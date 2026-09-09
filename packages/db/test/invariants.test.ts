@@ -310,6 +310,32 @@ describe('§2 invariants are enforced by the schema', () => {
       expect(msg).toContain('suppressions_value_is_normalised')
     })
 
+    /**
+     * The constraint must not strand a real opt-out. A suppression insert that
+     * fails is an opt-out that was never recorded, which is far worse than the
+     * case-sensitivity bug this replaced — so every geo the seeded ICP targets
+     * is checked here explicitly.
+     */
+    it('accepts real numbers from every geo in the seeded ICP (§11)', async () => {
+      const numbers: Array<[string, string]> = [
+        ['US', '+14155550100'], ['CA', '+14165550100'],
+        ['UK mobile', '+447911123456'], ['UK landline', '+442071234567'],
+        ['DE mobile', '+4915112345678'], ['DE landline', '+493012345678'],
+        ['NL', '+31612345678'], ['SE', '+46701234567'], ['IE', '+353851234567'],
+        ['FR', '+33612345678'], ['ES', '+34612345678'], ['PT', '+351912345678'],
+        ['PL', '+48512345678'],
+        ['shortest valid E.164', '+1234567'], ['longest valid E.164', '+123456789012345'],
+      ]
+      for (const [geo, number] of numbers) {
+        const rows = await db.driver.select(
+          `INSERT INTO suppressions (org_id, kind, value, reason) VALUES ($1, 'phone', $2, 'opt-out')
+           RETURNING id`,
+          [orgId, number],
+        )
+        expect(rows, `${geo} (${number}) must be storable`).toHaveLength(1)
+      }
+    })
+
     it('REFUSES a phone number that is not in E.164', async () => {
       for (const bad of ['+1 (415) 555-0100', '4155550100', '+0155550100', '+1-415-555-0100']) {
         const msg = await expectRejection(() =>
@@ -323,9 +349,10 @@ describe('§2 invariants are enforced by the schema', () => {
     })
 
     it('accepts the normalised forms', async () => {
+      // A number not used by the per-geo test above, which shares this org.
       const ok = await db.driver.select(
         `INSERT INTO suppressions (org_id, kind, value, reason)
-         VALUES ($1, 'phone', '+14155550100', 'opt-out') RETURNING id`,
+         VALUES ($1, 'phone', '+14155559999', 'opt-out') RETURNING id`,
         [orgId],
       )
       expect(ok).toHaveLength(1)

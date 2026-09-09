@@ -35,6 +35,12 @@ one.
   be stored, so `Stop@Example.com` can never coexist with `stop@example.com` as
   a second, unsuppressed row. `packages/core` gains the matching `normalise()`
   helper in Phase 4; until then the database is what enforces it.
+  **Phase 4 obligation:** a suppression insert that fails is an opt-out that was
+  never recorded — worse than the bug this constraint replaced. When
+  `normalise()` cannot parse an inbound number or address, the send path must
+  fail loudly and route it to a human, and must never fall through to sending.
+  Every geo the seeded ICP targets is covered by a test in
+  `packages/db/test/invariants.test.ts`.
 - Quiet hours are stored as wall-clock times and must be evaluated in the
   **recipient's** timezone. *The evaluation lands in Phase 4.*
 
