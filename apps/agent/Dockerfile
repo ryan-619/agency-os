@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1
 #
 # Build context is the REPO ROOT. See docker-compose.yml.
+# This image also carries the migration and seed CLIs, which docker-compose
+# runs as one-off `migrate` and `seed` task services.
 
 FROM node:22-alpine AS deps
 WORKDIR /app
@@ -14,19 +16,19 @@ RUN npm ci
 FROM node:22-alpine AS build
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
-COPY --from=deps /app/packages/core/node_modules ./packages/core/node_modules
-COPY --from=deps /app/packages/db/node_modules   ./packages/db/node_modules
-COPY --from=deps /app/apps/agent/node_modules    ./apps/agent/node_modules
 COPY . .
 RUN npx tsc --build
 
-# Drop devDependencies for the runtime image.
+# --- run: production dependencies only ------------------------------------
 FROM node:22-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production AGENT_PORT=3001
 
 RUN addgroup -g 1001 -S nodejs && adduser -S agent -u 1001
 
+# Reinstall without devDependencies. Every workspace package.json is needed for
+# the lockfile to resolve; npm then creates the node_modules/@agency/*
+# symlinks that let `import '@agency/db'` resolve to packages/db/dist.
 COPY package.json package-lock.json ./
 COPY packages/core/package.json packages/core/
 COPY packages/db/package.json   packages/db/
@@ -37,7 +39,7 @@ RUN npm ci --omit=dev --workspace @agency/agent --include-workspace-root
 COPY --from=build --chown=agent:nodejs /app/packages/core/dist ./packages/core/dist
 COPY --from=build --chown=agent:nodejs /app/packages/db/dist   ./packages/db/dist
 COPY --from=build --chown=agent:nodejs /app/apps/agent/dist    ./apps/agent/dist
-# The migration CLI ships with the image so `docker compose run` can apply them.
+# The migration CLI reads these off disk at run time.
 COPY --chown=agent:nodejs packages/db/migrations ./packages/db/migrations
 COPY --chown=agent:nodejs packages/db/seed       ./packages/db/seed
 

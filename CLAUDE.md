@@ -170,6 +170,15 @@ one that actually proves the deploy target. `freshDb()` pins PGlite to UTC;
 without that it derives an `Etc/GMT±N` zone from the host clock and truncates
 to whole hours (a developer at +05:30 silently tests at +05:00).
 
+**The Dockerfiles copy the ROOT `node_modules` only.** npm workspaces hoist
+every dependency to the root and symlink the workspaces as
+`node_modules/@agency/* -> ../../packages/*`. There are no per-package
+`node_modules` directories, so a `COPY --from=deps /app/packages/db/node_modules`
+fails outright. The agent runner then re-runs
+`npm ci --omit=dev --workspace @agency/agent --include-workspace-root`, which
+needs *every* workspace package.json present to satisfy the lockfile — that is
+why the image copies four package.json files it does not otherwise use.
+
 **The web app's database client is lazy (`getDb()`, not a `db` const).**
 `next build` evaluates route modules while collecting page data, so anything
 done at import time runs during the *build*. Constructing the pool eagerly
