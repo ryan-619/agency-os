@@ -325,7 +325,8 @@ export const touches = pgTable(
     id: id(),
     orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
     campaignId: uuid('campaign_id').references(() => campaigns.id, { onDelete: 'set null' }),
-    contactId: uuid('contact_id').notNull().references(() => contacts.id, { onDelete: 'cascade' }),
+    /** Nullable: the message log outlives the contact. See 0004_outreach.up.sql. */
+    contactId: uuid('contact_id').references(() => contacts.id, { onDelete: 'set null' }),
     channel: text('channel').notNull(),
     /** 'out' | 'in' */
     direction: text('direction').notNull(),
@@ -379,7 +380,8 @@ export const approvals = pgTable(
     /** 'low' | 'medium' | 'high' */
     risk: text('risk').notNull(),
     status: text('status').notNull().default('pending'),
-    decidedBy: uuid('decided_by').references(() => users.id, { onDelete: 'set null' }),
+    /** RESTRICT: a user who has decided an approval cannot be deleted (§2.4). */
+    decidedBy: uuid('decided_by').references(() => users.id, { onDelete: 'restrict' }),
     decidedAt: timestamp('decided_at', { withTimezone: true }),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
     ...timestamps,

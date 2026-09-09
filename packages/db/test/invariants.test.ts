@@ -334,6 +334,110 @@ describe('§2 invariants are enforced by the schema', () => {
   })
 
   // -------------------------------------------------------------------------
+  // Deletion behaviour — what survives, and what must not
+  // -------------------------------------------------------------------------
+  describe('deleting a contact', () => {
+    let localOrg: string
+    let localCompany: string
+    let localContact: string
+
+    beforeAll(async () => {
+      ;[{ id: localOrg }] = await db.driver.select<{ id: string }>(
+        `INSERT INTO orgs (name) VALUES ('Deletion Test') RETURNING id`,
+      )
+      ;[{ id: localCompany }] = await db.driver.select<{ id: string }>(
+        `INSERT INTO companies (org_id, domain) VALUES ($1, 'deletion.test') RETURNING id`,
+        [localOrg],
+      )
+      ;[{ id: localContact }] = await db.driver.select<{ id: string }>(
+        `INSERT INTO contacts (org_id, company_id, email) VALUES ($1, $2, 'gone@deletion.test') RETURNING id`,
+        [localOrg, localCompany],
+      )
+      const [{ id: campaign }] = await db.driver.select<{ id: string }>(
+        `INSERT INTO campaigns (org_id, name, channel) VALUES ($1, 'deletion', 'email') RETURNING id`,
+        [localOrg],
+      )
+      await db.driver.select(
+        `INSERT INTO touches (org_id, campaign_id, contact_id, channel, direction, status, subject, sent_at)
+         VALUES ($1, $2, $3, 'email', 'out', 'sent', 'we emailed you', now())`,
+        [localOrg, campaign, localContact],
+      )
+      await db.driver.select(
+        `INSERT INTO consents (org_id, contact_id, channel, granted, source)
+         VALUES ($1, $2, 'email', true, 'inbound form')`,
+        [localOrg, localContact],
+      )
+      await db.driver.select(`DELETE FROM contacts WHERE id = $1`, [localContact])
+    })
+
+    // §4 calls touches "the single log of every message in either direction".
+    // Deleting a person must not erase the record of what was sent to them —
+    // that record is what answers a complaint.
+    it('KEEPS the message in the touch log, with the contact link cleared', async () => {
+      const rows = await db.driver.select<{ subject: string; contact_id: string | null }>(
+        `SELECT subject, contact_id FROM touches WHERE org_id = $1`,
+        [localOrg],
+      )
+      expect(rows).toHaveLength(1)
+      expect(rows[0].subject).toBe('we emailed you')
+      expect(rows[0].contact_id).toBeNull()
+    })
+
+    // Consent is meaningful only in relation to a contact, and the send path
+    // looks it up by contact. A re-imported contact must start from NO.
+    it('REMOVES the consent row, so a re-imported contact starts from no consent', async () => {
+      const rows = await db.driver.select(`SELECT id FROM consents WHERE org_id = $1`, [localOrg])
+      expect(rows).toEqual([])
+
+      const [{ id: reimported }] = await db.driver.select<{ id: string }>(
+        `INSERT INTO contacts (org_id, company_id, email) VALUES ($1, $2, 'gone@deletion.test') RETURNING id`,
+        [localOrg, localCompany],
+      )
+      const consent = await db.driver.select(
+        `SELECT granted FROM consents WHERE contact_id = $1 AND channel = 'email'`,
+        [reimported],
+      )
+      // Absence means NO (§2.1).
+      expect(consent).toEqual([])
+    })
+  })
+
+  describe('deleting a user who has decided an approval', () => {
+    it('is REFUSED, so the approval never loses the name of its decider (§2.4)', async () => {
+      const [{ id: decider }] = await db.driver.select<{ id: string }>(
+        `INSERT INTO users (org_id, email, role) VALUES ($1, 'decider@example.com', 'member') RETURNING id`,
+        [orgId],
+      )
+      await db.driver.select(
+        `INSERT INTO approvals (org_id, requested_by, tool_name, risk, status, decided_by, decided_at, expires_at)
+         VALUES ($1, 'agent', 'send_email', 'high', 'approved', $2, now(), now() + interval '1 hour')`,
+        [orgId, decider],
+      )
+
+      const msg = await expectRejection(() =>
+        db.driver.select(`DELETE FROM users WHERE id = $1`, [decider]),
+      )
+      // A foreign-key error naming users/approvals — NOT a confusing check
+      // constraint violation, which is what ON DELETE SET NULL produced.
+      expect(msg).toMatch(/foreign key|still referenced/i)
+      expect(msg).not.toMatch(/approvals_decided_has_decider/)
+
+      const still = await db.driver.select(`SELECT decided_by FROM approvals WHERE decided_by = $1`, [decider])
+      expect(still).toHaveLength(1)
+    })
+
+    it('still allows deleting a user who has decided nothing', async () => {
+      const [{ id: innocent }] = await db.driver.select<{ id: string }>(
+        `INSERT INTO users (org_id, email, role) VALUES ($1, 'innocent@example.com', 'member') RETURNING id`,
+        [orgId],
+      )
+      await db.driver.select(`DELETE FROM users WHERE id = $1`, [innocent])
+      const gone = await db.driver.select(`SELECT id FROM users WHERE id = $1`, [innocent])
+      expect(gone).toEqual([])
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // §4 org scoping
   // -------------------------------------------------------------------------
   describe('§4 org scoping', () => {

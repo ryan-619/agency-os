@@ -39,6 +39,12 @@ CREATE TRIGGER contacts_set_updated_at BEFORE UPDATE ON contacts
 CREATE TABLE consents (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id      uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  -- CASCADE is deliberate, and is the safe direction: consent is meaningful
+  -- only in relation to a contact, and the send path looks it up BY contact.
+  -- If the contact is deleted and later re-imported, the new row has no
+  -- consent — which correctly reads as NO. An orphaned consent row would be
+  -- unreachable evidence that something was once permitted; audit_log, which
+  -- has no FK to contacts, is what survives as the record.
   contact_id  uuid NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
   channel     text NOT NULL CHECK (channel IN ('email', 'sms', 'voice', 'whatsapp')),
   granted     boolean NOT NULL,

@@ -37,7 +37,13 @@ CREATE TABLE touches (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id        uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
   campaign_id   uuid REFERENCES campaigns(id) ON DELETE SET NULL,
-  contact_id    uuid NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+  -- Nullable + SET NULL, matching calls.contact_id below. touches is "the
+  -- single log of every message in either direction" (§4): deleting a contact
+  -- must not erase the record of what was sent to them, or the audit_log and
+  -- suppressions rows that outlive them would point at nothing. The message
+  -- itself (subject, body, sent_at, provider_id) survives; only the link to
+  -- the person is cleared.
+  contact_id    uuid REFERENCES contacts(id) ON DELETE SET NULL,
   channel       text NOT NULL CHECK (channel IN ('email', 'linkedin', 'sms', 'voice', 'whatsapp')),
   direction     text NOT NULL CHECK (direction IN ('out', 'in')),
   status        text NOT NULL DEFAULT 'queued'
@@ -103,7 +109,13 @@ CREATE TABLE approvals (
   risk         text NOT NULL CHECK (risk IN ('low', 'medium', 'high')),
   status       text NOT NULL DEFAULT 'pending'
                  CHECK (status IN ('pending', 'approved', 'denied', 'expired')),
-  decided_by   uuid REFERENCES users(id) ON DELETE SET NULL,
+  -- RESTRICT, not SET NULL: approvals_decided_has_decider below forbids a
+  -- decided row from having a NULL decided_by, so SET NULL would make the
+  -- parent DELETE fail with a confusing check-constraint error on `approvals`
+  -- instead of a foreign-key error on `users`. RESTRICT states the real rule:
+  -- someone whose approval decisions are on record cannot be deleted (§2.4).
+  -- Offboarding is a role change, not a row deletion.
+  decided_by   uuid REFERENCES users(id) ON DELETE RESTRICT,
   decided_at   timestamptz,
   expires_at   timestamptz NOT NULL,
   created_at   timestamptz NOT NULL DEFAULT now(),
