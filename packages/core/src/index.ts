@@ -7,9 +7,10 @@
  * and by the dependency list in package.json, which is empty on purpose.
  *
  * What lands here, and when:
- *   Phase 0  authorisation (this file's `can`)
+ *   Phase 0  authorisation (`can`), log redaction (`redact`)
  *   Phase 1  scoring, tiering, disqualifiers, the `observed` rule
  *   Phase 2  risk classification for the agent's approval gate (§5.4)
  *   Phase 4  consent, suppression, quiet hours, daily caps — the send path (§8.4)
  */
 export * from './authz.js'
+export * from './redact.js'

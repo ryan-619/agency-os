@@ -54,7 +54,13 @@ CREATE TABLE consents (
   recorded_at timestamptz NOT NULL DEFAULT now(),
   evidence    jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at  timestamptz NOT NULL DEFAULT now(),
-  updated_at  timestamptz
+  updated_at  timestamptz,
+
+  -- NOT NULL alone accepts the empty string, and an import that maps a missing
+  -- column to '' would produce granted consent whose provenance cannot be
+  -- produced if a regulator asks. A granted consent with no source is not
+  -- evidence of anything.
+  CONSTRAINT consents_source_is_not_blank CHECK (length(btrim(source)) > 0)
 );
 
 CREATE UNIQUE INDEX consents_contact_channel_key ON consents (contact_id, channel);
@@ -64,8 +70,15 @@ CREATE TRIGGER consents_set_updated_at BEFORE UPDATE ON consents
 -- ---------------------------------------------------------------------------
 -- suppressions — wins over everything. One row here and no channel may ever
 -- contact that address, number or domain again (§2.1). Checked in the send path.
--- `value` is stored already normalised (lower-cased, phone in E.164) by
--- packages/core; the index is a plain equality index on that normalised form.
+--
+-- The send path does ONE indexed equality lookup per address, so a suppressed
+-- value stored in a different shape is a value that is no longer suppressed:
+-- 'Stop@Example.com' and 'stop@example.com' would be two rows, and suppressing
+-- one would not stop the other. Rather than trusting every future caller to
+-- normalise, the shape is a constraint — an unnormalised value cannot be
+-- stored at all, so the plain equality lookup is sound by construction.
+-- packages/core gains the matching normalise() helper in Phase 4; until then
+-- the database is what enforces this.
 -- ---------------------------------------------------------------------------
 CREATE TABLE suppressions (
   id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -74,7 +87,17 @@ CREATE TABLE suppressions (
   value      text NOT NULL,
   reason     text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz
+  updated_at timestamptz,
+
+  CONSTRAINT suppressions_value_is_normalised CHECK (
+    CASE kind
+      -- E.164: a leading +, a non-zero country digit, 7-15 digits total.
+      WHEN 'phone' THEN value ~ '^\+[1-9][0-9]{6,14}$'
+      -- Email and domain are case-insensitive in practice; store them folded
+      -- and untrimmed-free so equality means equality.
+      ELSE value = lower(btrim(value)) AND length(value) > 0
+    END
+  )
 );
 
 CREATE UNIQUE INDEX suppressions_org_kind_value_key ON suppressions (org_id, kind, value);

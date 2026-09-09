@@ -171,7 +171,12 @@ export const findings = pgTable(
   {
     id: id(),
     orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
-    scanId: uuid('scan_id').notNull().references(() => scans.id, { onDelete: 'cascade' }),
+    /**
+     * Part of a composite foreign key (scan_id, company_id, org_id) -> scans,
+     * so a finding cannot be filed against a company its scan never touched.
+     * Drizzle cannot express that here; the migration owns it.
+     */
+    scanId: uuid('scan_id').notNull(),
     companyId: uuid('company_id').notNull().references(() => companies.id, { onDelete: 'cascade' }),
     signalKey: text('signal_key').notNull(),
     /** §2.2 — false for a fetch failure, timeout, WAF block or CDN quirk. */

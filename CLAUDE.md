@@ -22,23 +22,50 @@ one.
   *Enforced now:* `campaigns_no_auto_send_on_voice_or_sms` — a campaign cannot
   have `auto_send = true` on a `voice` or `sms` channel.
 - **Consent is per channel and absence means NO.** `consents` has
-  `UNIQUE (contact_id, channel)`, `granted` and `source` are both NOT NULL, and
-  no row is ever created by default. There is no "unknown" state to misread.
+  `UNIQUE (contact_id, channel)`, `granted` and `source` are both NOT NULL,
+  `consents_source_is_not_blank` rejects an empty or whitespace-only source
+  (NOT NULL alone accepts `''`), and no row is ever created by default. There
+  is no "unknown" state to misread. Deleting a contact removes their consent
+  rows, so a re-imported contact correctly starts from NO.
 - **Suppression wins over everything.** `UNIQUE (org_id, kind, value)`, checked
-  in the send path — never in the campaign builder.
+  in the send path — never in the campaign builder. The send path does one
+  indexed equality lookup, so `suppressions_value_is_normalised` makes the
+  normalised shape a constraint rather than a convention: email and domain must
+  be lower-cased and trimmed, phone must be E.164. An unnormalised value cannot
+  be stored, so `Stop@Example.com` can never coexist with `stop@example.com` as
+  a second, unsuppressed row. `packages/core` gains the matching `normalise()`
+  helper in Phase 4; until then the database is what enforces it.
 - Quiet hours are stored as wall-clock times and must be evaluated in the
   **recipient's** timezone. *The evaluation lands in Phase 4.*
 
 ### Evidence integrity (§2.2)
-- **The app must never state a finding it did not observe.**
-  *Enforced now:* `findings_unobserved_has_no_gap` —
-  `(observed AND gap IS NOT NULL) OR (NOT observed AND gap IS NULL)`.
-  A fetch failure, timeout, WAF block or CDN quirk gives `observed = false`,
-  and the database then refuses to store any claim about it. Unobserved means
-  unknown, not "no gap".
-- Findings carry `evidence jsonb NOT NULL` — what was seen, where, when.
-- Findings go stale at 14 days (`stale_after_days` in the ICP definition) and
-  must be re-verified before appearing in any outbound draft.
+**The app must never state a finding it did not observe.** Four separate
+guards, because one of them alone was not enough:
+
+1. `findings_unobserved_has_no_gap` —
+   `(observed AND gap IS NOT NULL) OR (NOT observed AND gap IS NULL)`.
+   Makes the two columns agree. On its own this only stops a row from
+   contradicting *itself*.
+2. `findings_observed_requires_a_successful_scan` (trigger, INSERT **and**
+   UPDATE) — a finding may not claim `observed = true` if the scan it hangs off
+   has `ok = false`. This is the guard that actually stops the §2.2 scenario:
+   a timeout or WAF block becoming "they are missing X". Firing on UPDATE
+   matters — otherwise an honest row can be edited into a dishonest one.
+3. `findings_a_claimed_gap_carries_evidence` — `gap = true` requires a
+   non-empty `evidence` object. §2.2: "Findings carry the raw evidence that
+   produced them." A gap with `'{}'` is an unsupported claim.
+4. `findings_scan_matches_company_and_org` (composite FK on
+   `(scan_id, company_id, org_id)`) — the denormalised `company_id` is what the
+   UI reads, so it must agree with the scan. Without it a batch scanner with an
+   off-by-one can file one company's evidence under another's name and every
+   constraint still passes.
+
+**Not yet enforced — Phase 1 (§8.3):** `findings.stale`. The column, its index
+and the 14-day threshold (`freshness.stale_after_days` in the seeded ICP) all
+exist, but **nothing writes `stale` yet** and there is no scheduled rescan.
+Freshness is derivable today from `scans.ran_at`. Phase 4's draft generator
+must not assume a finding is fresh because `stale = false` — every row has
+`stale = false` because nothing has ever set it.
 - The scanner reads **public pages only**. No port scanning, no probing for
   `.git`, `.env`, admin panels or backups. Every piece of copy in the app must
   describe it as posture review from the outside, not a security test.
@@ -48,8 +75,12 @@ one.
 - `connectors.secret_ref` points at an encrypted credential; it never holds one.
 - The CLIs strip credentials from their output — `safeTarget()` in
   `packages/db/src/cli.ts` prints `host:port/db` and never the DSN.
-- Both loggers redact any field whose key matches `pass|secret|token|key|
-  authorization|cookie|url$`.
+- `redact()` in `packages/core` walks nested objects and arrays and blanks any
+  value whose **key** looks sensitive; both loggers use it. It is a backstop,
+  not the primary defence — it matches on key name only, so a credential under
+  an innocuous key (`{ value: 'sk-live-…' }`) still gets through. Do not read
+  it as permission to log arbitrary objects. `packages/core/test/redact.test.ts`
+  pins that limitation as an explicit test.
 - `sendVerificationRequest` deliberately does **not** log the magic-link URL.
   That URL is a bearer credential.
 
@@ -58,7 +89,11 @@ one.
   campaign has `auto_send = true`.
   *Enforced now:* `approvals_decided_has_decider` — a row cannot claim it was
   approved without naming who decided and when.
-- *The `canUseTool` gate that blocks on this lands in Phase 2.*
+- *The `canUseTool` gate that blocks on this lands in Phase 2.* That code also
+  owns the expiry rule: the schema deliberately does **not** forbid
+  `status = 'approved'` with `decided_at > expires_at`, because a stale-tab
+  approval should surface as a clean "this request expired" from the decision
+  service, not as a constraint violation and a 500.
 - **Never set `permissionMode: "bypassPermissions"`.**
 
 ---

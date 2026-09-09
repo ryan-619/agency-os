@@ -1,26 +1,20 @@
+import { redact } from '@agency/core'
+
 /**
- * Structured JSON logging with no dependencies (PROMPT.md §10).
+ * Structured JSON logging with no dependencies beyond the domain package
+ * (PROMPT.md §10). Never log credentials or full message bodies.
  *
- * Never log credentials or full message bodies. `redact` exists so that a
- * value which might be a secret cannot be passed in by accident: it is applied
- * to every string field whose key looks sensitive.
+ * Redaction lives in packages/core so the web app and the agent worker cannot
+ * drift apart on it. See packages/core/src/redact.ts for what it does and does
+ * not catch.
  */
-const SENSITIVE = /pass|secret|token|key|authorization|cookie|url$/i
-
 type Fields = Record<string, unknown>
-
-function redact(fields: Fields): Fields {
-  const out: Fields = {}
-  for (const [k, v] of Object.entries(fields)) {
-    out[k] = SENSITIVE.test(k) && typeof v === 'string' ? '[redacted]' : v
-  }
-  return out
-}
 
 function emit(level: string, msg: string, fields: Fields = {}): void {
   const line = JSON.stringify({
     level,
     msg,
+    service: 'web',
     time: new Date().toISOString(),
     ...redact(fields),
   })

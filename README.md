@@ -116,9 +116,11 @@ because a new engineer will hit them within a day; the full statements are in
 [CLAUDE.md §1](CLAUDE.md).
 
 **It never claims a finding it did not observe.** Every finding row carries
-`observed`. A timeout, a WAF block or a CDN quirk sets it false, and a database
-constraint then forbids the row from claiming anything at all. These claims go
-into an email under a real person's name; a false one costs the deal.
+`observed`, and four database constraints stand behind it: a finding cannot
+claim it observed anything on a scan that failed, a claimed gap must carry the
+evidence that produced it, and a finding cannot be filed against a company its
+scan never touched. These claims go into an email under a real person's name;
+a false one costs the deal.
 
 **Cold outreach is email and LinkedIn. Never voice, never SMS.** Not caution
 for its own sake — the FCC classified AI-generated voice as an "artificial
@@ -132,6 +134,8 @@ explicitly enabled auto-send for that specific campaign.
 
 **No credential is ever written to a source file, a log line, or an agent's
 context window.** Including the magic-link URL, which is a bearer credential.
+The loggers redact known-sensitive keys as a backstop, but the rule is not to
+pass credentials to a logger in the first place.
 
 ## Scanning: what it actually does
 

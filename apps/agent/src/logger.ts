@@ -1,21 +1,14 @@
-/**
- * Structured JSON logging, no dependencies (PROMPT.md §10).
- * Never log credentials or full message bodies.
- */
-const SENSITIVE = /pass|secret|token|key|authorization|cookie|url$/i
+import { redact } from '@agency/core'
 
+/**
+ * Structured JSON logging (PROMPT.md §10). Never log credentials or full
+ * message bodies. Redaction lives in packages/core so this and the web app
+ * cannot drift apart; see packages/core/src/redact.ts.
+ */
 type Fields = Record<string, unknown>
 
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 } as const
 export type Level = keyof typeof LEVELS
-
-function redact(fields: Fields): Fields {
-  const out: Fields = {}
-  for (const [k, v] of Object.entries(fields)) {
-    out[k] = SENSITIVE.test(k) && typeof v === 'string' ? '[redacted]' : v
-  }
-  return out
-}
 
 export function createLogger(minLevel: Level = 'info', base: Fields = {}) {
   const floor = LEVELS[minLevel]

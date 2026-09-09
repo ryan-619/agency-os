@@ -46,10 +46,12 @@ describe('§2 invariants are enforced by the schema', () => {
   // §2.2 Evidence integrity
   // -------------------------------------------------------------------------
   describe('§2.2 evidence integrity', () => {
-    it('accepts an observed finding that IS a gap', async () => {
+    it('accepts an observed finding that IS a gap, when it carries its evidence', async () => {
       const rows = await db.driver.select<{ id: string }>(
-        `INSERT INTO findings (org_id, scan_id, company_id, signal_key, observed, gap, weight)
-         VALUES ($1, $2, $3, 'csp', true, true, 15) RETURNING id`,
+        `INSERT INTO findings (org_id, scan_id, company_id, signal_key, observed, gap, weight, evidence)
+         VALUES ($1, $2, $3, 'csp', true, true, 15,
+                 '{"url":"https://example.com/","header":"content-security-policy","seen":"absent"}'::jsonb)
+         RETURNING id`,
         [orgId, scanId, companyId],
       )
       expect(rows).toHaveLength(1)
@@ -76,10 +78,12 @@ describe('§2 invariants are enforced by the schema', () => {
     // The rule the whole product's credibility rests on: a fetch failure,
     // timeout, WAF block or CDN quirk must never become "they are missing X".
     it('REFUSES an unobserved finding that claims a gap', async () => {
+      // Evidence is supplied so that findings_a_claimed_gap_carries_evidence is
+      // satisfied and the observed/gap constraint is the one under test.
       const msg = await expectRejection(() =>
         db.driver.select(
-          `INSERT INTO findings (org_id, scan_id, company_id, signal_key, observed, gap, weight)
-           VALUES ($1, $2, $3, 'server_banner', false, true, 7)`,
+          `INSERT INTO findings (org_id, scan_id, company_id, signal_key, observed, gap, weight, evidence)
+           VALUES ($1, $2, $3, 'server_banner', false, true, 7, '{"seen":"something"}'::jsonb)`,
           [orgId, scanId, companyId],
         ),
       )
@@ -108,7 +112,102 @@ describe('§2 invariants are enforced by the schema', () => {
       expect(msg).toContain('findings_unobserved_has_no_gap')
     })
 
+    // The CHECK above only makes `observed` and `gap` agree with each other.
+    // These three cover the gap that actually mattered: a finding that agrees
+    // with itself but is still a fabrication.
+    it('REFUSES a finding that claims to have observed something on a FAILED scan', async () => {
+      const [failed] = await db.driver.select<{ id: string }>(
+        `INSERT INTO scans (org_id, company_id, ok, error) VALUES ($1, $2, false, 'ETIMEDOUT')
+         RETURNING id`,
+        [orgId, companyId],
+      )
+      const msg = await expectRejection(() =>
+        db.driver.select(
+          `INSERT INTO findings (org_id, scan_id, company_id, signal_key, observed, gap, weight, evidence)
+           VALUES ($1, $2, $3, 'csp', true, true, 15, '{"header":"absent"}'::jsonb)`,
+          [orgId, failed.id, companyId],
+        ),
+      )
+      expect(msg).toContain('findings_observed_requires_a_successful_scan')
+    })
+
+    it('allows an UNOBSERVED finding on a failed scan — that row claims nothing', async () => {
+      const [failed] = await db.driver.select<{ id: string }>(
+        `INSERT INTO scans (org_id, company_id, ok, error) VALUES ($1, $2, false, 'WAF block')
+         RETURNING id`,
+        [orgId, companyId],
+      )
+      const rows = await db.driver.select(
+        `INSERT INTO findings (org_id, scan_id, company_id, signal_key, observed, gap, weight)
+         VALUES ($1, $2, $3, 'csp', false, NULL, 0) RETURNING id`,
+        [orgId, failed.id, companyId],
+      )
+      expect(rows).toHaveLength(1)
+    })
+
+    it('REFUSES an honest row being UPDATED into a dishonest one', async () => {
+      const [failed] = await db.driver.select<{ id: string }>(
+        `INSERT INTO scans (org_id, company_id, ok, error) VALUES ($1, $2, false, 'ETIMEDOUT')
+         RETURNING id`,
+        [orgId, companyId],
+      )
+      await db.driver.select(
+        `INSERT INTO findings (org_id, scan_id, company_id, signal_key, observed, gap, weight)
+         VALUES ($1, $2, $3, 'hsts', false, NULL, 0)`,
+        [orgId, failed.id, companyId],
+      )
+      const msg = await expectRejection(() =>
+        db.driver.select(
+          `UPDATE findings SET observed = true, gap = true, evidence = '{"x":1}'::jsonb
+           WHERE scan_id = $1 AND signal_key = 'hsts'`,
+          [failed.id],
+        ),
+      )
+      expect(msg).toContain('findings_observed_requires_a_successful_scan')
+    })
+
+    // §2.2: "Findings carry the raw evidence that produced them."
+    it('REFUSES a claimed gap with an empty evidence object', async () => {
+      const msg = await expectRejection(() =>
+        db.driver.select(
+          `INSERT INTO findings (org_id, scan_id, company_id, signal_key, observed, gap, weight, evidence)
+           VALUES ($1, $2, $3, 'frame_protection', true, true, 8, '{}'::jsonb)`,
+          [orgId, scanId, companyId],
+        ),
+      )
+      expect(msg).toContain('findings_a_claimed_gap_carries_evidence')
+    })
+
+    it('allows a NON-gap with no evidence — nothing is being claimed', async () => {
+      const rows = await db.driver.select(
+        `INSERT INTO findings (org_id, scan_id, company_id, signal_key, observed, gap, weight, evidence)
+         VALUES ($1, $2, $3, 'content_type_options', true, false, 5, '{}'::jsonb) RETURNING id`,
+        [orgId, scanId, companyId],
+      )
+      expect(rows).toHaveLength(1)
+    })
+
+    // The denormalised company_id is what the UI reads; if it can disagree with
+    // the scan, the app can show one company's evidence under another's name.
+    it('REFUSES a finding filed against a company its scan never touched', async () => {
+      const [other] = await db.driver.select<{ id: string }>(
+        `INSERT INTO companies (org_id, domain) VALUES ($1, 'not-scanned.test') RETURNING id`,
+        [orgId],
+      )
+      // A signal not already recorded on this scan, so the composite foreign
+      // key is what rejects the row rather than the per-signal unique index.
+      const msg = await expectRejection(() =>
+        db.driver.select(
+          `INSERT INTO findings (org_id, scan_id, company_id, signal_key, observed, gap, weight, evidence)
+           VALUES ($1, $2, $3, 'permissions_policy', true, true, 3, '{"header":"absent"}'::jsonb)`,
+          [orgId, scanId, other.id],
+        ),
+      )
+      expect(msg).toMatch(/findings_scan_matches_company_and_org|foreign key/i)
+    })
+
     it('allows only one finding per signal per scan', async () => {
+      // 'csp' was already recorded for this scan by the first test above.
       const msg = await expectRejection(() =>
         db.driver.select(
           `INSERT INTO findings (org_id, scan_id, company_id, signal_key, observed, gap, weight)
@@ -185,6 +284,68 @@ describe('§2 invariants are enforced by the schema', () => {
         ),
       )
       expect(msg).toMatch(/suppressions_org_kind_value_key|duplicate key/)
+    })
+
+    // The send path does one indexed equality lookup, so an unnormalised value
+    // is a value that is no longer suppressed.
+    it('REFUSES a suppression stored in mixed case, which would defeat the lookup', async () => {
+      const msg = await expectRejection(() =>
+        db.driver.select(
+          `INSERT INTO suppressions (org_id, kind, value, reason)
+           VALUES ($1, 'email', 'Unsub@Example.com', 'unsubscribed')`,
+          [orgId],
+        ),
+      )
+      expect(msg).toContain('suppressions_value_is_normalised')
+    })
+
+    it('REFUSES a suppression with untrimmed whitespace', async () => {
+      const msg = await expectRejection(() =>
+        db.driver.select(
+          `INSERT INTO suppressions (org_id, kind, value, reason)
+           VALUES ($1, 'email', ' spaced@example.com ', 'unsubscribed')`,
+          [orgId],
+        ),
+      )
+      expect(msg).toContain('suppressions_value_is_normalised')
+    })
+
+    it('REFUSES a phone number that is not in E.164', async () => {
+      for (const bad of ['+1 (415) 555-0100', '4155550100', '+0155550100', '+1-415-555-0100']) {
+        const msg = await expectRejection(() =>
+          db.driver.select(
+            `INSERT INTO suppressions (org_id, kind, value, reason) VALUES ($1, 'phone', $2, 'opt-out')`,
+            [orgId, bad],
+          ),
+        )
+        expect(msg, `"${bad}" should be rejected`).toContain('suppressions_value_is_normalised')
+      }
+    })
+
+    it('accepts the normalised forms', async () => {
+      const ok = await db.driver.select(
+        `INSERT INTO suppressions (org_id, kind, value, reason)
+         VALUES ($1, 'phone', '+14155550100', 'opt-out') RETURNING id`,
+        [orgId],
+      )
+      expect(ok).toHaveLength(1)
+      const ok2 = await db.driver.select(
+        `INSERT INTO suppressions (org_id, kind, value, reason)
+         VALUES ($1, 'domain', 'example.com', 'competitor') RETURNING id`,
+        [orgId],
+      )
+      expect(ok2).toHaveLength(1)
+    })
+
+    it('REFUSES a granted consent whose source is an empty string', async () => {
+      const msg = await expectRejection(() =>
+        db.driver.select(
+          `INSERT INTO consents (org_id, contact_id, channel, granted, source)
+           VALUES ($1, $2, 'voice', true, '   ')`,
+          [orgId, contactId],
+        ),
+      )
+      expect(msg).toContain('consents_source_is_not_blank')
     })
 
     it('suppresses by email, domain or phone — and nothing else', async () => {
