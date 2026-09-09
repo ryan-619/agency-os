@@ -57,6 +57,12 @@ CREATE TABLE scans (
   org_id     uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
   company_id uuid NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
   ran_at     timestamptz NOT NULL DEFAULT now(),
+  -- `ok` means THE RUN REACHED THE SITE and produced observations — it is the
+  -- Python engine's `fetch_ok`, not "every signal succeeded". A run that
+  -- fetched the homepage but could not read /security is still ok = true; the
+  -- individual security_txt finding carries observed = false. ok = false means
+  -- NOTHING was observed, which is why no finding on such a scan may claim
+  -- otherwise (see the trigger below).
   ok         boolean NOT NULL,
   error      text,
   raw        jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -101,8 +107,13 @@ CREATE TABLE findings (
   -- an empty evidence object is an unsupported claim, and unsupported claims
   -- are what this table exists to prevent. Not observing something is fine —
   -- that row carries no claim and needs no evidence.
+  -- jsonb_typeof pins it to a non-empty OBJECT: '{}' is empty, and 'null',
+  -- '[]' and '""' are all <> '{}' so a bare inequality would let them through.
   CONSTRAINT findings_a_claimed_gap_carries_evidence
-    CHECK (gap IS NOT TRUE OR evidence <> '{}'::jsonb),
+    CHECK (
+      gap IS NOT TRUE
+      OR (jsonb_typeof(evidence) = 'object' AND evidence <> '{}'::jsonb)
+    ),
 
   -- The denormalised company_id is what the UI reads, so it must agree with
   -- the scan the finding came from. Without this, a batch scanner with an
@@ -145,7 +156,45 @@ $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER findings_observed_requires_a_successful_scan
   BEFORE INSERT OR UPDATE ON findings
-  FOR EACH ROW EXECUTE FUNCTION findings_refuse_claims_from_a_failed_scan();
+  -- Only rows that actually claim an observation need checking; this also
+  -- keeps ordinary writes (Phase 1's staleness sweep, say) off the scans table.
+  FOR EACH ROW WHEN (NEW.observed)
+  EXECUTE FUNCTION findings_refuse_claims_from_a_failed_scan();
+
+-- ---------------------------------------------------------------------------
+-- The same rule from the other side.
+--
+-- Guarding only `findings` leaves the forbidden state reachable in two
+-- statements: write honest observed findings against a successful scan, then
+-- UPDATE that scan to ok = false. The result is exactly what §2.2 forbids, and
+-- it would also freeze those findings — every later write to them would be
+-- rejected by the trigger above, including the staleness sweep that is
+-- supposed to retire them.
+--
+-- A scan is a record of a run that already happened. Demoting one that has
+-- observations hanging off it is not a correction, it is a contradiction:
+-- delete the scan (findings cascade) and record a new one instead.
+-- ---------------------------------------------------------------------------
+CREATE FUNCTION scans_refuse_demotion_with_observations() RETURNS trigger AS $$
+DECLARE
+  observed_count integer;
+BEGIN
+  IF OLD.ok AND NOT NEW.ok THEN
+    SELECT count(*) INTO observed_count FROM findings WHERE scan_id = NEW.id AND observed;
+    IF observed_count > 0 THEN
+      RAISE EXCEPTION
+        'scans_cannot_be_demoted_with_observations: scan % has % observed finding(s); delete the scan and record a new one instead',
+        NEW.id, observed_count
+        USING ERRCODE = 'check_violation';
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER scans_cannot_be_demoted_with_observations
+  BEFORE UPDATE ON scans
+  FOR EACH ROW EXECUTE FUNCTION scans_refuse_demotion_with_observations();
 
 CREATE UNIQUE INDEX findings_scan_signal_key ON findings (scan_id, signal_key);
 CREATE INDEX findings_company_stale_idx ON findings (company_id, stale);

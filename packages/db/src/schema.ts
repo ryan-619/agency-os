@@ -338,6 +338,8 @@ export const touches = pgTable(
     status: text('status').notNull().default('queued'),
     subject: text('subject'),
     body: text('body'),
+    /** The address or number actually used, kept so the log outlives the contact. */
+    recipient: text('recipient'),
     providerId: text('provider_id'),
     scheduledFor: timestamp('scheduled_for', { withTimezone: true }),
     sentAt: timestamp('sent_at', { withTimezone: true }),

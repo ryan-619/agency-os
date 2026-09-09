@@ -40,10 +40,15 @@ SEED_OWNER_EMAIL=you@youragency.com
 Then:
 
 ```bash
-docker compose up --build          # db, mailpit, web, agent
+docker compose up --build -d       # db, mailpit, web, agent
 docker compose run --rm migrate    # create the schema
 docker compose run --rm seed       # create the org, you as owner, and the ICP
 ```
+
+`-d` matters: without it the first command holds the terminal streaming logs and
+you never reach the other two. Follow them with `docker compose logs -f web` if
+you want the output. The app is up before `migrate` runs, so sign-in only starts
+working after those two commands.
 
 Open <http://localhost:3000>, enter the address you put in `SEED_OWNER_EMAIL`,
 and click **Email me a sign-in link**.
@@ -63,8 +68,8 @@ the system claims nothing. It will not invent a finding to fill a card.
 
 ```bash
 npm install
-npx tsc --build       # typecheck + compile packages/* to dist/
-npm test              # 80 tests, no Docker required
+npm run typecheck     # packages and tests, strict
+npm test              # 147 tests, no Docker required
 ```
 
 The test suite runs against [PGlite](https://pglite.dev), an embedded Postgres,
@@ -74,7 +79,8 @@ Docker**. CI additionally runs the same migrations against a real
 looser gate than the deploy target.
 
 To run the app on your host against the compose database, change `DATABASE_URL`
-in `.env` to `@localhost:5432` and:
+in `.env` to `@localhost:5432` and (the db scripts read `.env`, as does
+`next dev`):
 
 ```bash
 npm run db:migrate && npm run db:seed

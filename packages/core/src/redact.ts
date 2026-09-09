@@ -31,27 +31,37 @@ export const REDACTED = '[redacted]'
 
 export type LogFields = Record<string, unknown>
 
-function redactValue(value: unknown, depth: number, seen: WeakSet<object>): unknown {
+function redactValue(value: unknown, depth: number, path: Set<object>): unknown {
   if (depth > MAX_DEPTH) return '[truncated]'
   if (value === null || typeof value !== 'object') return value
 
-  // A cycle would otherwise recurse until the depth cap on every branch.
-  if (seen.has(value)) return '[circular]'
-  seen.add(value)
-
-  if (Array.isArray(value)) return value.map((v) => redactValue(v, depth + 1, seen))
   if (value instanceof Date) return value.toISOString()
   // Errors carry a stack that can quote a connection string; keep name+message.
   if (value instanceof Error) return { name: value.name, message: value.message }
 
-  const out: LogFields = {}
-  for (const [k, v] of Object.entries(value as LogFields)) {
-    out[k] = SENSITIVE_KEY.test(k) ? REDACTED : redactValue(v, depth + 1, seen)
+  /**
+   * `path` holds the ANCESTORS of the current node, not everything visited.
+   * A set of all visited objects would flag the same sub-object referenced
+   * twice in different branches — an ordinary DAG, not a cycle — and silently
+   * drop its contents from the log line. Only a true self-reference matters,
+   * so the node is removed again on the way back up.
+   */
+  if (path.has(value)) return '[circular]'
+  path.add(value)
+  try {
+    if (Array.isArray(value)) return value.map((v) => redactValue(v, depth + 1, path))
+
+    const out: LogFields = {}
+    for (const [k, v] of Object.entries(value as LogFields)) {
+      out[k] = SENSITIVE_KEY.test(k) ? REDACTED : redactValue(v, depth + 1, path)
+    }
+    return out
+  } finally {
+    path.delete(value)
   }
-  return out
 }
 
 /** Redact a set of log fields, walking nested objects and arrays. */
 export function redact(fields: LogFields): LogFields {
-  return redactValue(fields, 0, new WeakSet()) as LogFields
+  return redactValue(fields, 0, new Set<object>()) as LogFields
 }

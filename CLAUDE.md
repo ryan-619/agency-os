@@ -139,8 +139,9 @@ seven phases at once):
 
 ```bash
 npm install
-npx tsc --build          # typecheck + compile packages to dist/
-npm test                 # 80 tests: domain + migrations + invariants + seed
+npm run typecheck        # packages AND tests, strict
+npx tsc --build          # compile packages to dist/ only
+npm test                 # 147 tests: domain + migrations + invariants + seed
 npm run build            # packages, then the Next app
 
 # database (needs DATABASE_URL)
@@ -153,7 +154,7 @@ npm run db:seed               # org + owner + ICP + 16 seed companies; idempoten
 # the whole stack
 cp .env.example .env
 # set AUTH_SECRET: openssl rand -base64 32
-docker compose up --build
+docker compose up --build -d   # -d, or the first command holds the terminal
 docker compose run --rm migrate
 docker compose run --rm seed
 # app        http://localhost:3000
@@ -242,6 +243,15 @@ guessed address list into the exact roster worth phishing. Now a stranger and a
 team member get byte-identical responses and only the member gets mail. The
 callback still refuses on the *callback* leg, which is what enforces "no signup
 flow" (§1).
+
+The cost of that, stated plainly: @auth/core writes the verification-token row
+before `sendVerificationRequest` runs, so an anonymous caller can now create
+token rows for addresses that are not team members. They are single-use, expire
+in 15 minutes, and grant nothing — but nothing prunes them and nothing rate
+limits the endpoint. Phase 2's worker should sweep
+`verification_tokens WHERE expires < now()`; rate limiting belongs at the
+reverse proxy. This was a deliberate trade against roster disclosure, which is
+the worse failure.
 
 **`AUTH_URL` is required and `AUTH_TRUST_HOST` is tri-state.** Auth.js reads
 `process.env.AUTH_URL` itself, so a zod `.default()` made the variable look

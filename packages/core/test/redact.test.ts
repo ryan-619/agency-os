@@ -69,6 +69,22 @@ describe('redact()', () => {
     expect(JSON.stringify(out)).not.toContain('at ')
   })
 
+  // `seen` used to be every object visited anywhere, which flagged an ordinary
+  // DAG as a cycle and dropped its contents from the log line.
+  it('keeps both branches when the same object appears twice', () => {
+    const shared = { name: 'shared', detail: 'kept' }
+    const out = redact({ a: shared, b: shared }) as Record<string, unknown>
+    expect(out.a).toEqual({ name: 'shared', detail: 'kept' })
+    expect(out.b).toEqual({ name: 'shared', detail: 'kept' })
+    expect(JSON.stringify(out)).not.toContain('[circular]')
+  })
+
+  it('keeps repeated siblings in an array', () => {
+    const shared = { id: 1 }
+    const out = redact({ rows: [shared, shared, shared] }) as { rows: unknown[] }
+    expect(out.rows).toEqual([{ id: 1 }, { id: 1 }, { id: 1 }])
+  })
+
   it('survives a circular object instead of hanging', () => {
     const a: Record<string, unknown> = { name: 'a' }
     a.self = a

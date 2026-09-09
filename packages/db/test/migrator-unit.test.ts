@@ -98,6 +98,26 @@ describe('managesItsOwnTransaction', () => {
   it('passes ordinary DDL', () => {
     expect(managesItsOwnTransaction('CREATE TABLE t (id int);\nCREATE INDEX i ON t (id);')).toBe(false)
   })
+
+  // Anchoring to the start of a LINE missed these.
+  it('catches transaction control that shares a line with other SQL', () => {
+    expect(managesItsOwnTransaction('CREATE TABLE t (x int); COMMIT;')).toBe(true)
+    expect(managesItsOwnTransaction('BEGIN; CREATE TABLE t (x int);')).toBe(true)
+  })
+
+  // Stripping only line comments made these throw.
+  it('ignores the words inside a block comment or a string literal', () => {
+    expect(managesItsOwnTransaction('/*\nCOMMIT this carefully\n*/\nCREATE TABLE t (x int);')).toBe(false)
+    expect(managesItsOwnTransaction("INSERT INTO t (note) VALUES ('COMMIT');")).toBe(false)
+    expect(managesItsOwnTransaction("INSERT INTO t (note) VALUES ('it''s a COMMIT');")).toBe(false)
+  })
+
+  it('ignores plpgsql EXCEPTION blocks and DO blocks', () => {
+    expect(managesItsOwnTransaction(
+      'CREATE FUNCTION f() RETURNS void AS $$\nBEGIN\n NULL;\nEXCEPTION WHEN others THEN\n NULL;\nEND;\n$$ LANGUAGE plpgsql;',
+    )).toBe(false)
+    expect(managesItsOwnTransaction('DO $$\nBEGIN\n RAISE NOTICE 1;\nEND\n$$;')).toBe(false)
+  })
 })
 
 describe('drift detection covers BOTH halves of a migration', () => {

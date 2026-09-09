@@ -139,10 +139,19 @@ export function readMigrations(dir: string): Migration[] {
 export function managesItsOwnTransaction(sql: string): boolean {
   const stripped = sql
     // $$ ... $$ and $tag$ ... $tag$ (an unmatched group backreference matches
-    // the empty string, which is what makes the untagged form work).
+    // the empty string, which is what makes the untagged form work). Must run
+    // first: a function body may legitimately contain any of the words below.
     .replace(/\$([A-Za-z_]\w*)?\$[\s\S]*?\$\1\$/g, '')
-    .replace(/--[^\n]*/g, '')
-  return /^\s*(BEGIN|START\s+TRANSACTION|COMMIT|ROLLBACK)\b/im.test(stripped)
+    .replace(/\/\*[\s\S]*?\*\//g, '') // block comments
+    .replace(/--[^\n]*/g, '') // line comments
+    .replace(/'(?:[^']|'')*'/g, "''") // string literals, doubled quotes included
+
+  // Split on statement boundaries rather than lines: anchoring to the start of
+  // a LINE misses `CREATE TABLE t (x int); COMMIT;`, and matching anywhere
+  // would trip on an identifier that merely contains the word.
+  return stripped
+    .split(';')
+    .some((statement) => /^\s*(BEGIN|START\s+TRANSACTION|COMMIT|ROLLBACK|END)\s*$/i.test(statement))
 }
 
 const LEDGER = `

@@ -51,6 +51,15 @@ CREATE TABLE touches (
                                     'delivered', 'bounced', 'replied', 'failed')),
   subject       text,
   body          text,
+  /**
+   * The address or number this message actually went to, captured at send
+   * time. Not in §4's column list, added deliberately: contact_id is
+   * ON DELETE SET NULL so the log outlives the contact, and without this the
+   * surviving row records that SOMETHING was sent but not to whom — which
+   * cannot answer the complaint the log is kept for. Normalised like
+   * suppressions.value.
+   */
+  recipient     text,
   provider_id   text,
   scheduled_for timestamptz,
   sent_at       timestamptz,

@@ -206,6 +206,69 @@ describe('§2 invariants are enforced by the schema', () => {
       expect(msg).toMatch(/findings_scan_matches_company_and_org|foreign key/i)
     })
 
+    // Guarding only `findings` left the forbidden state reachable in two
+    // statements: write honest findings, then demote the scan under them.
+    it('REFUSES to demote a scan that already has observed findings', async () => {
+      const [good] = await db.driver.select<{ id: string }>(
+        `INSERT INTO scans (org_id, company_id, ok) VALUES ($1, $2, true) RETURNING id`,
+        [orgId, companyId],
+      )
+      await db.driver.select(
+        `INSERT INTO findings (org_id, scan_id, company_id, signal_key, observed, gap, weight, evidence)
+         VALUES ($1, $2, $3, 'hsts', true, true, 10, '{"header":"absent"}'::jsonb)`,
+        [orgId, good.id, companyId],
+      )
+      const msg = await expectRejection(() =>
+        db.driver.select(`UPDATE scans SET ok = false WHERE id = $1`, [good.id]),
+      )
+      expect(msg).toContain('scans_cannot_be_demoted_with_observations')
+    })
+
+    it('allows demoting a scan that observed nothing', async () => {
+      const [empty] = await db.driver.select<{ id: string }>(
+        `INSERT INTO scans (org_id, company_id, ok) VALUES ($1, $2, true) RETURNING id`,
+        [orgId, companyId],
+      )
+      await db.driver.select(`UPDATE scans SET ok = false, error = 'retro' WHERE id = $1`, [empty.id])
+      const [row] = await db.driver.select<{ ok: boolean }>(
+        `SELECT ok FROM scans WHERE id = $1`, [empty.id],
+      )
+      expect(row.ok).toBe(false)
+    })
+
+    // Phase 1's staleness sweep must be able to write to honest findings.
+    it('lets an ordinary update through — the guard is not a freeze', async () => {
+      const [good] = await db.driver.select<{ id: string }>(
+        `INSERT INTO scans (org_id, company_id, ok) VALUES ($1, $2, true) RETURNING id`,
+        [orgId, companyId],
+      )
+      await db.driver.select(
+        `INSERT INTO findings (org_id, scan_id, company_id, signal_key, observed, gap, weight, evidence)
+         VALUES ($1, $2, $3, 'tls', true, true, 8, '{"protocol":"TLSv1.2"}'::jsonb)`,
+        [orgId, good.id, companyId],
+      )
+      await db.driver.select(`UPDATE findings SET stale = true WHERE scan_id = $1`, [good.id])
+      const [row] = await db.driver.select<{ stale: boolean }>(
+        `SELECT stale FROM findings WHERE scan_id = $1`, [good.id],
+      )
+      expect(row.stale).toBe(true)
+    })
+
+    // '{}' is not the only way to carry no evidence.
+    it('REFUSES a claimed gap whose evidence is null, an array or a string', async () => {
+      for (const empty of ["'null'::jsonb", "'[]'::jsonb", `'""'::jsonb`, "'[1,2]'::jsonb"]) {
+        const msg = await expectRejection(() =>
+          db.driver.select(
+            `INSERT INTO findings (org_id, scan_id, company_id, signal_key, observed, gap, weight, evidence)
+             VALUES ($1, $2, $3, 'referrer_policy', true, true, 4, ${empty})`,
+            [orgId, scanId, companyId],
+          ),
+        )
+        expect(msg, `evidence ${empty} should be rejected`)
+          .toContain('findings_a_claimed_gap_carries_evidence')
+      }
+    })
+
     it('allows only one finding per signal per scan', async () => {
       // 'csp' was already recorded for this scan by the first test above.
       const msg = await expectRejection(() =>

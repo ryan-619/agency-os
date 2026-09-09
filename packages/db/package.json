@@ -25,8 +25,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "rm -rf dist *.tsbuildinfo",
-    "db:migrate": "tsx src/cli.ts",
-    "db:seed": "tsx src/seed-cli.ts"
+    "db:migrate": "tsx --env-file-if-exists=../../.env src/cli.ts",
+    "db:seed": "tsx --env-file-if-exists=../../.env src/seed-cli.ts"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.2",
