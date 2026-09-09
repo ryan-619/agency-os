@@ -34,7 +34,9 @@ const { handlers, auth, signIn, signOut } = NextAuth(() => {
     session: { strategy: 'database', maxAge: 60 * 60 * 24 * 30 },
 
     secret: e.AUTH_SECRET,
-    trustHost: e.AUTH_TRUST_HOST,
+    // undefined (not false) when unset, so @auth/core's own `??=` default
+    // still applies. See the note in lib/env.ts.
+    ...(e.AUTH_TRUST_HOST === undefined ? {} : { trustHost: e.AUTH_TRUST_HOST }),
 
     pages: { signIn: '/signin', verifyRequest: '/signin/check-email', error: '/signin' },
 
@@ -62,6 +64,28 @@ const { handlers, auth, signIn, signOut } = NextAuth(() => {
          * written to a log line (§2.3). Only the fact of sending is logged.
          */
         async sendVerificationRequest({ identifier, url, provider }) {
+          /**
+           * Membership is checked HERE rather than by refusing in the signIn
+           * callback, so that the HTTP response is identical either way.
+           *
+           * Refusing in the callback makes @auth/core throw AccessDenied,
+           * which redirects somewhere visibly different from the success path
+           * — a clean oracle that turns a list of guessed addresses into the
+           * exact roster worth phishing. The check-email page promises the
+           * system will not reveal who has access; this is what keeps that
+           * promise. A stranger gets the same redirect and no mail.
+           */
+          const known = await getDb()
+            .select({ id: schema.users.id })
+            .from(schema.users)
+            .where(eq(schema.users.email, identifier.toLowerCase()))
+            .limit(1)
+
+          if (known.length === 0) {
+            log.warn('sign-in requested for an address that is not a team member', { identifier })
+            return
+          }
+
           const { host } = new URL(url)
           await transport().sendMail({
             to: identifier,
@@ -95,23 +119,43 @@ const { handlers, auth, signIn, signOut } = NextAuth(() => {
        * would happily create a user for any address that receives the mail.
        */
       async signIn({ user, email }) {
-        // The verification-request leg also runs this callback; reject unknown
-        // addresses there so no mail is sent to a stranger at all.
         const address = user?.email
         if (!address) return false
 
+        /**
+         * This callback runs on BOTH legs of the magic-link flow.
+         *
+         * On the request leg (`email.verificationRequest`) it always allows,
+         * so that a stranger and a team member get byte-identical responses —
+         * sendVerificationRequest above is what decides whether mail is
+         * actually sent. Refusing here instead would leak membership.
+         *
+         * On the callback leg — someone holding a token — membership is
+         * required, and this is the gate that enforces "no signup flow" (§1).
+         */
+        if (email?.verificationRequest) return true
+
+        /**
+         * Exact match, not lower(email).
+         *
+         * @auth/core normalises the identifier to lower case before this
+         * callback runs, and @auth/drizzle-adapter's getUserByEmail then does
+         * an exact `eq(users.email, email)`. A case-insensitive gate here
+         * would admit a user the adapter cannot find, and the adapter would
+         * try to CREATE them — failing on users.org_id NOT NULL. The database
+         * guarantees the two agree: users_email_is_normalised forbids storing
+         * anything but the trimmed, lower-cased form.
+         */
         const rows = await getDb()
           .select({ id: schema.users.id })
           .from(schema.users)
-          .where(eq(sql`lower(${schema.users.email})`, address.toLowerCase()))
+          .where(eq(schema.users.email, address.toLowerCase()))
           .limit(1)
 
         if (rows.length === 0) {
           log.warn('sign-in refused: address is not a team member', { identifier: address })
           return false
         }
-        // `email.verificationRequest` is true on the leg that sends the mail.
-        void email
         return true
       },
 

@@ -223,6 +223,39 @@ production secrets were passed to `docker build`. An image build must not need
 runtime credentials. CI builds the web app with no secrets in the environment
 to keep it that way. Never call `env()` or `getDb()` at module scope.
 
+**Sign-in reveals nothing about who has access.** Membership is checked inside
+`sendVerificationRequest`, not by returning `false` from the `signIn` callback.
+Refusing in the callback makes @auth/core throw `AccessDenied`, which redirects
+somewhere visibly different from the success path — a clean oracle that turns a
+guessed address list into the exact roster worth phishing. Now a stranger and a
+team member get byte-identical responses and only the member gets mail. The
+callback still refuses on the *callback* leg, which is what enforces "no signup
+flow" (§1).
+
+**`AUTH_URL` is required and `AUTH_TRUST_HOST` is tri-state.** Auth.js reads
+`process.env.AUTH_URL` itself, so a zod `.default()` made the variable look
+configured while Auth.js fell back to the request Host header — with
+`trustHost` on, that lets a forged header choose the origin the magic link
+points at. And @auth/core assigns `config.trustHost ??= …`, so passing an
+explicit `false` beats its own default and every request fails `UntrustedHost`,
+including in development; the config key is therefore omitted entirely when the
+variable is unset.
+
+**`users.email` is stored normalised, enforced by `users_email_is_normalised`.**
+@auth/core lower-cases the sign-in identifier before any lookup and
+@auth/drizzle-adapter then matches `users.email` *exactly*. A row stored as
+`Priya@Agency.com` would be invisible to that lookup, so Auth.js would try to
+create a second user and fail on `org_id NOT NULL` — locking the person out
+with an opaque error. Storing only the normalised form makes the gate and the
+adapter agree by construction.
+
+**`/api/health` is unauthenticated and hits the database.** Deliberate — an
+orchestrator has to reach it — and it reports only `err.name`, never the driver
+message that would carry the DSN. It is not rate limited, so sustained
+anonymous traffic can occupy connections from the same pool the app uses;
+`DATABASE_POOL_MAX` exists partly so that ceiling is tunable. Rate limiting
+belongs with the reverse proxy in front of the VPS, not in the app.
+
 **`users.org_id` is NOT NULL with no default**, so the Auth.js adapter's
 `createUser` cannot succeed. That is deliberate: there is no signup flow (§1).
 The `signIn` callback refuses any address without a `users` row *before* mail is

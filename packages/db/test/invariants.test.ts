@@ -599,6 +599,46 @@ describe('§2 invariants are enforced by the schema', () => {
   })
 
   // -------------------------------------------------------------------------
+  // Sign-in depends on the stored address matching what Auth.js looks up
+  // -------------------------------------------------------------------------
+  describe('users.email is stored normalised', () => {
+    it('REFUSES an address with uppercase, which the adapter could never find', async () => {
+      const msg = await expectRejection(() =>
+        db.driver.select(
+          `INSERT INTO users (org_id, email, role) VALUES ($1, 'Priya@Agency.com', 'member')`,
+          [orgId],
+        ),
+      )
+      expect(msg).toContain('users_email_is_normalised')
+    })
+
+    it('REFUSES an address with surrounding whitespace', async () => {
+      const msg = await expectRejection(() =>
+        db.driver.select(
+          `INSERT INTO users (org_id, email, role) VALUES ($1, ' priya@agency.com ', 'member')`,
+          [orgId],
+        ),
+      )
+      expect(msg).toContain('users_email_is_normalised')
+    })
+
+    it('accepts the normalised form and keeps it unique', async () => {
+      const rows = await db.driver.select(
+        `INSERT INTO users (org_id, email, role) VALUES ($1, 'priya@agency.com', 'member') RETURNING id`,
+        [orgId],
+      )
+      expect(rows).toHaveLength(1)
+      const msg = await expectRejection(() =>
+        db.driver.select(
+          `INSERT INTO users (org_id, email, role) VALUES ($1, 'priya@agency.com', 'member')`,
+          [orgId],
+        ),
+      )
+      expect(msg).toMatch(/users_email_key|duplicate key/)
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // §4 org scoping
   // -------------------------------------------------------------------------
   describe('§4 org scoping', () => {

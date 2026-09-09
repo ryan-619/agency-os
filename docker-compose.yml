@@ -58,12 +58,18 @@ services:
     environment:
       NODE_ENV: production
       DATABASE_URL: postgres://${POSTGRES_USER:-agency}:${POSTGRES_PASSWORD:-agency}@db:5432/${POSTGRES_DB:-agency}
+      DATABASE_POOL_MAX: ${DATABASE_POOL_MAX:-10}
       AUTH_SECRET: "${AUTH_SECRET:?required - generate one with openssl rand -base64 32}"
       AUTH_URL: ${AUTH_URL:-http://localhost:3000}
       AUTH_TRUST_HOST: ${AUTH_TRUST_HOST:-true}
       SMTP_HOST: ${SMTP_HOST:-mailpit}
       SMTP_PORT: ${SMTP_PORT:-1025}
       SMTP_SECURE: ${SMTP_SECURE:-false}
+      # Empty against mailpit, which accepts anything. Required once SMTP_HOST
+      # points at a real relay — without these the transport is built
+      # unauthenticated and the relay answers 530 Authentication Required.
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       MAIL_FROM: "${MAIL_FROM:-Agency OS <agency-os@localhost>}"
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:

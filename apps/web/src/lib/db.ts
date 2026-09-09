@@ -28,7 +28,7 @@ function pool(): Pool {
   // leak a pool on every hot reload.
   globalForDb.__agencyPool ??= new Pool({
     connectionString: env().DATABASE_URL,
-    max: 10,
+    max: env().DATABASE_POOL_MAX,
   })
   return globalForDb.__agencyPool
 }

@@ -11,14 +11,34 @@ const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
 
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
+  /** Connection pool ceiling. Lower it when Postgres is shared or constrained. */
+  DATABASE_POOL_MAX: z.coerce.number().int().positive().max(100).default(10),
 
   /** openssl rand -base64 32 */
   AUTH_SECRET: z.string().min(16, 'AUTH_SECRET must be at least 16 characters'),
-  AUTH_URL: z.string().min(1).default('http://localhost:3000'),
+
+  /**
+   * Required, with no default, on purpose.
+   *
+   * Auth.js reads `process.env.AUTH_URL` itself when it builds the magic-link
+   * URL; it never sees a value parsed here. A zod `.default()` therefore made
+   * the variable LOOK configured while Auth.js fell back to the request's
+   * Host / X-Forwarded-Host header — which, with trustHost on, lets a
+   * forged header decide the origin the sign-in link points at. Failing
+   * loudly at startup is the only version of this that is honest.
+   */
+  AUTH_URL: z.string().min(1, 'AUTH_URL is required — Auth.js builds magic-link URLs from it'),
+
+  /**
+   * Tri-state on purpose: `undefined` when unset, so Auth.js can apply its own
+   * default. @auth/core assigns with `config.trustHost ??= ...`, so passing an
+   * explicit `false` wins over that default and every request then fails with
+   * UntrustedHost — including in development.
+   */
   AUTH_TRUST_HOST: z
     .string()
     .optional()
-    .transform((v) => v === 'true' || v === '1'),
+    .transform((v) => (v && ['true', '1', 'yes'].includes(v.toLowerCase()) ? true : undefined)),
 
   SMTP_HOST: z.string().min(1, 'SMTP_HOST is required to send magic links'),
   SMTP_PORT: z.coerce.number().int().positive().default(1025),

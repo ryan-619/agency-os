@@ -43,10 +43,18 @@ CREATE TABLE users (
   email_verified timestamptz,
   image          text,
   created_at     timestamptz NOT NULL DEFAULT now(),
-  updated_at     timestamptz
+  updated_at     timestamptz,
+
+  -- Auth.js normalises the sign-in identifier to a trimmed, lower-cased
+  -- address before any lookup, and @auth/drizzle-adapter then matches on
+  -- users.email EXACTLY. A row stored as 'Priya@Agency.com' would be invisible
+  -- to that lookup, so Auth.js would try to create a second user — which fails
+  -- on org_id NOT NULL and locks the person out with an opaque error. Storing
+  -- only the normalised form makes the two agree by construction.
+  CONSTRAINT users_email_is_normalised CHECK (email = lower(btrim(email)))
 );
 
-CREATE UNIQUE INDEX users_email_key ON users (lower(email));
+CREATE UNIQUE INDEX users_email_key ON users (email);
 CREATE INDEX users_org_id_idx ON users (org_id);
 
 CREATE TRIGGER users_set_updated_at BEFORE UPDATE ON users

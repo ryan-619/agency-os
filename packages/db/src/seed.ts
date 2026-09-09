@@ -51,6 +51,8 @@ export async function seed(
   opts: SeedOptions,
   log: (msg: string) => void = () => {},
 ): Promise<SeedResult> {
+  // Normalised to the one form the database accepts and the Auth.js adapter
+  // looks up (users_email_is_normalised in migration 0001).
   const email = opts.ownerEmail.trim().toLowerCase()
   if (!email.includes('@')) throw new Error(`ownerEmail does not look like an address: ${email}`)
 

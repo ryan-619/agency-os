@@ -1,4 +1,5 @@
 import { redirect } from 'next/navigation'
+import { AuthError } from 'next-auth'
 import { auth, signIn } from '@/auth'
 
 export const dynamic = 'force-dynamic'
@@ -25,20 +26,46 @@ export default async function SignIn({
         <h1>Agency OS</h1>
         <p>Internal tool. Sign in with your team address.</p>
 
-        {error ? (
-          <p className="err">
-            {error === 'AccessDenied'
-              ? 'That address is not a team member. Ask an owner to add you.'
-              : 'Sign-in failed. Try again.'}
-          </p>
-        ) : null}
+        {error ? <p className="err">Sign-in failed. Try again.</p> : null}
 
         <form
           action={async (formData: FormData) => {
             'use server'
             const email = String(formData.get('email') ?? '').trim()
             if (!email) return
-            await signIn('nodemailer', { email, redirectTo: '/' })
+
+            try {
+              await signIn('nodemailer', { email, redirectTo: '/' })
+            } catch (err) {
+              /**
+               * Two things are thrown through here and they must be handled
+               * differently.
+               *
+               * On success `signIn` calls redirect(), which throws NEXT_REDIRECT.
+               * That MUST propagate or the redirect never happens — so anything
+               * that is not an AuthError is re-thrown untouched.
+               *
+               * On refusal @auth/core throws AccessDenied, and next-auth's
+               * `signIn` re-throws it rather than converting it to a redirect
+               * (lib/actions.js: `if (isAuthError && isRaw && !isRedirect) throw`).
+               * Uncaught, that surfaced as a 500 "server-side exception" page —
+               * so the friendly message this page renders was unreachable.
+               */
+              if (err instanceof AuthError) {
+                /**
+                 * Deliberately the SAME destination as success.
+                 *
+                 * The check-email page promises the system will not reveal
+                 * which addresses belong to the team, and that promise has to
+                 * be kept in behaviour, not just in copy: a distinguishable
+                 * response is an oracle that turns an address list into the
+                 * exact roster worth phishing. Both outcomes look identical
+                 * from outside; only a real team member gets mail.
+                 */
+                redirect('/signin/check-email')
+              }
+              throw err
+            }
           }}
         >
           <label htmlFor="email">Email address</label>

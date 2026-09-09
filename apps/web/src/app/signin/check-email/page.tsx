@@ -8,8 +8,8 @@ export default function CheckEmail() {
           for 15 minutes and can be used once.
         </p>
         <p className="fine">
-          Nothing was sent if the address is not on the team — the system will not tell you
-          which, and will not create an account.
+          You will see this page whether or not the address is on the team, and no account is
+          ever created — so this screen reveals nothing about who has access.
           <br />
           <br />
           In local development the message is waiting at{' '}
