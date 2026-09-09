@@ -262,6 +262,13 @@ explicit `false` beats its own default and every request fails `UntrustedHost`,
 including in development; the config key is therefore omitted entirely when the
 variable is unset.
 
+Note the consequence: because `AUTH_URL` is now always present,
+`trustHost ??= !!(AUTH_URL ?? …)` is always true, so **`AUTH_TRUST_HOST` no
+longer changes anything**. That is safe rather than alarming — `reqWithEnvURL`
+rewrites the request origin from `AUTH_URL`, so the Host header is not what
+builds the magic link. The variable is kept because removing it would silently
+change behaviour for anyone who already sets it.
+
 **`users.email` is stored normalised, enforced by `users_email_is_normalised`.**
 @auth/core lower-cases the sign-in identifier before any lookup and
 @auth/drizzle-adapter then matches `users.email` *exactly*. A row stored as
@@ -269,6 +276,11 @@ variable is unset.
 create a second user and fail on `org_id NOT NULL` — locking the person out
 with an opaque error. Storing only the normalised form makes the gate and the
 adapter agree by construction.
+
+**The dashboard reads the stored ICP definition** rather than repeating §11's
+numbers as literals. The threshold, channels and daily cap shown are whatever
+the active `icp_profiles` row says. A dashboard displaying a threshold the
+engine is not using is the same class of mistake as a finding nobody observed.
 
 **`/api/health` is unauthenticated and hits the database.** Deliberate — an
 orchestrator has to reach it — and it reports only `err.name`, never the driver

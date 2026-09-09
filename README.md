@@ -79,13 +79,18 @@ Docker**. CI additionally runs the same migrations against a real
 looser gate than the deploy target.
 
 To run the app on your host against the compose database, change `DATABASE_URL`
-in `.env` to `@localhost:5432` and (the db scripts read `.env`, as does
-`next dev`):
+in `.env` to `@localhost:5432` and:
 
 ```bash
+ln -s ../../.env apps/web/.env   # once — Next reads .env from its own project dir
 npm run db:migrate && npm run db:seed
 npm run dev
 ```
+
+The symlink is the whole story: the database scripts read the repo-root `.env`,
+but Next only looks in `apps/web`, and its CLI re-execs through `NODE_OPTIONS`,
+which rejects `--env-file`. One file, linked, rather than two that drift.
+`.gitignore` covers `.env` at any depth, so the link is not committed.
 
 ### Layout
 

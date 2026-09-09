@@ -53,10 +53,21 @@ export default async function Dashboard() {
     .limit(1)
 
   const [icp] = await getDb()
-    .select({ name: schema.icpProfiles.name })
+    .select({ name: schema.icpProfiles.name, definition: schema.icpProfiles.definition })
     .from(schema.icpProfiles)
     .where(sql`${schema.icpProfiles.orgId} = ${user.orgId} AND ${schema.icpProfiles.active}`)
     .limit(1)
+
+  // Read from the stored definition rather than repeating §11's numbers as
+  // literals. The ICP is editable (Phase 1 puts it in the UI), and a dashboard
+  // that displays a threshold the engine is not using is the same class of
+  // mistake as a finding nobody observed.
+  const def = icp?.definition as
+    | { scoring?: { qualify_at?: number }; outreach?: { channels?: string[]; max_per_day?: number } }
+    | undefined
+  const qualifyAt = def?.scoring?.qualify_at
+  const channels = def?.outreach?.channels
+  const dailyCap = def?.outreach?.max_per_day
 
   return (
     <div className="shell">
@@ -114,9 +125,9 @@ export default async function Dashboard() {
           <tbody>
             <tr>
               <td>{icp?.name ?? '— none seeded —'}</td>
-              <td className="mono">45 / 100</td>
-              <td className="mono">email, linkedin</td>
-              <td className="mono">25</td>
+              <td className="mono">{qualifyAt === undefined ? '—' : `${qualifyAt} / 100`}</td>
+              <td className="mono">{channels?.join(', ') ?? '—'}</td>
+              <td className="mono">{dailyCap ?? '—'}</td>
             </tr>
           </tbody>
         </table>
@@ -126,6 +137,7 @@ export default async function Dashboard() {
           <strong>Phase 0 ends here, deliberately.</strong>
           <ul>
             <li>The {c.companies} seeded companies have never been scanned — no findings exist, and none are invented.</li>
+            <li>Findings have no staleness tracking yet; nothing sets <code>stale</code> until Phase 1.</li>
             <li>Scanning, scoring and the company detail page arrive in Phase 1.</li>
             <li>The agent chat panel, the approval queue and audit logging arrive in Phase 2.</li>
             <li>Nothing in this system can send a message yet. The send path lands in Phase 4.</li>

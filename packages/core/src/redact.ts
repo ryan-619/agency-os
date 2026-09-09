@@ -14,15 +14,33 @@
  * and the agent worker need exactly the same behaviour; two copies would drift.
  *
  * Known limits, stated plainly so nobody over-trusts it:
- *   * It matches on KEY NAME. A credential stored under an innocuous key
+ *   * It matches on KEY NAME, plus one value-shaped rule for connection
+ *     strings. A bare credential under an innocuous key
  *     (`{ value: 'sk-live-...' }`) is not detected and never will be.
- *   * It does not inspect string contents for secret-shaped substrings.
+ *   * It does not inspect string contents for other secret-shaped substrings.
  * Treat it as a seatbelt, not as permission to log arbitrary objects.
  */
 
-/** Key names whose values are replaced wholesale, whatever their type. */
+/**
+ * Key names whose values are replaced wholesale, whatever their type.
+ *
+ * Deliberately NOT broad substrings. A bare `key` blanks `signal_key`, a bare
+ * `url$` blanks `linkedin_url` and `recording_url`, and a bare `session` blanks
+ * `session_id` — all ordinary domain columns that appear in this schema, and
+ * blanking them makes a log line useless without protecting anything. The
+ * credential-bearing URLs (DATABASE_URL and friends) are caught by
+ * SENSITIVE_VALUE below instead, which looks at the value rather than guessing
+ * from the name.
+ */
 export const SENSITIVE_KEY =
-  /pass|passwd|pwd|secret|token|key|apikey|credential|auth|bearer|cookie|session|dsn|connection|url$/i
+  /password|passwd|pwd|secret|token|apikey|api_key|access_key|private_key|encryption_key|^key$|credential|authorization|^auth$|bearer|cookie|dsn|connection_?string/i
+
+/**
+ * A value carrying embedded credentials, whatever its key is called.
+ * Matches the `scheme://user:password@host` form, which is how every
+ * connection string in this system leaks.
+ */
+export const SENSITIVE_VALUE = /^[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^/\s@]*@/i
 
 /** Depth cap, so a cyclic or pathological object cannot hang the logger. */
 const MAX_DEPTH = 6
@@ -53,7 +71,9 @@ function redactValue(value: unknown, depth: number, path: Set<object>): unknown 
 
     const out: LogFields = {}
     for (const [k, v] of Object.entries(value as LogFields)) {
-      out[k] = SENSITIVE_KEY.test(k) ? REDACTED : redactValue(v, depth + 1, path)
+      if (SENSITIVE_KEY.test(k)) out[k] = REDACTED
+    else if (typeof v === 'string' && SENSITIVE_VALUE.test(v)) out[k] = REDACTED
+    else out[k] = redactValue(v, depth + 1, path)
     }
     return out
   } finally {

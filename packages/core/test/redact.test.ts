@@ -24,9 +24,11 @@ describe('redact()', () => {
     const headers = config.headers as Record<string, unknown>
 
     expect(headers.authorization).toBe(REDACTED)
-    expect(config.url).toBe(REDACTED)
     expect(out.connector.secret_ref).toBe(REDACTED)
-    // Non-sensitive fields survive, or the log would be useless.
+    // Non-sensitive fields survive, or the log would be useless — including
+    // the connector's own URL, which is an endpoint, not a credential. A
+    // connection string in that position WOULD be caught, by value shape.
+    expect(config.url).toBe('https://mcp.apollo.io')
     expect(out.connector.id).toBe('c1')
     expect(out.connector.name).toBe('apollo')
   })
@@ -103,8 +105,35 @@ describe('redact()', () => {
     expect(redact({ n: 1, s: 'x', b: true, nul: null })).toEqual({ n: 1, s: 'x', b: true, nul: null })
   })
 
+  // A broad key regex blanked ordinary columns and made log lines useless
+  // without protecting anything. These are all real column names in the schema.
+  it('leaves ordinary domain fields alone', () => {
+    const fields = {
+      signal_key: 'csp',
+      linkedin_url: 'https://linkedin.com/in/someone',
+      recording_url: 'https://recordings.example/1.mp3',
+      provider_id: 'msg-1',
+      session_id: 'abc',
+      sdk_session_id: 's-1',
+      domain: 'acme.com',
+      tool_name: 'scan_company',
+      AUTH_URL: 'http://localhost:3000',
+      identifier: 'someone@example.com',
+    }
+    expect(redact(fields)).toEqual(fields)
+  })
+
+  // Caught by value shape, not key name, so an innocuously-named field holding
+  // a connection string is still covered.
+  it('redacts any value carrying embedded credentials, whatever the key', () => {
+    expect(redact({ target: 'postgres://user:hunter2@host:5432/db' })).toEqual({ target: REDACTED })
+    expect(redact({ note: 'smtp://u:p@mail.example:587' })).toEqual({ note: REDACTED })
+    // ...but a URL with no credentials in it is left readable.
+    expect(redact({ target: 'https://acme.com/pricing' })).toEqual({ target: 'https://acme.com/pricing' })
+  })
+
   // Stated as a test so the limitation is visible, not discovered later.
-  it('does NOT catch a secret stored under an innocuous key — by design', () => {
+  it('does NOT catch a bare secret stored under an innocuous key — by design', () => {
     expect(redact({ value: 'sk-live-REAL' })).toEqual({ value: 'sk-live-REAL' })
   })
 })
