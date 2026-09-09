@@ -302,6 +302,11 @@ sent, and the NOT NULL is the backstop if that callback is ever bypassed.
 own types and any drift noted here. Checked against
 **`@anthropic-ai/claude-agent-sdk@0.3.263`**.
 
+Provenance, since this cannot be re-checked from inside the repo: the SDK is
+**not** a dependency here — it arrives in Phase 2 — so these were read from a
+scratch install of that exact version (`sdk.d.ts`), not from `node_modules`.
+Re-verify against the version you actually install before building on them.
+
 **Names that are correct as written in the spec:** `query`, `mcpServers`,
 `agents`, `canUseTool`, `resume`, `forkSession`, `includePartialMessages`,
 `maxTurns`, `maxBudgetUsd`, `settingSources`, `skills`, `createSdkMcpServer`,
