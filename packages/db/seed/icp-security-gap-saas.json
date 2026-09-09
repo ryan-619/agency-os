@@ -1,0 +1,61 @@
+{
+  "id": "security-gap-saas-us-eu",
+  "label": "Security-gap SaaS (US/EU)",
+  "positioning": "SMB / mid-market SaaS companies that ship a real product to real customers but have no dedicated security engineer. They hit a wall the first time an enterprise prospect sends a security questionnaire or demands SOC 2. Wedge: AppSec assessment + DevSecOps pipeline, sold by an engineer who builds, not an auditor who only reports.",
+
+  "firmographics": {
+    "geos": ["US", "CA", "UK", "DE", "NL", "SE", "IE", "FR", "ES", "PT", "PL"],
+    "headcount": { "min": 15, "max": 400 },
+    "stage": ["seed", "series-a", "series-b", "bootstrapped-profitable"],
+    "must_have": [
+      "web-facing SaaS product with a login",
+      "sells B2B (has enterprise customers to lose)"
+    ]
+  },
+
+  "disqualifiers": {
+    "unreachable": "No response from the public homepage; nothing was observed, so nothing can be claimed",
+    "is_security_vendor": "Sells security themselves; the pitch is insulting",
+    "has_security_team": "In-house security function already; we'd be displacing, not filling",
+    "enterprise_scale": "Over ~400 staff: procurement cycle too long for an agency this size",
+    "no_public_product": "Nothing web-facing to assess"
+  },
+
+  "signals": {
+    "csp":                  { "weight": 15, "why": "No Content-Security-Policy — the loudest AppSec tell on a login-bearing app" },
+    "trust_page":           { "weight": 14, "why": "No /security or /trust page — cannot answer an enterprise security review" },
+    "compliance_claim":     { "weight": 12, "why": "No SOC 2 / ISO 27001 claim anywhere public — the deal-blocker they haven't hit yet" },
+    "security_txt":         { "weight": 12, "why": "No /.well-known/security.txt — no disclosure process, no named security owner" },
+    "hsts":                 { "weight": 10, "why": "No Strict-Transport-Security — trivially fixed, always flagged in questionnaires" },
+    "outdated_js":          { "weight": 10, "why": "Known-outdated JS library served in production — concrete, demonstrable" },
+    "frame_protection":     { "weight":  8, "why": "No X-Frame-Options / frame-ancestors — clickjacking exposure" },
+    "tls":                  { "weight":  8, "why": "Certificate or TLS configuration problem" },
+    "server_banner":        { "weight":  7, "why": "Server / X-Powered-By header discloses stack and version" },
+    "content_type_options": { "weight":  5, "why": "No X-Content-Type-Options — MIME sniffing" },
+    "referrer_policy":      { "weight":  4, "why": "No Referrer-Policy — leaks internal URLs to third parties" },
+    "permissions_policy":   { "weight":  3, "why": "No Permissions-Policy" }
+  },
+
+  "scoring": {
+    "qualify_at": 45,
+    "tiers": [
+      { "name": "A — call first", "floor": 70 },
+      { "name": "B — sequence",   "floor": 55 },
+      { "name": "C — nurture",    "floor": 45 }
+    ],
+    "note": "Normalise to 0-100 over the weights of OBSERVED signals only. An unobserved signal is excluded from both the numerator and the denominator, so a blocked fetch can never become a fake finding."
+  },
+
+  "freshness": {
+    "stale_after_days": 14,
+    "note": "Findings older than 14 days are marked stale and must be re-verified before appearing in any outbound draft."
+  },
+
+  "outreach": {
+    "channels": ["email", "linkedin"],
+    "max_per_day": 25,
+    "auto_send": false,
+    "opener_rule": "Lead with ONE specific, verifiable finding on their own public product, stated plainly and without alarmism. One finding, one consequence, one ask. Never send a numeric score. Never imply anything private was accessed.",
+    "note": "Cold voice and cold SMS are deliberately absent and are not addable here. Voice and SMS are for inbound contacts and contacts with a recorded opt-in only, enforced in the send path, not in this document."
+  }
+}

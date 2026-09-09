@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Typecheck + the full suite against PGlite (an embedded Postgres). No Docker,
+  # no services — this is the fast gate that runs on every push.
+  # ---------------------------------------------------------------------------
+  check:
+    name: typecheck + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Typecheck (tsc --build, strict)
+        run: npx tsc --build --force
+      - name: Tests
+        run: npm test
+      - name: Build the web app
+        run: npm run build --workspace @agency/web
+        env:
+          # Build-time only. Real values are injected at run time.
+          DATABASE_URL: postgres://ci:ci@127.0.0.1:5432/ci
+          AUTH_SECRET: ci-secret-not-used-at-runtime-000000
+          SMTP_HOST: localhost
+
+  # ---------------------------------------------------------------------------
+  # The same migrations against a REAL Postgres 16.
+  #
+  # PGlite embeds a newer Postgres major (18.x at the time of writing), so it
+  # is a LOOSER gate than production, not a stricter one: syntax that PG16
+  # rejects can pass the fast job. This job is what actually proves the
+  # migrations run clean from zero on the version we deploy.
+  # ---------------------------------------------------------------------------
+  postgres16:
+    name: migrations on real Postgres 16
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd="pg_isready -U ci -d ci"
+          --health-interval=5s --health-timeout=3s --health-retries=20
+    env:
+      DATABASE_URL: postgres://ci:ci@127.0.0.1:5432/ci
+      SEED_ORG_NAME: Agency
+      SEED_OWNER_EMAIL: owner@example.com
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --build
+
+      - name: Report the server version being tested
+        run: node -e "const{Client}=require('pg');(async()=>{const c=new Client({connectionString:process.env.DATABASE_URL});await c.connect();console.log((await c.query('select version()')).rows[0].version);await c.end()})()"
+
+      - name: Migrate up from zero
+        run: node packages/db/dist/cli.js up
+
+      - name: Status is clean
+        run: node packages/db/dist/cli.js status
+
+      - name: Seed
+        run: node packages/db/dist/seed-cli.js
+
+      - name: Seed again — must be idempotent
+        run: node packages/db/dist/seed-cli.js
+
+      - name: Roll all the way back, then forward again
+        run: |
+          node packages/db/dist/cli.js down all
+          node packages/db/dist/cli.js up
+
+      - name: No table survived the rollback except the ledger
+        run: |
+          node -e "
+          const {Client} = require('pg');
+          (async () => {
+            const c = new Client({connectionString: process.env.DATABASE_URL});
+            await c.connect();
+            const { rows } = await c.query(
+              \"select tablename from pg_tables where schemaname='public' order by 1\"
+            );
+            const names = rows.map(r => r.tablename);
+            console.log(names.length, 'tables:', names.join(', '));
+            if (names.length !== 24) {
+              console.error('expected 23 application tables + schema_migrations');
+              process.exit(1);
+            }
+            await c.end();
+          })()"
+
+  # ---------------------------------------------------------------------------
+  # The compose file and both images must actually build.
+  # ---------------------------------------------------------------------------
+  docker:
+    name: docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate docker-compose.yml
+        run: docker compose config --quiet
+        env:
+          AUTH_SECRET: ci-secret
+          SEED_OWNER_EMAIL: owner@example.com
+      - name: Build the web image
+        run: docker build -f apps/web/Dockerfile -t agency-os-web .
+      - name: Build the agent image
+        run: docker build -f apps/agent/Dockerfile -t agency-os-agent .

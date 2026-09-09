@@ -1,0 +1,31 @@
+# dependencies
+node_modules/
+.pnp.*
+
+# build output
+dist/
+.next/
+out/
+*.tsbuildinfo
+
+# env — never commit a credential (PROMPT.md §2.3)
+.env
+.env.*
+!.env.example
+
+# local dev mail sink
+.dev-mail/
+
+# test / coverage
+coverage/
+.vitest/
+
+# editor / os
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# runtime
+*.log
+pgdata/

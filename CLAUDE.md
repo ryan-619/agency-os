@@ -1,0 +1,243 @@
+# Agency OS — architecture, invariants, commands
+
+Internal operating system for a small application-security agency. Read
+[PROMPT.md](PROMPT.md) for the full build spec; this file is the working
+summary a session should read first.
+
+**Current state: Phase 0 (Foundation) is complete. Phase 1 has not started.**
+
+---
+
+## 1. The invariants (PROMPT.md §2)
+
+These are not preferences. Violating them creates legal exposure or destroys
+the product's value. Where a rule can be expressed in the schema it *is*
+expressed in the schema, so that a bug in application code cannot produce a bad
+row. `packages/db/test/invariants.test.ts` asserts the database rejects each
+one.
+
+### Outreach compliance (§2.1)
+- **Cold outreach is email and LinkedIn only.** Voice and SMS are for inbound
+  contacts and contacts with a recorded opt-in.
+  *Enforced now:* `campaigns_no_auto_send_on_voice_or_sms` — a campaign cannot
+  have `auto_send = true` on a `voice` or `sms` channel.
+- **Consent is per channel and absence means NO.** `consents` has
+  `UNIQUE (contact_id, channel)`, `granted` and `source` are both NOT NULL, and
+  no row is ever created by default. There is no "unknown" state to misread.
+- **Suppression wins over everything.** `UNIQUE (org_id, kind, value)`, checked
+  in the send path — never in the campaign builder.
+- Quiet hours are stored as wall-clock times and must be evaluated in the
+  **recipient's** timezone. *The evaluation lands in Phase 4.*
+
+### Evidence integrity (§2.2)
+- **The app must never state a finding it did not observe.**
+  *Enforced now:* `findings_unobserved_has_no_gap` —
+  `(observed AND gap IS NOT NULL) OR (NOT observed AND gap IS NULL)`.
+  A fetch failure, timeout, WAF block or CDN quirk gives `observed = false`,
+  and the database then refuses to store any claim about it. Unobserved means
+  unknown, not "no gap".
+- Findings carry `evidence jsonb NOT NULL` — what was seen, where, when.
+- Findings go stale at 14 days (`stale_after_days` in the ICP definition) and
+  must be re-verified before appearing in any outbound draft.
+- The scanner reads **public pages only**. No port scanning, no probing for
+  `.git`, `.env`, admin panels or backups. Every piece of copy in the app must
+  describe it as posture review from the outside, not a security test.
+
+### Secrets (§2.3)
+- No credential in a source file, a log line, or an agent's context window.
+- `connectors.secret_ref` points at an encrypted credential; it never holds one.
+- The CLIs strip credentials from their output — `safeTarget()` in
+  `packages/db/src/cli.ts` prints `host:port/db` and never the DSN.
+- Both loggers redact any field whose key matches `pass|secret|token|key|
+  authorization|cookie|url$`.
+- `sendVerificationRequest` deliberately does **not** log the magic-link URL.
+  That URL is a bearer credential.
+
+### Irreversible actions need a human (§2.4)
+- Anything leaving the building goes through the `approvals` queue unless a
+  campaign has `auto_send = true`.
+  *Enforced now:* `approvals_decided_has_decider` — a row cannot claim it was
+  approved without naming who decided and when.
+- *The `canUseTool` gate that blocks on this lands in Phase 2.*
+- **Never set `permissionMode: "bypassPermissions"`.**
+
+---
+
+## 2. Layout
+
+```
+apps/
+  web/          Next.js 16 App Router — UI + BFF routes + Auth.js
+  agent/        the long-running worker (Phase 2 gives it the query() loop)
+packages/
+  core/         domain logic. NO I/O, no framework, no database.
+  db/           schema, reversible SQL migrations, typed queries, seed
+```
+
+`packages/core` has an **empty `dependencies` block on purpose**, and
+`packages/core/test/no-io.test.ts` reads the source to prove it imports no
+framework, no driver, no Node I/O built-in, and never touches `process.env`.
+This is the one architectural rule worth being pedantic about (§3).
+
+Not yet created, because their phase has not arrived (§12 — do not scaffold all
+seven phases at once):
+`packages/scanner` (Phase 1), `packages/tools` (Phase 2), `apps/voice`
+(Phase 6, and only after A2P 10DLC registration clears).
+
+### What lands in `packages/core`, and when
+| Phase | Domain rules |
+|---|---|
+| 0 ✅ | authorisation — `can(principal, capability)` |
+| 1 | scoring, tiering, disqualifiers, the `observed` rule |
+| 2 | risk classification for the approval gate (§5.4) |
+| 4 | consent, suppression, quiet hours, daily caps — the one send path |
+
+---
+
+## 3. Commands
+
+```bash
+npm install
+npx tsc --build          # typecheck + compile packages to dist/
+npm test                 # 80 tests: domain + migrations + invariants + seed
+npm run build            # packages, then the Next app
+
+# database (needs DATABASE_URL)
+npm run db:migrate            # apply pending
+npm run db:migrate -- status  # what is applied
+npm run db:migrate -- down 1  # revert one
+npm run db:migrate -- reset   # all the way down, then up (refuses in production)
+npm run db:seed               # org + owner + ICP + 16 seed companies; idempotent
+
+# the whole stack
+cp .env.example .env
+# set AUTH_SECRET: openssl rand -base64 32
+docker compose up --build
+docker compose run --rm migrate
+docker compose run --rm seed
+# app        http://localhost:3000
+# magic links http://localhost:8025   (Mailpit — dev only, relays nothing)
+```
+
+`packages/core` and `packages/db` compile to `dist/` and are consumed as
+JavaScript, so **run `npx tsc --build` after changing them** or the web app
+will use stale output. TypeScript project references handle the ordering.
+
+---
+
+## 4. Decisions and deviations
+
+Places where this repo departs from a literal reading of PROMPT.md, and why.
+Flagged rather than hidden, per §13.
+
+**`companies.domain` and `agent_defs.slug` are unique per org, not globally.**
+§4 says `domain unique`. A global unique domain would force exactly the
+migration that putting `org_id` on every table was meant to avoid, so both are
+`UNIQUE (org_id, <col>)`.
+
+**Enumerated columns are `text` + `CHECK`, not Postgres `ENUM` types.**
+Verified on a real server: `ALTER TYPE ... DROP VALUE` fails outright
+("dropping an enum value is not implemented") and a value added by
+`ALTER TYPE ... ADD VALUE` cannot be used in the transaction that added it.
+An enum migration is therefore not reversible, and §10 requires every migration
+to be. A `CHECK` drops and re-adds cleanly inside one transaction.
+
+**Migrations are hand-written `NNNN_name.up.sql` / `.down.sql` pairs** applied
+by `packages/db/src/migrator.ts`, not by drizzle-kit. drizzle-kit generates
+forward-only SQL and there is no `drizzle-kit down`. Use
+`npx drizzle-kit export --dialect=postgresql --schema=packages/db/src/schema.ts`
+as a *generator* if you want a starting point, then hand-maintain the pair.
+The migrator records a sha256 of every applied file and **refuses to run if a
+shipped migration was edited** (§10).
+
+**Two sources of truth, kept in step by a test.** The migrations own the
+database; `packages/db/src/schema.ts` owns the types.
+`packages/db/test/schema-parity.test.ts` migrates a real Postgres engine from
+zero and compares every table, column and nullability against the drizzle
+declarations, so drift fails CI instead of production.
+
+**Mailpit is in the default compose stack.** §3's stack table does not mention
+it. Phase 0 promises that `docker compose up` gives a working login, and a
+magic link has to go *somewhere*; logging it would violate §2.3. It is dev-only,
+relays nothing, and production points `SMTP_*` at the real mailboxes instead.
+
+**Tests run on PGlite; CI also runs on real Postgres 16.** PGlite is an
+embedded Postgres, so `npm test` needs no Docker and no server. But **PGlite
+0.5.8 embeds Postgres 18.3, not 16** — it is a *looser* gate than production,
+and will accept PG17/PG18-only syntax that PG16 rejects. The `postgres16` job
+in CI runs the same migrations against a real `postgres:16-alpine` and is the
+one that actually proves the deploy target. `freshDb()` pins PGlite to UTC;
+without that it derives an `Etc/GMT±N` zone from the host clock and truncates
+to whole hours (a developer at +05:30 silently tests at +05:00).
+
+**`users.org_id` is NOT NULL with no default**, so the Auth.js adapter's
+`createUser` cannot succeed. That is deliberate: there is no signup flow (§1).
+The `signIn` callback refuses any address without a `users` row *before* mail is
+sent, and the NOT NULL is the backstop if that callback is ever bypassed.
+
+---
+
+## 5. SDK verification (PROMPT.md §13)
+
+§13 asks for the SDK option names to be checked against the installed package's
+own types and any drift noted here. Checked against
+**`@anthropic-ai/claude-agent-sdk@0.3.263`**.
+
+**Names that are correct as written in the spec:** `query`, `mcpServers`,
+`agents`, `canUseTool`, `resume`, `forkSession`, `includePartialMessages`,
+`maxTurns`, `maxBudgetUsd`, `settingSources`, `skills`, `createSdkMcpServer`,
+`tool`, `sessionStore`, `permissionMode`, `systemPrompt`, `allowedTools`,
+`hooks`. `mcpServers` is `Record<string, McpServerConfig>` and the stdio /
+http / sse shapes match §6's `buildMcpServers` exactly.
+
+**Drift — §5.4's pseudocode does not match the real types. Phase 2 must use
+the real ones:**
+
+1. `canUseTool` is **not** `(toolCall) => ...`. It is
+   ```ts
+   type CanUseTool = (
+     toolName: string,
+     input: Record<string, unknown>,
+     options: { signal: AbortSignal; suggestions?: PermissionUpdate[]; blockedPath?: string; decisionReason?: string },
+   ) => Promise<PermissionResult | null>
+   ```
+2. `PermissionResult` is **not** `{ allow: boolean, reason }`. It is
+   ```ts
+   | { behavior: 'allow'; updatedInput?: Record<string, unknown>; updatedPermissions?: PermissionUpdate[] }
+   | { behavior: 'deny'; message: string; interrupt?: boolean }
+   ```
+   So §5.4's `return { allow: true }` becomes `return { behavior: 'allow' }`,
+   and the denial becomes
+   `{ behavior: 'deny', message: 'Not approved by a human (...)' }`.
+3. `AgentDefinition.tools` — passing `'Skill'` here is **deprecated**; use the
+   separate `skills` field. Affects §6's skills guidance and §7's `allowedTools`.
+4. `SettingSource` is `'user' | 'project' | 'local'`, so §6's
+   `settingSources: ["project"]` is right.
+
+**Other pinned-version facts worth not rediscovering:**
+- `next-auth@5.0.0-beta.32` peers `next ^14 || ^15 || ^16` — Next 16 is fine.
+- Use `next-auth/providers/nodemailer`; `providers/email` is deprecated and
+  gives the provider id `email`, changing the callback path.
+- `Nodemailer({...})` **throws without a `server` config** even when
+  `sendVerificationRequest` is fully overridden.
+- Under `strategy: 'database'` the `session` callback receives
+  `{ ...adapterSession, user }` — returning it verbatim **publishes the raw
+  `sessionToken`** from `GET /api/auth/session`. Build the object explicitly.
+- Next 16 renamed `middleware.ts` to `proxy.ts`; `proxy.ts` runs on the Node
+  runtime (`middleware.ts` was Edge). Shipping both is a build error.
+- Next 16 dropped the `eslint` key from `next.config`.
+- `pg-boss@12.30.0` (Phase 2): **no default export** (`import { PgBoss }`),
+  `boss.work` handlers receive an **array** of jobs, and `createQueue()` is
+  mandatory before `send`/`work`.
+
+---
+
+## 6. Standards (PROMPT.md §10)
+
+- TypeScript strict, plus `noUncheckedIndexedAccess`. No surviving `any`.
+- Zod at every boundary — env is validated at startup in both apps.
+- Domain rules in `packages/core`, pure, unit-tested against edge cases.
+- Every migration reversible. **Never edit a shipped migration** — the migrator
+  will refuse to run.
+- Structured JSON logging. Never log credentials or full message bodies.
+- Conventional commits, small PRs, one phase per branch.

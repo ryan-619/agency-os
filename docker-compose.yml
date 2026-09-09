@@ -1,0 +1,123 @@
+# Agency OS — the whole system on one host (PROMPT.md §3).
+#
+#   cp .env.example .env      # then set AUTH_SECRET
+#   docker compose up --build
+#   docker compose run --rm migrate     # apply migrations
+#   docker compose run --rm seed        # create the org, owner and ICP
+#
+# Lead data stays on the agency's own hardware. Nothing here talks to a managed
+# service.
+
+name: agency-os
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-agency}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agency}
+      POSTGRES_DB: ${POSTGRES_DB:-agency}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      # Exposed for psql and for running the app on the host. Bound to
+      # loopback so the database is not reachable from the network.
+      - '127.0.0.1:5432:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-agency} -d ${POSTGRES_DB:-agency}']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Development mail sink. Magic links land here instead of the internet.
+  #
+  # DEV ONLY. It accepts everything and relays nothing. In production, point
+  # SMTP_* at the agency's warmed mailboxes and remove this service. It is in
+  # the default stack rather than behind a profile so that a fresh
+  # `docker compose up` gives a working login, which is what Phase 0 promises.
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    ports:
+      - '127.0.0.1:8025:8025' # web UI — read the magic link here
+      - '127.0.0.1:1025:1025' # SMTP
+    environment:
+      MP_MAX_MESSAGES: 500
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+      mailpit: { condition: service_started }
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER:-agency}:${POSTGRES_PASSWORD:-agency}@db:5432/${POSTGRES_DB:-agency}
+      AUTH_SECRET: "${AUTH_SECRET:?required - generate one with openssl rand -base64 32}"
+      AUTH_URL: ${AUTH_URL:-http://localhost:3000}
+      AUTH_TRUST_HOST: ${AUTH_TRUST_HOST:-true}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      MAIL_FROM: "${MAIL_FROM:-Agency OS <agency-os@localhost>}"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - '3000:3000'
+
+  agent:
+    build:
+      context: .
+      dockerfile: apps/agent/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER:-agency}:${POSTGRES_PASSWORD:-agency}@db:5432/${POSTGRES_DB:-agency}
+      AGENT_PORT: 3001
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # The Agent SDK reads this from the environment (§5). Optional in
+      # Phase 0 — the query() loop lands in Phase 2.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Bound the blast radius of a subagent fan-out (§7).
+      CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: ${CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS:-3}
+      CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: ${CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH:-2}
+    ports:
+      - '127.0.0.1:3001:3001'
+
+  # --- one-off tasks --------------------------------------------------------
+  # Run with `docker compose run --rm migrate`. They exit when done, so they
+  # carry `profiles` and never start as part of `docker compose up`.
+
+  migrate:
+    build:
+      context: .
+      dockerfile: apps/agent/Dockerfile
+    profiles: ['tasks']
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-agency}:${POSTGRES_PASSWORD:-agency}@db:5432/${POSTGRES_DB:-agency}
+    command: ['node', 'packages/db/dist/cli.js', 'up']
+
+  seed:
+    build:
+      context: .
+      dockerfile: apps/agent/Dockerfile
+    profiles: ['tasks']
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-agency}:${POSTGRES_PASSWORD:-agency}@db:5432/${POSTGRES_DB:-agency}
+      SEED_ORG_NAME: ${SEED_ORG_NAME:-Agency}
+      SEED_OWNER_EMAIL: "${SEED_OWNER_EMAIL:?required - it is the only account that can sign in}"
+      SEED_OWNER_NAME: ${SEED_OWNER_NAME:-Owner}
+    command: ['node', 'packages/db/dist/seed-cli.js']
+
+volumes:
+  pgdata:

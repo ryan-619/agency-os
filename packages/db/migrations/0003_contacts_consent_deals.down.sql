@@ -1,0 +1,4 @@
+DROP TABLE IF EXISTS deals;
+DROP TABLE IF EXISTS suppressions;
+DROP TABLE IF EXISTS consents;
+DROP TABLE IF EXISTS contacts;

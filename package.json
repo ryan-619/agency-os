@@ -1,0 +1,22 @@
+{
+  "name": "agency-os",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "workspaces": ["packages/*", "apps/*"],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "tsc --build --verbose",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:migrate": "npm run db:migrate -w @agency/db --",
+    "db:seed": "npm run db:seed -w @agency/db --",
+    "dev": "npm run dev --workspace @agency/web"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vitest": "3.2.7",
+    "@types/node": "22.18.1"
+  }
+}
