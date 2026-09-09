@@ -170,6 +170,15 @@ one that actually proves the deploy target. `freshDb()` pins PGlite to UTC;
 without that it derives an `Etc/GMT±N` zone from the host clock and truncates
 to whole hours (a developer at +05:30 silently tests at +05:00).
 
+**The web app's database client is lazy (`getDb()`, not a `db` const).**
+`next build` evaluates route modules while collecting page data, so anything
+done at import time runs during the *build*. Constructing the pool eagerly
+called `env()`, which throws on a missing `DATABASE_URL` — and the Docker build
+therefore failed with `Failed to collect page data for /api/health` unless
+production secrets were passed to `docker build`. An image build must not need
+runtime credentials. CI builds the web app with no secrets in the environment
+to keep it that way. Never call `env()` or `getDb()` at module scope.
+
 **`users.org_id` is NOT NULL with no default**, so the Auth.js adapter's
 `createUser` cannot succeed. That is deliberate: there is no signup flow (§1).
 The `signIn` callback refuses any address without a `users` row *before* mail is

@@ -1,14 +1,14 @@
 import { redirect } from 'next/navigation'
 import { sql } from 'drizzle-orm'
 import { auth, signOut } from '@/auth'
-import { db, schema } from '@/lib/db'
+import { getDb, schema } from '@/lib/db'
 import { can } from '@agency/core'
 
 export const dynamic = 'force-dynamic'
 
 /** One round trip for every counter on the dashboard. */
 async function counts(orgId: string) {
-  const result = await db.execute<{
+  const result = await getDb().execute<{
     companies: string
     contacts: string
     findings: string
@@ -46,13 +46,13 @@ export default async function Dashboard() {
   const user = session.user
   const c = await counts(user.orgId)
 
-  const [org] = await db
+  const [org] = await getDb()
     .select({ name: schema.orgs.name })
     .from(schema.orgs)
     .where(sql`${schema.orgs.id} = ${user.orgId}`)
     .limit(1)
 
-  const [icp] = await db
+  const [icp] = await getDb()
     .select({ name: schema.icpProfiles.name })
     .from(schema.icpProfiles)
     .where(sql`${schema.icpProfiles.orgId} = ${user.orgId} AND ${schema.icpProfiles.active}`)

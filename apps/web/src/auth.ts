@@ -2,7 +2,7 @@ import NextAuth from 'next-auth'
 import Nodemailer from 'next-auth/providers/nodemailer'
 import { DrizzleAdapter } from '@auth/drizzle-adapter'
 import { eq, sql } from 'drizzle-orm'
-import { db, schema } from '@/lib/db'
+import { getDb, schema } from '@/lib/db'
 import { env } from '@/lib/env'
 import { transport } from '@/lib/mail'
 import { log } from '@/lib/logger'
@@ -22,7 +22,7 @@ import type { Role } from '@agency/core'
 const { handlers, auth, signIn, signOut } = NextAuth(() => {
   const e = env()
   return {
-    adapter: DrizzleAdapter(db, {
+    adapter: DrizzleAdapter(getDb(), {
       usersTable: schema.users,
       accountsTable: schema.accounts,
       sessionsTable: schema.sessions,
@@ -100,7 +100,7 @@ const { handlers, auth, signIn, signOut } = NextAuth(() => {
         const address = user?.email
         if (!address) return false
 
-        const rows = await db
+        const rows = await getDb()
           .select({ id: schema.users.id })
           .from(schema.users)
           .where(eq(sql`lower(${schema.users.email})`, address.toLowerCase()))
@@ -126,7 +126,7 @@ const { handlers, auth, signIn, signOut } = NextAuth(() => {
        * next-auth@5.0.0-beta.32 + @auth/core@0.41.3.
        */
       async session({ session, user }) {
-        const rows = await db
+        const rows = await getDb()
           .select({ orgId: schema.users.orgId, role: schema.users.role })
           .from(schema.users)
           .where(eq(schema.users.id, user.id))

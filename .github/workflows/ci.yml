@@ -31,13 +31,12 @@ jobs:
         run: npx tsc --build --force
       - name: Tests
         run: npm test
-      - name: Build the web app
+      # Deliberately run with NO secrets in the environment. An image build
+      # must never need runtime credentials, so this step is the regression
+      # test for that: the DB client is lazy precisely so `next build` can
+      # collect page data without DATABASE_URL/AUTH_SECRET/SMTP_HOST.
+      - name: Build the web app (no secrets in the environment)
         run: npm run build --workspace @agency/web
-        env:
-          # Build-time only. Real values are injected at run time.
-          DATABASE_URL: postgres://ci:ci@127.0.0.1:5432/ci
-          AUTH_SECRET: ci-secret-not-used-at-runtime-000000
-          SMTP_HOST: localhost
 
   # ---------------------------------------------------------------------------
   # The same migrations against a REAL Postgres 16.
