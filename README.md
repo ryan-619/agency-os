@@ -103,8 +103,9 @@ npm run db:migrate -- reset      # down all, then up (refuses in production)
 ```
 
 Every `.up.sql` has a matching `.down.sql` — the migrator refuses to load one
-without the other. It also records a checksum of each applied file and **will
-not run if a shipped migration has been edited**. Add a new migration instead.
+without the other. It records a checksum over **both halves** of each applied
+migration and **will not run if a shipped migration has been edited**, in
+either direction. Add a new migration instead.
 
 ---
 

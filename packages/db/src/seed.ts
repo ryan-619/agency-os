@@ -32,24 +32,66 @@ export interface SeedResult {
   createdIcp: boolean
 }
 
-/** Parse the `domain,name` seed list, ignoring blank lines and comments. */
+/** A hostname: labels of letters/digits/hyphens, at least one dot, no scheme or path. */
+const DOMAIN = /^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/
+
+/**
+ * Parse the `domain,name` seed list, ignoring blank lines and comments.
+ *
+ * De-duplicates on domain so the caller's inserted/already-present counts add
+ * up: `ON CONFLICT DO NOTHING` collapses a repeated domain into one insert, so
+ * counting the raw line total would over-report "already present".
+ */
 export function parseCompanySeeds(csv: string): Array<{ domain: string; name: string }> {
   const out: Array<{ domain: string; name: string }> = []
+  const seen = new Set<string>()
+
   for (const raw of csv.split('\n')) {
     const line = raw.trim()
     if (!line || line.startsWith('#')) continue
     const [domain = '', ...rest] = line.split(',')
-    const d = domain.trim().toLowerCase()
+    const d = domain.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '')
     if (!d || d === 'domain') continue // header
-    out.push({ domain: d, name: rest.join(',').trim() })
+    if (!DOMAIN.test(d)) {
+      throw new Error(`Seed list contains something that is not a domain: "${domain.trim()}"`)
+    }
+    if (seen.has(d)) continue
+    seen.add(d)
+    // A quoted field keeps its commas; strip the surrounding quotes only.
+    const name = rest.join(',').trim().replace(/^"(.*)"$/s, '$1')
+    out.push({ domain: d, name })
   }
   return out
 }
 
+/**
+ * Seed inside a single transaction.
+ *
+ * Without it a partial run leaves debris: the org is created before the owner
+ * is validated, so a mismatched SEED_ORG_NAME used to create a second
+ * organisation and *then* fail — leaving exactly the split-brain the check
+ * exists to prevent. All or nothing.
+ */
 export async function seed(
   driver: MigrationDriver,
   opts: SeedOptions,
   log: (msg: string) => void = () => {},
+): Promise<SeedResult> {
+  await driver.exec('BEGIN')
+  try {
+    const result = await seedInTransaction(driver, opts, log)
+    await driver.exec('COMMIT')
+    return result
+  } catch (err) {
+    await driver.exec('ROLLBACK').catch(() => {})
+    throw err
+  }
+}
+
+async function seedInTransaction(
+  driver: MigrationDriver,
+  opts: SeedOptions,
+  log: (msg: string) => void,
 ): Promise<SeedResult> {
   // Normalised to the one form the database accepts and the Auth.js adapter
   // looks up (users_email_is_normalised in migration 0001).
@@ -73,17 +115,32 @@ export async function seed(
   // There is no signup flow (§1). A person can only sign in if a row already
   // exists here, so this seed is how the first human gets access.
   let createdOwner = false
-  let userRows = await driver.select<{ id: string }>(
-    'SELECT id FROM users WHERE lower(email) = $1',
+  const userRows = await driver.select<{ id: string; org_id: string }>(
+    'SELECT id, org_id FROM users WHERE email = $1',
     [email],
   )
-  let ownerUserId = userRows[0]?.id
+  const existing = userRows[0]
+  /**
+   * The owner is found globally by address, but the org was found by name. If
+   * those disagree, the caller has changed SEED_ORG_NAME against a database
+   * that already has this person in a different org — and silently returning a
+   * SeedResult whose orgId and ownerUserId belong to different organisations
+   * would strand the only account that can sign in. Fail loudly instead.
+   */
+  if (existing && existing.org_id !== orgId) {
+    throw new Error(
+      `${email} already exists in a different organisation (${existing.org_id}), but the seed ` +
+        `resolved "${opts.orgName}" to ${orgId}. Point SEED_ORG_NAME at the existing ` +
+        `organisation, or use a different owner address.`,
+    )
+  }
+  let ownerUserId = existing?.id
   if (!ownerUserId) {
-    userRows = await driver.select<{ id: string }>(
+    const inserted = await driver.select<{ id: string }>(
       `INSERT INTO users (org_id, email, name, role) VALUES ($1, $2, $3, 'owner') RETURNING id`,
       [orgId, email, opts.ownerName ?? null],
     )
-    ownerUserId = userRows[0]!.id
+    ownerUserId = inserted[0]!.id
     createdOwner = true
     log(`created owner ${email}`)
   }

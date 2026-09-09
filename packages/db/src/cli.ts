@@ -15,16 +15,9 @@ import { Client } from 'pg'
 import { pgDriver } from './driver.js'
 import { MIGRATIONS_DIR } from './paths.js'
 import { readMigrations, migrateUp, migrateDown, migrationStatus } from './migrator.js'
+import { safeTarget } from './safe-target.js'
 
-/** Strip credentials so a connection target can be shown in a log line. */
-function safeTarget(url: string): string {
-  try {
-    const u = new URL(url)
-    return `${u.hostname}:${u.port || '5432'}${u.pathname}`
-  } catch {
-    return '(unparseable DATABASE_URL)'
-  }
-}
+
 
 async function main(): Promise<void> {
   const url = process.env.DATABASE_URL

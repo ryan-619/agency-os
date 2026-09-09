@@ -27,8 +27,10 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci
-      - name: Typecheck (tsc --build, strict)
-        run: npx tsc --build --force
+      # `tsc --build` covers the shipped packages; tsconfig.test.json covers the
+      # test suite, which the per-package build configs exclude.
+      - name: Typecheck (packages and tests, strict)
+        run: npm run typecheck
       - name: Tests
         run: npm test
       # Deliberately run with NO secrets in the environment. An image build

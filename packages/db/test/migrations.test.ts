@@ -22,10 +22,22 @@ describe('migration files', () => {
     }
   })
 
-  it('versions are unique and strictly ascending', () => {
+  // Uniqueness and ordering are structural in readMigrations (a Map keyed by
+  // version, returned sorted), so asserting them proves nothing about the
+  // FILES. What is worth checking is that the directory itself is sane and
+  // contiguous — a skipped or misnumbered version is a real mistake.
+  it('the migration files are numbered contiguously from 0001', () => {
     const versions = readMigrations(MIGRATIONS_DIR).map((m) => m.version)
-    expect(new Set(versions).size).toBe(versions.length)
-    expect([...versions].sort()).toEqual(versions)
+    expect(versions.length).toBeGreaterThan(0)
+    expect(versions).toEqual(
+      versions.map((_, i) => String(i + 1).padStart(4, '0')),
+    )
+  })
+
+  it('every migration name is a distinct, readable slug', () => {
+    const names = readMigrations(MIGRATIONS_DIR).map((m) => m.name)
+    expect(new Set(names).size).toBe(names.length)
+    for (const n of names) expect(n).toMatch(/^[a-z][a-z0-9_]*$/)
   })
 })
 

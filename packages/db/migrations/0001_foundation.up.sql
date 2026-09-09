@@ -18,6 +18,11 @@ CREATE TABLE orgs (
   updated_at  timestamptz
 );
 
+-- The seed finds the organisation by name. Without this, a one-word change to
+-- SEED_ORG_NAME would create a SECOND org and strand the owner in the first —
+-- a split-brain the single-org invariant is supposed to make impossible.
+CREATE UNIQUE INDEX orgs_name_key ON orgs (name);
+
 -- Maintains updated_at on UPDATE. Attached to every table that has the column.
 CREATE FUNCTION set_updated_at() RETURNS trigger AS $$
 BEGIN

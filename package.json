@@ -3,11 +3,16 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "engines": { "node": ">=22" },
-  "workspaces": ["packages/*", "apps/*"],
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
-    "typecheck": "tsc --build --verbose",
+    "typecheck": "tsc --build && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "db:migrate": "npm run db:migrate -w @agency/db --",

@@ -182,8 +182,13 @@ by `packages/db/src/migrator.ts`, not by drizzle-kit. drizzle-kit generates
 forward-only SQL and there is no `drizzle-kit down`. Use
 `npx drizzle-kit export --dialect=postgresql --schema=packages/db/src/schema.ts`
 as a *generator* if you want a starting point, then hand-maintain the pair.
-The migrator records a sha256 of every applied file and **refuses to run if a
-shipped migration was edited** (§10).
+The migrator records a sha256 over the up **and** down SQL of every applied
+migration and **refuses to run if a shipped migration was edited** (§10) — an
+edited down file is as dangerous as an edited up file, because `migrateDown`
+removes the ledger row on the strength of whatever it does. It also refuses a
+migration that issues its own BEGIN/COMMIT, which would silently void the
+all-or-nothing guarantee (the plpgsql `BEGIN` that opens a function body is
+correctly ignored).
 
 **Two sources of truth, kept in step by a test.** The migrations own the
 database; `packages/db/src/schema.ts` owns the types.
@@ -324,6 +329,9 @@ the real ones:**
 - Zod at every boundary — env is validated at startup in both apps.
 - Domain rules in `packages/core`, pure, unit-tested against edge cases.
 - Every migration reversible. **Never edit a shipped migration** — the migrator
-  will refuse to run.
+  will refuse to run, on either half of the pair.
+- `npm run typecheck` covers the shipped packages *and* the test suite
+  (`tsconfig.test.json`). The test suite is the stated proof of the §2
+  invariants, so it belongs inside the type system.
 - Structured JSON logging. Never log credentials or full message bodies.
 - Conventional commits, small PRs, one phase per branch.

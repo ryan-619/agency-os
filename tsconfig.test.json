@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  // Typechecks the test suite, which the per-package build configs exclude
+  // (they emit dist/, and tests are not shipped). Without this, `tsc --build`
+  // covered zero test code — in a repo where the tests are the stated proof of
+  // the §2 invariants. Run by `npm run typecheck`.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "types": ["node"],
+    // Relaxed for tests ONLY; src keeps it on. A test that indexes rows[0] and
+    // gets undefined SHOULD blow up loudly — that is the assertion failing.
+    // Requiring a guard on every row access would bury the real type errors
+    // this config exists to catch.
+    "noUncheckedIndexedAccess": false
+  },
+  "include": [
+    "packages/*/test/**/*.ts",
+    "packages/*/src/**/*.ts",
+    "apps/agent/src/**/*.ts",
+    "vitest.config.ts"
+  ]
+}

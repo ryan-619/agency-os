@@ -21,6 +21,37 @@ describe('parseCompanySeeds', () => {
       { domain: 'acme.com', name: 'Acme, Inc.' },
     ])
   })
+
+  it('unwraps a quoted name', () => {
+    expect(parseCompanySeeds('acme.com,"Acme, Inc."')).toEqual([
+      { domain: 'acme.com', name: 'Acme, Inc.' },
+    ])
+  })
+
+  it('strips a scheme or path someone pasted in', () => {
+    expect(parseCompanySeeds('https://acme.com/pricing,Acme')).toEqual([
+      { domain: 'acme.com', name: 'Acme' },
+    ])
+  })
+
+  it('tolerates CRLF and a byte-order mark', () => {
+    expect(parseCompanySeeds('\uFEFFdomain,name\r\nacme.com,Acme\r\n')).toEqual([
+      { domain: 'acme.com', name: 'Acme' },
+    ])
+  })
+
+  // ON CONFLICT DO NOTHING collapses a repeated domain into one insert, so a
+  // raw line count would over-report "already present" on the next run.
+  it('de-duplicates a repeated domain so the caller’s counts add up', () => {
+    expect(parseCompanySeeds('acme.com,Acme\nACME.com,Acme Again')).toEqual([
+      { domain: 'acme.com', name: 'Acme' },
+    ])
+  })
+
+  it('rejects a line that is not a domain rather than importing garbage', () => {
+    expect(() => parseCompanySeeds('not a domain at all,Nope')).toThrow(/not a domain/)
+    expect(() => parseCompanySeeds('localhost,Local')).toThrow(/not a domain/)
+  })
 })
 
 describe('seeding a fresh database', () => {
@@ -129,6 +160,20 @@ describe('seeding a fresh database', () => {
     )
     const def = typeof row.definition === 'string' ? JSON.parse(row.definition) : row.definition
     expect((def.scoring as { qualify_at: number }).qualify_at).toBe(55)
+  })
+
+  // orgs.name is unique and the seed resolves the org by name, so changing
+  // SEED_ORG_NAME against an existing database must not quietly produce a
+  // second org with the owner stranded in the first.
+  it('refuses to strand the owner when SEED_ORG_NAME changes', async () => {
+    await expect(seed(db.driver, { ...OPTS, orgName: 'A Different Agency' })).rejects.toThrow(
+      /already exists in a different organisation/,
+    )
+  })
+
+  it('never creates a second organisation', async () => {
+    const [{ count }] = await db.driver.select<{ count: string }>(`SELECT count(*) FROM orgs`)
+    expect(Number(count)).toBe(1)
   })
 
   it('rejects an owner email that is not an address', async () => {

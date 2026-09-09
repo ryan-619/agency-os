@@ -10,6 +10,12 @@
  * Each migration runs inside a single transaction, so a failure leaves the
  * database exactly where it started.
  *
+ * The corollary: DDL that Postgres refuses to run inside a transaction —
+ * CREATE INDEX CONCURRENTLY, ALTER TYPE ... ADD VALUE on an existing type,
+ * VACUUM — cannot be used in a migration file. None of it is needed today. If
+ * it becomes necessary, add an explicit opt-out marker rather than removing
+ * the wrapper for everything.
+ *
  * §10 also says "never edit a shipped migration". This records a checksum of
  * every applied file and refuses to run if one changed underneath it.
  */
@@ -41,7 +47,13 @@ export interface Migration {
   name: string
   upSql: string
   downSql: string
-  /** sha256 of the up SQL, used to detect an edited shipped migration. */
+  /**
+   * sha256 of BOTH files. An edited `.down.sql` is just as dangerous as an
+   * edited `.up.sql`: migrateDown deletes the ledger row on the strength of
+   * whatever the down script does, so a silently changed one can leave a
+   * schema that no longer matches its recorded state and cannot be recovered
+   * through this tool.
+   */
   checksum: string
 }
 
@@ -91,13 +103,46 @@ export function readMigrations(dir: string): Migration[] {
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([version, e]) => {
       if (e.up === undefined) throw new Error(`Migration ${version}_${e.name} has no .up.sql`)
+      // Each migration is wrapped in BEGIN/COMMIT by migrateUp. A file that
+      // issues its own would end that transaction early and silently void the
+      // all-or-nothing guarantee the module docstring promises.
+      for (const [which, sql] of [['up', e.up], ['down', e.down]] as const) {
+        if (sql !== undefined && managesItsOwnTransaction(sql)) {
+          throw new Error(
+            `Migration ${version}_${e.name} .${which}.sql manages its own transaction. ` +
+              `The migrator wraps every file in BEGIN/COMMIT; remove the statement.`,
+          )
+        }
+      }
       if (e.down === undefined) {
         throw new Error(
           `Migration ${version}_${e.name} has no .down.sql — every migration must be reversible (PROMPT.md §10)`,
         )
       }
-      return { version, name: e.name, upSql: e.up, downSql: e.down, checksum: sha256(e.up) }
+      return {
+        version,
+        name: e.name,
+        upSql: e.up,
+        downSql: e.down,
+        checksum: sha256(`${e.up}\n--DOWN--\n${e.down}`),
+      }
     })
+}
+
+/**
+ * Does this SQL issue its own transaction control?
+ *
+ * Dollar-quoted bodies and line comments are stripped first: a plpgsql
+ * function body opens with BEGIN, which is a block, not a transaction —
+ * `CREATE FUNCTION ... AS $$ BEGIN ... END; $$` must not trip this.
+ */
+export function managesItsOwnTransaction(sql: string): boolean {
+  const stripped = sql
+    // $$ ... $$ and $tag$ ... $tag$ (an unmatched group backreference matches
+    // the empty string, which is what makes the untagged form work).
+    .replace(/\$([A-Za-z_]\w*)?\$[\s\S]*?\$\1\$/g, '')
+    .replace(/--[^\n]*/g, '')
+  return /^\s*(BEGIN|START\s+TRANSACTION|COMMIT|ROLLBACK)\b/im.test(stripped)
 }
 
 const LEDGER = `
@@ -204,9 +249,21 @@ export async function migrateDown(
   const rows = await applied(driver)
   assertNoDrift(migrations, rows)
 
+  if (steps !== 'all' && (!Number.isInteger(steps) || steps < 1)) {
+    // Array.slice treats a negative end index as an offset from the end, so an
+    // unvalidated -1 would revert everything EXCEPT the newest migration.
+    throw new Error(`migrateDown expects a positive integer or 'all', got ${String(steps)}`)
+  }
+
   const byVersion = new Map(migrations.map((m) => [m.version, m]))
   const toUndo = rows
-    .map((r) => byVersion.get(r.version)!)
+    .map((r) => {
+      const m = byVersion.get(r.version)
+      // assertNoDrift already rejects this, but the map lookup is what would
+      // otherwise throw a bare TypeError three lines later.
+      if (!m) throw new Error(`Migration ${r.version}_${r.name} is applied but missing from the repo`)
+      return m
+    })
     .sort((a, b) => b.version.localeCompare(a.version))
     .slice(0, steps === 'all' ? undefined : steps)
 

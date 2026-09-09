@@ -31,6 +31,16 @@ interface PgliteLike {
  * running migrations outside a transaction.
  */
 export function pgDriver(client: PgLikeClient): MigrationDriver {
+  // A pg.Pool satisfies PgLikeClient structurally, so the type system cannot
+  // stop this — but a Pool may hand each statement to a different backend,
+  // silently running BEGIN, the migration and COMMIT on three connections.
+  // `totalCount` exists on Pool and not on Client.
+  if ('totalCount' in (client as object)) {
+    throw new TypeError(
+      'pgDriver requires a pg.Client, not a pg.Pool: the migrator issues BEGIN and ' +
+        'COMMIT as separate statements and a Pool may run them on different connections.',
+    )
+  }
   return {
     async exec(sql) {
       // No values argument, so node-postgres uses the simple query protocol,
