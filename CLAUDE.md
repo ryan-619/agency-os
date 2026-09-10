@@ -4,7 +4,7 @@ Internal operating system for a small application-security agency. Read
 [PROMPT.md](PROMPT.md) for the full build spec; this file is the working
 summary a session should read first.
 
-**Current state: Phase 0 (Foundation) is complete. Phase 1 has not started.**
+**Current state: Phases 0 (Foundation) and 1 (Data core) are complete. Phase 2 has not started.**
 
 ---
 
@@ -120,16 +120,26 @@ packages/
 framework, no driver, no Node I/O built-in, and never touches `process.env`.
 This is the one architectural rule worth being pedantic about (§3).
 
+```
+packages/scanner   the public-surface signal collector (Phase 1)
+```
+
 Not yet created, because their phase has not arrived (§12 — do not scaffold all
-seven phases at once):
-`packages/scanner` (Phase 1), `packages/tools` (Phase 2), `apps/voice`
-(Phase 6, and only after A2P 10DLC registration clears).
+seven phases at once): `packages/tools` (Phase 2), `apps/voice` (Phase 6, and
+only after A2P 10DLC registration clears).
+
+### packages/scanner
+`fetch.ts` does the I/O; `extract.ts` is pure. That split is not cosmetic — it
+is what lets the same recorded bytes be replayed through this engine and the
+original Python one, which is how the port is proved correct. The list of paths
+the scanner may request is a frozen constant in `types.ts`, not a parameter, so
+no caller can widen it into something that probes for `.git` or an admin panel.
 
 ### What lands in `packages/core`, and when
 | Phase | Domain rules |
 |---|---|
-| 0 ✅ | authorisation — `can(principal, capability)` |
-| 1 | scoring, tiering, disqualifiers, the `observed` rule |
+| 0 ✅ | authorisation — `can(principal, capability)`, log redaction — `redact()` |
+| 1 ✅ | the ICP definition, scoring, tiering, disqualifiers, the `observed` rule |
 | 2 | risk classification for the approval gate (§5.4) |
 | 4 | consent, suppression, quiet hours, daily caps — the one send path |
 
@@ -150,6 +160,16 @@ npm run db:migrate -- status  # what is applied
 npm run db:migrate -- down 1  # revert one
 npm run db:migrate -- reset   # all the way down, then up (refuses in production)
 npm run db:seed               # org + owner + ICP + 16 seed companies; idempotent
+
+# scanning (Phase 1)
+npm run scan                  # every company that has never been scanned
+npm run scan -- --all         # re-scan everything
+npm run scan -- rentman.io    # one domain
+npm run scan -- --import f.csv  # import a domain,name CSV, then scan
+
+# the parity harness — regenerate only when re-recording on purpose
+npm run fixtures:capture      # re-record the seed domains' public surface
+npm run fixtures:golden       # re-run the PYTHON engine over those recordings
 
 # the whole stack
 cp .env.example .env
@@ -296,7 +316,44 @@ sent, and the NOT NULL is the backstop if that callback is ever bypassed.
 
 ---
 
-## 5. SDK verification (PROMPT.md §13)
+## 5. The scanner port, and how it is proved (Phase 1)
+
+`packages/scanner` and the scoring in `packages/core` are a port of the Python
+engine at `~/Documents/lead-engine`. §8.3 says the rules encoded there ARE the
+product, so the port is checked rather than trusted:
+
+`packages/scanner/test/parity.test.ts` replays recorded captures of all sixteen
+seed domains through both engines and asserts they agree on every signal's
+observed/gap/detail, the score, the tier, the gap ordering, the headline
+finding, the angle and the evidence lines — 97 assertions. Both engines read
+the SAME bytes from `packages/scanner/fixtures/*.json.gz`, so a disagreement is
+between the engines rather than between two moments on the internet, and the
+suite runs offline.
+
+**Three fidelity traps the parity test caught**, each of which would have
+shipped silently:
+1. Python's `round()` is banker's rounding — half to EVEN. `round(42.5)` is 42
+   there and 43 in JavaScript. One point, straddling the qualify-at-45
+   threshold. `roundHalfToEven()` in packages/core exists for this.
+2. Python's HTMLParser sets its in-title flag on EVERY `<title>` element, so an
+   inline SVG icon's title is appended to the page title. Taking the first
+   `<title>` disagreed on lawwwing.com.
+3. The CSP detail is truncated to 140 at the Python call site, before the
+   generic 160 cap.
+
+**One deliberate divergence.** Python's public-path probe does
+`except Exception: continue`, so a timeout, DNS failure or WAF block on
+`/security` is indistinguishable from a clean 404 — both become "no trust
+page". That is the exact case §2.2 forbids. Here a 404 still counts as absent,
+because a 404 IS an observation, but silence from every candidate marks the
+signal `observed = false`. §2 outranks port fidelity. Asserted explicitly in
+`packages/scanner/test/extract.test.ts` rather than hidden.
+
+If you re-record the fixtures, the goldens must be regenerated in the same
+commit, and the diff should be read: a changed score means the site changed, or
+the engine did.
+
+## 6. SDK verification (PROMPT.md §13)
 
 §13 asks for the SDK option names to be checked against the installed package's
 own types and any drift noted here. Checked against
@@ -356,7 +413,7 @@ the real ones:**
 
 ---
 
-## 6. Standards (PROMPT.md §10)
+## 7. Standards (PROMPT.md §10)
 
 - TypeScript strict, plus `noUncheckedIndexedAccess`. No surviving `any`.
 - Zod at every boundary — env is validated at startup in both apps.

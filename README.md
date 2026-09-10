@@ -8,8 +8,9 @@ carry a deal to a signed client.
 Single organisation. No billing, no signup, no marketing site. Self-hosted, so
 lead data stays on the agency's own hardware.
 
-> **Phase 0 of 6 is complete.** The foundation — schema, auth, seed, health
-> checks, CI — is in place and verified. Nothing scans, scores, or sends yet.
+> **Phases 0 and 1 of 6 are complete.** The foundation is in place, and
+> companies can now be imported, scanned against their public surface, and
+> scored against an editable ICP. Nothing reaches out yet.
 > See [CLAUDE.md](CLAUDE.md) §2 for what arrives in which phase, and
 > [PROMPT.md](PROMPT.md) for the full spec.
 
@@ -62,6 +63,17 @@ A dashboard reporting **16 companies** — the seed list from §11 — and **zer
 findings**. That is correct and it is the point: nothing has been scanned, so
 the system claims nothing. It will not invent a finding to fill a card.
 
+To give it something to look at:
+
+```bash
+npm run scan
+```
+
+That reads each company's public surface, scores it against the active ICP, and
+writes what it observed. Then **Companies** lists them by fit, and each company
+page shows every finding beside the evidence that produced it — the header that
+was checked, the URL fetched, the library version served.
+
 ---
 
 ## Working on it
@@ -69,7 +81,7 @@ the system claims nothing. It will not invent a finding to fill a card.
 ```bash
 npm install
 npm run typecheck     # packages and tests, strict
-npm test              # 147 tests, no Docker required
+npm test              # 315 tests, no Docker required
 ```
 
 The test suite runs against [PGlite](https://pglite.dev), an embedded Postgres,
@@ -99,6 +111,7 @@ which rejects `--env-file`. One file, linked, rather than two that drift.
 | `apps/web` | Next.js 16 App Router — UI, BFF routes, Auth.js magic link |
 | `apps/agent` | the long-running worker; gets the agent runtime in Phase 2 |
 | `packages/core` | domain logic — pure, no I/O, no framework, no database |
+| `packages/scanner` | the public-surface collector, and the port of the Python engine |
 | `packages/db` | schema, reversible SQL migrations, typed queries, seed |
 
 ### Migrations
@@ -151,7 +164,7 @@ pass credentials to a logger in the first place.
 
 ## Scanning: what it actually does
 
-The scanner (Phase 1) reads only what a company publishes to the open
+The scanner reads only what a company publishes to the open
 internet — the response headers of their own homepage, its HTML, the
 conventional public paths `/.well-known/security.txt`, `/security` and
 `/trust`, and the TLS certificate their server presents.
@@ -162,6 +175,18 @@ headers is what every browser does.
 
 **This is posture review from the outside, not a security test.** Describe it
 that way to a prospect. Never imply otherwise.
+
+The list of paths it may request is a frozen constant, not a parameter, so no
+caller can widen it.
+
+### It is a port, and the port is checked
+
+The engine is a translation of a Python original. Rather than trusting the
+translation, `npm test` replays recorded captures of all sixteen seed domains
+through **both** engines and asserts they agree — on every signal, the score,
+the tier, the ordering, and the evidence. See [CLAUDE.md](CLAUDE.md) §5 for the
+three real bugs that caught, and the one place the port deliberately disagrees
+with its original in order to obey §2.2.
 
 ---
 

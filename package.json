@@ -19,7 +19,8 @@
     "db:seed": "npm run db:seed -w @agency/db --",
     "dev": "npm run dev --workspace @agency/web",
     "fixtures:capture": "tsx tools/capture-fixtures.ts",
-    "fixtures:golden": "python3 tools/python-golden.py"
+    "fixtures:golden": "python3 tools/python-golden.py",
+    "scan": "tsx --env-file-if-exists=.env tools/scan.ts"
   },
   "devDependencies": {
     "typescript": "5.9.3",

@@ -2,7 +2,7 @@ import { redirect } from 'next/navigation'
 import { sql } from 'drizzle-orm'
 import { auth, signOut } from '@/auth'
 import { getDb, schema } from '@/lib/db'
-import { can } from '@agency/core'
+import { Shell } from '@/components/shell'
 
 export const dynamic = 'force-dynamic'
 
@@ -69,48 +69,20 @@ export default async function Dashboard() {
   const channels = def?.outreach?.channels
   const dailyCap = def?.outreach?.max_per_day
 
+  const signOutAction = async () => {
+    'use server'
+    await signOut({ redirectTo: '/signin' })
+  }
+
   return (
-    <div className="shell">
-      <aside className="side">
-        <div className="brand">Agency OS</div>
-        <div className="brand-sub">{org?.name ?? 'Agency'}</div>
-
-        <nav className="nav">
-          <a href="/">Dashboard</a>
-          <span>Companies <em className="phase-tag">phase 1</em></span>
-          <span>Chat <em className="phase-tag">phase 2</em></span>
-          <span>Connectors <em className="phase-tag">phase 3</em></span>
-          <span>Campaigns <em className="phase-tag">phase 4</em></span>
-          <span>Pipeline <em className="phase-tag">phase 5</em></span>
-        </nav>
-
-        <div className="who">
-          <div>{user.email}</div>
-          <div style={{ marginTop: 5 }}>
-            <span className="role">{user.role}</span>
-            {can(user, 'connectors:write') ? null : (
-              <span style={{ marginLeft: 6 }}>read-only settings</span>
-            )}
-          </div>
-          <form
-            action={async () => {
-              'use server'
-              await signOut({ redirectTo: '/signin' })
-            }}
-          >
-            <button style={{ marginTop: 12, padding: '5px 10px', fontSize: 12.5 }}>Sign out</button>
-          </form>
-        </div>
-      </aside>
-
-      <main className="main">
+    <Shell user={user} orgName={org?.name ?? 'Agency'} current="dashboard" signOut={signOutAction}>
         <h1>Dashboard</h1>
         <p className="lede">
-          Phase 0 — foundation. The schema, auth and seed are in place; the funnel is not built yet.
+          Phase 1 — data core. Companies can be imported, scanned and scored; nothing reaches out yet.
         </p>
 
         <div className="cards">
-          <div className="card"><div className="n">{c.companies}</div><div className="k">Companies</div></div>
+          <a className="card" href="/companies"><div className="n">{c.companies}</div><div className="k">Companies</div></a>
           <div className="card"><div className="n">{c.contacts}</div><div className="k">Contacts</div></div>
           <div className="card"><div className="n">{c.findings}</div><div className="k">Findings</div></div>
           <div className="card"><div className="n">{c.deals}</div><div className="k">Deals</div></div>
@@ -134,16 +106,14 @@ export default async function Dashboard() {
 
         <h2>What is not built yet</h2>
         <div className="note">
-          <strong>Phase 0 ends here, deliberately.</strong>
+          <strong>Phase 1 ends here, deliberately.</strong>
           <ul>
-            <li>The {c.companies} seeded companies have never been scanned — no findings exist, and none are invented.</li>
-            <li>Findings have no staleness tracking yet; nothing sets <code>stale</code> until Phase 1.</li>
-            <li>Scanning, scoring and the company detail page arrive in Phase 1.</li>
+            <li>Scanning, scoring and the company detail page are built — run <code>npm run scan</code>.</li>
+            <li>Nothing sources new companies automatically yet; import a CSV or add them by hand.</li>
             <li>The agent chat panel, the approval queue and audit logging arrive in Phase 2.</li>
             <li>Nothing in this system can send a message yet. The send path lands in Phase 4.</li>
           </ul>
         </div>
-      </main>
-    </div>
+    </Shell>
   )
 }

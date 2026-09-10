@@ -114,3 +114,40 @@ button {
 button:hover { opacity: .9; }
 .err { color: var(--warn); font-size: 13px; margin: 0 0 14px; }
 .fine { color: var(--muted); font-size: 12px; margin-top: 18px; line-height: 1.5; }
+
+/* --- phase 1: companies ------------------------------------------------- */
+.nav a.on { background: var(--bg); font-weight: 600; }
+.crumb { margin: 0 0 10px; font-size: 13px; }
+.crumb a { text-decoration: none; }
+.muted { color: var(--muted); }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px;
+       background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
+
+.pill { display: inline-block; border: 1px solid var(--line); border-radius: 999px;
+        padding: 1px 8px; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.pill-a { border-color: var(--ok); color: var(--ok); }
+.pill-b { border-color: var(--accent); color: var(--accent); }
+.pill-c { border-color: var(--warn); color: var(--warn); }
+.pill-stale { margin-left: 6px; border-color: var(--warn); color: var(--warn); }
+.row-stale td { opacity: .6; }
+
+.note-warn { border-left-color: var(--warn); }
+
+table th { vertical-align: bottom; }
+table td { vertical-align: top; }
+
+dl.evidence { margin: 0; font-size: 12px; }
+dl.evidence > div { display: grid; grid-template-columns: 96px 1fr; gap: 8px; margin-bottom: 2px; }
+dl.evidence dt { color: var(--muted); }
+dl.evidence dd { margin: 0; word-break: break-word; }
+
+a.card { display: block; text-decoration: none; color: inherit; }
+a.card:hover { border-color: var(--accent); }
+
+h1 .action { float: right; font-size: 13px; font-weight: 500; text-decoration: none;
+             border: 1px solid var(--line); border-radius: 6px; padding: 4px 12px; }
+h1 .action:hover { border-color: var(--accent); }
+textarea { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px;
+           background: var(--bg); color: var(--ink); font-size: 13px;
+           font-family: ui-monospace, SFMono-Regular, Menlo, monospace; resize: vertical; }
+textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
