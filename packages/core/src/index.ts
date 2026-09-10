@@ -8,9 +8,12 @@
  *
  * What lands here, and when:
  *   Phase 0  authorisation (`can`), log redaction (`redact`)
- *   Phase 1  scoring, tiering, disqualifiers, the `observed` rule
+ *   Phase 1  the ICP definition (`icp`) and scoring (`scoring`)
+ *   Phase 1  scoring, tiering, disqualifiers, the `observed` rule — DONE
  *   Phase 2  risk classification for the agent's approval gate (§5.4)
  *   Phase 4  consent, suppression, quiet hours, daily caps — the send path (§8.4)
  */
 export * from './authz.js'
 export * from './redact.js'
+export * from './icp.js'
+export * from './scoring.js'

@@ -17,11 +17,14 @@
     "test:watch": "vitest",
     "db:migrate": "npm run db:migrate -w @agency/db --",
     "db:seed": "npm run db:seed -w @agency/db --",
-    "dev": "npm run dev --workspace @agency/web"
+    "dev": "npm run dev --workspace @agency/web",
+    "fixtures:capture": "tsx tools/capture-fixtures.ts",
+    "fixtures:golden": "python3 tools/python-golden.py"
   },
   "devDependencies": {
     "typescript": "5.9.3",
     "vitest": "3.2.7",
-    "@types/node": "22.18.1"
+    "@types/node": "22.18.1",
+    "tsx": "4.20.6"
   }
 }

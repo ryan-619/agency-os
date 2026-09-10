@@ -1,0 +1,2600 @@
+{
+  "amberlo.io": {
+    "profile": {
+      "compliance_claims": [],
+      "domain": "amberlo.io",
+      "fetch_error": "",
+      "fetch_ok": true,
+      "has_login_surface": true,
+      "is_security_vendor": false,
+      "mentions_security_hiring": false,
+      "observations": {
+        "compliance_claim": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "content_type_options": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "csp": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "frame_protection": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "hsts": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "outdated_js": {
+          "detail": "",
+          "gap": false,
+          "observed": true
+        },
+        "permissions_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "referrer_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "security_txt": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "server_banner": {
+          "detail": "nginx",
+          "gap": false,
+          "observed": true
+        },
+        "tls": {
+          "detail": "TLSv1.3, 65d to expiry",
+          "gap": false,
+          "observed": true
+        },
+        "trust_page": {
+          "detail": "/security",
+          "gap": false,
+          "observed": true
+        }
+      },
+      "outdated_libs": [],
+      "title": "Amberlo - Law Practice Management Software"
+    },
+    "result": {
+      "angle": "Security page exists but no SOC 2 / ISO claim \u2014 they are mid-journey. Sell the gap assessment and the DevSecOps pipeline that makes audit evidence a build artifact instead of a fire drill.",
+      "company": "Amberlo",
+      "disqualified": "",
+      "domain": "amberlo.io",
+      "evidence": [
+        {
+          "claim": "No Content-Security-Policy \u2014 the loudest AppSec tell on a login-bearing app",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No SOC 2 / ISO 27001 claim anywhere public \u2014 the deal-blocker they haven't hit yet",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No Strict-Transport-Security \u2014 trivially fixed, always flagged in questionnaires",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No X-Frame-Options / frame-ancestors \u2014 clickjacking exposure",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No X-Content-Type-Options \u2014 MIME sniffing",
+          "observed": "header absent on homepage response"
+        }
+      ],
+      "gaps": [
+        {
+          "detail": "",
+          "key": "csp",
+          "weight": 15,
+          "why": "No Content-Security-Policy \u2014 the loudest AppSec tell on a login-bearing app"
+        },
+        {
+          "detail": "",
+          "key": "compliance_claim",
+          "weight": 12,
+          "why": "No SOC 2 / ISO 27001 claim anywhere public \u2014 the deal-blocker they haven't hit yet"
+        },
+        {
+          "detail": "",
+          "key": "security_txt",
+          "weight": 12,
+          "why": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner"
+        },
+        {
+          "detail": "",
+          "key": "hsts",
+          "weight": 10,
+          "why": "No Strict-Transport-Security \u2014 trivially fixed, always flagged in questionnaires"
+        },
+        {
+          "detail": "",
+          "key": "frame_protection",
+          "weight": 8,
+          "why": "No X-Frame-Options / frame-ancestors \u2014 clickjacking exposure"
+        },
+        {
+          "detail": "",
+          "key": "content_type_options",
+          "weight": 5,
+          "why": "No X-Content-Type-Options \u2014 MIME sniffing"
+        },
+        {
+          "detail": "",
+          "key": "referrer_policy",
+          "weight": 4,
+          "why": "No Referrer-Policy \u2014 leaks internal URLs to third parties"
+        },
+        {
+          "detail": "",
+          "key": "permissions_policy",
+          "weight": 3,
+          "why": "No Permissions-Policy"
+        }
+      ],
+      "headline_finding": "No Content-Security-Policy \u2014 the loudest AppSec tell on a login-bearing app",
+      "qualified": true,
+      "reachable": true,
+      "score": 64,
+      "strengths": [
+        {
+          "detail": "/security",
+          "key": "trust_page"
+        },
+        {
+          "detail": "",
+          "key": "outdated_js"
+        },
+        {
+          "detail": "TLSv1.3, 65d to expiry",
+          "key": "tls"
+        },
+        {
+          "detail": "nginx",
+          "key": "server_banner"
+        }
+      ],
+      "tier": "B \u2014 sequence"
+    }
+  },
+  "arcol.io": {
+    "profile": {
+      "compliance_claims": [],
+      "domain": "arcol.io",
+      "fetch_error": "",
+      "fetch_ok": true,
+      "has_login_surface": true,
+      "is_security_vendor": false,
+      "mentions_security_hiring": false,
+      "observations": {
+        "compliance_claim": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "content_type_options": {
+          "detail": "nosniff",
+          "gap": false,
+          "observed": true
+        },
+        "csp": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "frame_protection": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "hsts": {
+          "detail": "max-age=31536000",
+          "gap": false,
+          "observed": true
+        },
+        "outdated_js": {
+          "detail": "",
+          "gap": false,
+          "observed": true
+        },
+        "permissions_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "referrer_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "security_txt": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "server_banner": {
+          "detail": "Framer/bea9510",
+          "gap": false,
+          "observed": true
+        },
+        "tls": {
+          "detail": "TLSv1.3, 80d to expiry",
+          "gap": false,
+          "observed": true
+        },
+        "trust_page": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        }
+      },
+      "outdated_libs": [],
+      "title": "Arcol"
+    },
+    "result": {
+      "angle": "No public trust page and no SOC 2 claim: the next enterprise deal stalls at the security questionnaire. Sell the questionnaire-readiness sprint \u2014 assessment, fixes, and the trust page that unblocks procurement.",
+      "company": "Arcol",
+      "disqualified": "",
+      "domain": "arcol.io",
+      "evidence": [
+        {
+          "claim": "No Content-Security-Policy \u2014 the loudest AppSec tell on a login-bearing app",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No /security or /trust page \u2014 cannot answer an enterprise security review",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No SOC 2 / ISO 27001 claim anywhere public \u2014 the deal-blocker they haven't hit yet",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No X-Frame-Options / frame-ancestors \u2014 clickjacking exposure",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No Referrer-Policy \u2014 leaks internal URLs to third parties",
+          "observed": "header absent on homepage response"
+        }
+      ],
+      "gaps": [
+        {
+          "detail": "",
+          "key": "csp",
+          "weight": 15,
+          "why": "No Content-Security-Policy \u2014 the loudest AppSec tell on a login-bearing app"
+        },
+        {
+          "detail": "",
+          "key": "trust_page",
+          "weight": 14,
+          "why": "No /security or /trust page \u2014 cannot answer an enterprise security review"
+        },
+        {
+          "detail": "",
+          "key": "compliance_claim",
+          "weight": 12,
+          "why": "No SOC 2 / ISO 27001 claim anywhere public \u2014 the deal-blocker they haven't hit yet"
+        },
+        {
+          "detail": "",
+          "key": "security_txt",
+          "weight": 12,
+          "why": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner"
+        },
+        {
+          "detail": "",
+          "key": "frame_protection",
+          "weight": 8,
+          "why": "No X-Frame-Options / frame-ancestors \u2014 clickjacking exposure"
+        },
+        {
+          "detail": "",
+          "key": "referrer_policy",
+          "weight": 4,
+          "why": "No Referrer-Policy \u2014 leaks internal URLs to third parties"
+        },
+        {
+          "detail": "",
+          "key": "permissions_policy",
+          "weight": 3,
+          "why": "No Permissions-Policy"
+        }
+      ],
+      "headline_finding": "No Content-Security-Policy \u2014 the loudest AppSec tell on a login-bearing app",
+      "qualified": true,
+      "reachable": true,
+      "score": 63,
+      "strengths": [
+        {
+          "detail": "max-age=31536000",
+          "key": "hsts"
+        },
+        {
+          "detail": "",
+          "key": "outdated_js"
+        },
+        {
+          "detail": "TLSv1.3, 80d to expiry",
+          "key": "tls"
+        },
+        {
+          "detail": "Framer/bea9510",
+          "key": "server_banner"
+        },
+        {
+          "detail": "nosniff",
+          "key": "content_type_options"
+        }
+      ],
+      "tier": "B \u2014 sequence"
+    }
+  },
+  "breedr.co": {
+    "profile": {
+      "compliance_claims": [],
+      "domain": "breedr.co",
+      "fetch_error": "",
+      "fetch_ok": true,
+      "has_login_surface": true,
+      "is_security_vendor": false,
+      "mentions_security_hiring": false,
+      "observations": {
+        "compliance_claim": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "content_type_options": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "csp": {
+          "detail": "upgrade-insecure-requests",
+          "gap": false,
+          "observed": true
+        },
+        "frame_protection": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "hsts": {
+          "detail": "max-age=31536000",
+          "gap": false,
+          "observed": true
+        },
+        "outdated_js": {
+          "detail": "",
+          "gap": false,
+          "observed": true
+        },
+        "permissions_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "referrer_policy": {
+          "detail": "no-referrer-when-downgrade",
+          "gap": false,
+          "observed": true
+        },
+        "security_txt": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "server_banner": {
+          "detail": "cloudflare",
+          "gap": false,
+          "observed": true
+        },
+        "tls": {
+          "detail": "TLSv1.3, 78d to expiry",
+          "gap": false,
+          "observed": true
+        },
+        "trust_page": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        }
+      },
+      "outdated_libs": [],
+      "title": "Breedr | Cattle Management Software"
+    },
+    "result": {
+      "angle": "No public trust page and no SOC 2 claim: the next enterprise deal stalls at the security questionnaire. Sell the questionnaire-readiness sprint \u2014 assessment, fixes, and the trust page that unblocks procurement.",
+      "company": "Breedr",
+      "disqualified": "",
+      "domain": "breedr.co",
+      "evidence": [
+        {
+          "claim": "No /security or /trust page \u2014 cannot answer an enterprise security review",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No SOC 2 / ISO 27001 claim anywhere public \u2014 the deal-blocker they haven't hit yet",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No X-Frame-Options / frame-ancestors \u2014 clickjacking exposure",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No X-Content-Type-Options \u2014 MIME sniffing",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No Permissions-Policy",
+          "observed": "header absent on homepage response"
+        }
+      ],
+      "gaps": [
+        {
+          "detail": "",
+          "key": "trust_page",
+          "weight": 14,
+          "why": "No /security or /trust page \u2014 cannot answer an enterprise security review"
+        },
+        {
+          "detail": "",
+          "key": "compliance_claim",
+          "weight": 12,
+          "why": "No SOC 2 / ISO 27001 claim anywhere public \u2014 the deal-blocker they haven't hit yet"
+        },
+        {
+          "detail": "",
+          "key": "security_txt",
+          "weight": 12,
+          "why": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner"
+        },
+        {
+          "detail": "",
+          "key": "frame_protection",
+          "weight": 8,
+          "why": "No X-Frame-Options / frame-ancestors \u2014 clickjacking exposure"
+        },
+        {
+          "detail": "",
+          "key": "content_type_options",
+          "weight": 5,
+          "why": "No X-Content-Type-Options \u2014 MIME sniffing"
+        },
+        {
+          "detail": "",
+          "key": "permissions_policy",
+          "weight": 3,
+          "why": "No Permissions-Policy"
+        }
+      ],
+      "headline_finding": "No X-Frame-Options / frame-ancestors \u2014 clickjacking exposure",
+      "qualified": true,
+      "reachable": true,
+      "score": 50,
+      "strengths": [
+        {
+          "detail": "upgrade-insecure-requests",
+          "key": "csp"
+        },
+        {
+          "detail": "max-age=31536000",
+          "key": "hsts"
+        },
+        {
+          "detail": "",
+          "key": "outdated_js"
+        },
+        {
+          "detail": "TLSv1.3, 78d to expiry",
+          "key": "tls"
+        },
+        {
+          "detail": "cloudflare",
+          "key": "server_banner"
+        },
+        {
+          "detail": "no-referrer-when-downgrade",
+          "key": "referrer_policy"
+        }
+      ],
+      "tier": "C \u2014 nurture"
+    }
+  },
+  "carbonmaps.io": {
+    "profile": {
+      "compliance_claims": [],
+      "domain": "carbonmaps.io",
+      "fetch_error": "",
+      "fetch_ok": true,
+      "has_login_surface": true,
+      "is_security_vendor": false,
+      "mentions_security_hiring": false,
+      "observations": {
+        "compliance_claim": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "content_type_options": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "csp": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "frame_protection": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "hsts": {
+          "detail": "max-age=31536000",
+          "gap": false,
+          "observed": true
+        },
+        "outdated_js": {
+          "detail": "jquery 3.5.1",
+          "gap": true,
+          "observed": true
+        },
+        "permissions_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "referrer_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "security_txt": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "server_banner": {
+          "detail": "cloudflare",
+          "gap": false,
+          "observed": true
+        },
+        "tls": {
+          "detail": "TLSv1.3, 72d to expiry",
+          "gap": false,
+          "observed": true
+        },
+        "trust_page": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        }
+      },
+      "outdated_libs": [
+        {
+          "lib": "jquery",
+          "note": "jQuery below 3.6 carries published XSS advisories",
+          "src": "https://d3e54v103j8qbb.cloudfront.net/js/jquery-3.5.1.min.dc5e7f18c8.js?site=65314a18c462865b9b841f1d",
+          "version": "3.5.1"
+        }
+      ],
+      "title": "Carbon Maps - Decarbonization and Sustainability Platform for the Food Industry"
+    },
+    "result": {
+      "angle": "No public trust page and no SOC 2 claim: the next enterprise deal stalls at the security questionnaire. Sell the questionnaire-readiness sprint \u2014 assessment, fixes, and the trust page that unblocks procurement.",
+      "company": "Carbon Maps",
+      "disqualified": "",
+      "domain": "carbonmaps.io",
+      "evidence": [
+        {
+          "claim": "No Content-Security-Policy \u2014 the loudest AppSec tell on a login-bearing app",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No /security or /trust page \u2014 cannot answer an enterprise security review",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No SOC 2 / ISO 27001 claim anywhere public \u2014 the deal-blocker they haven't hit yet",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "Known-outdated JS library served in production \u2014 concrete, demonstrable",
+          "observed": "jquery 3.5.1"
+        },
+        {
+          "claim": "No X-Frame-Options / frame-ancestors \u2014 clickjacking exposure",
+          "observed": "header absent on homepage response"
+        }
+      ],
+      "gaps": [
+        {
+          "detail": "",
+          "key": "csp",
+          "weight": 15,
+          "why": "No Content-Security-Policy \u2014 the loudest AppSec tell on a login-bearing app"
+        },
+        {
+          "detail": "",
+          "key": "trust_page",
+          "weight": 14,
+          "why": "No /security or /trust page \u2014 cannot answer an enterprise security review"
+        },
+        {
+          "detail": "",
+          "key": "compliance_claim",
+          "weight": 12,
+          "why": "No SOC 2 / ISO 27001 claim anywhere public \u2014 the deal-blocker they haven't hit yet"
+        },
+        {
+          "detail": "",
+          "key": "security_txt",
+          "weight": 12,
+          "why": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner"
+        },
+        {
+          "detail": "jquery 3.5.1",
+          "key": "outdated_js",
+          "weight": 10,
+          "why": "Known-outdated JS library served in production \u2014 concrete, demonstrable"
+        },
+        {
+          "detail": "",
+          "key": "frame_protection",
+          "weight": 8,
+          "why": "No X-Frame-Options / frame-ancestors \u2014 clickjacking exposure"
+        },
+        {
+          "detail": "",
+          "key": "content_type_options",
+          "weight": 5,
+          "why": "No X-Content-Type-Options \u2014 MIME sniffing"
+        },
+        {
+          "detail": "",
+          "key": "referrer_policy",
+          "weight": 4,
+          "why": "No Referrer-Policy \u2014 leaks internal URLs to third parties"
+        },
+        {
+          "detail": "",
+          "key": "permissions_policy",
+          "weight": 3,
+          "why": "No Permissions-Policy"
+        }
+      ],
+      "headline_finding": "jquery 3.5.1 served in production \u2014 jQuery below 3.6 carries published XSS advisories",
+      "qualified": true,
+      "reachable": true,
+      "score": 77,
+      "strengths": [
+        {
+          "detail": "max-age=31536000",
+          "key": "hsts"
+        },
+        {
+          "detail": "TLSv1.3, 72d to expiry",
+          "key": "tls"
+        },
+        {
+          "detail": "cloudflare",
+          "key": "server_banner"
+        }
+      ],
+      "tier": "A \u2014 call first"
+    }
+  },
+  "eagronom.com": {
+    "profile": {
+      "compliance_claims": [
+        "iso27001"
+      ],
+      "domain": "eagronom.com",
+      "fetch_error": "",
+      "fetch_ok": true,
+      "has_login_surface": false,
+      "is_security_vendor": false,
+      "mentions_security_hiring": false,
+      "observations": {
+        "compliance_claim": {
+          "detail": "iso27001",
+          "gap": false,
+          "observed": true
+        },
+        "content_type_options": {
+          "detail": "nosniff",
+          "gap": false,
+          "observed": true
+        },
+        "csp": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "frame_protection": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "hsts": {
+          "detail": "max-age=31536000",
+          "gap": false,
+          "observed": true
+        },
+        "outdated_js": {
+          "detail": "",
+          "gap": false,
+          "observed": true
+        },
+        "permissions_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "referrer_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "security_txt": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "server_banner": {
+          "detail": "Framer/bea9510",
+          "gap": false,
+          "observed": true
+        },
+        "tls": {
+          "detail": "TLSv1.3, 88d to expiry",
+          "gap": false,
+          "observed": true
+        },
+        "trust_page": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        }
+      },
+      "outdated_libs": [],
+      "title": "eAgronom"
+    },
+    "result": {
+      "angle": "",
+      "company": "eAgronom",
+      "disqualified": "Nothing web-facing to assess",
+      "domain": "eagronom.com",
+      "evidence": [],
+      "gaps": [],
+      "headline_finding": "",
+      "qualified": false,
+      "reachable": true,
+      "score": 0,
+      "strengths": [],
+      "tier": ""
+    }
+  },
+  "firstdue.com": {
+    "profile": {
+      "compliance_claims": [
+        "fedramp"
+      ],
+      "domain": "firstdue.com",
+      "fetch_error": "",
+      "fetch_ok": true,
+      "has_login_surface": true,
+      "is_security_vendor": false,
+      "mentions_security_hiring": false,
+      "observations": {
+        "compliance_claim": {
+          "detail": "fedramp",
+          "gap": false,
+          "observed": true
+        },
+        "content_type_options": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "csp": {
+          "detail": "frame-ancestors 'self'",
+          "gap": false,
+          "observed": true
+        },
+        "frame_protection": {
+          "detail": "SAMEORIGIN",
+          "gap": false,
+          "observed": true
+        },
+        "hsts": {
+          "detail": "max-age=31536000",
+          "gap": false,
+          "observed": true
+        },
+        "outdated_js": {
+          "detail": "jquery 1.11.0; jquery 3.5.1",
+          "gap": true,
+          "observed": true
+        },
+        "permissions_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "referrer_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "security_txt": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "server_banner": {
+          "detail": "cloudflare",
+          "gap": false,
+          "observed": true
+        },
+        "tls": {
+          "detail": "TLSv1.3, 77d to expiry",
+          "gap": false,
+          "observed": true
+        },
+        "trust_page": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        }
+      },
+      "outdated_libs": [
+        {
+          "lib": "jquery",
+          "note": "jQuery below 3.6 carries published XSS advisories",
+          "src": "https://ajax.googleapis.com/ajax/libs/jquery/1.11.0/jquery.min.js",
+          "version": "1.11.0"
+        },
+        {
+          "lib": "jquery",
+          "note": "jQuery below 3.6 carries published XSS advisories",
+          "src": "https://d3e54v103j8qbb.cloudfront.net/js/jquery-3.5.1.min.dc5e7f18c8.js?site=5e4f0520105a949dcb8424a1",
+          "version": "3.5.1"
+        }
+      ],
+      "title": "Fire and EMS Software | Fire and EMS RMS Software"
+    },
+    "result": {
+      "angle": "Posture is partly there. Lead with the specific finding and offer a one-week assessment rather than a retainer pitch.",
+      "company": "First Due",
+      "disqualified": "",
+      "domain": "firstdue.com",
+      "evidence": [
+        {
+          "claim": "No /security or /trust page \u2014 cannot answer an enterprise security review",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "Known-outdated JS library served in production \u2014 concrete, demonstrable",
+          "observed": "jquery 1.11.0; jquery 3.5.1"
+        },
+        {
+          "claim": "No X-Content-Type-Options \u2014 MIME sniffing",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No Referrer-Policy \u2014 leaks internal URLs to third parties",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No Permissions-Policy",
+          "observed": "header absent on homepage response"
+        }
+      ],
+      "gaps": [
+        {
+          "detail": "",
+          "key": "trust_page",
+          "weight": 14,
+          "why": "No /security or /trust page \u2014 cannot answer an enterprise security review"
+        },
+        {
+          "detail": "",
+          "key": "security_txt",
+          "weight": 12,
+          "why": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner"
+        },
+        {
+          "detail": "jquery 1.11.0; jquery 3.5.1",
+          "key": "outdated_js",
+          "weight": 10,
+          "why": "Known-outdated JS library served in production \u2014 concrete, demonstrable"
+        },
+        {
+          "detail": "",
+          "key": "content_type_options",
+          "weight": 5,
+          "why": "No X-Content-Type-Options \u2014 MIME sniffing"
+        },
+        {
+          "detail": "",
+          "key": "referrer_policy",
+          "weight": 4,
+          "why": "No Referrer-Policy \u2014 leaks internal URLs to third parties"
+        },
+        {
+          "detail": "",
+          "key": "permissions_policy",
+          "weight": 3,
+          "why": "No Permissions-Policy"
+        }
+      ],
+      "headline_finding": "jquery 1.11.0 served in production \u2014 jQuery below 3.6 carries published XSS advisories",
+      "qualified": false,
+      "reachable": true,
+      "score": 44,
+      "strengths": [
+        {
+          "detail": "frame-ancestors 'self'",
+          "key": "csp"
+        },
+        {
+          "detail": "fedramp",
+          "key": "compliance_claim"
+        },
+        {
+          "detail": "max-age=31536000",
+          "key": "hsts"
+        },
+        {
+          "detail": "SAMEORIGIN",
+          "key": "frame_protection"
+        },
+        {
+          "detail": "TLSv1.3, 77d to expiry",
+          "key": "tls"
+        },
+        {
+          "detail": "cloudflare",
+          "key": "server_banner"
+        }
+      ],
+      "tier": ""
+    }
+  },
+  "greensparksoftware.com": {
+    "profile": {
+      "compliance_claims": [],
+      "domain": "greensparksoftware.com",
+      "fetch_error": "",
+      "fetch_ok": true,
+      "has_login_surface": true,
+      "is_security_vendor": false,
+      "mentions_security_hiring": false,
+      "observations": {
+        "compliance_claim": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "content_type_options": {
+          "detail": "nosniff",
+          "gap": false,
+          "observed": true
+        },
+        "csp": {
+          "detail": "default-src 'self'; script-src 'self' 'unsafe-inline' https://go.respark.com https://static.cloudflareinsights.com https://www.googletagmana",
+          "gap": false,
+          "observed": true
+        },
+        "frame_protection": {
+          "detail": "DENY",
+          "gap": false,
+          "observed": true
+        },
+        "hsts": {
+          "detail": "max-age=31536000; includeSubDomains; preload",
+          "gap": false,
+          "observed": true
+        },
+        "outdated_js": {
+          "detail": "",
+          "gap": false,
+          "observed": true
+        },
+        "permissions_policy": {
+          "detail": "camera=(), microphone=(), geolocation=()",
+          "gap": false,
+          "observed": true
+        },
+        "referrer_policy": {
+          "detail": "strict-origin-when-cross-origin",
+          "gap": false,
+          "observed": true
+        },
+        "security_txt": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "server_banner": {
+          "detail": "cloudflare",
+          "gap": false,
+          "observed": true
+        },
+        "tls": {
+          "detail": "TLSv1.3, 176d to expiry",
+          "gap": false,
+          "observed": true
+        },
+        "trust_page": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        }
+      },
+      "outdated_libs": [],
+      "title": "Scrap Metal Recycling Software & AI Platform | ReSpark"
+    },
+    "result": {
+      "angle": "No public trust page and no SOC 2 claim: the next enterprise deal stalls at the security questionnaire. Sell the questionnaire-readiness sprint \u2014 assessment, fixes, and the trust page that unblocks procurement.",
+      "company": "GreenSpark Software",
+      "disqualified": "",
+      "domain": "greensparksoftware.com",
+      "evidence": [
+        {
+          "claim": "No /security or /trust page \u2014 cannot answer an enterprise security review",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No SOC 2 / ISO 27001 claim anywhere public \u2014 the deal-blocker they haven't hit yet",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner",
+          "observed": "header absent on homepage response"
+        }
+      ],
+      "gaps": [
+        {
+          "detail": "",
+          "key": "trust_page",
+          "weight": 14,
+          "why": "No /security or /trust page \u2014 cannot answer an enterprise security review"
+        },
+        {
+          "detail": "",
+          "key": "compliance_claim",
+          "weight": 12,
+          "why": "No SOC 2 / ISO 27001 claim anywhere public \u2014 the deal-blocker they haven't hit yet"
+        },
+        {
+          "detail": "",
+          "key": "security_txt",
+          "weight": 12,
+          "why": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner"
+        }
+      ],
+      "headline_finding": "No /security or /trust page \u2014 cannot answer an enterprise security review",
+      "qualified": false,
+      "reachable": true,
+      "score": 35,
+      "strengths": [
+        {
+          "detail": "default-src 'self'; script-src 'self' 'unsafe-inline' https://go.respark.com https://static.cloudflareinsights.com https://www.googletagmana",
+          "key": "csp"
+        },
+        {
+          "detail": "max-age=31536000; includeSubDomains; preload",
+          "key": "hsts"
+        },
+        {
+          "detail": "",
+          "key": "outdated_js"
+        },
+        {
+          "detail": "DENY",
+          "key": "frame_protection"
+        },
+        {
+          "detail": "TLSv1.3, 176d to expiry",
+          "key": "tls"
+        },
+        {
+          "detail": "cloudflare",
+          "key": "server_banner"
+        },
+        {
+          "detail": "nosniff",
+          "key": "content_type_options"
+        },
+        {
+          "detail": "strict-origin-when-cross-origin",
+          "key": "referrer_policy"
+        },
+        {
+          "detail": "camera=(), microphone=(), geolocation=()",
+          "key": "permissions_policy"
+        }
+      ],
+      "tier": ""
+    }
+  },
+  "lawwwing.com": {
+    "profile": {
+      "compliance_claims": [],
+      "domain": "lawwwing.com",
+      "fetch_error": "",
+      "fetch_ok": true,
+      "has_login_surface": true,
+      "is_security_vendor": false,
+      "mentions_security_hiring": false,
+      "observations": {
+        "compliance_claim": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "content_type_options": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "csp": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "frame_protection": {
+          "detail": "SAMEORIGIN",
+          "gap": false,
+          "observed": true
+        },
+        "hsts": {
+          "detail": "max-age=31536000; includeSubDomains; preload",
+          "gap": false,
+          "observed": true
+        },
+        "outdated_js": {
+          "detail": "",
+          "gap": false,
+          "observed": true
+        },
+        "permissions_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "referrer_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "security_txt": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "server_banner": {
+          "detail": "nginx",
+          "gap": false,
+          "observed": true
+        },
+        "tls": {
+          "detail": "TLSv1.3, 32d to expiry",
+          "gap": false,
+          "observed": true
+        },
+        "trust_page": {
+          "detail": "/trust",
+          "gap": false,
+          "observed": true
+        }
+      },
+      "outdated_libs": [],
+      "title": "Textos legales web | Cookie banner CMP RGPD - LawwwingPrestaShop iconsquarespace [#132]crosschat-linesclockmailmap-pinphone"
+    },
+    "result": {
+      "angle": "Security page exists but no SOC 2 / ISO claim \u2014 they are mid-journey. Sell the gap assessment and the DevSecOps pipeline that makes audit evidence a build artifact instead of a fire drill.",
+      "company": "Lawwwing",
+      "disqualified": "",
+      "domain": "lawwwing.com",
+      "evidence": [
+        {
+          "claim": "No Content-Security-Policy \u2014 the loudest AppSec tell on a login-bearing app",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No SOC 2 / ISO 27001 claim anywhere public \u2014 the deal-blocker they haven't hit yet",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No X-Content-Type-Options \u2014 MIME sniffing",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No Referrer-Policy \u2014 leaks internal URLs to third parties",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No Permissions-Policy",
+          "observed": "header absent on homepage response"
+        }
+      ],
+      "gaps": [
+        {
+          "detail": "",
+          "key": "csp",
+          "weight": 15,
+          "why": "No Content-Security-Policy \u2014 the loudest AppSec tell on a login-bearing app"
+        },
+        {
+          "detail": "",
+          "key": "compliance_claim",
+          "weight": 12,
+          "why": "No SOC 2 / ISO 27001 claim anywhere public \u2014 the deal-blocker they haven't hit yet"
+        },
+        {
+          "detail": "",
+          "key": "security_txt",
+          "weight": 12,
+          "why": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner"
+        },
+        {
+          "detail": "",
+          "key": "content_type_options",
+          "weight": 5,
+          "why": "No X-Content-Type-Options \u2014 MIME sniffing"
+        },
+        {
+          "detail": "",
+          "key": "referrer_policy",
+          "weight": 4,
+          "why": "No Referrer-Policy \u2014 leaks internal URLs to third parties"
+        },
+        {
+          "detail": "",
+          "key": "permissions_policy",
+          "weight": 3,
+          "why": "No Permissions-Policy"
+        }
+      ],
+      "headline_finding": "No Content-Security-Policy \u2014 the loudest AppSec tell on a login-bearing app",
+      "qualified": true,
+      "reachable": true,
+      "score": 47,
+      "strengths": [
+        {
+          "detail": "/trust",
+          "key": "trust_page"
+        },
+        {
+          "detail": "max-age=31536000; includeSubDomains; preload",
+          "key": "hsts"
+        },
+        {
+          "detail": "",
+          "key": "outdated_js"
+        },
+        {
+          "detail": "SAMEORIGIN",
+          "key": "frame_protection"
+        },
+        {
+          "detail": "TLSv1.3, 32d to expiry",
+          "key": "tls"
+        },
+        {
+          "detail": "nginx",
+          "key": "server_banner"
+        }
+      ],
+      "tier": "C \u2014 nurture"
+    }
+  },
+  "rentman.io": {
+    "profile": {
+      "compliance_claims": [],
+      "domain": "rentman.io",
+      "fetch_error": "",
+      "fetch_ok": true,
+      "has_login_surface": true,
+      "is_security_vendor": false,
+      "mentions_security_hiring": false,
+      "observations": {
+        "compliance_claim": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "content_type_options": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "csp": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "frame_protection": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "hsts": {
+          "detail": "max-age=31536000",
+          "gap": false,
+          "observed": true
+        },
+        "outdated_js": {
+          "detail": "jquery 3.5.1",
+          "gap": true,
+          "observed": true
+        },
+        "permissions_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "referrer_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "security_txt": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "server_banner": {
+          "detail": "cloudflare",
+          "gap": false,
+          "observed": true
+        },
+        "tls": {
+          "detail": "TLSv1.3, 82d to expiry",
+          "gap": false,
+          "observed": true
+        },
+        "trust_page": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        }
+      },
+      "outdated_libs": [
+        {
+          "lib": "jquery",
+          "note": "jQuery below 3.6 carries published XSS advisories",
+          "src": "https://d3e54v103j8qbb.cloudfront.net/js/jquery-3.5.1.min.dc5e7f18c8.js?site=680b7c8bdefaec9c53251168",
+          "version": "3.5.1"
+        }
+      ],
+      "title": "Rental business management software for the AV industry | Rentman"
+    },
+    "result": {
+      "angle": "No public trust page and no SOC 2 claim: the next enterprise deal stalls at the security questionnaire. Sell the questionnaire-readiness sprint \u2014 assessment, fixes, and the trust page that unblocks procurement.",
+      "company": "Rentman",
+      "disqualified": "",
+      "domain": "rentman.io",
+      "evidence": [
+        {
+          "claim": "No Content-Security-Policy \u2014 the loudest AppSec tell on a login-bearing app",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No /security or /trust page \u2014 cannot answer an enterprise security review",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No SOC 2 / ISO 27001 claim anywhere public \u2014 the deal-blocker they haven't hit yet",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "Known-outdated JS library served in production \u2014 concrete, demonstrable",
+          "observed": "jquery 3.5.1"
+        },
+        {
+          "claim": "No X-Frame-Options / frame-ancestors \u2014 clickjacking exposure",
+          "observed": "header absent on homepage response"
+        }
+      ],
+      "gaps": [
+        {
+          "detail": "",
+          "key": "csp",
+          "weight": 15,
+          "why": "No Content-Security-Policy \u2014 the loudest AppSec tell on a login-bearing app"
+        },
+        {
+          "detail": "",
+          "key": "trust_page",
+          "weight": 14,
+          "why": "No /security or /trust page \u2014 cannot answer an enterprise security review"
+        },
+        {
+          "detail": "",
+          "key": "compliance_claim",
+          "weight": 12,
+          "why": "No SOC 2 / ISO 27001 claim anywhere public \u2014 the deal-blocker they haven't hit yet"
+        },
+        {
+          "detail": "",
+          "key": "security_txt",
+          "weight": 12,
+          "why": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner"
+        },
+        {
+          "detail": "jquery 3.5.1",
+          "key": "outdated_js",
+          "weight": 10,
+          "why": "Known-outdated JS library served in production \u2014 concrete, demonstrable"
+        },
+        {
+          "detail": "",
+          "key": "frame_protection",
+          "weight": 8,
+          "why": "No X-Frame-Options / frame-ancestors \u2014 clickjacking exposure"
+        },
+        {
+          "detail": "",
+          "key": "content_type_options",
+          "weight": 5,
+          "why": "No X-Content-Type-Options \u2014 MIME sniffing"
+        },
+        {
+          "detail": "",
+          "key": "referrer_policy",
+          "weight": 4,
+          "why": "No Referrer-Policy \u2014 leaks internal URLs to third parties"
+        },
+        {
+          "detail": "",
+          "key": "permissions_policy",
+          "weight": 3,
+          "why": "No Permissions-Policy"
+        }
+      ],
+      "headline_finding": "jquery 3.5.1 served in production \u2014 jQuery below 3.6 carries published XSS advisories",
+      "qualified": true,
+      "reachable": true,
+      "score": 77,
+      "strengths": [
+        {
+          "detail": "max-age=31536000",
+          "key": "hsts"
+        },
+        {
+          "detail": "TLSv1.3, 82d to expiry",
+          "key": "tls"
+        },
+        {
+          "detail": "cloudflare",
+          "key": "server_banner"
+        }
+      ],
+      "tier": "A \u2014 call first"
+    }
+  },
+  "respark.com": {
+    "profile": {
+      "compliance_claims": [],
+      "domain": "respark.com",
+      "fetch_error": "",
+      "fetch_ok": true,
+      "has_login_surface": true,
+      "is_security_vendor": false,
+      "mentions_security_hiring": false,
+      "observations": {
+        "compliance_claim": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "content_type_options": {
+          "detail": "nosniff",
+          "gap": false,
+          "observed": true
+        },
+        "csp": {
+          "detail": "default-src 'self'; script-src 'self' 'unsafe-inline' https://go.respark.com https://static.cloudflareinsights.com https://www.googletagmana",
+          "gap": false,
+          "observed": true
+        },
+        "frame_protection": {
+          "detail": "DENY",
+          "gap": false,
+          "observed": true
+        },
+        "hsts": {
+          "detail": "max-age=31536000; includeSubDomains; preload",
+          "gap": false,
+          "observed": true
+        },
+        "outdated_js": {
+          "detail": "",
+          "gap": false,
+          "observed": true
+        },
+        "permissions_policy": {
+          "detail": "camera=(), microphone=(), geolocation=()",
+          "gap": false,
+          "observed": true
+        },
+        "referrer_policy": {
+          "detail": "strict-origin-when-cross-origin",
+          "gap": false,
+          "observed": true
+        },
+        "security_txt": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "server_banner": {
+          "detail": "cloudflare",
+          "gap": false,
+          "observed": true
+        },
+        "tls": {
+          "detail": "TLSv1.3, 34d to expiry",
+          "gap": false,
+          "observed": true
+        },
+        "trust_page": {
+          "detail": "/security",
+          "gap": false,
+          "observed": true
+        }
+      },
+      "outdated_libs": [],
+      "title": "Scrap Metal Recycling Software & AI Platform | ReSpark"
+    },
+    "result": {
+      "angle": "Security page exists but no SOC 2 / ISO claim \u2014 they are mid-journey. Sell the gap assessment and the DevSecOps pipeline that makes audit evidence a build artifact instead of a fire drill.",
+      "company": "ReSpark",
+      "disqualified": "",
+      "domain": "respark.com",
+      "evidence": [
+        {
+          "claim": "No SOC 2 / ISO 27001 claim anywhere public \u2014 the deal-blocker they haven't hit yet",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner",
+          "observed": "header absent on homepage response"
+        }
+      ],
+      "gaps": [
+        {
+          "detail": "",
+          "key": "compliance_claim",
+          "weight": 12,
+          "why": "No SOC 2 / ISO 27001 claim anywhere public \u2014 the deal-blocker they haven't hit yet"
+        },
+        {
+          "detail": "",
+          "key": "security_txt",
+          "weight": 12,
+          "why": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner"
+        }
+      ],
+      "headline_finding": "No SOC 2 / ISO 27001 claim anywhere public \u2014 the deal-blocker they haven't hit yet",
+      "qualified": false,
+      "reachable": true,
+      "score": 22,
+      "strengths": [
+        {
+          "detail": "default-src 'self'; script-src 'self' 'unsafe-inline' https://go.respark.com https://static.cloudflareinsights.com https://www.googletagmana",
+          "key": "csp"
+        },
+        {
+          "detail": "/security",
+          "key": "trust_page"
+        },
+        {
+          "detail": "max-age=31536000; includeSubDomains; preload",
+          "key": "hsts"
+        },
+        {
+          "detail": "",
+          "key": "outdated_js"
+        },
+        {
+          "detail": "DENY",
+          "key": "frame_protection"
+        },
+        {
+          "detail": "TLSv1.3, 34d to expiry",
+          "key": "tls"
+        },
+        {
+          "detail": "cloudflare",
+          "key": "server_banner"
+        },
+        {
+          "detail": "nosniff",
+          "key": "content_type_options"
+        },
+        {
+          "detail": "strict-origin-when-cross-origin",
+          "key": "referrer_policy"
+        },
+        {
+          "detail": "camera=(), microphone=(), geolocation=()",
+          "key": "permissions_policy"
+        }
+      ],
+      "tier": ""
+    }
+  },
+  "rundoo.ai": {
+    "profile": {
+      "compliance_claims": [],
+      "domain": "rundoo.ai",
+      "fetch_error": "",
+      "fetch_ok": true,
+      "has_login_surface": true,
+      "is_security_vendor": false,
+      "mentions_security_hiring": false,
+      "observations": {
+        "compliance_claim": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "content_type_options": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "csp": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "frame_protection": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "hsts": {
+          "detail": "max-age=31536000; includeSubDomains",
+          "gap": false,
+          "observed": true
+        },
+        "outdated_js": {
+          "detail": "",
+          "gap": false,
+          "observed": true
+        },
+        "permissions_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "referrer_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "security_txt": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "server_banner": {
+          "detail": "cloudflare",
+          "gap": false,
+          "observed": true
+        },
+        "tls": {
+          "detail": "TLSv1.3, 40d to expiry",
+          "gap": false,
+          "observed": true
+        },
+        "trust_page": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        }
+      },
+      "outdated_libs": [],
+      "title": "Rundoo - Technology for independent supply stores"
+    },
+    "result": {
+      "angle": "No public trust page and no SOC 2 claim: the next enterprise deal stalls at the security questionnaire. Sell the questionnaire-readiness sprint \u2014 assessment, fixes, and the trust page that unblocks procurement.",
+      "company": "Rundoo",
+      "disqualified": "",
+      "domain": "rundoo.ai",
+      "evidence": [
+        {
+          "claim": "No Content-Security-Policy \u2014 the loudest AppSec tell on a login-bearing app",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No /security or /trust page \u2014 cannot answer an enterprise security review",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No SOC 2 / ISO 27001 claim anywhere public \u2014 the deal-blocker they haven't hit yet",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No X-Frame-Options / frame-ancestors \u2014 clickjacking exposure",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No X-Content-Type-Options \u2014 MIME sniffing",
+          "observed": "header absent on homepage response"
+        }
+      ],
+      "gaps": [
+        {
+          "detail": "",
+          "key": "csp",
+          "weight": 15,
+          "why": "No Content-Security-Policy \u2014 the loudest AppSec tell on a login-bearing app"
+        },
+        {
+          "detail": "",
+          "key": "trust_page",
+          "weight": 14,
+          "why": "No /security or /trust page \u2014 cannot answer an enterprise security review"
+        },
+        {
+          "detail": "",
+          "key": "compliance_claim",
+          "weight": 12,
+          "why": "No SOC 2 / ISO 27001 claim anywhere public \u2014 the deal-blocker they haven't hit yet"
+        },
+        {
+          "detail": "",
+          "key": "security_txt",
+          "weight": 12,
+          "why": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner"
+        },
+        {
+          "detail": "",
+          "key": "frame_protection",
+          "weight": 8,
+          "why": "No X-Frame-Options / frame-ancestors \u2014 clickjacking exposure"
+        },
+        {
+          "detail": "",
+          "key": "content_type_options",
+          "weight": 5,
+          "why": "No X-Content-Type-Options \u2014 MIME sniffing"
+        },
+        {
+          "detail": "",
+          "key": "referrer_policy",
+          "weight": 4,
+          "why": "No Referrer-Policy \u2014 leaks internal URLs to third parties"
+        },
+        {
+          "detail": "",
+          "key": "permissions_policy",
+          "weight": 3,
+          "why": "No Permissions-Policy"
+        }
+      ],
+      "headline_finding": "No Content-Security-Policy \u2014 the loudest AppSec tell on a login-bearing app",
+      "qualified": true,
+      "reachable": true,
+      "score": 68,
+      "strengths": [
+        {
+          "detail": "max-age=31536000; includeSubDomains",
+          "key": "hsts"
+        },
+        {
+          "detail": "",
+          "key": "outdated_js"
+        },
+        {
+          "detail": "TLSv1.3, 40d to expiry",
+          "key": "tls"
+        },
+        {
+          "detail": "cloudflare",
+          "key": "server_banner"
+        }
+      ],
+      "tier": "B \u2014 sequence"
+    }
+  },
+  "solvimon.com": {
+    "profile": {
+      "compliance_claims": [
+        "soc2"
+      ],
+      "domain": "solvimon.com",
+      "fetch_error": "",
+      "fetch_ok": true,
+      "has_login_surface": false,
+      "is_security_vendor": false,
+      "mentions_security_hiring": false,
+      "observations": {
+        "compliance_claim": {
+          "detail": "soc2",
+          "gap": false,
+          "observed": true
+        },
+        "content_type_options": {
+          "detail": "nosniff",
+          "gap": false,
+          "observed": true
+        },
+        "csp": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "frame_protection": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "hsts": {
+          "detail": "max-age=31536000",
+          "gap": false,
+          "observed": true
+        },
+        "outdated_js": {
+          "detail": "",
+          "gap": false,
+          "observed": true
+        },
+        "permissions_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "referrer_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "security_txt": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "server_banner": {
+          "detail": "Framer/bea9510",
+          "gap": false,
+          "observed": true
+        },
+        "tls": {
+          "detail": "TLSv1.3, 55d to expiry",
+          "gap": false,
+          "observed": true
+        },
+        "trust_page": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        }
+      },
+      "outdated_libs": [],
+      "title": "Solvimon | AI billing and monetization"
+    },
+    "result": {
+      "angle": "",
+      "company": "Solvimon",
+      "disqualified": "Nothing web-facing to assess",
+      "domain": "solvimon.com",
+      "evidence": [],
+      "gaps": [],
+      "headline_finding": "",
+      "qualified": false,
+      "reachable": true,
+      "score": 0,
+      "strengths": [],
+      "tier": ""
+    }
+  },
+  "stitchflow.com": {
+    "profile": {
+      "compliance_claims": [
+        "soc 2"
+      ],
+      "domain": "stitchflow.com",
+      "fetch_error": "",
+      "fetch_ok": true,
+      "has_login_surface": false,
+      "is_security_vendor": false,
+      "mentions_security_hiring": false,
+      "observations": {
+        "compliance_claim": {
+          "detail": "soc 2",
+          "gap": false,
+          "observed": true
+        },
+        "content_type_options": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "csp": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "frame_protection": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "hsts": {
+          "detail": "max-age=63072000",
+          "gap": false,
+          "observed": true
+        },
+        "outdated_js": {
+          "detail": "",
+          "gap": false,
+          "observed": true
+        },
+        "permissions_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "referrer_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "security_txt": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "server_banner": {
+          "detail": "Vercel",
+          "gap": false,
+          "observed": true
+        },
+        "tls": {
+          "detail": "TLSv1.3, 82d to expiry",
+          "gap": false,
+          "observed": true
+        },
+        "trust_page": {
+          "detail": "/security",
+          "gap": false,
+          "observed": true
+        }
+      },
+      "outdated_libs": [],
+      "title": "Stitchflow | IT Automation, Built and Managed For You"
+    },
+    "result": {
+      "angle": "",
+      "company": "Stitchflow",
+      "disqualified": "Nothing web-facing to assess",
+      "domain": "stitchflow.com",
+      "evidence": [],
+      "gaps": [],
+      "headline_finding": "",
+      "qualified": false,
+      "reachable": true,
+      "score": 0,
+      "strengths": [],
+      "tier": ""
+    }
+  },
+  "toplinepro.com": {
+    "profile": {
+      "compliance_claims": [],
+      "domain": "toplinepro.com",
+      "fetch_error": "",
+      "fetch_ok": true,
+      "has_login_surface": true,
+      "is_security_vendor": false,
+      "mentions_security_hiring": false,
+      "observations": {
+        "compliance_claim": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "content_type_options": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "csp": {
+          "detail": "frame-ancestors 'self'",
+          "gap": false,
+          "observed": true
+        },
+        "frame_protection": {
+          "detail": "SAMEORIGIN",
+          "gap": false,
+          "observed": true
+        },
+        "hsts": {
+          "detail": "max-age=31536000; includeSubDomains; preload",
+          "gap": false,
+          "observed": true
+        },
+        "outdated_js": {
+          "detail": "jquery 3.5.1",
+          "gap": true,
+          "observed": true
+        },
+        "permissions_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "referrer_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "security_txt": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "server_banner": {
+          "detail": "cloudflare",
+          "gap": false,
+          "observed": true
+        },
+        "tls": {
+          "detail": "TLSv1.3, 32d to expiry",
+          "gap": false,
+          "observed": true
+        },
+        "trust_page": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        }
+      },
+      "outdated_libs": [
+        {
+          "lib": "jquery",
+          "note": "jQuery below 3.6 carries published XSS advisories",
+          "src": "https://d3e54v103j8qbb.cloudfront.net/js/jquery-3.5.1.min.dc5e7f18c8.js?site=6a0b196b6d0e771c71e3a02b",
+          "version": "3.5.1"
+        }
+      ],
+      "title": "The AI for Local Service Pros | Topline Pro"
+    },
+    "result": {
+      "angle": "No public trust page and no SOC 2 claim: the next enterprise deal stalls at the security questionnaire. Sell the questionnaire-readiness sprint \u2014 assessment, fixes, and the trust page that unblocks procurement.",
+      "company": "Topline Pro",
+      "disqualified": "",
+      "domain": "toplinepro.com",
+      "evidence": [
+        {
+          "claim": "No /security or /trust page \u2014 cannot answer an enterprise security review",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No SOC 2 / ISO 27001 claim anywhere public \u2014 the deal-blocker they haven't hit yet",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "Known-outdated JS library served in production \u2014 concrete, demonstrable",
+          "observed": "jquery 3.5.1"
+        },
+        {
+          "claim": "No X-Content-Type-Options \u2014 MIME sniffing",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No Referrer-Policy \u2014 leaks internal URLs to third parties",
+          "observed": "header absent on homepage response"
+        }
+      ],
+      "gaps": [
+        {
+          "detail": "",
+          "key": "trust_page",
+          "weight": 14,
+          "why": "No /security or /trust page \u2014 cannot answer an enterprise security review"
+        },
+        {
+          "detail": "",
+          "key": "compliance_claim",
+          "weight": 12,
+          "why": "No SOC 2 / ISO 27001 claim anywhere public \u2014 the deal-blocker they haven't hit yet"
+        },
+        {
+          "detail": "",
+          "key": "security_txt",
+          "weight": 12,
+          "why": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner"
+        },
+        {
+          "detail": "jquery 3.5.1",
+          "key": "outdated_js",
+          "weight": 10,
+          "why": "Known-outdated JS library served in production \u2014 concrete, demonstrable"
+        },
+        {
+          "detail": "",
+          "key": "content_type_options",
+          "weight": 5,
+          "why": "No X-Content-Type-Options \u2014 MIME sniffing"
+        },
+        {
+          "detail": "",
+          "key": "referrer_policy",
+          "weight": 4,
+          "why": "No Referrer-Policy \u2014 leaks internal URLs to third parties"
+        },
+        {
+          "detail": "",
+          "key": "permissions_policy",
+          "weight": 3,
+          "why": "No Permissions-Policy"
+        }
+      ],
+      "headline_finding": "jquery 3.5.1 served in production \u2014 jQuery below 3.6 carries published XSS advisories",
+      "qualified": true,
+      "reachable": true,
+      "score": 56,
+      "strengths": [
+        {
+          "detail": "frame-ancestors 'self'",
+          "key": "csp"
+        },
+        {
+          "detail": "max-age=31536000; includeSubDomains; preload",
+          "key": "hsts"
+        },
+        {
+          "detail": "SAMEORIGIN",
+          "key": "frame_protection"
+        },
+        {
+          "detail": "TLSv1.3, 32d to expiry",
+          "key": "tls"
+        },
+        {
+          "detail": "cloudflare",
+          "key": "server_banner"
+        }
+      ],
+      "tier": "B \u2014 sequence"
+    }
+  },
+  "usekojo.com": {
+    "profile": {
+      "compliance_claims": [
+        "soc 2",
+        "soc2"
+      ],
+      "domain": "usekojo.com",
+      "fetch_error": "",
+      "fetch_ok": true,
+      "has_login_surface": true,
+      "is_security_vendor": false,
+      "mentions_security_hiring": false,
+      "observations": {
+        "compliance_claim": {
+          "detail": "soc 2, soc2",
+          "gap": false,
+          "observed": true
+        },
+        "content_type_options": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "csp": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "frame_protection": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "hsts": {
+          "detail": "max-age=31536000",
+          "gap": false,
+          "observed": true
+        },
+        "outdated_js": {
+          "detail": "jquery 3.5.1",
+          "gap": true,
+          "observed": true
+        },
+        "permissions_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "referrer_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "security_txt": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "server_banner": {
+          "detail": "cloudflare",
+          "gap": false,
+          "observed": true
+        },
+        "tls": {
+          "detail": "TLSv1.3, 61d to expiry",
+          "gap": false,
+          "observed": true
+        },
+        "trust_page": {
+          "detail": "/security",
+          "gap": false,
+          "observed": true
+        }
+      },
+      "outdated_libs": [
+        {
+          "lib": "jquery",
+          "note": "jQuery below 3.6 carries published XSS advisories",
+          "src": "https://d3e54v103j8qbb.cloudfront.net/js/jquery-3.5.1.min.dc5e7f18c8.js?site=62729c594454f55c901fb1f2",
+          "version": "3.5.1"
+        }
+      ],
+      "title": "Kojo Construction Material Management Software"
+    },
+    "result": {
+      "angle": "Posture is partly there. Lead with the specific finding and offer a one-week assessment rather than a retainer pitch.",
+      "company": "Kojo",
+      "disqualified": "",
+      "domain": "usekojo.com",
+      "evidence": [
+        {
+          "claim": "No Content-Security-Policy \u2014 the loudest AppSec tell on a login-bearing app",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "Known-outdated JS library served in production \u2014 concrete, demonstrable",
+          "observed": "jquery 3.5.1"
+        },
+        {
+          "claim": "No X-Frame-Options / frame-ancestors \u2014 clickjacking exposure",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No X-Content-Type-Options \u2014 MIME sniffing",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No Referrer-Policy \u2014 leaks internal URLs to third parties",
+          "observed": "header absent on homepage response"
+        }
+      ],
+      "gaps": [
+        {
+          "detail": "",
+          "key": "csp",
+          "weight": 15,
+          "why": "No Content-Security-Policy \u2014 the loudest AppSec tell on a login-bearing app"
+        },
+        {
+          "detail": "",
+          "key": "security_txt",
+          "weight": 12,
+          "why": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner"
+        },
+        {
+          "detail": "jquery 3.5.1",
+          "key": "outdated_js",
+          "weight": 10,
+          "why": "Known-outdated JS library served in production \u2014 concrete, demonstrable"
+        },
+        {
+          "detail": "",
+          "key": "frame_protection",
+          "weight": 8,
+          "why": "No X-Frame-Options / frame-ancestors \u2014 clickjacking exposure"
+        },
+        {
+          "detail": "",
+          "key": "content_type_options",
+          "weight": 5,
+          "why": "No X-Content-Type-Options \u2014 MIME sniffing"
+        },
+        {
+          "detail": "",
+          "key": "referrer_policy",
+          "weight": 4,
+          "why": "No Referrer-Policy \u2014 leaks internal URLs to third parties"
+        },
+        {
+          "detail": "",
+          "key": "permissions_policy",
+          "weight": 3,
+          "why": "No Permissions-Policy"
+        }
+      ],
+      "headline_finding": "jquery 3.5.1 served in production \u2014 jQuery below 3.6 carries published XSS advisories",
+      "qualified": true,
+      "reachable": true,
+      "score": 53,
+      "strengths": [
+        {
+          "detail": "/security",
+          "key": "trust_page"
+        },
+        {
+          "detail": "soc 2, soc2",
+          "key": "compliance_claim"
+        },
+        {
+          "detail": "max-age=31536000",
+          "key": "hsts"
+        },
+        {
+          "detail": "TLSv1.3, 61d to expiry",
+          "key": "tls"
+        },
+        {
+          "detail": "cloudflare",
+          "key": "server_banner"
+        }
+      ],
+      "tier": "C \u2014 nurture"
+    }
+  },
+  "vooma.com": {
+    "profile": {
+      "compliance_claims": [],
+      "domain": "vooma.com",
+      "fetch_error": "",
+      "fetch_ok": true,
+      "has_login_surface": true,
+      "is_security_vendor": false,
+      "mentions_security_hiring": false,
+      "observations": {
+        "compliance_claim": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "content_type_options": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "csp": {
+          "detail": "frame-ancestors 'self'",
+          "gap": false,
+          "observed": true
+        },
+        "frame_protection": {
+          "detail": "SAMEORIGIN",
+          "gap": false,
+          "observed": true
+        },
+        "hsts": {
+          "detail": "max-age=31536000",
+          "gap": false,
+          "observed": true
+        },
+        "outdated_js": {
+          "detail": "jquery 3.5.1",
+          "gap": true,
+          "observed": true
+        },
+        "permissions_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "referrer_policy": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "security_txt": {
+          "detail": "",
+          "gap": true,
+          "observed": true
+        },
+        "server_banner": {
+          "detail": "cloudflare",
+          "gap": false,
+          "observed": true
+        },
+        "tls": {
+          "detail": "TLSv1.3, 34d to expiry",
+          "gap": false,
+          "observed": true
+        },
+        "trust_page": {
+          "detail": "/security",
+          "gap": false,
+          "observed": true
+        }
+      },
+      "outdated_libs": [
+        {
+          "lib": "jquery",
+          "note": "jQuery below 3.6 carries published XSS advisories",
+          "src": "https://d3e54v103j8qbb.cloudfront.net/js/jquery-3.5.1.min.dc5e7f18c8.js?site=68ed090d0998c3c224a59e7c",
+          "version": "3.5.1"
+        }
+      ],
+      "title": "Vooma"
+    },
+    "result": {
+      "angle": "Security page exists but no SOC 2 / ISO claim \u2014 they are mid-journey. Sell the gap assessment and the DevSecOps pipeline that makes audit evidence a build artifact instead of a fire drill.",
+      "company": "Vooma",
+      "disqualified": "",
+      "domain": "vooma.com",
+      "evidence": [
+        {
+          "claim": "No SOC 2 / ISO 27001 claim anywhere public \u2014 the deal-blocker they haven't hit yet",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "Known-outdated JS library served in production \u2014 concrete, demonstrable",
+          "observed": "jquery 3.5.1"
+        },
+        {
+          "claim": "No X-Content-Type-Options \u2014 MIME sniffing",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No Referrer-Policy \u2014 leaks internal URLs to third parties",
+          "observed": "header absent on homepage response"
+        },
+        {
+          "claim": "No Permissions-Policy",
+          "observed": "header absent on homepage response"
+        }
+      ],
+      "gaps": [
+        {
+          "detail": "",
+          "key": "compliance_claim",
+          "weight": 12,
+          "why": "No SOC 2 / ISO 27001 claim anywhere public \u2014 the deal-blocker they haven't hit yet"
+        },
+        {
+          "detail": "",
+          "key": "security_txt",
+          "weight": 12,
+          "why": "No /.well-known/security.txt \u2014 no disclosure process, no named security owner"
+        },
+        {
+          "detail": "jquery 3.5.1",
+          "key": "outdated_js",
+          "weight": 10,
+          "why": "Known-outdated JS library served in production \u2014 concrete, demonstrable"
+        },
+        {
+          "detail": "",
+          "key": "content_type_options",
+          "weight": 5,
+          "why": "No X-Content-Type-Options \u2014 MIME sniffing"
+        },
+        {
+          "detail": "",
+          "key": "referrer_policy",
+          "weight": 4,
+          "why": "No Referrer-Policy \u2014 leaks internal URLs to third parties"
+        },
+        {
+          "detail": "",
+          "key": "permissions_policy",
+          "weight": 3,
+          "why": "No Permissions-Policy"
+        }
+      ],
+      "headline_finding": "jquery 3.5.1 served in production \u2014 jQuery below 3.6 carries published XSS advisories",
+      "qualified": false,
+      "reachable": true,
+      "score": 43,
+      "strengths": [
+        {
+          "detail": "frame-ancestors 'self'",
+          "key": "csp"
+        },
+        {
+          "detail": "/security",
+          "key": "trust_page"
+        },
+        {
+          "detail": "max-age=31536000",
+          "key": "hsts"
+        },
+        {
+          "detail": "SAMEORIGIN",
+          "key": "frame_protection"
+        },
+        {
+          "detail": "TLSv1.3, 34d to expiry",
+          "key": "tls"
+        },
+        {
+          "detail": "cloudflare",
+          "key": "server_banner"
+        }
+      ],
+      "tier": ""
+    }
+  }
+}

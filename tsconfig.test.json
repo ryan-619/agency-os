@@ -21,6 +21,7 @@
     "packages/*/test/**/*.ts",
     "packages/*/src/**/*.ts",
     "apps/agent/src/**/*.ts",
+    "packages/scanner/src/**/*.ts",
     "vitest.config.ts"
   ]
 }
