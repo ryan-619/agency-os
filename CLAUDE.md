@@ -135,6 +135,18 @@ original Python one, which is how the port is proved correct. The list of paths
 the scanner may request is a frozen constant in `types.ts`, not a parameter, so
 no caller can widen it into something that probes for `.git` or an admin panel.
 
+`capture()` also refuses any host that is not a public DNS name. Python's
+`_norm` stops after stripping the path, which leaves userinfo attached — so a
+`companies.domain` of `evil.com@internal.corp` produces the URL
+`https://evil.com@internal.corp/`, requesting *internal.corp* while the row
+still reads like evil.com. IP literals, `localhost`, and the reserved and
+internal-use suffixes are refused too, `169.254.169.254` among them. The CSV
+importer already validates domains, but this check lives in the one place that
+turns a stored string into an outbound request, because Phase 2 gives an agent
+tools that write to that table. It does not resolve DNS, so a public name
+pointing at a private address is still out of scope; that needs a connect-time
+check and should be added if the scanner is ever aimed at untrusted input.
+
 ### What lands in `packages/core`, and when
 | Phase | Domain rules |
 |---|---|

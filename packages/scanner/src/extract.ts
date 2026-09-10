@@ -30,10 +30,61 @@ function observation(
   return { observed, gap: observed ? Boolean(gap) : null, detail: detail.slice(0, DETAIL_MAX), evidence }
 }
 
-/** Strip scheme, path and a leading `www.` — Python's `_norm`. */
+/**
+ * Reduce whatever was typed or imported to a bare hostname.
+ *
+ * Python's `_norm` strips the scheme, the path and a leading `www.` and stops
+ * there, which leaves userinfo and a port attached: `_norm("a.com@internal")`
+ * is `"a.com@internal"`, and `https://a.com@internal/` requests *internal*.
+ * This also strips userinfo, port, query and fragment. That is stricter than
+ * the original, deliberately — it changes only which host is REQUESTED, never
+ * how a response is interpreted, so it cannot affect parity.
+ */
 export function normaliseDomain(input: string): string {
-  const d = input.trim().toLowerCase().replace(/^https?:\/\//, '').split('/')[0] ?? ''
+  let d = input.trim().toLowerCase().replace(/^[a-z][a-z0-9+.-]*:\/\//, '')
+  d = d.split('/')[0] ?? ''
+  d = d.split('?')[0] ?? ''
+  d = d.split('#')[0] ?? ''
+  // Everything before the last '@' is userinfo, and the host is what follows.
+  const at = d.lastIndexOf('@')
+  if (at !== -1) d = d.slice(at + 1)
+  // Strip a port, but leave a bracketed IPv6 literal intact for the check below.
+  if (!d.startsWith('[')) d = d.split(':')[0] ?? ''
   return d.startsWith('www.') ? d.slice(4) : d
+}
+
+/** A public DNS name: labels of letters, digits and hyphens, at least one dot. */
+const HOSTNAME = /^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/
+
+/**
+ * Suffixes that never name a company's public marketing site: the RFC 2606 and
+ * RFC 6761 reserved names, plus the strings ICANN identified as high-risk
+ * internal-use TLDs and never delegated (.corp, .home, .mail).
+ */
+const NON_PUBLIC_SUFFIXES = [
+  '.local', '.localhost', '.internal', '.intranet', '.private', '.localdomain',
+  '.lan', '.corp', '.home', '.test', '.example', '.invalid',
+]
+
+/**
+ * Is this a host the scanner is willing to request?
+ *
+ * The scanner exists to look at companies' public marketing sites. Anything
+ * that is not a public DNS name — an IP literal, localhost, a private suffix —
+ * is refused, so a bad row in `companies.domain` cannot turn the scanner into
+ * a request forwarder aimed at the machine it runs on or at cloud metadata.
+ *
+ * This does not resolve DNS, so it does not stop a public name that resolves
+ * to a private address. Blocking that needs resolution plus a connect-time
+ * check; if the scanner is ever pointed at untrusted input it should gain one.
+ */
+export function isScannableHost(host: string): boolean {
+  if (!host || host.length > 253) return false
+  if (host.startsWith('[')) return false                 // IPv6 literal
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return false  // IPv4 literal
+  if (host === 'localhost') return false
+  if (NON_PUBLIC_SUFFIXES.some((s) => host.endsWith(s))) return false
+  return HOSTNAME.test(host)
 }
 
 type PathVerdict =

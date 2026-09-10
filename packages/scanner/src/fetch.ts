@@ -15,7 +15,7 @@
  */
 import { connect as tlsConnect, type PeerCertificate } from 'node:tls'
 import { ALL_PUBLIC_PATHS, type RawCapture, type RawResponse, type RawTls } from './types.js'
-import { normaliseDomain } from './extract.js'
+import { isScannableHost, normaliseDomain } from './extract.js'
 
 const USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
@@ -109,8 +109,22 @@ export function fetchTls(host: string, now: () => Date = () => new Date()): Prom
  * Never throws: a failure is recorded as a failure so the extractor can mark
  * the signal unobserved (§2.2) rather than guess.
  */
+export class UnscannableHostError extends Error {
+  constructor(readonly host: string, input: string) {
+    super(
+      `Refusing to scan "${input}": "${host}" is not a public hostname. ` +
+        'The scanner only requests companies\' own public marketing sites.',
+    )
+    this.name = 'UnscannableHostError'
+  }
+}
+
 export async function capture(domain: string, opts: FetchOptions = {}): Promise<RawCapture> {
   const host = normaliseDomain(domain)
+  // Checked here rather than only at import, because this is the single place
+  // that turns a stored string into an outbound request. A bad row, an agent
+  // tool call in a later phase, or a hand-run CLI all pass through it.
+  if (!isScannableHost(host)) throw new UnscannableHostError(host, domain)
   const now = opts.now ?? (() => new Date())
   const capturedAt = now().toISOString()
 

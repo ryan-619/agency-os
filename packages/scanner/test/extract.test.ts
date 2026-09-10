@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { extractProfile, probePublicPath, outdatedLibFor, normaliseDomain } from '../src/extract.js'
+import { extractProfile, probePublicPath, outdatedLibFor, normaliseDomain, isScannableHost } from '../src/extract.js'
 import { extractHtmlFacts } from '../src/html.js'
 import { PUBLIC_PATHS, type RawCapture, type RawResponse } from '../src/types.js'
 
@@ -27,6 +27,55 @@ describe('normaliseDomain', () => {
     expect(normaliseDomain('https://www.Acme.com/pricing')).toBe('acme.com')
     expect(normaliseDomain('acme.io')).toBe('acme.io')
     expect(normaliseDomain('  HTTP://Acme.IO/a/b  ')).toBe('acme.io')
+  })
+
+  // Python's _norm stops after the path, leaving userinfo attached — so
+  // `https://${_norm("a.com@internal")}/` requests *internal* while the row
+  // still reads "a.com". Stripping userinfo is what makes the host honest.
+  it('resolves to the REAL host when userinfo is attached', () => {
+    expect(normaliseDomain('evil.com@internal.corp')).toBe('internal.corp')
+    expect(normaliseDomain('user:pw@internal')).toBe('internal')
+  })
+
+  it('strips port, query and fragment', () => {
+    expect(normaliseDomain('acme.io:8443')).toBe('acme.io')
+    expect(normaliseDomain('acme.io?x=1')).toBe('acme.io')
+    expect(normaliseDomain('acme.io#frag')).toBe('acme.io')
+  })
+})
+
+describe('isScannableHost — the scanner only visits public marketing sites', () => {
+  it('accepts an ordinary public domain', () => {
+    for (const h of ['rentman.io', 'greensparksoftware.com', 'a.co.uk', 'x-y.example-site.com']) {
+      expect(isScannableHost(h), h).toBe(true)
+    }
+  })
+
+  it('refuses loopback, link-local and any IP literal', () => {
+    // 169.254.169.254 is the cloud metadata endpoint — the classic SSRF target.
+    for (const h of ['localhost', '127.0.0.1', '169.254.169.254', '10.0.0.1', '192.168.1.1', '[::1]']) {
+      expect(isScannableHost(h), h).toBe(false)
+    }
+  })
+
+  it('refuses reserved and internal-use suffixes', () => {
+    for (const h of ['box.local', 'db.internal', 'host.lan', 'app.corp', 'x.home', 'a.test', 'b.invalid']) {
+      expect(isScannableHost(h), h).toBe(false)
+    }
+  })
+
+  it('refuses anything that is not a dotted hostname', () => {
+    for (const h of ['', 'nodots', 'has space.com', 'a..com', '-lead.com', 'trail-.com', 'a'.repeat(300)]) {
+      expect(isScannableHost(h), JSON.stringify(h)).toBe(false)
+    }
+  })
+
+  it('lets every real seed domain through', () => {
+    for (const h of ['rentman.io', 'eagronom.com', 'amberlo.io', 'solvimon.com', 'rundoo.ai',
+      'greensparksoftware.com', 'respark.com', 'breedr.co', 'firstdue.com', 'stitchflow.com',
+      'lawwwing.com', 'carbonmaps.io', 'vooma.com', 'usekojo.com', 'toplinepro.com', 'arcol.io']) {
+      expect(isScannableHost(h), h).toBe(true)
+    }
   })
 })
 
