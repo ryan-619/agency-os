@@ -341,15 +341,34 @@ export async function markStaleFindings(
   return updated.length
 }
 
-/** Findings safe to quote in an outbound draft: observed, a gap, and fresh. */
+/**
+ * Findings safe to quote in an outbound draft: observed, a gap, fresh, and
+ * from the MOST RECENT scan.
+ *
+ * The last condition is the one that is easy to miss. Filtering only by
+ * company returns every scan's findings at once, so after a re-scan a draft
+ * could quote a gap the newest scan says is now closed — the company fixed
+ * their CSP last week, and the email still tells them they have none. The old
+ * row stays in the table as history; it is simply not quotable.
+ */
 export async function quotableFindings(db: AgencyDb, orgId: string, companyId: string) {
+  const latest = await db
+    .select({ id: schema.scans.id })
+    .from(schema.scans)
+    .where(and(eq(schema.scans.orgId, orgId), eq(schema.scans.companyId, companyId), eq(schema.scans.ok, true)))
+    .orderBy(desc(schema.scans.ranAt))
+    .limit(1)
+
+  const scanId = latest[0]?.id
+  if (!scanId) return []
+
   return db
     .select()
     .from(schema.findings)
     .where(
       and(
         eq(schema.findings.orgId, orgId),
-        eq(schema.findings.companyId, companyId),
+        eq(schema.findings.scanId, scanId),
         eq(schema.findings.observed, true),
         eq(schema.findings.gap, true),
         eq(schema.findings.stale, false),

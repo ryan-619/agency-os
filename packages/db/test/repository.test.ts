@@ -238,6 +238,53 @@ describe('the qualification data core', () => {
       expect(quotable.every((f) => f.observed && f.gap === true && !f.stale)).toBe(true)
     })
 
+    // The failure this prevents: the company fixed their CSP last week, the
+    // re-scan recorded that, and a draft still quotes the old row saying they
+    // have none.
+    it('quotes only the LATEST scan, never a gap an older scan reported', async () => {
+      const [company] = await db
+        .insert(schema.companies).values({ orgId, domain: 'rescanned.test' })
+        .returning({ id: schema.companies.id })
+
+      // First scan: csp is a gap.
+      const before = profileWith({ gaps: ['csp', 'hsts'] })
+      await recordScan(db, { orgId, companyId: company!.id, icpProfileId, raw: {}, profile: before, result: scoreCompany(before, icp) })
+      expect((await quotableFindings(db, orgId, company!.id)).map((f) => f.signalKey).sort())
+        .toEqual(['csp', 'hsts'])
+
+      // They fix the CSP; the re-scan says so.
+      const after = profileWith({ gaps: ['hsts'] })
+      await recordScan(db, { orgId, companyId: company!.id, icpProfileId, raw: {}, profile: after, result: scoreCompany(after, icp) })
+
+      const quotable = await quotableFindings(db, orgId, company!.id)
+      expect(quotable.map((f) => f.signalKey)).toEqual(['hsts'])
+      expect(quotable.some((f) => f.signalKey === 'csp'), 'the closed gap must not be quotable').toBe(false)
+
+      // The old row is still there as history — it is simply not quotable.
+      const all = await db.select().from(schema.findings).where(eq(schema.findings.companyId, company!.id))
+      expect(all.filter((f) => f.signalKey === 'csp')).toHaveLength(2)
+    })
+
+    it('quotes nothing at all when the latest scan never reached the site', async () => {
+      const [company] = await db
+        .insert(schema.companies).values({ orgId, domain: 'wentdown.test' })
+        .returning({ id: schema.companies.id })
+      const good = profileWith({ gaps: ['csp'] })
+      await recordScan(db, { orgId, companyId: company!.id, icpProfileId, raw: {}, profile: good, result: scoreCompany(good, icp) })
+
+      const down: SiteProfile = {
+        domain: 'wentdown.test', company: '', title: '', fetchOk: false, fetchError: 'TimeoutError',
+        hasLoginSurface: false, isSecurityVendor: false, mentionsSecurityHiring: false,
+        outdatedLibs: [], observations: {},
+      }
+      await recordScan(db, { orgId, companyId: company!.id, icpProfileId, raw: {}, profile: down, result: scoreCompany(down, icp) })
+
+      // The newest successful scan is still the source of truth; a failed scan
+      // does not silently un-quote a real finding, nor does it add one.
+      const quotable = await quotableFindings(db, orgId, company!.id)
+      expect(quotable.map((f) => f.signalKey)).toEqual(['csp'])
+    })
+
     it('refuses a nonsensical threshold rather than marking everything', async () => {
       await expect(markStaleFindings(db, orgId, 0)).rejects.toThrow(/positive number/)
       await expect(markStaleFindings(db, orgId, -14)).rejects.toThrow(/positive number/)
