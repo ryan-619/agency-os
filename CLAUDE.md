@@ -362,6 +362,16 @@ numbers as literals. The threshold, channels and daily cap shown are whatever
 the active `icp_profiles` row says. A dashboard displaying a threshold the
 engine is not using is the same class of mistake as a finding nobody observed.
 
+**`tools/scan.ts` uses a connection POOL, not a `Client`.** `recordScan` wraps
+its writes in a transaction, and a transaction on a single connection is not
+isolated from anything else using that connection. With four workers sharing
+one `Client`, worker B's INSERTs land between worker A's BEGIN and COMMIT — so
+a failure in A rolls back B's scan too — and a second BEGIN on an open
+transaction is a warning Postgres logs and then ignores, merging the two.
+`max` is the worker count, so each worker gets its own connection and each scan
+is atomic on its own. Nothing in the test suite can catch this: PGlite is a
+single embedded connection, so the suite cannot have two.
+
 **`/api/health` is unauthenticated and hits the database.** Deliberate — an
 orchestrator has to reach it — and it reports only `err.name`, never the driver
 message that would carry the DSN. It is not rate limited, so sustained

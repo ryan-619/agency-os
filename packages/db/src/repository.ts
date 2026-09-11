@@ -302,6 +302,24 @@ export async function companyList(db: AgencyDb, orgId: string): Promise<CompanyL
     .where(eq(schema.companies.orgId, orgId))
     .orderBy(schema.companies.domain)
 
+  // Scans BEFORE scores, and not in parallel. These are three statements, not
+  // one snapshot, so a scan committing between them is visible to the later
+  // query and not the earlier one. In this order every scan read here already
+  // had its score committed — recordScan writes the pair in one transaction —
+  // so the score lookup below cannot come up empty for a scan that is present.
+  // The other order leaves a window where a freshly scanned company renders
+  // with a scan time and no score at all.
+  const scanRows = await db
+    .select({
+      id: schema.scans.id,
+      companyId: schema.scans.companyId,
+      ranAt: schema.scans.ranAt,
+      ok: schema.scans.ok,
+    })
+    .from(schema.scans)
+    .where(eq(schema.scans.orgId, orgId))
+    .orderBy(desc(schema.scans.ranAt))
+
   const scoreRows = await db
     .select({
       companyId: schema.scores.companyId,
@@ -315,17 +333,6 @@ export async function companyList(db: AgencyDb, orgId: string): Promise<CompanyL
     .from(schema.scores)
     .where(eq(schema.scores.orgId, orgId))
     .orderBy(desc(schema.scores.computedAt))
-
-  const scanRows = await db
-    .select({
-      id: schema.scans.id,
-      companyId: schema.scans.companyId,
-      ranAt: schema.scans.ranAt,
-      ok: schema.scans.ok,
-    })
-    .from(schema.scans)
-    .where(eq(schema.scans.orgId, orgId))
-    .orderBy(desc(schema.scans.ranAt))
 
   // Ordered newest-first, so the first entry seen per company is the latest.
   const latestScan = new Map<string, (typeof scanRows)[number]>()

@@ -11,7 +11,7 @@
  * whatever the profile row says (§8.3) — nothing here hard-codes them.
  */
 import { readFileSync } from 'node:fs'
-import { Client } from 'pg'
+import { Pool } from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { DEFAULT_STALE_AFTER_DAYS, isStale, parseIcpDefinition } from '@agency/core'
 import { scanDomain } from '@agency/scanner'
@@ -55,9 +55,15 @@ async function main(): Promise<void> {
     process.exit(1)
   }
 
-  const client = new Client({ connectionString: url })
-  await client.connect()
-  const db = drizzle(client, { schema }) as unknown as AgencyDb
+  // A POOL, not a Client. `recordScan` wraps its writes in a transaction, and
+  // a transaction on a single connection is not isolated from anything else
+  // using that connection: with CONCURRENCY workers sharing one, worker B's
+  // INSERTs land between worker A's BEGIN and COMMIT, so a failure in A rolls
+  // back B's scan as well — and a second BEGIN on an open transaction is a
+  // warning Postgres logs and then ignores, silently merging the two. One
+  // connection per worker is what makes each scan atomic on its own.
+  const pool = new Pool({ connectionString: url, max: CONCURRENCY })
+  const db = drizzle(pool, { schema }) as unknown as AgencyDb
   console.log(`database: ${safeTarget(url)}`)
 
   try {
@@ -158,7 +164,7 @@ async function main(): Promise<void> {
         `${scored.filter((c) => c.disqualifiedReason).length} disqualified`,
     )
   } finally {
-    await client.end()
+    await pool.end()
   }
 }
 
