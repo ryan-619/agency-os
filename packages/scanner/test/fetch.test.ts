@@ -161,3 +161,27 @@ describe('a redirect cannot take the scanner off the public internet', () => {
     expect(redirectTarget('//www.example.org/x', from).toString()).toBe('https://www.example.org/x')
   })
 })
+
+
+/**
+ * The reference runs on Python 3.9, whose redirect handler has no
+ * `http_error_308`, so a 308 raises there and the company is written down as
+ * unreachable. `308 Location: https://www.<host>/` is the apex-to-www redirect
+ * half the hosting industry emits: two of the sixteen seed domains answer with
+ * exactly that, and "unreachable" is a false statement about both of them.
+ */
+describe('which redirects are followed', () => {
+  it('follows every permanent and temporary redirect, 308 included', async () => {
+    for (const status of [301, 302, 303, 307, 308]) {
+      const { statusFollowed } = await import('../src/fetch.js')
+      expect(statusFollowed(status), String(status)).toBe(true)
+    }
+  })
+
+  it('does not treat a non-redirect status as one', async () => {
+    const { statusFollowed } = await import('../src/fetch.js')
+    for (const status of [200, 204, 304, 400, 404, 500]) {
+      expect(statusFollowed(status), String(status)).toBe(false)
+    }
+  })
+})

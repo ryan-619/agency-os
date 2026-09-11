@@ -202,6 +202,8 @@ export const scores = pgTable(
     id: id(),
     orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
     companyId: uuid('company_id').notNull().references(() => companies.id, { onDelete: 'cascade' }),
+    /** The scan this score was computed from — see 0006. */
+    scanId: uuid('scan_id').notNull(),
     icpProfileId: uuid('icp_profile_id').notNull().references(() => icpProfiles.id, { onDelete: 'restrict' }),
     score: integer('score').notNull(),
     tier: text('tier'),
@@ -213,6 +215,7 @@ export const scores = pgTable(
   (t) => [
     index('scores_company_computed_idx').on(t.companyId, t.computedAt.desc()),
     index('scores_org_qualified_idx').on(t.orgId, t.qualified, t.score.desc()),
+    index('scores_scan_idx').on(t.scanId),
   ],
 )
 

@@ -16,4 +16,5 @@
 export * from './authz.js'
 export * from './redact.js'
 export * from './icp.js'
+export * from './freshness.js'
 export * from './scoring.js'

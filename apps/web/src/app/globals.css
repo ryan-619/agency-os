@@ -139,7 +139,19 @@ table td { vertical-align: top; }
 dl.evidence { margin: 0; font-size: 12px; }
 dl.evidence > div { display: grid; grid-template-columns: 96px 1fr; gap: 8px; margin-bottom: 2px; }
 dl.evidence dt { color: var(--muted); }
-dl.evidence dd { margin: 0; word-break: break-word; }
+/*
+   The full evidence value is always in the DOM — it is what a finding is
+   judged on, and an operator has to be able to select and copy it before
+   quoting the claim. Long values are clamped visually rather than truncated in
+   the markup; cutting the string cut verification URLs off the end of it.
+*/
+dl.evidence dd {
+  margin: 0;
+  word-break: break-word;
+  max-height: 6.5em;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 
 a.card { display: block; text-decoration: none; color: inherit; }
 a.card:hover { border-color: var(--accent); }

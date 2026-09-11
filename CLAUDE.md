@@ -66,12 +66,34 @@ guards, because one of them alone was not enough:
    off-by-one can file one company's evidence under another's name and every
    constraint still passes.
 
-**Not yet enforced — Phase 1 (§8.3):** `findings.stale`. The column, its index
-and the 14-day threshold (`freshness.stale_after_days` in the seeded ICP) all
-exist, but **nothing writes `stale` yet** and there is no scheduled rescan.
-Freshness is derivable today from `scans.ran_at`. Phase 4's draft generator
-must not assume a finding is fresh because `stale = false` — every row has
-`stale = false` because nothing has ever set it.
+**`findings.stale` is a cache, not the answer.** `markStaleFindings` writes it
+and `npm run scan` calls that on every run, so the column is current as of the
+last scan and no more. A finding that aged past the threshold an hour ago still
+has `stale = false` on it, and there is still no scheduled rescan.
+
+So **freshness is DERIVED from the scan's `ran_at`**, by `isStale()` in
+`packages/core/src/freshness.ts`, everywhere it decides whether something may
+be shown or quoted: `quotableFindings`, the company detail page, and
+`npm run scan -- --stale`. Reading the column instead is how a three-week-old
+gap rendered with no mark on it, and how `--stale` — which filtered on
+`lastScanAt === null`, a copy of the never-scanned filter — could never pick a
+single company it existed to re-verify. The column is still narrowed on first
+where it is indexed and cheap, but never on its own, and Phase 4's draft
+generator must do the same.
+
+Two more §2.2 links, both added in 0006 and after:
+- **A score names the scan it was computed from.** It used to record a company
+  and a time, so "the latest score" and "the latest scan" were independent
+  lookups; a page could show one scan's number above another scan's evidence —
+  a qualification nobody computed. `scores.scan_id` carries the same composite
+  FK `findings` uses, so the denormalised `company_id` and `org_id` must agree
+  with the scan's.
+- **`recordScan` computes the score itself**, from the ICP row it stamps.
+  Taking an id and a pre-computed `ScoreResult` separately let a caller score
+  against one profile and stamp another's id. It also reads each gap's weight
+  from the ICP rather than from `result.gaps` — that list is EMPTY for a
+  disqualified company, so every real gap such a company had was written at
+  weight 0.
 - The scanner reads **public pages only**. No port scanning, no probing for
   `.git`, `.env`, admin panels or backups. Every piece of copy in the app must
   describe it as posture review from the outside, not a security test.
@@ -163,7 +185,7 @@ check and should be added if the scanner is ever aimed at untrusted input.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 382 tests: domain + migrations + invariants + seed + parity
+npm test                 # 399 tests: domain + migrations + invariants + seed + parity
 npm run build            # packages, then the Next app
 
 # database (needs DATABASE_URL)
@@ -443,10 +465,9 @@ direction. urllib follows a redirect wherever it points, so refusing
 `169.254.169.254` in `companies.domain` bought nothing while a company's own
 site could answer `302 Location: http://169.254.169.254/` and be followed.
 `Accept-Encoding` is the reference's exact `gzip, deflate` (not undici's
-brotli), redirects follow 301/302/303/307 and not 308 — matching Python 3.9,
-where `http_error_308` does not exist — and stop at urllib's ten.
+brotli) and redirects stop at urllib's ten.
 
-**Three deliberate divergences, all §2 over port fidelity.**
+**Four deliberate divergences, all §2 over port fidelity.**
 
 1. Python's public-path probe does `except Exception: continue`, so a timeout,
    DNS failure or WAF block on `/security` is indistinguishable from a clean
@@ -460,8 +481,17 @@ where `http_error_308` does not exist — and stop at urllib's ten.
    a term found in the half that was read was genuinely read. `truncated` is
    recorded on the capture so the reason is in the evidence.
 3. The redirect host check above.
+4. **308 is followed.** Python 3.9's `HTTPRedirectHandler` has
+   `http_error_301/302/303/307` and no `http_error_308`; support arrived in a
+   later CPython. On the interpreter the reference runs, a 308 raises, and the
+   engine writes the company down as UNREACHABLE. But `308 Location:
+   https://www.example.com/` is the apex-to-www redirect half the hosting
+   industry emits — two of the sixteen seed domains answer with exactly that,
+   and both were being recorded as unreachable sites. That is a false statement
+   about a company, and it is not a rule the reference chose; it is the absence
+   of one in a standard library version.
 
-All three are asserted explicitly in `packages/scanner/test/`, never hidden.
+All four are asserted explicitly in `packages/scanner/test/`, never hidden.
 
 If you re-record the fixtures, the goldens must be regenerated in the same
 commit, and the diff should be read: a changed score means the site changed, or

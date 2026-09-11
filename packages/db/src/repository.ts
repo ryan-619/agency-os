@@ -10,7 +10,10 @@
  */
 import { and, desc, eq, inArray, lt, sql } from 'drizzle-orm'
 import type { PgDatabase, PgQueryResultHKT } from 'drizzle-orm/pg-core'
-import type { ScoreResult, SiteProfile } from '@agency/core'
+import {
+  DEFAULT_STALE_AFTER_DAYS, isStale, scoreCompany,
+  type IcpDefinition, type ScoreResult, type SiteProfile,
+} from '@agency/core'
 import * as schema from './schema.js'
 
 export { parseCompanySeeds } from './csv.js'
@@ -97,16 +100,31 @@ export async function findCompanyByDomain(db: AgencyDb, orgId: string, domain: s
 export interface RecordScanInput {
   readonly orgId: string
   readonly companyId: string
-  readonly icpProfileId: string
+  /**
+   * The ICP row this scan is judged against — the id AND the definition it
+   * holds, together.
+   *
+   * Taking an id and a pre-computed `ScoreResult` separately let the two
+   * disagree: nothing stopped a caller from scoring against one profile and
+   * stamping another's id, and the row would then read as a judgement the named
+   * profile never made. The score is computed HERE, from this definition, so
+   * the number, the weights on the findings and the `icp_profile_id` cannot
+   * come from different places.
+   */
+  readonly icpProfile: {
+    readonly id: string
+    readonly definition: IcpDefinition
+  }
   /** The full capture, stored on scans.raw so a finding can be traced back. */
   readonly raw: unknown
   readonly profile: SiteProfile
-  readonly result: ScoreResult
 }
 
 export interface RecordScanOutput {
   readonly scanId: string
   readonly scoreId: string
+  /** What was written, so the caller need not re-derive it. */
+  readonly result: ScoreResult
   readonly findingsWritten: number
   readonly observedCount: number
   readonly unobservedCount: number
@@ -120,11 +138,15 @@ export interface RecordScanOutput {
  *   * a scan that never reached the site is stored with ok = false and NO
  *     findings — nothing was observed, so nothing is claimed;
  *   * an unobserved signal is stored with gap = NULL and weight 0;
- *   * a signal's weight is read from the ICP, so a finding cannot claim a
- *     weight the profile does not give it.
+ *   * a gap's weight is the ICP's weight for that signal, so a finding cannot
+ *     claim a weight the profile does not give it;
+ *   * the score names the scan it was computed from, so no reader can pair one
+ *     scan's number with another scan's evidence.
  */
 export async function recordScan(db: AgencyDb, input: RecordScanInput): Promise<RecordScanOutput> {
-  const { orgId, companyId, icpProfileId, raw, profile, result } = input
+  const { orgId, companyId, icpProfile, raw, profile } = input
+  const icp = icpProfile.definition
+  const result = scoreCompany(profile, icp)
 
   return db.transaction(async (tx) => {
     const [scan] = await tx
@@ -140,8 +162,11 @@ export async function recordScan(db: AgencyDb, input: RecordScanInput): Promise<
 
     if (!scan) throw new Error('failed to insert scan')
 
-    // A gap's weight comes from the scored gap list, which came from the ICP.
-    const weightOf = new Map(result.gaps.map((g) => [g.key, g.weight]))
+    // A gap's weight is the ICP's weight for that signal, read from the
+    // definition rather than from `result.gaps`. The gap list is empty for a
+    // DISQUALIFIED company — scoring returns before it is built — so reading
+    // weights from it wrote 0 against every real gap a disqualified company
+    // has, and the detail page then ranked them all equally at zero.
 
     const findingRows = Object.entries(profile.observations).map(([signalKey, o]) => ({
       orgId,
@@ -151,7 +176,7 @@ export async function recordScan(db: AgencyDb, input: RecordScanInput): Promise<
       observed: o.observed,
       // NULL whenever unobserved: unknown, not "no gap".
       gap: o.observed ? Boolean(o.gap) : null,
-      weight: o.observed && o.gap ? (weightOf.get(signalKey) ?? 0) : 0,
+      weight: o.observed && o.gap ? (icp.signals[signalKey]?.weight ?? 0) : 0,
       detail: o.detail || null,
       evidence: (o.evidence ?? {}) as Record<string, unknown>,
       stale: false,
@@ -164,7 +189,8 @@ export async function recordScan(db: AgencyDb, input: RecordScanInput): Promise<
       .values({
         orgId,
         companyId,
-        icpProfileId,
+        scanId: scan.id,
+        icpProfileId: icpProfile.id,
         score: result.score,
         tier: result.tier || null,
         qualified: result.qualified,
@@ -177,6 +203,7 @@ export async function recordScan(db: AgencyDb, input: RecordScanInput): Promise<
     return {
       scanId: scan.id,
       scoreId: score.id,
+      result,
       findingsWritten: findingRows.length,
       observedCount: findingRows.filter((f) => f.observed).length,
       unobservedCount: findingRows.filter((f) => !f.observed).length,
@@ -184,7 +211,15 @@ export async function recordScan(db: AgencyDb, input: RecordScanInput): Promise<
   })
 }
 
-/** The most recent scan for a company, with its findings. */
+/**
+ * The most recent scan for a company, with its findings AND the score computed
+ * from it.
+ *
+ * The three are returned together on purpose. Fetching "the latest score" and
+ * "the latest scan" as separate queries let a page render one scan's number
+ * above another scan's evidence — a claim nobody computed. Since 0006 a score
+ * names its scan, so the honest read is one lookup.
+ */
 export async function latestScanWithFindings(db: AgencyDb, orgId: string, companyId: string) {
   const scans = await db
     .select()
@@ -196,16 +231,30 @@ export async function latestScanWithFindings(db: AgencyDb, orgId: string, compan
   const scan = scans[0]
   if (!scan) return null
 
-  const findings = await db
-    .select()
-    .from(schema.findings)
-    .where(eq(schema.findings.scanId, scan.id))
-    .orderBy(desc(schema.findings.weight), schema.findings.signalKey)
+  const [findings, scoreRows] = await Promise.all([
+    db
+      .select()
+      .from(schema.findings)
+      .where(eq(schema.findings.scanId, scan.id))
+      .orderBy(desc(schema.findings.weight), schema.findings.signalKey),
+    db
+      .select()
+      .from(schema.scores)
+      .where(eq(schema.scores.scanId, scan.id))
+      .orderBy(desc(schema.scores.computedAt))
+      .limit(1),
+  ])
 
-  return { scan, findings }
+  return { scan, findings, score: scoreRows[0] ?? null }
 }
 
-/** The most recent score for a company. History is kept, never overwritten (§4). */
+/**
+ * The most recent score for a company. History is kept, never overwritten (§4).
+ *
+ * Use `latestScanWithFindings` when the score is going to be shown NEXT TO
+ * findings: this returns the newest score row, which is not necessarily the one
+ * belonging to the newest scan.
+ */
 export async function latestScore(db: AgencyDb, orgId: string, companyId: string) {
   const rows = await db
     .select()
@@ -229,7 +278,12 @@ export interface CompanyListRow {
 }
 
 /**
- * Every company with its latest score and latest scan.
+ * Every company with its latest scan and THAT SCAN'S score.
+ *
+ * Not "the latest score": pairing two independent lookups puts one scan's
+ * number in the same row as another scan's timestamp, and the operator reads a
+ * qualification that was never computed from the evidence the row claims. Since
+ * 0006 a score names its scan, so the pairing is a join rather than a guess.
  *
  * Three indexed queries folded together in memory rather than one DISTINCT ON
  * with a LATERAL join: the typed builder cannot express that, and `db.execute`
@@ -251,6 +305,7 @@ export async function companyList(db: AgencyDb, orgId: string): Promise<CompanyL
   const scoreRows = await db
     .select({
       companyId: schema.scores.companyId,
+      scanId: schema.scores.scanId,
       score: schema.scores.score,
       tier: schema.scores.tier,
       qualified: schema.scores.qualified,
@@ -263,6 +318,7 @@ export async function companyList(db: AgencyDb, orgId: string): Promise<CompanyL
 
   const scanRows = await db
     .select({
+      id: schema.scans.id,
       companyId: schema.scans.companyId,
       ranAt: schema.scans.ranAt,
       ok: schema.scans.ok,
@@ -272,14 +328,16 @@ export async function companyList(db: AgencyDb, orgId: string): Promise<CompanyL
     .orderBy(desc(schema.scans.ranAt))
 
   // Ordered newest-first, so the first entry seen per company is the latest.
-  const latestScore = new Map<string, (typeof scoreRows)[number]>()
-  for (const r of scoreRows) if (!latestScore.has(r.companyId)) latestScore.set(r.companyId, r)
   const latestScan = new Map<string, (typeof scanRows)[number]>()
   for (const r of scanRows) if (!latestScan.has(r.companyId)) latestScan.set(r.companyId, r)
+  // Keyed by SCAN, not by company: the row shown is the judgement of the scan
+  // whose timestamp is shown beside it, or nothing at all.
+  const scoreForScan = new Map<string, (typeof scoreRows)[number]>()
+  for (const r of scoreRows) if (!scoreForScan.has(r.scanId)) scoreForScan.set(r.scanId, r)
 
   return companies.map((c) => {
-    const s = latestScore.get(c.id)
     const scan = latestScan.get(c.id)
+    const s = scan ? scoreForScan.get(scan.id) : undefined
     return {
       companyId: c.id,
       domain: c.domain,
@@ -343,24 +401,42 @@ export async function markStaleFindings(
 
 /**
  * Findings safe to quote in an outbound draft: observed, a gap, fresh, and
- * from the MOST RECENT scan.
+ * from the MOST RECENT SUCCESSFUL scan.
  *
- * The last condition is the one that is easy to miss. Filtering only by
- * company returns every scan's findings at once, so after a re-scan a draft
- * could quote a gap the newest scan says is now closed — the company fixed
- * their CSP last week, and the email still tells them they have none. The old
- * row stays in the table as history; it is simply not quotable.
+ * Two conditions here are easy to get wrong, and both end as a claim about a
+ * company that is not true.
+ *
+ * Filtering only by company returns every scan's findings at once, so after a
+ * re-scan a draft could quote a gap the newest scan says is now closed — the
+ * company fixed their CSP last week and the email still tells them they have
+ * none. The old row stays as history; it is simply not quotable.
+ *
+ * And freshness is computed from the scan's `ran_at`, NOT read from
+ * `findings.stale`. That column is a cache, written by `markStaleFindings`,
+ * which only runs when someone runs a scan. Trusting it lets an observation
+ * that aged past the threshold this morning go out in an email this afternoon,
+ * which is exactly what §2.2's "must be re-verified" forbids. The column is
+ * still narrowed on first, because it is indexed and every row it excludes is
+ * one this does not have to age-check.
  */
-export async function quotableFindings(db: AgencyDb, orgId: string, companyId: string) {
+export async function quotableFindings(
+  db: AgencyDb,
+  orgId: string,
+  companyId: string,
+  staleAfterDays: number = DEFAULT_STALE_AFTER_DAYS,
+  now: Date = new Date(),
+) {
   const latest = await db
-    .select({ id: schema.scans.id })
+    .select({ id: schema.scans.id, ranAt: schema.scans.ranAt })
     .from(schema.scans)
     .where(and(eq(schema.scans.orgId, orgId), eq(schema.scans.companyId, companyId), eq(schema.scans.ok, true)))
     .orderBy(desc(schema.scans.ranAt))
     .limit(1)
 
-  const scanId = latest[0]?.id
-  if (!scanId) return []
+  const scan = latest[0]
+  if (!scan) return []
+  // The whole scan is one moment, so one check settles every finding on it.
+  if (isStale(scan.ranAt, staleAfterDays, now)) return []
 
   return db
     .select()
@@ -368,7 +444,7 @@ export async function quotableFindings(db: AgencyDb, orgId: string, companyId: s
     .where(
       and(
         eq(schema.findings.orgId, orgId),
-        eq(schema.findings.scanId, scanId),
+        eq(schema.findings.scanId, scan.id),
         eq(schema.findings.observed, true),
         eq(schema.findings.gap, true),
         eq(schema.findings.stale, false),

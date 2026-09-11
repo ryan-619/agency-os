@@ -48,11 +48,32 @@ export const MAX_ENCODED_BYTES = 1_500_000
 const MAX_REDIRECTS = 10
 
 /**
- * Python 3.9's redirect handler implements 301, 302, 303 and 307 — and NOT
- * 308, which arrived in 3.11. A 308 therefore surfaces as an HTTP error there,
- * and does the same here.
+ * A FOURTH DELIBERATE DIVERGENCE, and the plainest one.
+ *
+ * Python 3.9's `HTTPRedirectHandler` has `http_error_301/302/303/307` and no
+ * `http_error_308` — support for it arrived in a later CPython. So on the
+ * interpreter the reference engine runs, a 308 is not a redirect at all; it
+ * raises, and the engine records `fetch_error = "HTTP 308"` and disqualifies
+ * the company as UNREACHABLE.
+ *
+ * `308 Location: https://www.example.com/` is the apex-to-www redirect half
+ * the hosting industry emits. Two of the sixteen seed domains answer with
+ * exactly that, and both were being written down as unreachable sites — a
+ * statement about a company that is simply false, and §2.2's whole subject.
+ * It is also not a rule the reference chose; it is the absence of one in the
+ * version of a standard library.
+ *
+ * So 308 is followed, with the same host check as every other hop. The score
+ * this changes is one that was never computed rather than one that was
+ * computed differently, and parity is untouched: the fixtures are replayed
+ * bytes, with no redirect in them.
  */
-const FOLLOWED_REDIRECTS = new Set([301, 302, 303, 307])
+const FOLLOWED_REDIRECTS = new Set([301, 302, 303, 307, 308])
+
+/** Exported so the set above is pinned by a test rather than by reading it. */
+export function statusFollowed(status: number): boolean {
+  return FOLLOWED_REDIRECTS.has(status)
+}
 
 // keepAlive off: a scan makes seven requests to a host and then never speaks to
 // it again, and a pooled socket would keep the process alive after it.

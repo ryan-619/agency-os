@@ -37,7 +37,7 @@ describe('the qualification data core', () => {
   let test: TestDb
   let db: AgencyDb
   let orgId: string
-  let icpProfileId: string
+  let icpProfile: { id: string; definition: typeof icp }
 
   beforeAll(async () => {
     test = await freshDb()
@@ -49,7 +49,7 @@ describe('the qualification data core', () => {
       .insert(schema.icpProfiles)
       .values({ orgId, name: icp.label, definition: icp as unknown as Record<string, unknown> })
       .returning({ id: schema.icpProfiles.id })
-    icpProfileId = p!.id
+    icpProfile = { id: p!.id, definition: icp }
   })
   afterAll(async () => { await test.close() })
 
@@ -93,8 +93,8 @@ describe('the qualification data core', () => {
       const result = scoreCompany(profile, icp)
 
       const out = await recordScan(db, {
-        orgId, companyId: company!.id, icpProfileId,
-        raw: { home: { ok: true } }, profile, result,
+        orgId, companyId: company!.id, icpProfile,
+        raw: { home: { ok: true } }, profile,
       })
 
       expect(out.findingsWritten).toBe(12)
@@ -124,7 +124,7 @@ describe('the qualification data core', () => {
       const result = scoreCompany(profile, icp)
 
       const out = await recordScan(db, {
-        orgId, companyId: company!.id, icpProfileId, raw: {}, profile, result,
+        orgId, companyId: company!.id, icpProfile, raw: {}, profile,
       })
       expect(out.unobservedCount).toBe(2)
 
@@ -148,7 +148,7 @@ describe('the qualification data core', () => {
       const result = scoreCompany(profile, icp)
 
       const out = await recordScan(db, {
-        orgId, companyId: company!.id, icpProfileId, raw: {}, profile, result,
+        orgId, companyId: company!.id, icpProfile, raw: {}, profile,
       })
       expect(out.findingsWritten).toBe(0)
 
@@ -165,7 +165,7 @@ describe('the qualification data core', () => {
     it('keeps score history rather than overwriting it (§4)', async () => {
       const company = await findCompanyByDomain(db, orgId, 'acme.test')
       const profile = profileWith({ gaps: ['csp'] })
-      await recordScan(db, { orgId, companyId: company!.id, icpProfileId, raw: {}, profile, result: scoreCompany(profile, icp) })
+      await recordScan(db, { orgId, companyId: company!.id, icpProfile, raw: {}, profile })
 
       const all = await db.select().from(schema.scores).where(eq(schema.scores.companyId, company!.id))
       expect(all.length).toBeGreaterThan(1)
@@ -185,7 +185,7 @@ describe('the qualification data core', () => {
         observations: { ...profile.observations, csp: { observed: true, gap: true, detail: '', evidence: {} } },
       }
       await expect(
-        recordScan(db, { orgId, companyId: company!.id, icpProfileId, raw: {}, profile: broken, result }),
+        recordScan(db, { orgId, companyId: company!.id, icpProfile, raw: {}, profile: broken }),
       ).rejects.toThrow()
 
       const after = await db.select().from(schema.scans).where(eq(schema.scans.companyId, company!.id))
@@ -248,13 +248,13 @@ describe('the qualification data core', () => {
 
       // First scan: csp is a gap.
       const before = profileWith({ gaps: ['csp', 'hsts'] })
-      await recordScan(db, { orgId, companyId: company!.id, icpProfileId, raw: {}, profile: before, result: scoreCompany(before, icp) })
+      await recordScan(db, { orgId, companyId: company!.id, icpProfile, raw: {}, profile: before })
       expect((await quotableFindings(db, orgId, company!.id)).map((f) => f.signalKey).sort())
         .toEqual(['csp', 'hsts'])
 
       // They fix the CSP; the re-scan says so.
       const after = profileWith({ gaps: ['hsts'] })
-      await recordScan(db, { orgId, companyId: company!.id, icpProfileId, raw: {}, profile: after, result: scoreCompany(after, icp) })
+      await recordScan(db, { orgId, companyId: company!.id, icpProfile, raw: {}, profile: after })
 
       const quotable = await quotableFindings(db, orgId, company!.id)
       expect(quotable.map((f) => f.signalKey)).toEqual(['hsts'])
@@ -270,14 +270,14 @@ describe('the qualification data core', () => {
         .insert(schema.companies).values({ orgId, domain: 'wentdown.test' })
         .returning({ id: schema.companies.id })
       const good = profileWith({ gaps: ['csp'] })
-      await recordScan(db, { orgId, companyId: company!.id, icpProfileId, raw: {}, profile: good, result: scoreCompany(good, icp) })
+      await recordScan(db, { orgId, companyId: company!.id, icpProfile, raw: {}, profile: good })
 
       const down: SiteProfile = {
         domain: 'wentdown.test', company: '', title: '', fetchOk: false, fetchError: 'TimeoutError',
         hasLoginSurface: false, isSecurityVendor: false, mentionsSecurityHiring: false,
         outdatedLibs: [], observations: {},
       }
-      await recordScan(db, { orgId, companyId: company!.id, icpProfileId, raw: {}, profile: down, result: scoreCompany(down, icp) })
+      await recordScan(db, { orgId, companyId: company!.id, icpProfile, raw: {}, profile: down })
 
       // The newest successful scan is still the source of truth; a failed scan
       // does not silently un-quote a real finding, nor does it add one.
@@ -288,6 +288,138 @@ describe('the qualification data core', () => {
     it('refuses a nonsensical threshold rather than marking everything', async () => {
       await expect(markStaleFindings(db, orgId, 0)).rejects.toThrow(/positive number/)
       await expect(markStaleFindings(db, orgId, -14)).rejects.toThrow(/positive number/)
+    })
+
+    /**
+     * `findings.stale` is a CACHE, written by markStaleFindings, which only
+     * runs when someone runs a scan. A finding that aged past the threshold an
+     * hour ago still has `stale = false` on it. Reading the column instead of
+     * the scan's age is what lets a three-week-old observation go out in an
+     * email — the exact §2.2 failure the column was meant to prevent.
+     */
+    it('will not quote an observation that aged out since the last sweep', async () => {
+      const [company] = await db
+        .insert(schema.companies).values({ orgId, domain: 'agedout.test' })
+        .returning({ id: schema.companies.id })
+      await recordScan(db, {
+        orgId, companyId: company!.id, icpProfile, raw: {}, profile: profileWith({ gaps: ['csp'] }),
+      })
+
+      // The column still says fresh: nothing has swept since the scan.
+      const rows = await db.select().from(schema.findings).where(eq(schema.findings.companyId, company!.id))
+      expect(rows.every((f) => f.stale === false)).toBe(true)
+
+      // Fresh now...
+      expect((await quotableFindings(db, orgId, company!.id, 14)).map((f) => f.signalKey)).toEqual(['csp'])
+      // ...and nothing fifteen days from now, without the column having moved.
+      const later = new Date(Date.now() + 15 * 86_400_000)
+      expect(await quotableFindings(db, orgId, company!.id, 14, later)).toEqual([])
+      const stillFresh = await db.select().from(schema.findings).where(eq(schema.findings.companyId, company!.id))
+      expect(stillFresh.every((f) => f.stale === false), 'the column was not touched').toBe(true)
+    })
+  })
+
+  /**
+   * A score is a claim about a set of findings. Before 0006 it recorded a
+   * company and a time and nothing else, so "the latest score" and "the latest
+   * scan" were two independent lookups that could disagree.
+   */
+  describe('a score names the scan it was computed from', () => {
+    it('stamps the scan it was written with', async () => {
+      const company = await findCompanyByDomain(db, orgId, 'acme.test')
+      const out = await recordScan(db, {
+        orgId, companyId: company!.id, icpProfile, raw: {}, profile: profileWith({ gaps: ['csp'] }),
+      })
+      const rows = await db.select().from(schema.scores).where(eq(schema.scores.id, out.scoreId))
+      expect(rows[0]!.scanId).toBe(out.scanId)
+    })
+
+    it('returns the score of the scan whose findings it returns', async () => {
+      const [company] = await db
+        .insert(schema.companies).values({ orgId, domain: 'paired.test' })
+        .returning({ id: schema.companies.id })
+
+      const first = await recordScan(db, {
+        orgId, companyId: company!.id, icpProfile, raw: {},
+        profile: profileWith({ gaps: ['csp', 'hsts', 'trust_page', 'security_txt'] }),
+      })
+      const second = await recordScan(db, {
+        orgId, companyId: company!.id, icpProfile, raw: {}, profile: profileWith({ gaps: ['hsts'] }),
+      })
+      expect(second.result.score).not.toBe(first.result.score)
+
+      const found = await latestScanWithFindings(db, orgId, company!.id)
+      expect(found!.scan.id).toBe(second.scanId)
+      expect(found!.score!.scanId).toBe(second.scanId)
+      expect(found!.score!.score).toBe(second.result.score)
+    })
+
+    it('puts the latest scan\'s score in the list, not the latest score row', async () => {
+      const [company] = await db
+        .insert(schema.companies).values({ orgId, domain: 'listed.test' })
+        .returning({ id: schema.companies.id })
+      await recordScan(db, {
+        orgId, companyId: company!.id, icpProfile, raw: {},
+        profile: profileWith({ gaps: ['csp', 'hsts', 'trust_page'] }),
+      })
+      const second = await recordScan(db, {
+        orgId, companyId: company!.id, icpProfile, raw: {}, profile: profileWith({ gaps: [] }),
+      })
+
+      const row = (await companyList(db, orgId)).find((c) => c.domain === 'listed.test')
+      expect(row!.score).toBe(second.result.score)
+      expect(row!.lastScanAt?.getTime()).toBe(
+        (await db.select().from(schema.scans).where(eq(schema.scans.id, second.scanId)))[0]!.ranAt.getTime(),
+      )
+    })
+
+    it('refuses to file a score against another company\'s scan', async () => {
+      const acme = await findCompanyByDomain(db, orgId, 'acme.test')
+      const [other] = await db
+        .insert(schema.companies).values({ orgId, domain: 'elsewhere.test' })
+        .returning({ id: schema.companies.id })
+      const out = await recordScan(db, {
+        orgId, companyId: acme!.id, icpProfile, raw: {}, profile: profileWith({ gaps: ['csp'] }),
+      })
+      // Through the raw driver: the point is that the DATABASE refuses this,
+      // not that the repository declines to ask.
+      const message = await expectRejection(() =>
+        test.driver.select(
+          `INSERT INTO scores (org_id, company_id, scan_id, icp_profile_id, score, tier, qualified)
+           VALUES ($1, $2, $3, $4, 99, 'A', true)`,
+          [orgId, other!.id, out.scanId, icpProfile.id],
+        ),
+      )
+      expect(message).toMatch(/scores_scan_matches_company_and_org/)
+    })
+  })
+
+  /**
+   * Scoring returns before the gap list is built for a DISQUALIFIED company, so
+   * reading weights from `result.gaps` wrote 0 against every real gap such a
+   * company has — and the detail page then ranked them all equally at nothing.
+   * The weight of a signal is a property of the ICP, not of the score.
+   */
+  describe('a disqualified company still records what its gaps are worth', () => {
+    it('writes the ICP weight even though the score is zero', async () => {
+      const [company] = await db
+        .insert(schema.companies).values({ orgId, domain: 'vendor.test' })
+        .returning({ id: schema.companies.id })
+
+      const profile = { ...profileWith({ gaps: ['csp', 'hsts'] }), isSecurityVendor: true }
+      const out = await recordScan(db, { orgId, companyId: company!.id, icpProfile, raw: {}, profile })
+
+      expect(out.result.disqualified).not.toBe('')
+      expect(out.result.gaps).toEqual([])
+
+      const rows = await db.select().from(schema.findings).where(eq(schema.findings.scanId, out.scanId))
+      const csp = rows.find((f) => f.signalKey === 'csp')
+      const hsts = rows.find((f) => f.signalKey === 'hsts')
+      expect(csp!.gap).toBe(true)
+      expect(csp!.weight).toBe(icp.signals.csp!.weight)
+      expect(hsts!.weight).toBe(icp.signals.hsts!.weight)
+      // ...and a signal that is not a gap is still worth nothing.
+      expect(rows.find((f) => f.signalKey === 'tls')!.weight).toBe(0)
     })
   })
 })

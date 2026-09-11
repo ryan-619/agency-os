@@ -4,7 +4,7 @@
  *   npm run scan                    every company that has never been scanned
  *   npm run scan -- --all           re-scan everything
  *   npm run scan -- rentman.io      one domain
- *   npm run scan -- --stale         only those whose findings have gone stale
+ *   npm run scan -- --stale         never scanned, or the newest scan has aged out
  *   npm run scan -- --import FILE   import a domain,name CSV first, then scan
  *
  * Reads the active ICP from the database, so weights and thresholds are
@@ -13,7 +13,7 @@
 import { readFileSync } from 'node:fs'
 import { Client } from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
-import { parseIcpDefinition } from '@agency/core'
+import { DEFAULT_STALE_AFTER_DAYS, isStale, parseIcpDefinition } from '@agency/core'
 import { scanDomain } from '@agency/scanner'
 import {
   activeIcpProfile, companyList, importCompanies, markStaleFindings,
@@ -81,18 +81,30 @@ async function main(): Promise<void> {
     }
 
     // Findings age out before anything is scanned, so --stale sees the truth.
-    const staleDays = icp.freshness?.stale_after_days ?? 14
+    const staleDays = icp.freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
     const marked = await markStaleFindings(db, org.id, staleDays)
     if (marked) console.log(`stale   : marked ${marked} finding(s) older than ${staleDays} days`)
 
     const all = await companyList(db, org.id)
+    const neverScanned = (c: { lastScanAt: Date | null }): boolean => c.lastScanAt === null
+    // §2.2: a finding older than the threshold must be RE-VERIFIED, and this is
+    // the command that re-verifies it. Measured against the scan's own time,
+    // the same way markStaleFindings and quotableFindings measure it — asking
+    // `findings.stale` would ask a cache this run has just rewritten.
+    const agedOut = (c: { lastScanAt: Date | null }): boolean =>
+      c.lastScanAt !== null && isStale(c.lastScanAt, staleDays)
+
     let targets = all
     if (args.domains.length) targets = all.filter((c) => args.domains.includes(c.domain))
-    else if (args.staleOnly) targets = all.filter((c) => c.lastScanAt === null)
-    else if (!args.all) targets = all.filter((c) => c.lastScanAt === null)
+    else if (args.staleOnly) targets = all.filter((c) => neverScanned(c) || agedOut(c))
+    else if (!args.all) targets = all.filter(neverScanned)
 
     if (!targets.length) {
-      console.log('\nnothing to scan (use --all to re-scan)')
+      console.log(
+        args.staleOnly
+          ? `\nnothing older than ${staleDays} days (use --all to re-scan everything)`
+          : '\nnothing to scan (use --all to re-scan)',
+      )
       return
     }
     console.log(`\nscanning ${targets.length} of ${all.length} companies, ${CONCURRENCY} at a time\n`)
@@ -107,16 +119,17 @@ async function main(): Promise<void> {
         if (!target) return
         const started = Date.now()
         try {
-          const { raw, profile, result } = await scanDomain(target.domain, icp, {
+          const { raw, profile } = await scanDomain(target.domain, icp, {
             company: target.name ?? undefined,
           })
-          await recordScan(db, {
+          // The score is computed inside recordScan, from the same profile row
+          // it stamps, so what is printed here is what was written.
+          const { result } = await recordScan(db, {
             orgId: org.id,
             companyId: target.companyId,
-            icpProfileId: profileRow.id,
+            icpProfile: { id: profileRow.id, definition: icp },
             raw,
             profile,
-            result,
           })
           done++
           const tag = result.disqualified
