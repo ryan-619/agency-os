@@ -22,18 +22,18 @@
   },
 
   "signals": {
-    "csp":                  { "weight": 15, "why": "No Content-Security-Policy — the loudest AppSec tell on a login-bearing app" },
-    "trust_page":           { "weight": 14, "why": "No /security or /trust page — cannot answer an enterprise security review" },
-    "compliance_claim":     { "weight": 12, "why": "No SOC 2 / ISO 27001 claim anywhere public — the deal-blocker they haven't hit yet" },
-    "security_txt":         { "weight": 12, "why": "No /.well-known/security.txt — no disclosure process, no named security owner" },
-    "hsts":                 { "weight": 10, "why": "No Strict-Transport-Security — trivially fixed, always flagged in questionnaires" },
-    "outdated_js":          { "weight": 10, "why": "Known-outdated JS library served in production — concrete, demonstrable" },
-    "frame_protection":     { "weight":  8, "why": "No X-Frame-Options / frame-ancestors — clickjacking exposure" },
-    "tls":                  { "weight":  8, "why": "Certificate or TLS configuration problem" },
-    "server_banner":        { "weight":  7, "why": "Server / X-Powered-By header discloses stack and version" },
-    "content_type_options": { "weight":  5, "why": "No X-Content-Type-Options — MIME sniffing" },
-    "referrer_policy":      { "weight":  4, "why": "No Referrer-Policy — leaks internal URLs to third parties" },
-    "permissions_policy":   { "weight":  3, "why": "No Permissions-Policy" }
+    "csp":                  { "weight": 15, "order":  1, "why": "No Content-Security-Policy — the loudest AppSec tell on a login-bearing app" },
+    "trust_page":           { "weight": 14, "order":  2, "why": "No /security or /trust page — cannot answer an enterprise security review" },
+    "compliance_claim":     { "weight": 12, "order":  3, "why": "No SOC 2 / ISO 27001 claim anywhere public — the deal-blocker they haven't hit yet" },
+    "security_txt":         { "weight": 12, "order":  4, "why": "No /.well-known/security.txt — no disclosure process, no named security owner" },
+    "hsts":                 { "weight": 10, "order":  5, "why": "No Strict-Transport-Security — trivially fixed, always flagged in questionnaires" },
+    "outdated_js":          { "weight": 10, "order":  6, "why": "Known-outdated JS library served in production — concrete, demonstrable" },
+    "frame_protection":     { "weight":  8, "order":  7, "why": "No X-Frame-Options / frame-ancestors — clickjacking exposure" },
+    "tls":                  { "weight":  8, "order":  8, "why": "Certificate or TLS configuration problem" },
+    "server_banner":        { "weight":  7, "order":  9, "why": "Server / X-Powered-By header discloses stack and version" },
+    "content_type_options": { "weight":  5, "order": 10, "why": "No X-Content-Type-Options — MIME sniffing" },
+    "referrer_policy":      { "weight":  4, "order": 11, "why": "No Referrer-Policy — leaks internal URLs to third parties" },
+    "permissions_policy":   { "weight":  3, "order": 12, "why": "No Permissions-Policy" }
   },
 
   "scoring": {

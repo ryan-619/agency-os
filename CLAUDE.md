@@ -163,7 +163,7 @@ check and should be added if the scanner is ever aimed at untrusted input.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 356 tests: domain + migrations + invariants + seed + parity
+npm test                 # 364 tests: domain + migrations + invariants + seed + parity
 npm run build            # packages, then the Next app
 
 # database (needs DATABASE_URL)
@@ -310,6 +310,30 @@ change behaviour for anyone who already sets it.
 create a second user and fail on `org_id NOT NULL` — locking the person out
 with an opaque error. Storing only the normalised form makes the gate and the
 adapter agree by construction.
+
+**`icp_profiles.definition.signals` carries an explicit `order`, and nothing
+iterates the object's keys.** `definition` is `jsonb`, and jsonb does not keep
+an object's keys in the order they were written — it sorts them by length, then
+bytewise. The seeded profile is authored heaviest-first; the row comes back as
+`csp tls hsts trust_page outdated_js security_txt …`.
+
+That reorders things the product shows. `strengths` is built by walking the
+signals, and three pairs of signals share a weight, so the stable sort that
+follows keeps the walk's order for each pair — two of the three flip
+(`compliance_claim`/`security_txt` and `frame_protection`/`tls`), both inside
+the six evidence lines a draft quotes. The parity harness reads the seed FILE,
+so it agreed with the Python engine while the app disagreed with both.
+
+`orderedSignals()` in `packages/core` is now the only way to walk them, and
+`packages/db/test/icp-round-trip.test.ts` stores the real definition in a real
+Postgres, reads it back, and asserts the score, the gap order, the strength
+order and the evidence lines are identical — starting with an assertion that
+jsonb really did reorder the keys, so the suite cannot pass vacuously.
+A definition where only some signals carry an `order`, or where two share one,
+is rejected by `parseIcpDefinition` rather than silently guessed at. Without
+any `order` the fallback is the key name: not the author's intent, but at least
+the same in the file and in the row. **A database seeded before this change
+holds a definition with no `order` and will use that fallback; re-seed it.**
 
 **The dashboard reads the stored ICP definition** rather than repeating §11's
 numbers as literals. The threshold, channels and daily cap shown are whatever

@@ -9,7 +9,7 @@
  *
  * Pure. No I/O, no framework, no database (§3).
  */
-import type { IcpDefinition, SignalKey } from './icp.js'
+import { orderedSignals, type IcpDefinition, type SignalKey } from './icp.js'
 
 /** One signal as the scanner saw it. Mirrors the Python `observations` entry. */
 export interface Observation {
@@ -152,7 +152,7 @@ export function scoreCompany(profile: SiteProfile, icp: IcpDefinition): ScoreRes
   const gaps: ScoredGap[] = []
   const strengths: ScoredStrength[] = []
 
-  for (const [key, signal] of Object.entries(icp.signals)) {
+  for (const [key, signal] of orderedSignals(icp)) {
     const o = profile.observations[key]
     // Never penalise for what could not be seen: excluded from the numerator
     // AND the denominator (§2.2).
@@ -168,8 +168,8 @@ export function scoreCompany(profile: SiteProfile, icp: IcpDefinition): ScoreRes
 
   const score = maxPossible ? roundHalfToEven((100 * raw) / maxPossible) : 0
 
-  // Stable sort by descending weight, so equal weights keep ICP order — the
-  // same tie-break Python's stable sort gives.
+  // Stable sort by descending weight, so equal weights keep the order the walk
+  // above used — the same tie-break Python's stable sort gives.
   const sortedGaps = [...gaps].sort((a, b) => b.weight - a.weight)
 
   let tier = ''
