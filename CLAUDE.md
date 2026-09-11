@@ -163,7 +163,7 @@ check and should be added if the scanner is ever aimed at untrusted input.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 340 tests: domain + migrations + invariants + seed + parity
+npm test                 # 356 tests: domain + migrations + invariants + seed + parity
 npm run build            # packages, then the Next app
 
 # database (needs DATABASE_URL)
@@ -388,13 +388,45 @@ Python's `\s` and `str.strip()` are not JavaScript's — Python has U+001C..U+00
 and U+0085, JavaScript has U+FEFF — so every ported regex spells the class out
 from the generated `PY_SPACE_CLASS` and `pyStrip()` replaces `String.trim()`.
 
-**One deliberate divergence.** Python's public-path probe does
-`except Exception: continue`, so a timeout, DNS failure or WAF block on
-`/security` is indistinguishable from a clean 404 — both become "no trust
-page". That is the exact case §2.2 forbids. Here a 404 still counts as absent,
-because a 404 IS an observation, but silence from every candidate marks the
-signal `observed = false`. §2 outranks port fidelity. Asserted explicitly in
-`packages/scanner/test/extract.test.ts` rather than hidden.
+**The HTTP client is `node:https`, not `fetch()`.** The WHATWG Response hides
+the two things this module has to get right, and the fixtures cannot show it:
+the recording stores a body that is already decoded and headers that are
+already a map, so a mistake made *before* the recording is invisible to parity.
+
+1. The reference's `resp.read(1_500_000)` caps the **encoded** stream and only
+   then decompresses. `fetch()` decompresses first, so the 1.5 MB cap was being
+   applied to a different quantity — a gzipped page read to a different depth
+   than the engine this one must agree with.
+2. `Headers.get` joins repeated headers with `", "`; Python's
+   `email.message.Message.get` returns the **first**. A site sending two
+   `Content-Security-Policy` headers had a third, invented one quoted back to
+   it as what it serves.
+
+Owning the request also means owning the redirect chain, and `redirectTarget()`
+re-checks `isScannableHost` on **every hop** — a divergence in the other
+direction. urllib follows a redirect wherever it points, so refusing
+`169.254.169.254` in `companies.domain` bought nothing while a company's own
+site could answer `302 Location: http://169.254.169.254/` and be followed.
+`Accept-Encoding` is the reference's exact `gzip, deflate` (not undici's
+brotli), redirects follow 301/302/303/307 and not 308 — matching Python 3.9,
+where `http_error_308` does not exist — and stop at urllib's ten.
+
+**Three deliberate divergences, all §2 over port fidelity.**
+
+1. Python's public-path probe does `except Exception: continue`, so a timeout,
+   DNS failure or WAF block on `/security` is indistinguishable from a clean
+   404 — both become "no trust page". That is the exact case §2.2 forbids. Here
+   a 404 still counts as absent, because a 404 IS an observation, but silence
+   from every candidate marks the signal `observed = false`.
+2. A body that hit the read cap is a PREFIX of the page, and "SOC 2 is not in
+   the text" is really "SOC 2 is not in the part we read". The reference cannot
+   tell the difference and reports the gap. Here a **negative** result off a
+   truncated body is `observed = false`; a **positive** one still stands, since
+   a term found in the half that was read was genuinely read. `truncated` is
+   recorded on the capture so the reason is in the evidence.
+3. The redirect host check above.
+
+All three are asserted explicitly in `packages/scanner/test/`, never hidden.
 
 If you re-record the fixtures, the goldens must be regenerated in the same
 commit, and the diff should be read: a changed score means the site changed, or

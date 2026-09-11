@@ -6,9 +6,11 @@
  * lets packages/scanner/test/parity.test.ts compare it against the Python
  * original for all sixteen seed domains.
  *
- * ONE DELIBERATE DIVERGENCE from the Python engine, documented at
- * `probePublicPath` below and asserted explicitly by the parity test: §2.2
- * outranks port fidelity.
+ * TWO DELIBERATE DIVERGENCES from the Python engine, both documented where
+ * they happen — at `probePublicPath` and at `compliance_claim` — and both
+ * asserted explicitly rather than hidden. In each, §2.2 outranks port
+ * fidelity: a question the scan did not actually answer must not come out as a
+ * gap.
  */
 import type { Observation, OutdatedLib, SiteProfile } from '@agency/core'
 import { extractHtmlFacts } from './html.js'
@@ -192,6 +194,7 @@ export function extractProfile(raw: RawCapture, company?: string): SiteProfile {
   const html = raw.home.body
   const low = html.toLowerCase()
   const homeLength = html.trim().length
+  const truncated = raw.home.truncated === true
   const headers = raw.home.headers
   const facts = extractHtmlFacts(html)
   const url = raw.home.finalUrl || `https://${raw.domain}/`
@@ -263,22 +266,38 @@ export function extractProfile(raw: RawCapture, company?: string): SiteProfile {
         })
 
   // --- compliance posture stated publicly ----------------------------------
+  // THE SECOND DIVERGENCE. A body that hit the read cap is a PREFIX of the
+  // page, and "the term is not in the prefix" is not "the company does not say
+  // it". Python cannot tell the difference and reports the gap; §2.2 says a
+  // finding nobody observed must not be stated, so a negative result off a
+  // truncated body is unobserved. A POSITIVE result still stands — a term
+  // found in the half that was read was genuinely read.
   const claims = COMPLIANCE_TERMS.filter((t) => low.includes(t))
   const hard = claims.filter((c) => !SOFT_COMPLIANCE_TERMS.includes(c))
-  observations.compliance_claim = observation(true, hard.length === 0, claims.join(', '), {
-    url, termsFound: claims, qualifyingTerms: hard,
-  })
+  observations.compliance_claim =
+    truncated && hard.length === 0
+      ? observation(false, null, 'homepage exceeded the read cap', {
+          url, outcome: 'body truncated', termsFound: claims,
+        })
+      : observation(true, hard.length === 0, claims.join(', '), {
+          url, termsFound: claims, qualifyingTerms: hard,
+        })
 
   // --- outdated JS served in production ------------------------------------
   const outdatedLibs = facts.scripts
     .map(outdatedLibFor)
     .filter((l): l is OutdatedLib => l !== null)
-  observations.outdated_js = observation(
-    true,
-    outdatedLibs.length > 0,
-    outdatedLibs.map((l) => `${l.lib} ${l.version}`).join('; '),
-    { url, libraries: outdatedLibs.map((l) => ({ lib: l.lib, version: l.version, src: l.src })) },
-  )
+  observations.outdated_js =
+    truncated && outdatedLibs.length === 0
+      ? observation(false, null, 'homepage exceeded the read cap', {
+          url, outcome: 'body truncated', scriptsRead: facts.scripts.length,
+        })
+      : observation(
+          true,
+          outdatedLibs.length > 0,
+          outdatedLibs.map((l) => `${l.lib} ${l.version}`).join('; '),
+          { url, libraries: outdatedLibs.map((l) => ({ lib: l.lib, version: l.version, src: l.src })) },
+        )
 
   // --- TLS ------------------------------------------------------------------
   if (raw.tls.ok) {

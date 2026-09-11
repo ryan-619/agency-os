@@ -267,3 +267,69 @@ describe('header interpretation', () => {
     expect(two.isSecurityVendor).toBe(true)
   })
 })
+
+
+/**
+ * §2.2 again, at the other end of the pipe: the read cap.
+ *
+ * The reference engine reads 1.5 MB off the wire and interprets whatever that
+ * turns out to be. If the homepage was longer, "SOC 2 is not in the text" is
+ * really "SOC 2 is not in the part we read" — and it reports the gap anyway.
+ * A finding nobody observed is exactly what §2.2 forbids, so a NEGATIVE result
+ * off a truncated body is unobserved here. A positive one still stands: a term
+ * found in the half that was read was genuinely read.
+ */
+describe('a body that hit the read cap cannot produce an absence (§2.2)', () => {
+  const base = {
+    domain: 'example.com',
+    capturedAt: '2026-09-11T00:00:00.000Z',
+    paths: {},
+    tls: { ok: false, error: 'not attempted' },
+  } as const
+
+  const withBody = (body: string, truncated: boolean): RawCapture => ({
+    ...base,
+    home: { ok: true, status: 200, finalUrl: 'https://example.com/', headers: {}, body, truncated },
+  })
+
+  it('does not claim a company states no compliance posture', () => {
+    const o = extractProfile(withBody('<p>nothing about certifications</p>', true)).observations
+    expect(o.compliance_claim?.observed).toBe(false)
+    expect(o.compliance_claim?.gap).toBeNull()
+  })
+
+  it('still claims one when the term was actually read', () => {
+    const o = extractProfile(withBody('<p>we are SOC 2 Type II certified</p>', true)).observations
+    expect(o.compliance_claim?.observed).toBe(true)
+    expect(o.compliance_claim?.gap).toBe(false)
+  })
+
+  it('does not claim a company serves no outdated JavaScript', () => {
+    const o = extractProfile(withBody('<script src="/js/app.js"></script>', true)).observations
+    expect(o.outdated_js?.observed).toBe(false)
+    expect(o.outdated_js?.gap).toBeNull()
+  })
+
+  it('still reports an outdated library it actually saw', () => {
+    const o = extractProfile(
+      withBody('<script src="/js/jquery-1.11.0.min.js"></script>', true),
+    ).observations
+    expect(o.outdated_js?.observed).toBe(true)
+    expect(o.outdated_js?.gap).toBe(true)
+  })
+
+  it('reports both normally when the body was complete', () => {
+    const o = extractProfile(withBody('<p>nothing here</p>', false)).observations
+    expect(o.compliance_claim?.observed).toBe(true)
+    expect(o.compliance_claim?.gap).toBe(true)
+    expect(o.outdated_js?.observed).toBe(true)
+    expect(o.outdated_js?.gap).toBe(false)
+  })
+
+  it('leaves the header signals alone — truncation is a body problem', () => {
+    const o = extractProfile(withBody('<p>x</p>', true)).observations
+    for (const key of ['csp', 'hsts', 'frame_protection', 'content_type_options']) {
+      expect(o[key]?.observed, key).toBe(true)
+    }
+  })
+})

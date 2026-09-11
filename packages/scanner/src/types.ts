@@ -13,6 +13,12 @@ export interface RawResponse {
   /** HTTP status, or null when the request never completed. */
   readonly status: number | null
   readonly body: string
+  /**
+   * The read hit the 1.5 MB cap, so `body` is a PREFIX of the page rather than
+   * the page. Recorded because §2.2 turns on the difference: an absence read
+   * off a body that was cut short was not observed.
+   */
+  readonly truncated?: boolean
   /** Populated instead of status when the request failed outright. */
   readonly error?: string
 }
@@ -35,9 +41,14 @@ export interface RawCapture {
     readonly ok: boolean
     readonly status: number | null
     readonly finalUrl: string
-    /** Header names lower-cased, exactly as the Python engine sees them. */
+    /**
+     * Header names lower-cased, the FIRST value of a repeated header — which
+     * is what `email.message.Message.get` gives the Python engine.
+     */
     readonly headers: Readonly<Record<string, string>>
     readonly body: string
+    /** See RawResponse.truncated. */
+    readonly truncated?: boolean
     readonly error?: string
   }
   /**
