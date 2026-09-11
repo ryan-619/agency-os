@@ -9,7 +9,8 @@
  * "identical" is.
  */
 
-import { parseHtml, pyStrip, type Attr } from './htmlparser.js'
+import { parseHtml, type Attr } from './htmlparser.js'
+import { pyLen, pyStrip } from './pystr.js'
 import { unescape } from './unescape.js'
 
 export { unescape as decodeEntities }
@@ -29,13 +30,6 @@ function asDict(attrs: readonly Attr[]): Map<string, string | null> {
   const out = new Map<string, string | null>()
   for (const [name, value] of attrs) out.set(name, value)
   return out
-}
-
-/** `len(s)` — Python counts code points, JavaScript counts UTF-16 units. */
-function codePointLength(s: string): number {
-  let count = 0
-  for (const _ of s) count += 1
-  return count
 }
 
 export function extractHtmlFacts(html: string): HtmlFacts {
@@ -75,7 +69,7 @@ export function extractHtmlFacts(html: string): HtmlFacts {
         if (inTitle && titleLength < 200) {
           const chunk = pyStrip(text)
           title += chunk
-          titleLength += codePointLength(chunk)
+          titleLength += pyLen(chunk)
         }
       },
     })

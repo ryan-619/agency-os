@@ -163,7 +163,7 @@ check and should be added if the scanner is ever aimed at untrusted input.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 364 tests: domain + migrations + invariants + seed + parity
+npm test                 # 382 tests: domain + migrations + invariants + seed + parity
 npm run build            # packages, then the Next app
 
 # database (needs DATABASE_URL)
@@ -401,6 +401,17 @@ hostile tag soup — hand-written traps plus seeded random soup — through the
 port and asserts it answers what the REFERENCE extractor answered when
 `npm run fixtures:html-parity` ran it. The old regex reader disagrees with
 Python on **1169 of those 2009**; the port disagrees on none.
+
+**`pystr.ts` holds the Python string semantics**, because the port's length
+rules and truncations are Python's and Python counts CODE POINTS where
+JavaScript counts UTF-16 units. `pyLen`, `pyHead` and `pyStrip` replace
+`.length`, `.slice(0, n)` and `.trim()` wherever the number came from
+`signals.py`. The difference is not academic: a `/security` page of 39 emoji is
+39 characters to the reference and 78 to `.length`, which decides whether it
+clears the 40-character floor and whether the SPA-shell guard calls it the
+homepage. And `detail[:160]` cut as UTF-16 can split a surrogate pair, leaving
+half a character in a string that is then stored as `findings.evidence` and
+rendered.
 
 Details that are ported on purpose and look like bugs, because they are the
 reference's behaviour and the score depends on them: an unclosed `<title>`

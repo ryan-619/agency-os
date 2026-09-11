@@ -26,6 +26,7 @@
  */
 
 import { PY_SPACE_CLASS as S } from './python-tables.js'
+import { pyStrip } from './pystr.js'
 import { unescape } from './unescape.js'
 
 /**
@@ -111,17 +112,6 @@ function matchAt(re: RegExp, s: string, pos: number): RegExpExecArray | null {
 function searchFrom(re: RegExp, s: string, pos: number): RegExpExecArray | null {
   re.lastIndex = pos
   return re.exec(s)
-}
-
-const PY_STRIP = new RegExp(`^[${S}]+|[${S}]+$`, 'g')
-
-/**
- * `str.strip()`. Not `String.prototype.trim()`: the two disagree about
- * U+001C..U+001F, U+0085 and U+FEFF, and the reference strips every text run
- * it appends to the title.
- */
-export function pyStrip(s: string): string {
-  return s.replace(PY_STRIP, '')
 }
 
 class Parser {

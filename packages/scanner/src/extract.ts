@@ -18,9 +18,15 @@ import {
   COMPLIANCE_TERMS, OUTDATED_JS, SECURITY_TEAM_TERMS, SECURITY_VENDOR_TERMS,
   SOFT_COMPLIANCE_TERMS, TLS_EXPIRY_WARN_DAYS, VERSION_IN_URL, WEAK_TLS_PROTOCOLS,
 } from './terms.js'
+import { pyHead, pyLen, pyStrip } from './pystr.js'
 import { PUBLIC_PATHS, type RawCapture, type RawResponse } from './types.js'
 
-/** Detail strings are capped at 160 characters, as the Python `obs()` does. */
+/**
+ * Detail strings are capped at 160 characters, as the Python `obs()` does —
+ * 160 CODE POINTS, which is what `detail[:160]` means. Truncating UTF-16 units
+ * instead cuts a page with an emoji in a different place, and can leave half a
+ * surrogate pair in a string that goes on to be stored as evidence.
+ */
 const DETAIL_MAX = 160
 
 function observation(
@@ -29,7 +35,7 @@ function observation(
   detail: string,
   evidence: Record<string, unknown>,
 ): Observation {
-  return { observed, gap: observed ? Boolean(gap) : null, detail: detail.slice(0, DETAIL_MAX), evidence }
+  return { observed, gap: observed ? Boolean(gap) : null, detail: pyHead(detail, DETAIL_MAX), evidence }
 }
 
 /**
@@ -128,18 +134,20 @@ export function probePublicPath(
     sawAnyAnswer = true
 
     if (res.status !== 200) continue
-    const body = res.body.trim()
-    if (body.length < 40) continue
+    // Every length below is Python's: code points, and Python's whitespace set.
+    const body = pyStrip(res.body)
+    const bodyLength = pyLen(body)
+    if (bodyLength < 40) continue
 
     if (path.endsWith('.txt')) {
       // A catch-all serving HTML for a .txt path is not a security.txt.
-      if (body.slice(0, 400).toLowerCase().includes('<html')) continue
+      if (pyHead(body, 400).toLowerCase().includes('<html')) continue
       if (!/(contact|policy|expires)\s*:/i.test(body)) continue
       return { kind: 'found', path }
     }
 
     // An HTML page the same size as the homepage is the SPA shell, not a page.
-    if (homeLength && Math.abs(body.length - homeLength) < 40) continue
+    if (homeLength && Math.abs(bodyLength - homeLength) < 40) continue
     return { kind: 'found', path }
   }
 
@@ -165,7 +173,7 @@ export function outdatedLibFor(src: string): OutdatedLib | null {
         : version[2] < entry.floor[2]
 
   if (!isBelow) return null
-  return { lib, version: version.join('.'), note: entry.note, src: src.slice(0, 150) }
+  return { lib, version: version.join('.'), note: entry.note, src: pyHead(src, 150) }
 }
 
 /**
@@ -193,7 +201,7 @@ export function extractProfile(raw: RawCapture, company?: string): SiteProfile {
 
   const html = raw.home.body
   const low = html.toLowerCase()
-  const homeLength = html.trim().length
+  const homeLength = pyLen(pyStrip(html))
   const truncated = raw.home.truncated === true
   const headers = raw.home.headers
   const facts = extractHtmlFacts(html)
@@ -205,7 +213,7 @@ export function extractProfile(raw: RawCapture, company?: string): SiteProfile {
   // Python truncates this one to 140 at the call site, before obs() applies
   // its own 160 cap — so a long policy shows 140 characters, not 160. The
   // full value is kept in `evidence`, which is what a finding is judged on.
-  observations.csp = observation(true, !csp, csp.slice(0, 140), {
+  observations.csp = observation(true, !csp, pyHead(csp, 140), {
     url, header: 'content-security-policy', seen: csp || 'absent',
   })
 
@@ -240,7 +248,7 @@ export function extractProfile(raw: RawCapture, company?: string): SiteProfile {
 
   // --- server banner --------------------------------------------------------
   // A bare CDN name is not a disclosure; a version number is.
-  const banner = [headers.server, headers['x-powered-by']].filter(Boolean).join(' ').trim()
+  const banner = pyStrip([headers.server, headers['x-powered-by']].filter(Boolean).join(' '))
   const leaky = /\d+\.\d+/.test(banner) || Boolean(headers['x-powered-by'])
   observations.server_banner = observation(true, leaky, banner, {
     url, server: headers.server ?? 'absent', xPoweredBy: headers['x-powered-by'] ?? 'absent',
@@ -317,7 +325,7 @@ export function extractProfile(raw: RawCapture, company?: string): SiteProfile {
   return {
     domain: raw.domain,
     company: company ?? '',
-    title: facts.title.slice(0, DETAIL_MAX),
+    title: pyHead(facts.title, DETAIL_MAX),
     fetchOk: true,
     fetchError: '',
     hasLoginSurface: facts.hasLogin,

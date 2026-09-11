@@ -107,23 +107,23 @@ describe('the ICP definition survives the round trip through jsonb', () => {
 })
 
 describe('an ordering that is half there is rejected rather than guessed at', () => {
-  const base = JSON.parse(source) as IcpDefinition & { signals: Record<string, Record<string, unknown>> }
+  type Editable = { signals: Record<string, Record<string, unknown> | undefined> }
 
   it('refuses a definition where only some signals carry an order', () => {
-    const half = JSON.parse(source) as typeof base
-    delete half.signals.csp!.order
+    const half = JSON.parse(source) as Editable
+    delete half.signals.csp!['order']
     expect(() => parseIcpDefinition(half)).toThrow(/every signal needs an order once any has one/)
   })
 
   it('refuses duplicate orders', () => {
-    const dup = JSON.parse(source) as typeof base
-    dup.signals.csp!.order = dup.signals.trust_page!.order
+    const dup = JSON.parse(source) as Editable
+    dup.signals.csp!['order'] = dup.signals.trust_page!['order']
     expect(() => parseIcpDefinition(dup)).toThrow(/order must be unique/)
   })
 
   it('falls back to the key name when no signal carries an order, so it is still total', () => {
-    const none = JSON.parse(source) as typeof base
-    for (const s of Object.values(none.signals)) delete s.order
+    const none = JSON.parse(source) as Editable
+    for (const sig of Object.values(none.signals)) delete sig!['order']
     const parsed = parseIcpDefinition(none)
     const keys = orderedSignals(parsed).map(([k]) => k)
     expect(keys).toEqual([...keys].sort())
