@@ -20,6 +20,8 @@
     "dev": "npm run dev --workspace @agency/web",
     "fixtures:capture": "tsx tools/capture-fixtures.ts",
     "fixtures:golden": "python3 tools/python-golden.py",
+    "fixtures:html-parity": "python3 tools/html-parity-corpus.py",
+    "tables:python": "python3 tools/generate-python-tables.py",
     "scan": "tsx --env-file-if-exists=.env tools/scan.ts"
   },
   "devDependencies": {

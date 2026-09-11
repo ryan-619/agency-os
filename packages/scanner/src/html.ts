@@ -1,47 +1,18 @@
 /**
- * The small amount of HTML understanding the scanner needs, matching what
- * Python's `html.parser.HTMLParser` gives the original engine: the page title,
- * the `src` of every script tag, and whether the page offers a way to log in.
+ * The three questions the scanner asks of a page's markup: what the title
+ * says, what scripts it loads, and whether it offers a way to log in.
  *
- * Deliberately not a full parser. These three questions are answerable from
- * tag soup, and a dependency here would be a dependency in the one package
- * whose output has to match another language's byte for byte.
+ * This is a port of the `HTMLParser` subclass in the reference engine's
+ * `signals.py`, sitting on the port of HTMLParser itself in htmlparser.ts.
+ * It is deliberately small and deliberately literal — the answers feed a score
+ * that has to match the other engine's, so "sensible" is not the goal and
+ * "identical" is.
  */
 
-const NAMED_ENTITIES: Readonly<Record<string, string>> = {
-  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
-}
+import { parseHtml, pyStrip, type Attr } from './htmlparser.js'
+import { unescape } from './unescape.js'
 
-/** Mirrors HTMLParser(convert_charrefs=True). */
-export function decodeEntities(text: string): string {
-  return text.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);?/g, (match, body: string) => {
-    if (body.startsWith('#')) {
-      const code = body[1] === 'x' || body[1] === 'X'
-        ? Number.parseInt(body.slice(2), 16)
-        : Number.parseInt(body.slice(1), 10)
-      return Number.isFinite(code) && code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : match
-    }
-    return NAMED_ENTITIES[body.toLowerCase()] ?? match
-  })
-}
-
-/** Attributes of one tag, names lower-cased, values entity-decoded. */
-function attributes(tag: string): Record<string, string> {
-  const out: Record<string, string> = {}
-  const re = /([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?:\s*=\s*("[^"]*"|'[^']*'|[^\s"'>`]+))?/g
-  // Skip the tag name itself.
-  const body = tag.replace(/^<\s*[a-zA-Z0-9]+/, '')
-  let m: RegExpExecArray | null
-  while ((m = re.exec(body)) !== null) {
-    const name = m[1]!.toLowerCase()
-    let value = m[2] ?? ''
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1)
-    }
-    out[name] = decodeEntities(value)
-  }
-  return out
-}
+export { unescape as decodeEntities }
 
 export interface HtmlFacts {
   /** Concatenated, per-chunk-stripped title text, as Python builds it. */
@@ -50,45 +21,68 @@ export interface HtmlFacts {
   readonly hasLogin: boolean
 }
 
-/** Hrefs containing any of these read as a way into a product. */
+/** An href containing any of these reads as a way into a product. */
 const LOGIN_HREF_HINTS = ['/login', '/signin', '/sign-in', '/app', '/dashboard'] as const
 
-export function extractHtmlFacts(html: string): HtmlFacts {
-  // --- title ---------------------------------------------------------------
-  // Python's HTMLParser sets its in-title flag on EVERY <title> start tag,
-  // wherever it appears, and appends each stripped text chunk. Inline SVG
-  // icons carry their own <title> elements, so a page's "title" is really the
-  // concatenation of all of them — which is what the original engine records
-  // and therefore what this has to reproduce. The 200-character check happens
-  // BEFORE each append, so the result can overshoot by one chunk; the caller
-  // then truncates to 160.
-  let title = ''
-  for (const m of html.matchAll(/<title\b[^>]*>([\s\S]*?)<\/title\s*>/gi)) {
-    for (const chunk of m[1]!.split(/<[^>]*>/)) {
-      if (title.length >= 200) break
-      title += decodeEntities(chunk).trim()
-    }
-    if (title.length >= 200) break
-  }
+/** `dict(attrs)` — a later duplicate overwrites an earlier one. */
+function asDict(attrs: readonly Attr[]): Map<string, string | null> {
+  const out = new Map<string, string | null>()
+  for (const [name, value] of attrs) out.set(name, value)
+  return out
+}
 
-  // --- scripts and login surface -------------------------------------------
+/** `len(s)` — Python counts code points, JavaScript counts UTF-16 units. */
+function codePointLength(s: string): number {
+  let count = 0
+  for (const _ of s) count += 1
+  return count
+}
+
+export function extractHtmlFacts(html: string): HtmlFacts {
+  let title = ''
+  let titleLength = 0
+  let inTitle = false
   const scripts: string[] = []
   let hasLogin = false
 
-  for (const m of html.matchAll(/<\s*(script|input|a)\b([^>]*)>/gi)) {
-    const tagName = m[1]!.toLowerCase()
-    const attrs = attributes(m[0]!)
-
-    if (tagName === 'script') {
-      const src = attrs.src
-      if (src) scripts.push(src)
-    } else if (tagName === 'input') {
-      // Python compares the raw attribute value to "password" exactly.
-      if (attrs.type === 'password') hasLogin = true
-    } else {
-      const href = (attrs.href ?? '').toLowerCase()
-      if (href && LOGIN_HREF_HINTS.some((hint) => href.includes(hint))) hasLogin = true
-    }
+  try {
+    parseHtml(html, {
+      starttag(tag, attrs) {
+        const a = asDict(attrs)
+        if (tag === 'title') {
+          // The flag is set by EVERY <title>, wherever it appears. An inline
+          // SVG icon carries its own, so a page's "title" is really the
+          // concatenation of all of them — which is what the reference engine
+          // records, and therefore what this has to reproduce.
+          inTitle = true
+        } else if (tag === 'script') {
+          const src = a.get('src')
+          if (src) scripts.push(src)
+        } else if (tag === 'input') {
+          // Compared to "password" exactly, on the decoded value.
+          if (a.get('type') === 'password') hasLogin = true
+        } else if (tag === 'a') {
+          const href = (a.get('href') ?? '').toLowerCase()
+          if (LOGIN_HREF_HINTS.some((hint) => href.includes(hint))) hasLogin = true
+        }
+      },
+      endtag(tag) {
+        if (tag === 'title') inTitle = false
+      },
+      data(text) {
+        // The length check happens BEFORE the append, so the result can
+        // overshoot 200 by one chunk. The caller then truncates to 160.
+        if (inTitle && titleLength < 200) {
+          const chunk = pyStrip(text)
+          title += chunk
+          titleLength += codePointLength(chunk)
+        }
+      },
+    })
+  } catch {
+    // `except Exception: pass` at the reference's call site. Malformed markup
+    // that makes HTMLParser raise leaves the partial result standing, and the
+    // rest of the document unread — by both engines, identically.
   }
 
   return { title, scripts, hasLogin }

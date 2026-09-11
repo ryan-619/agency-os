@@ -163,7 +163,7 @@ check and should be added if the scanner is ever aimed at untrusted input.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 147 tests: domain + migrations + invariants + seed
+npm test                 # 340 tests: domain + migrations + invariants + seed + parity
 npm run build            # packages, then the Next app
 
 # database (needs DATABASE_URL)
@@ -182,6 +182,8 @@ npm run scan -- --import f.csv  # import a domain,name CSV, then scan
 # the parity harness — regenerate only when re-recording on purpose
 npm run fixtures:capture      # re-record the seed domains' public surface
 npm run fixtures:golden       # re-run the PYTHON engine over those recordings
+npm run fixtures:html-parity  # re-run the PYTHON parser over the tag-soup corpus
+npm run tables:python         # regenerate the entity/whitespace tables from CPython
 
 # the whole stack
 cp .env.example .env
@@ -353,6 +355,39 @@ shipped silently:
 3. The CSP detail is truncated to 140 at the Python call site, before the
    generic 160 cap.
 
+**The HTML reader is a port of `html.parser.HTMLParser`, not a regex.**
+`packages/scanner/src/htmlparser.ts` reproduces CPython 3.9's parser state
+machine function for function, `unescape.ts` reproduces `html.unescape`, and
+`python-tables.ts` is GENERATED from Python's own tables
+(`npm run tables:python`) so a 2231-entry entity table cannot drift by a typo.
+
+It started as three regexes, which is how sixteen real pages can pass parity
+while the engine is still wrong. A regex reads markup HTMLParser never reaches:
+tags inside `<!--…-->`, inside marked sections, and inside a `<script>` body —
+and it ends a tag at the first `>`, including one inside a quoted attribute
+value. Both produce §2.2 violations in opposite directions. A commented-out IE
+fallback became "jQuery 1.11.0 served in production" — a finding stated about
+markup no browser executes, scoring 86 against the reference's 77. An
+`<a onclick="() => go()" href="/login">` lost its href, and with it the login
+surface that qualifies the lead at all: 77 and tier A became 0 and disqualified.
+
+Real pages did not catch this because real pages are well behaved.
+`packages/scanner/test/html-parity.test.ts` replays 2009 cases of deliberately
+hostile tag soup — hand-written traps plus seeded random soup — through the
+port and asserts it answers what the REFERENCE extractor answered when
+`npm run fixtures:html-parity` ran it. The old regex reader disagrees with
+Python on **1169 of those 2009**; the port disagrees on none.
+
+Details that are ported on purpose and look like bugs, because they are the
+reference's behaviour and the score depends on them: an unclosed `<title>`
+swallows the rest of the document (the in-title flag is never cleared); the
+reference calls `feed()` and never `close()`, so a document ending mid-tag
+silently loses its tail; an unknown marked-section keyword raises, which the
+reference's `except Exception: pass` turns into "keep the partial result". And
+Python's `\s` and `str.strip()` are not JavaScript's — Python has U+001C..U+001F
+and U+0085, JavaScript has U+FEFF — so every ported regex spells the class out
+from the generated `PY_SPACE_CLASS` and `pyStrip()` replaces `String.trim()`.
+
 **One deliberate divergence.** Python's public-path probe does
 `except Exception: continue`, so a timeout, DNS failure or WAF block on
 `/security` is indistinguishable from a clean 404 — both become "no trust
@@ -363,7 +398,10 @@ signal `observed = false`. §2 outranks port fidelity. Asserted explicitly in
 
 If you re-record the fixtures, the goldens must be regenerated in the same
 commit, and the diff should be read: a changed score means the site changed, or
-the engine did.
+the engine did. The same goes for `fixtures/html-parity.json`, which records
+what a specific CPython answered — it carries the version it was generated
+with, and regenerating it on a different one is a change to the target, not a
+refresh.
 
 ## 6. SDK verification (PROMPT.md §13)
 
