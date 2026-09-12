@@ -393,10 +393,28 @@ export const approvals = pgTable(
     /** RESTRICT: a user who has decided an approval cannot be deleted (§2.4). */
     decidedBy: uuid('decided_by').references(() => users.id, { onDelete: 'restrict' }),
     decidedAt: timestamp('decided_at', { withTimezone: true }),
+    /** Why the human decided as they did. Only ever set on a decided row. */
+    decidedReason: text('decided_reason'),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    // --- what this approval gates (0007) ---------------------------------
+    /** The chat thread the call was made in. SET NULL: the decision outlives
+     *  the conversation. */
+    chatSessionId: uuid('chat_session_id').references(() => chatSessions.id, { onDelete: 'set null' }),
+    /** One agent turn. Scopes the retry key below. */
+    turnId: uuid('turn_id'),
+    /** The SDK's `options.toolUseID`. Unique per org: the redelivery key. */
+    toolUseId: text('tool_use_id'),
+    /** sha256 of the canonical payload, so a denied-then-retried call — which
+     *  carries a NEW tool_use_id — is recognised as the same human intent. */
+    payloadSha256: text('payload_sha256'),
     ...timestamps,
   },
-  (t) => [index('approvals_org_status_idx').on(t.orgId, t.status)],
+  (t) => [
+    index('approvals_org_status_idx').on(t.orgId, t.status),
+    index('approvals_chat_session_idx').on(t.chatSessionId, t.createdAt.desc()),
+    uniqueIndex('approvals_org_tool_use_key').on(t.orgId, t.toolUseId),
+    uniqueIndex('approvals_org_turn_payload_key').on(t.orgId, t.turnId, t.toolName, t.payloadSha256),
+  ],
 )
 
 // ---------------------------------------------------------------------------
@@ -456,8 +474,13 @@ export const chatSessions = pgTable(
     title: text('title'),
     archived: boolean('archived').notNull().default(false),
     lastActiveAt: timestamp('last_active_at', { withTimezone: true }).notNull().defaultNow(),
+    /** Set while a turn is running, so a worker restart is visible as an
+     *  interrupted turn rather than as a spinner that never resolves (0007). */
+    runningTurnId: uuid('running_turn_id'),
+    runningSince: timestamp('running_since', { withTimezone: true }),
     ...timestamps,
   },
+  (t) => [uniqueIndex('chat_sessions_sdk_id_key').on(t.orgId, t.sdkSessionId)],
 )
 
 export const chatMessages = pgTable(
@@ -472,10 +495,25 @@ export const chatMessages = pgTable(
     toolName: text('tool_name'),
     tokensIn: integer('tokens_in'),
     tokensOut: integer('tokens_out'),
+    /** NOTE: drizzle `numeric` with no mode is typed STRING on read and write.
+     *  Adding two of these with `+` concatenates. */
     costUsd: numeric('cost_usd', { precision: 12, scale: 6 }),
+    // --- ordering within a turn (0007) ------------------------------------
+    /** One agent turn. Null on rows written before 0007. */
+    turnId: uuid('turn_id'),
+    /** Position within the turn. created_at is not enough: several frames of
+     *  one turn land inside the same millisecond. */
+    seq: integer('seq'),
+    /** Ties a tool call and its result together, and makes a replayed frame
+     *  idempotent rather than a duplicate. */
+    toolUseId: text('tool_use_id'),
     ...timestamps,
   },
-  (t) => [index('chat_messages_session_created_idx').on(t.sessionId, t.createdAt)],
+  (t) => [
+    index('chat_messages_session_created_idx').on(t.sessionId, t.createdAt),
+    index('chat_messages_turn_idx').on(t.sessionId, t.turnId, t.seq),
+    uniqueIndex('chat_messages_tool_use_key').on(t.sessionId, t.toolUseId, t.role),
+  ],
 )
 
 // ---------------------------------------------------------------------------

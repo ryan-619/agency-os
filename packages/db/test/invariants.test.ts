@@ -498,50 +498,174 @@ describe('§2 invariants are enforced by the schema', () => {
   // §2.4 Irreversible actions need a human
   // -------------------------------------------------------------------------
   describe('§2.4 the approval gate', () => {
+    /**
+     * An approval the AGENT raised has to name the tool call it gates — the
+     * chat thread, the turn, the SDK's tool_use_id and a hash of the payload
+     * the human was shown (0007). Every test below therefore builds a
+     * traceable row; a row without those columns is not a gate, it is a note,
+     * and the constraint at the end of this block proves the database says so.
+     */
+    // Both unique indexes are org-scoped and these tests share one org, so
+    // every call gets its own turn, tool_use_id and payload hash. A test that
+    // wants a COLLISION asks for it explicitly by reusing the returned object.
+    let gateSeq = 0
+    const traceable = async () => {
+      const n = ++gateSeq
+      const [user] = await db.driver.select<{ id: string }>(
+        `INSERT INTO users (org_id, email, role) VALUES ($1, $2, 'owner') RETURNING id`,
+        [orgId, `gate-${n}@example.com`],
+      )
+      const [session] = await db.driver.select<{ id: string }>(
+        `INSERT INTO chat_sessions (org_id, user_id) VALUES ($1, $2) RETURNING id`,
+        [orgId, user!.id],
+      )
+      return {
+        userId: user!.id,
+        sessionId: session!.id,
+        turnId: `11111111-1111-4111-8111-${String(n).padStart(12, '0')}`,
+        toolUseId: `toolu_${n}`,
+        payloadSha256: String(n).padStart(64, '0'),
+      }
+    }
+
+    const insertAgentApproval = (
+      t: { sessionId: string; turnId: string; toolUseId: string; payloadSha256: string },
+      columns: string,
+      values: string,
+      params: readonly unknown[] = [],
+    ) =>
+      db.driver.select<{ status: string }>(
+        `INSERT INTO approvals (org_id, requested_by, tool_name, risk, expires_at,
+                                chat_session_id, turn_id, tool_use_id, payload_sha256${columns})
+         VALUES ($1, 'agent', 'send_email', 'high', now() + interval '30 minutes',
+                 $2, $3, $4, $5${values})
+         RETURNING status`,
+        [orgId, t.sessionId, t.turnId, t.toolUseId, t.payloadSha256, ...params],
+      )
+
     it('REFUSES to mark an approval approved without naming who approved it', async () => {
+      const t = await traceable()
       const msg = await expectRejection(() =>
-        db.driver.select(
-          `INSERT INTO approvals (org_id, requested_by, tool_name, risk, status, expires_at)
-           VALUES ($1, 'agent', 'send_email', 'high', 'approved', now() + interval '30 minutes')`,
-          [orgId],
-        ),
+        insertAgentApproval(t, ', status', `, 'approved'`),
       )
       expect(msg).toContain('approvals_decided_has_decider')
     })
 
     it('accepts an approval decided by a real user', async () => {
-      const [{ id: userId }] = await db.driver.select<{ id: string }>(
-        `INSERT INTO users (org_id, email, role) VALUES ($1, 'owner@example.com', 'owner') RETURNING id`,
-        [orgId],
+      const t = await traceable()
+      const rows = await insertAgentApproval(
+        t,
+        ', status, decided_by, decided_at',
+        `, 'approved', $6, now()`,
+        [t.userId],
       )
-      const rows = await db.driver.select<{ status: string }>(
-        `INSERT INTO approvals (org_id, requested_by, tool_name, risk, status, decided_by, decided_at, expires_at)
-         VALUES ($1, 'agent', 'send_email', 'high', 'approved', $2, now(), now() + interval '30 minutes')
-         RETURNING status`,
-        [orgId, userId],
-      )
-      expect(rows[0].status).toBe('approved')
+      expect(rows[0]!.status).toBe('approved')
     })
 
     it('leaves a pending approval undecided without complaint', async () => {
-      const rows = await db.driver.select<{ status: string }>(
-        `INSERT INTO approvals (org_id, requested_by, tool_name, risk, expires_at)
-         VALUES ($1, 'agent', 'scan_company', 'low', now() + interval '30 minutes')
-         RETURNING status`,
-        [orgId],
-      )
-      expect(rows[0].status).toBe('pending')
+      const t = await traceable()
+      const rows = await insertAgentApproval(t, '', '')
+      expect(rows[0]!.status).toBe('pending')
     })
 
     it('rejects a risk level outside low / medium / high', async () => {
       const msg = await expectRejection(() =>
         db.driver.select(
           `INSERT INTO approvals (org_id, requested_by, tool_name, risk, expires_at)
-           VALUES ($1, 'agent', 'x', 'catastrophic', now())`,
+           VALUES ($1, 'human', 'x', 'catastrophic', now())`,
           [orgId],
         ),
       )
       expect(msg).toMatch(/approvals_risk_check|violates check constraint/)
+    })
+
+    // --- what 0007 added ---------------------------------------------------
+
+    it('REFUSES an agent approval that does not name the tool call it gates', async () => {
+      const msg = await expectRejection(() =>
+        db.driver.select(
+          `INSERT INTO approvals (org_id, requested_by, tool_name, risk, expires_at)
+           VALUES ($1, 'agent', 'send_email', 'high', now() + interval '30 minutes')`,
+          [orgId],
+        ),
+      )
+      expect(msg).toContain('approvals_agent_request_is_traceable')
+    })
+
+    /**
+     * The SDK redelivers a pending permission request after a transport gap —
+     * its own doc says callbacks must be idempotent because "a request whose
+     * response was lost in the gap will be dispatched again". Two rows would
+     * mean two cards and two humans for one action.
+     */
+    it('REFUSES a second approval for the same tool_use_id', async () => {
+      const t = await traceable()
+      await insertAgentApproval(t, '', '')
+      const msg = await expectRejection(() => insertAgentApproval(t, '', ''))
+      expect(msg).toMatch(/approvals_org_tool_use_key|approvals_org_turn_payload_key/)
+    })
+
+    /**
+     * And a call the SDK denied-and-retried arrives with a NEW tool_use_id, so
+     * the key above misses it. The payload hash, scoped to the turn, catches
+     * the same human intent asked twice.
+     */
+    it('REFUSES a retry of the same call under a new tool_use_id', async () => {
+      const t = await traceable()
+      await insertAgentApproval(t, '', '')
+      const retry = { ...t, toolUseId: 'toolu_02_retry' }
+      const msg = await expectRejection(() => insertAgentApproval(retry, '', ''))
+      expect(msg).toContain('approvals_org_turn_payload_key')
+    })
+
+    it('REFUSES an expired approval that names a decider — expiry is a lapse, not an answer', async () => {
+      const t = await traceable()
+      const msg = await expectRejection(() =>
+        insertAgentApproval(
+          t,
+          ', status, decided_by, decided_at',
+          `, 'expired', $6, now()`,
+          [t.userId],
+        ),
+      )
+      expect(msg).toContain('approvals_expired_has_no_decider')
+    })
+
+    it('REFUSES a reason on a row nobody has decided', async () => {
+      const t = await traceable()
+      const msg = await expectRejection(() =>
+        insertAgentApproval(t, ', decided_reason', `, 'looks fine to me'`),
+      )
+      expect(msg).toContain('approvals_reason_belongs_to_a_decision')
+    })
+  })
+
+  /**
+   * §2.4: "Approval decides; the audit log remembers." A memory that can be
+   * edited is not one. audit_log is the only table with an updated_at and no
+   * set_updated_at trigger — which looks like an oversight and invites a fix,
+   * so 0007 makes the append-only rule explicit and enforced.
+   */
+  describe('the audit log cannot be rewritten', () => {
+    it('REFUSES an UPDATE', async () => {
+      const [row] = await db.driver.select<{ id: string }>(
+        `INSERT INTO audit_log (org_id, actor, action) VALUES ($1, 'agent', 'agent.tool_pre') RETURNING id`,
+        [orgId],
+      )
+      const msg = await expectRejection(() =>
+        db.driver.select(`UPDATE audit_log SET action = 'nothing.happened' WHERE id = $1`, [row!.id]),
+      )
+      expect(msg).toContain('append-only')
+    })
+
+    it('still permits a DELETE, so deleting an org does not fail', async () => {
+      const [row] = await db.driver.select<{ id: string }>(
+        `INSERT INTO audit_log (org_id, actor, action) VALUES ($1, 'agent', 'agent.tool_post') RETURNING id`,
+        [orgId],
+      )
+      await db.driver.select(`DELETE FROM audit_log WHERE id = $1`, [row!.id])
+      const left = await db.driver.select(`SELECT id FROM audit_log WHERE id = $1`, [row!.id])
+      expect(left).toHaveLength(0)
     })
   })
 
@@ -659,9 +783,11 @@ describe('§2 invariants are enforced by the schema', () => {
         `INSERT INTO users (org_id, email, role) VALUES ($1, 'decider@example.com', 'member') RETURNING id`,
         [orgId],
       )
+      // 'human' rather than 'agent': this test is about the decider link, and
+      // an agent-raised row would need the whole traceability chain (0007).
       await db.driver.select(
         `INSERT INTO approvals (org_id, requested_by, tool_name, risk, status, decided_by, decided_at, expires_at)
-         VALUES ($1, 'agent', 'send_email', 'high', 'approved', $2, now(), now() + interval '1 hour')`,
+         VALUES ($1, 'human', 'send_email', 'high', 'approved', $2, now(), now() + interval '1 hour')`,
         [orgId, decider],
       )
 
