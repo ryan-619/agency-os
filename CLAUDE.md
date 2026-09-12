@@ -584,8 +584,13 @@ the real ones:**
 - Domain rules in `packages/core`, pure, unit-tested against edge cases.
 - Every migration reversible. **Never edit a shipped migration** — the migrator
   will refuse to run, on either half of the pair.
-- `npm run typecheck` covers the shipped packages *and* the test suite
-  (`tsconfig.test.json`). The test suite is the stated proof of the §2
-  invariants, so it belongs inside the type system.
+- `npm run typecheck` covers the shipped packages, the test suite, the CLIs
+  under `tools/`, and the web app (`tsconfig.test.json` plus
+  `apps/web/tsconfig.json`). The test suite is the stated proof of the §2
+  invariants, so it belongs inside the type system — and so does everything
+  vitest will run. `tsconfig.test.json`'s include globs must stay a superset of
+  `vitest.config.ts`'s: vitest runs `apps/*/test/**`, so a test placed there
+  runs whether or not anything typechecks it. `tools/*.ts` was checked by
+  nothing at all until Phase 2 closed the hole.
 - Structured JSON logging. Never log credentials or full message bodies.
 - Conventional commits, small PRs, one phase per branch.

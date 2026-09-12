@@ -17,11 +17,19 @@
     // this config exists to catch.
     "noUncheckedIndexedAccess": false
   },
+  // Every glob vitest runs, plus the sources they import, plus the CLIs under
+  // tools/. vitest's include is ['packages/*/test/**', 'apps/*/test/**'] — a
+  // test placed in apps/agent/test WILL run, so it has to be typechecked too
+  // or it becomes the only untyped code in a repo whose stated standard is
+  // that the test suite belongs inside the type system. tools/*.ts was checked
+  // by nothing at all until now.
   "include": [
     "packages/*/test/**/*.ts",
     "packages/*/src/**/*.ts",
+    "apps/*/test/**/*.ts",
     "apps/agent/src/**/*.ts",
     "packages/scanner/src/**/*.ts",
+    "tools/**/*.ts",
     "vitest.config.ts"
   ]
 }
