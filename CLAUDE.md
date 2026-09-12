@@ -514,12 +514,16 @@ refresh.
 
 §13 asks for the SDK option names to be checked against the installed package's
 own types and any drift noted here. Checked against
-**`@anthropic-ai/claude-agent-sdk@0.3.263`**.
+**`@anthropic-ai/claude-agent-sdk@0.3.269`**, which is now a real dependency of
+`apps/agent` — so everything below was read from `node_modules/@anthropic-ai/
+claude-agent-sdk/sdk.d.ts` and `sdk.mjs` in this tree and can be re-checked
+from inside the repo. (An earlier version of this section was written against
+0.3.263 from a scratch install and said the SDK was not a dependency. Both were
+true when written; neither is now.)
 
-Provenance, since this cannot be re-checked from inside the repo: the SDK is
-**not** a dependency here — it arrives in Phase 2 — so these were read from a
-scratch install of that exact version (`sdk.d.ts`), not from `node_modules`.
-Re-verify against the version you actually install before building on them.
+`zod` is the one peer worth pinning here: the SDK declares `zod: ^4.0.0` and
+this repo pins `4.5.4`, so the v3/v4 raw-shape trap does not apply. `tool()`
+takes a raw shape — `{ domain: z.string() }` — not a `z.object(...)`.
 
 **Names that are correct as written in the spec:** `query`, `mcpServers`,
 `agents`, `canUseTool`, `resume`, `forkSession`, `includePartialMessages`,
@@ -564,9 +568,12 @@ the real ones:**
 - Next 16 renamed `middleware.ts` to `proxy.ts`; `proxy.ts` runs on the Node
   runtime (`middleware.ts` was Edge). Shipping both is a build error.
 - Next 16 dropped the `eslint` key from `next.config`.
-- `pg-boss@12.30.0` (Phase 2): **no default export** (`import { PgBoss }`),
-  `boss.work` handlers receive an **array** of jobs, and `createQueue()` is
-  mandatory before `send`/`work`.
+- `pg-boss@12.30.0`: **no default export** (`import { PgBoss }`), `boss.work`
+  handlers receive an **array** of jobs, and `createQueue()` is mandatory
+  before `send`/`work`. **Unverified against this tree** — pg-boss is named in
+  PROMPT.md §3's stack table but is in no `package.json` here and is not
+  installed. These three claims came from reading the package elsewhere; check
+  them against the version you actually install before relying on them.
 
 ---
 

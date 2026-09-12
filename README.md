@@ -81,7 +81,7 @@ was checked, the URL fetched, the library version served.
 ```bash
 npm install
 npm run typecheck     # packages and tests, strict
-npm test              # 315 tests, no Docker required
+npm test              # 399 tests, no Docker required
 ```
 
 The test suite runs against [PGlite](https://pglite.dev), an embedded Postgres,
