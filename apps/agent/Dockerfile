@@ -7,10 +7,11 @@
 FROM node:22-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
-COPY packages/core/package.json packages/core/
-COPY packages/db/package.json   packages/db/
-COPY apps/web/package.json      apps/web/
-COPY apps/agent/package.json    apps/agent/
+COPY packages/core/package.json    packages/core/
+COPY packages/db/package.json      packages/db/
+COPY packages/scanner/package.json packages/scanner/
+COPY apps/web/package.json         apps/web/
+COPY apps/agent/package.json       apps/agent/
 RUN npm ci
 
 FROM node:22-alpine AS build
@@ -27,18 +28,24 @@ ENV NODE_ENV=production AGENT_PORT=3001
 RUN addgroup -g 1001 -S nodejs && adduser -S agent -u 1001
 
 # Reinstall without devDependencies. Every workspace package.json is needed for
-# the lockfile to resolve; npm then creates the node_modules/@agency/*
-# symlinks that let `import '@agency/db'` resolve to packages/db/dist.
+# npm creates the node_modules/@agency/* symlinks that let `import '@agency/db'`
+# resolve to packages/db/dist. EVERY workspace package.json must be copied —
+# not because npm ci fails without one (it does NOT: it silently creates a
+# dangling symlink and exits 0) but because the failure surfaces at run time
+# instead, as ERR_MODULE_NOT_FOUND from inside a container, with nothing red in
+# the build. packages/scanner was missing here until Phase 2 needed it.
 COPY package.json package-lock.json ./
-COPY packages/core/package.json packages/core/
-COPY packages/db/package.json   packages/db/
-COPY apps/web/package.json      apps/web/
-COPY apps/agent/package.json    apps/agent/
+COPY packages/core/package.json    packages/core/
+COPY packages/db/package.json      packages/db/
+COPY packages/scanner/package.json packages/scanner/
+COPY apps/web/package.json         apps/web/
+COPY apps/agent/package.json       apps/agent/
 RUN npm ci --omit=dev --workspace @agency/agent --include-workspace-root
 
-COPY --from=build --chown=agent:nodejs /app/packages/core/dist ./packages/core/dist
-COPY --from=build --chown=agent:nodejs /app/packages/db/dist   ./packages/db/dist
-COPY --from=build --chown=agent:nodejs /app/apps/agent/dist    ./apps/agent/dist
+COPY --from=build --chown=agent:nodejs /app/packages/core/dist    ./packages/core/dist
+COPY --from=build --chown=agent:nodejs /app/packages/db/dist      ./packages/db/dist
+COPY --from=build --chown=agent:nodejs /app/packages/scanner/dist ./packages/scanner/dist
+COPY --from=build --chown=agent:nodejs /app/apps/agent/dist       ./apps/agent/dist
 # The migration CLI reads these off disk at run time.
 COPY --chown=agent:nodejs packages/db/migrations ./packages/db/migrations
 COPY --chown=agent:nodejs packages/db/seed       ./packages/db/seed

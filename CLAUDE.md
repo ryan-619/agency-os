@@ -273,6 +273,21 @@ one that actually proves the deploy target. `freshDb()` pins PGlite to UTC;
 without that it derives an `Etc/GMT±N` zone from the host clock and truncates
 to whole hours (a developer at +05:30 silently tests at +05:00).
 
+**A workspace reaches a container only if BOTH halves are done.** Verified by
+replicating the agent runner stage's exact COPY set on disk and running its
+`npm ci` (there is no Docker on the dev machine):
+
+1. the workspace's `package.json` must be COPIED in the install stage, and
+2. the workspace must be DECLARED as a dependency of what the image runs.
+
+Copying the package.json alone creates no `node_modules/@agency/<name>` symlink
+at all — npm links only the workspaces inside the install scope's dependency
+graph. Declaring it without copying gives a symlink that dangles. And **`npm ci`
+does not fail on either mistake**: it exits 0 and the image dies later with
+`ERR_MODULE_NOT_FOUND`, with nothing red in the build. `packages/scanner` was
+missing from both images this way — `apps/web` already declares it — and Phase
+2's `scan_company` is what would have made it fatal.
+
 **The Dockerfiles copy the ROOT `node_modules` only.** npm workspaces hoist
 every dependency to the root and symlink the workspaces as
 `node_modules/@agency/* -> ../../packages/*`. There are no per-package

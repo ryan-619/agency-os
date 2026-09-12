@@ -10,13 +10,17 @@
 # --- deps: install once against the whole workspace ------------------------
 FROM node:22-alpine AS deps
 WORKDIR /app
-# Every workspace package.json must be present or npm ci cannot satisfy the
-# lockfile, even though this image only runs the web app.
+# Every workspace package.json is copied even though this image only runs the
+# web app. Not because npm ci fails without one — it does NOT, it silently
+# creates a dangling symlink and exits 0 — but because the failure then
+# surfaces at run time as ERR_MODULE_NOT_FOUND with nothing red in the build.
+# apps/web declares @agency/scanner, so its package.json belongs here.
 COPY package.json package-lock.json ./
-COPY packages/core/package.json packages/core/
-COPY packages/db/package.json   packages/db/
-COPY apps/web/package.json      apps/web/
-COPY apps/agent/package.json    apps/agent/
+COPY packages/core/package.json    packages/core/
+COPY packages/db/package.json      packages/db/
+COPY packages/scanner/package.json packages/scanner/
+COPY apps/web/package.json         apps/web/
+COPY apps/agent/package.json       apps/agent/
 RUN npm ci
 
 # --- build: compile the workspace packages, then Next ----------------------
