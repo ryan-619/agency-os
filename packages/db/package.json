@@ -19,6 +19,10 @@
     "./repository": {
       "types": "./dist/repository.d.ts",
       "default": "./dist/repository.js"
+    },
+    "./queries": {
+      "types": "./dist/queries.d.ts",
+      "default": "./dist/queries.js"
     }
   },
   "files": [

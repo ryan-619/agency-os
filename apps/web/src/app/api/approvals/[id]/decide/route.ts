@@ -1,9 +1,9 @@
 import { NextResponse } from 'next/server'
 import { assertCan } from '@agency/core'
-import { appendAudit, decideApproval } from '@agency/db'
+import { appendAudit, decideApproval } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
-import type { AgencyDb } from '@agency/db'
+import type { AgencyDb } from '@agency/db/queries'
 
 /**
  * A human decides (PROMPT.md §2.4).

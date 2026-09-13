@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { can } from '@agency/core'
-import { createChatSession, listChatSessions, type AgencyDb, type ChatSessionRow } from '@agency/db'
+import { createChatSession, listChatSessions, type AgencyDb, type ChatSessionRow } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
 

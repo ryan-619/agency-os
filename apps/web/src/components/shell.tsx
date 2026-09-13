@@ -14,13 +14,19 @@ export interface ShellUser {
  * a nav that pretends.
  */
 export function Shell({
-  user, orgName, current, children, signOut,
+  user, orgName, current, children, signOut, pendingApprovals = 0,
 }: {
   user: ShellUser
   orgName: string
-  current: 'dashboard' | 'companies'
+  current: 'dashboard' | 'companies' | 'chat' | 'approvals'
   children: React.ReactNode
   signOut: () => Promise<void>
+  /**
+   * §5.4's `notifyTeam` is this number, plus the row and the card. Phase 2
+   * ships no send path, and §8.4 says there must be exactly one — so adding a
+   * second here, to notify about the first, would be the joke writing itself.
+   */
+  pendingApprovals?: number
 }) {
   return (
     <div className="shell">
@@ -31,7 +37,11 @@ export function Shell({
         <nav className="nav">
           <a href="/" className={current === 'dashboard' ? 'on' : undefined}>Dashboard</a>
           <a href="/companies" className={current === 'companies' ? 'on' : undefined}>Companies</a>
-          <span>Chat <em className="phase-tag">phase 2</em></span>
+          <a href="/chat" className={current === 'chat' ? 'on' : undefined}>Chat</a>
+          <a href="/approvals" className={current === 'approvals' ? 'on' : undefined}>
+            Approvals
+            {pendingApprovals > 0 ? <em className="badge">{pendingApprovals}</em> : null}
+          </a>
           <span>Connectors <em className="phase-tag">phase 3</em></span>
           <span>Campaigns <em className="phase-tag">phase 4</em></span>
           <span>Pipeline <em className="phase-tag">phase 5</em></span>
