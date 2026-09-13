@@ -30,9 +30,21 @@ export interface SeedResult {
   icpProfileId: string
   companiesInserted: number
   companiesAlreadyPresent: number
+  agentsInserted: number
   createdOrg: boolean
   createdOwner: boolean
   createdIcp: boolean
+}
+
+/** One row of `agent_defs`, as the seed file carries it. */
+interface AgentSeed {
+  slug: string
+  name: string
+  description: string
+  system_prompt: string
+  tools: string[]
+  model: string | null
+  enabled: boolean
 }
 
 export async function seed(
@@ -152,12 +164,44 @@ async function seedInTransaction(
     `companies: ${companiesInserted} inserted, ${seeds.length - companiesInserted} already present`,
   )
 
+  // --- subagents (§7) ------------------------------------------------------
+  //
+  // "Agents as data": these map onto the SDK's `agents` option, which takes
+  // definitions programmatically. Seeding them now means the four §7 roles
+  // exist as editable rows from the first boot rather than as a later data
+  // migration — Settings → Agents in Phase 3 edits these.
+  //
+  // Two are seeded DISABLED. `prospector` has no sourcing connector to work
+  // with until Phase 3, and `closer` drafts outbound messages, which belongs
+  // with Phase 4's single send path and its consent rules. An agent that is
+  // present but off is honest about what exists; one that is on and cannot do
+  // its job teaches the model a false shape of the business (§12).
+  //
+  // Left untouched if present, for the same reason as the ICP: once the team
+  // edits a prompt, a re-seed must not silently revert it.
+  const agentSeeds = JSON.parse(
+    readFileSync(join(SEED_DIR, 'agents.json'), 'utf8'),
+  ) as AgentSeed[]
+  let agentsInserted = 0
+  for (const a of agentSeeds) {
+    const inserted = await driver.select<{ id: string }>(
+      `INSERT INTO agent_defs (org_id, slug, name, description, system_prompt, tools, model, enabled)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (org_id, slug) DO NOTHING
+       RETURNING id`,
+      [orgId, a.slug, a.name, a.description, a.system_prompt, a.tools, a.model, a.enabled],
+    )
+    if (inserted.length) agentsInserted++
+  }
+  log(`agents: ${agentsInserted} inserted, ${agentSeeds.length - agentsInserted} already present`)
+
   return {
     orgId,
     ownerUserId,
     icpProfileId,
     companiesInserted,
     companiesAlreadyPresent: seeds.length - companiesInserted,
+    agentsInserted,
     createdOrg,
     createdOwner,
     createdIcp,

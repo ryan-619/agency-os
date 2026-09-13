@@ -22,7 +22,8 @@
     "fixtures:golden": "python3 tools/python-golden.py",
     "fixtures:html-parity": "python3 tools/html-parity-corpus.py",
     "tables:python": "python3 tools/generate-python-tables.py",
-    "scan": "tsx --env-file-if-exists=.env tools/scan.ts"
+    "scan": "tsx --env-file-if-exists=.env tools/scan.ts",
+    "smoke:agent": "tsx --env-file-if-exists=.env tools/smoke-agent.ts"
   },
   "devDependencies": {
     "typescript": "5.9.3",

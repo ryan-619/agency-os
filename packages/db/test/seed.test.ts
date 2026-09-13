@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { freshDb, migrations, type TestDb } from './helpers.js'
 import { migrateUp } from '../src/migrator.js'
 import { seed, parseCompanySeeds } from '../src/seed.js'
+import { PERMITTED_TOOLS } from '@agency/core'
 
 const OPTS = { orgName: 'Agency', ownerEmail: 'Owner@Example.com', ownerName: 'Owner' }
 
@@ -180,5 +181,78 @@ describe('seeding a fresh database', () => {
     await expect(seed(db.driver, { ...OPTS, ownerEmail: 'not-an-email' })).rejects.toThrow(
       /does not look like an address/,
     )
+  })
+
+  /**
+   * §7's "agents as data". These rows map onto the SDK's `agents` option, and
+   * the shape matters as much as the content: AgentDefinition carries its own
+   * `permissionMode`, so a row that ever grew a free-form config column could
+   * escape the approval gate from inside the database. The columns are named
+   * and fixed, and the mapper in Phase 3 must build the record field by field
+   * rather than spreading a row.
+   */
+  describe('the four subagents (§7)', () => {
+    it('seeds exactly the four roles the spec names', async () => {
+      const rows = await db.driver.select<{ slug: string; enabled: boolean }>(
+        'SELECT slug, enabled FROM agent_defs ORDER BY slug',
+      )
+      expect(rows.map((r) => r.slug)).toEqual(['closer', 'prospector', 'qualifier', 'researcher'])
+    })
+
+    /**
+     * An agent that is present but off is honest about what exists. One that
+     * is on and cannot do its job teaches the model a false shape of the
+     * business, which is the §12 mistake this repo has already made once.
+     */
+    it('leaves off the two that have nothing to work with yet', async () => {
+      const rows = await db.driver.select<{ slug: string; enabled: boolean }>(
+        'SELECT slug, enabled FROM agent_defs',
+      )
+      const on = rows.filter((r) => r.enabled).map((r) => r.slug).sort()
+      expect(on).toEqual(['qualifier', 'researcher'])
+    })
+
+    it('gives every agent a description the model can choose by, and a prompt', async () => {
+      const rows = await db.driver.select<{ slug: string; description: string; system_prompt: string }>(
+        'SELECT slug, description, system_prompt FROM agent_defs',
+      )
+      for (const r of rows) {
+        expect(r.description.length, r.slug).toBeGreaterThan(80)
+        expect(r.system_prompt.length, r.slug).toBeGreaterThan(200)
+      }
+    })
+
+    /**
+     * §2.2 again. These prompts are the last thing between a subagent and a
+     * claim nobody observed, so each one restates the rule in its own terms.
+     */
+    it('tells every agent that absence means unknown', async () => {
+      const rows = await db.driver.select<{ slug: string; system_prompt: string }>(
+        "SELECT slug, system_prompt FROM agent_defs WHERE slug IN ('qualifier', 'researcher', 'closer')",
+      )
+      for (const r of rows) {
+        expect(r.system_prompt.toLowerCase(), r.slug).toMatch(/observed|quotable|stale/)
+      }
+    })
+
+    it('only grants tools that exist and are classified', async () => {
+      const rows = await db.driver.select<{ slug: string; tools: string[] }>(
+        'SELECT slug, tools FROM agent_defs',
+      )
+      for (const r of rows) {
+        for (const tool of r.tools) {
+          expect(PERMITTED_TOOLS.has(tool), `${r.slug} was granted ${tool}`).toBe(true)
+        }
+      }
+    })
+
+    it('is idempotent, so a re-seed never reverts an edited prompt', async () => {
+      await db.driver.select("UPDATE agent_defs SET system_prompt = 'edited by the team' WHERE slug = 'qualifier'")
+      await seed(db.driver, OPTS)
+      const rows = await db.driver.select<{ system_prompt: string }>(
+        "SELECT system_prompt FROM agent_defs WHERE slug = 'qualifier'",
+      )
+      expect(rows[0]!.system_prompt).toBe('edited by the team')
+    })
   })
 })
