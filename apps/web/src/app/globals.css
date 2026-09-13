@@ -234,10 +234,21 @@ textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
 .chat-bar { display: flex; gap: 8px; align-items: flex-end; }
 .chat-input {
-  flex: 1; resize: vertical; font: inherit; font-size: 14px;
+  /* min-width: 0 is load-bearing. A flex item's default min-width is auto,
+     which is its CONTENT width, so a textarea beside a full-width button
+     collapses to nothing instead of taking the space. */
+  flex: 1 1 auto; min-width: 0;
+  resize: vertical; font: inherit; font-size: 14px;
   padding: 9px 11px; border: 1px solid var(--line); border-radius: var(--radius);
   background: var(--panel); color: var(--ink);
 }
+/* The global button is width:100% for the sign-in form; inside a row it has to
+   size to its label instead. */
+.chat-bar button, .approval-actions button, .queue button {
+  width: auto; margin-top: 0; flex: 0 0 auto; padding: 9px 16px;
+}
+.chat-bar button:disabled, .approval-actions button:disabled { opacity: .45; cursor: not-allowed; }
+.approval-actions .deny, .queue .deny { background: var(--panel); color: var(--ink); border: 1px solid var(--warn); }
 .chat-cost { display: flex; gap: 14px; font-size: 12px; color: var(--muted); }
 
 .pill-risk { border-color: var(--warn); color: var(--warn); }

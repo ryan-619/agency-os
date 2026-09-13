@@ -246,7 +246,14 @@ export function reduceChat(state: ChatState, event: ChatEvent): ChatState {
       return { ...s, turnCostUsd: event.turnCostUsd, sessionCostUsd: event.sessionCostUsd }
 
     case 'turn_finished': {
-      const note = endedMessage(event.reason)
+      // If the turn already explained itself, do not say it twice. An SDK
+      // failure emits an `error` naming the cause — "the account has no
+      // credit" — and following it with "the agent stopped before finishing"
+      // adds nothing and reads like two separate problems.
+      const alreadyExplained = s.blocks.some(
+        (b) => b.kind === 'notice' && b.tone === 'error' && b.id.startsWith(`${event.turnId}:`),
+      )
+      const note = alreadyExplained ? null : endedMessage(event.reason)
       return {
         ...s,
         running: false,

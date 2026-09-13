@@ -174,6 +174,12 @@ export function startTurn(deps: TurnDeps, req: TurnRequest): RunningTurn {
     let reason: TurnEndReason = 'error'
     let sdkSessionId: string | null = null
     let claimed = false
+    // Whether the turn has already told the user WHY it is failing. The SDK
+    // reports a refusal on the assistant message — "the account has no credit"
+    // — and then the iteration throws. Emitting a second, generic "stopped
+    // unexpectedly, try again" on top of that reads as two separate problems
+    // and the advice contradicts the first message.
+    let explained = false
     const timer = setTimeout(() => {
       deps.log.warn('turn timed out', { turnId: deps.turnId })
       req.abort.abort()
@@ -214,6 +220,7 @@ export function startTurn(deps: TurnDeps, req: TurnRequest): RunningTurn {
 
       for await (const message of query({ prompt: req.text, options: req.options })) {
         for (const body of mapSdkMessage(message, mapCtx)) {
+          if (body.kind === 'error') explained = true
           if (body.kind === 'turn_finished') {
             // Held back: the finish is emitted once, in the finally, so every
             // exit path produces exactly one and the browser has a single
@@ -236,13 +243,16 @@ export function startTurn(deps: TurnDeps, req: TurnRequest): RunningTurn {
         deps.log.error('turn failed', {
           turnId: deps.turnId,
           error: err instanceof Error ? err.name : 'UnknownError',
+          alreadyExplained: explained,
         })
-        emit({
-          kind: 'error',
-          code: 'sdk_error',
-          retryable: true,
-          message: 'The agent stopped unexpectedly. Nothing further was done. Try again.',
-        })
+        if (!explained) {
+          emit({
+            kind: 'error',
+            code: 'sdk_error',
+            retryable: true,
+            message: 'The agent stopped unexpectedly. Nothing further was done. Try again.',
+          })
+        }
       }
     } finally {
       clearTimeout(timer)
