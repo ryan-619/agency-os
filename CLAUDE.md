@@ -4,7 +4,10 @@ Internal operating system for a small application-security agency. Read
 [PROMPT.md](PROMPT.md) for the full build spec; this file is the working
 summary a session should read first.
 
-**Current state: Phases 0 (Foundation) and 1 (Data core) are complete. Phase 2 has not started.**
+**Current state: Phases 0, 1 and 2 are built. Phase 2's Definition of Done is
+NOT yet proved — it needs one live turn against an account with credit, and the
+account available during the build had none. `npm run smoke:agent` is the gate;
+run it before calling Phase 2 finished or starting Phase 3.**
 
 ---
 
@@ -117,12 +120,15 @@ Two more §2.2 links, both added in 0006 and after:
   campaign has `auto_send = true`.
   *Enforced now:* `approvals_decided_has_decider` — a row cannot claim it was
   approved without naming who decided and when.
-- *The `canUseTool` gate that blocks on this lands in Phase 2.* That code also
-  owns the expiry rule: the schema deliberately does **not** forbid
-  `status = 'approved'` with `decided_at > expires_at`, because a stale-tab
-  approval should surface as a clean "this request expired" from the decision
-  service, not as a constraint violation and a 500.
-- **Never set `permissionMode: "bypassPermissions"`.**
+- *Built in Phase 2.* `decideApproval` owns the expiry rule the schema left
+  open: 0004 deliberately does **not** forbid `status = 'approved'` with
+  `decided_at > expires_at`, so a stale-tab approval surfaces as a clean
+  "expired" from the decision path rather than a constraint violation and a
+  500. The same single statement arbitrates two people clicking Approve at
+  once, and hands the loser the WINNER's row so their screen can say who
+  decided instead of showing an error.
+- **Never set `permissionMode: "bypassPermissions"`.** See §8 below — there are
+  three ways the gate is skipped, and the spec recommends two of them.
 
 ---
 
@@ -144,11 +150,29 @@ This is the one architectural rule worth being pedantic about (§3).
 
 ```
 packages/scanner   the public-surface signal collector (Phase 1)
+packages/tools     the agency's own MCP tools, as plain data (Phase 2)
 ```
 
 Not yet created, because their phase has not arrived (§12 — do not scaffold all
-seven phases at once): `packages/tools` (Phase 2), `apps/voice` (Phase 6, and
-only after A2P 10DLC registration clears).
+seven phases at once): `apps/voice` (Phase 6, and only after A2P 10DLC
+registration clears).
+
+### packages/tools
+The tools as PLAIN DATA, with **no import of the Agent SDK anywhere in the
+package**. `apps/agent/src/mcp/agency.ts` is the only file that adapts them to
+`createSdkMcpServer`, and it is about thirty lines.
+
+That split is not style. The SDK ships no mock transport and no
+recorded-session mode, so anything needing the SDK to be *defined* is also
+untestable — and a package that CANNOT import the SDK cannot drag it into the
+Next module graph, which CI builds with no secrets on purpose.
+
+Six tools ship: `get_icp`, `search_companies`, `get_company`, `scan_company`,
+`score_company` (all low risk) and `queue_touch` (high). Three of §6's eight
+deliberately do not: `draft_outreach` belongs with Phase 4's single send path,
+and `get_pipeline`/`update_deal` would read a `deals` table nothing writes — a
+tool that reliably returns `[]` teaches the model a false shape of the business.
+The system prompt redirects the phrase instead.
 
 ### packages/scanner
 `fetch.ts` does the I/O; `extract.ts` is pure. That split is not cosmetic — it
@@ -174,7 +198,7 @@ check and should be added if the scanner is ever aimed at untrusted input.
 |---|---|
 | 0 ✅ | authorisation — `can(principal, capability)`, log redaction — `redact()` |
 | 1 ✅ | the ICP definition, scoring, tiering, disqualifiers, the `observed` rule |
-| 2 | risk classification for the approval gate (§5.4) |
+| 2 ✅ | risk classification (§5.4), the chat wire types, the freshness rule |
 | 4 | consent, suppression, quiet hours, daily caps — the one send path |
 
 ---
@@ -185,7 +209,7 @@ check and should be added if the scanner is ever aimed at untrusted input.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 399 tests: domain + migrations + invariants + seed + parity
+npm test                 # 639 tests: domain + migrations + invariants + seed + parity + agent
 npm run build            # packages, then the Next app
 
 # database (needs DATABASE_URL)
@@ -200,6 +224,11 @@ npm run scan                  # every company that has never been scanned
 npm run scan -- --all         # re-scan everything
 npm run scan -- rentman.io    # one domain
 npm run scan -- --import f.csv  # import a domain,name CSV, then scan
+
+# the agent (Phase 2) — needs ANTHROPIC_API_KEY with credit, and a worker
+npx tsx --env-file=.env apps/agent/src/index.ts   # the worker: health 3001, api 3002
+npm run smoke:agent              # the Phase 2 Definition-of-Done gate. Costs money.
+npm run smoke:agent -- --draft   # ...and make it park a draft on a human
 
 # the parity harness — regenerate only when re-recording on purpose
 npm run fixtures:capture      # re-record the seed domains' public surface
@@ -630,3 +659,125 @@ the real ones:**
   nothing at all until Phase 2 closed the hole.
 - Structured JSON logging. Never log credentials or full message bodies.
 - Conventional commits, small PRs, one phase per branch.
+
+## 8. The agent runtime (Phase 2)
+
+### The gate has three documented bypasses, and the spec recommends two of them
+
+Read verbatim out of the installed SDK's own `sdk.mjs`, from the warning it
+emits when you configure one:
+
+| bypass | the SDK's words |
+|---|---|
+| `permissionMode: 'bypassPermissions'` | "auto-approves every tool call (except explicit deny rules) **before the callback is consulted**" |
+| any **bare** `allowedTools` entry — one containing no `(`, which includes a wildcard like `mcp__apollo__*` | "Bare allowedTools entries **auto-approve the whole tool before the callback is consulted**" |
+| an allow rule in a settings file | "Allow rules from settings files can also shadow the callback but **are not visible here**" |
+
+PROMPT.md §6 recommends the wildcard for connectors and for `Skill`; §7
+recommends it for `Agent`; §6 wants `settingSources: ["project"]`. §2.4 says
+the gate IS `canUseTool`. §2 is labelled hard constraints and wins, so all
+three are refused and this is the fifth documented divergence.
+
+The SDK names its own mitigation, twice: *"To gate every tool call, use a
+PreToolUse hook instead."* So the gate is four layers, and each exists because
+the one above it can be turned off:
+
+1. **Ring 0 — configuration.** `tools: []`, `allowedTools: []`,
+   `settingSources: []`, `strictMcpConfig: true`, `permissionMode: 'default'`,
+   plus `disallowedTools` naming every shell and filesystem tool. That last is
+   redundant with `tools: []` on purpose: the default tool set is baked into a
+   shipped binary and cannot be read from the types, so it cannot be *proved*
+   empty.
+2. **The policy tier.** `managedSettings` is filtered restrictive-only by the
+   SDK, and exactly two surviving keys close all three bypasses ABOVE
+   configuration: `allowManagedPermissionRulesOnly` (documented as ignoring
+   allow rules from settings files **and from `--allowedTools`**) and
+   `permissions.disableBypassPermissionsMode: 'disable'`. Do NOT add
+   `permissions.defaultMode` — the filter drops it silently, so it would read
+   as protection that is not there. Caveat recorded rather than hidden: this
+   tier is skipped on a machine that already has an IT-managed settings tier.
+3. **Ring 1 — `canUseTool`.** Returns `'ask'`-forced decisions for everything
+   above low risk. **It never returns `null`**: the SDK's own doc says a null
+   sends no control_response and "the tool stays blocked indefinitely —
+   permission prompts have no park deadline". A hang is the worst outcome in
+   the phase because it is indistinguishable from the model thinking, so a
+   source test bans the literal from the file with comments stripped.
+4. **Ring 2 — the `PreToolUse` hook.** Returns `'ask'` for anything above low
+   risk, which FORCES the prompt even where a bare entry or a settings rule
+   would have auto-approved first. It must never wait for a human:
+   `HookCallbackMatcher.timeout` is **in seconds**, and a hook that parks for
+   thirty minutes is denied-and-retried under a new `tool_use_id`, producing
+   two cards for one intent.
+5. **Ring 3 — the ledger.** Before a call is allowed, a single-use grant is
+   recorded for exactly those arguments, and the in-process tool handler
+   refuses without one. It is a multiset (so one approval cannot authorise an
+   unbounded number of identical calls) and keyed by turn (so a grant cannot
+   cross conversations). This is the ring that needs no SDK cooperation at all
+   — for the bypass nobody has enumerated yet. A call that reaches a handler
+   without a grant **halts the runtime**, latched, and `/readyz` reports it.
+
+`ALLOWED_OPTION_KEYS` is frozen and asserted key-by-key, so an SDK upgrade that
+introduces a new permission knob cannot be adopted silently.
+
+### The approval wait polls, and that is deliberate
+
+`LISTEN/NOTIFY` is the obvious design and it is wrong here. `pg.Pool` cannot
+receive notifications at all — `pool.query('LISTEN x')` appears to succeed and
+silently delivers nothing. Notifications are not durable, so a decision landing
+between the insert and the subscribe is lost and a correct design needs the
+poll underneath anyway. And the local socket bridge drops NOTIFY entirely, so a
+LISTEN-only waiter hangs on a developer's own machine.
+
+The waiter tolerates a transient database failure rather than denying a live
+approval: a two-second blip during a twenty-minute wait would otherwise
+permanently deny a request while the row stays pending and the human approves
+into nothing.
+
+### A turn always ends
+
+`turn_finished` is emitted from a `finally`, exactly once, on every path —
+crash, timeout, interrupt, budget refusal, claim refusal. The conversation
+claim is released on all of them. A turn that simply stops producing events
+leaves a spinner that never resolves.
+
+Two bounds the SDK does not provide: `maxTurns` and `maxBudgetUsd` bound ONE
+turn, so twenty $2 turns in an hour sits inside every SDK limit — one query
+against `chat_messages` refuses past `AGENT_SESSION_BUDGET_USD`. And a session
+claim stops two browser tabs starting concurrent turns on one thread, which
+would splice two exchanges into a single SDK transcript.
+
+`AGENT_TURN_TIMEOUT_MINUTES` must EXCEED `APPROVAL_TTL_MINUTES`, and the worker
+refuses to boot otherwise: a turn killed while its own approval is still live
+means a human's decision lands on a turn that no longer exists to consume it.
+
+### Restart recovery is scoped by boot time, not by the lock
+
+A killed worker leaves a conversation marked as running (a browser reattaching
+spins forever) and approvals still pending (a person approves into nothing).
+Both are cleared before the HTTP server accepts a turn, and both leave a
+`system` message and an audit row.
+
+That reconciliation is scoped by `bootAt`: only a turn or approval that
+PREDATES the boot can have been orphaned. The single-worker advisory lock is a
+second layer rather than the first, because it cannot be verified everywhere —
+see the PGlite socket bridge note in §4.
+
+### Costs are strings, and the SDK's total is cumulative
+
+`chat_messages.cost_usd` is drizzle `numeric` with no mode, so it is a STRING
+on insert and select — `"0.01" + "0.02"` is `"0.010.02"`, which stores fine and
+reads as a number to nobody. Every value crosses through `usd()` and every
+total is summed by Postgres.
+
+`result.total_cost_usd` is documented as **cumulative**: "each result carries
+the running total so far". The turn cost is a delta. Treating it as per-turn
+bills a long conversation several times over.
+
+### What is deliberately not built
+
+`draft_outreach`, `get_pipeline` and `update_deal` (§6 lists all three). The
+first belongs with Phase 4's single send path; the other two would read a
+`deals` table nothing writes, and §12 forbids a tool that teaches the model a
+false shape of the business. The `agents` and `skills` SDK options are Phase 3:
+`AgentDefinition` carries its own `permissionMode`, so the mapper needs a test
+on its key set before a database row can build one.
