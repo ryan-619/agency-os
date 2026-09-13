@@ -27,7 +27,6 @@ import type { AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
 
 export type TouchRow = typeof schema.touches.$inferSelect
-export type CampaignRow = typeof schema.campaigns.$inferSelect
 
 /**
  * What actually puts a message on the wire.
