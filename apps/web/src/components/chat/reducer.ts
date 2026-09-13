@@ -22,6 +22,8 @@ export interface TextBlock {
   readonly kind: 'text'
   readonly id: string
   readonly role: 'user' | 'assistant'
+  /** The turn that wrote it. Null for the person's own message. */
+  readonly turnId: string | null
   text: string
   /** False once `message_complete` closes it, so the caret can stop blinking. */
   streaming: boolean
@@ -120,18 +122,40 @@ function replace(blocks: readonly Block[], id: string, next: Block): Block[] {
 }
 
 export function reduceChat(state: ChatState, event: ChatEvent): ChatState {
-  // Out-of-order or replayed frames are dropped rather than applied twice. A
-  // reconnect replays from the last seq, and the edge of that window overlaps.
-  if (event.seq <= state.lastSeq && event.kind !== 'turn_started') return state
-  const s = { ...state, lastSeq: Math.max(state.lastSeq, event.seq) }
+  // The watermark is PER TURN, because the worker numbers per turn.
+  //
+  // `seq` is assigned inside startTurn, so every turn begins again at 1. A
+  // watermark carried across turns therefore sits at the previous turn's
+  // maximum — and every frame of the next answer falls under it and is thrown
+  // away. The user sees their own question, a spinner, and then nothing: no
+  // text, no tool cards, no approval card, no cost. It only shows up on the
+  // SECOND question in a conversation, which is exactly the case a single
+  // manual test does not reach.
+  //
+  // Resetting on a new turn keeps what the guard is actually for — a reconnect
+  // replays the tail of the current turn, and the edge of that window overlaps.
+  const newTurn = event.turnId !== state.turnId
+  if (!newTurn && event.seq <= state.lastSeq) return state
+  const s = {
+    ...state,
+    turnId: event.turnId,
+    lastSeq: newTurn ? event.seq : Math.max(state.lastSeq, event.seq),
+  }
 
   switch (event.kind) {
     case 'turn_started':
       return { ...s, running: true, turnId: event.turnId, endedBecause: null, turnCostUsd: null }
 
     case 'text_delta': {
+      // Continue the open block only if THIS turn opened it. A turn that ended
+      // without a `message_complete` — an error, an interrupt, a timeout, a
+      // budget refusal — leaves its block streaming, and without the turn
+      // check the next answer is appended to the previous one: two replies run
+      // together in a single paragraph, under a caret that never stopped
+      // blinking. `turn_finished` also closes it below; this is the second
+      // guard, because the first one is a frame that can be missed.
       const last = s.blocks[s.blocks.length - 1]
-      if (last?.kind === 'text' && last.role === 'assistant' && last.streaming) {
+      if (last?.kind === 'text' && last.role === 'assistant' && last.streaming && last.turnId === event.turnId) {
         return {
           ...s,
           blocks: replace(s.blocks, last.id, { ...last, text: last.text + event.text }),
@@ -145,6 +169,7 @@ export function reduceChat(state: ChatState, event: ChatEvent): ChatState {
             kind: 'text',
             id: `${event.turnId}:text:${event.blockIndex}:${event.seq}`,
             role: 'assistant',
+            turnId: event.turnId,
             text: event.text,
             streaming: true,
           },
@@ -254,13 +279,20 @@ export function reduceChat(state: ChatState, event: ChatEvent): ChatState {
         (b) => b.kind === 'notice' && b.tone === 'error' && b.id.startsWith(`${event.turnId}:`),
       )
       const note = alreadyExplained ? null : endedMessage(event.reason)
+      // The turn is over, so nothing is still arriving. Only a clean finish
+      // emits `message_complete`; every other ending would otherwise leave the
+      // last block streaming forever, with a caret blinking under an answer
+      // that stopped.
+      const closed = s.blocks.map((b) =>
+        b.kind === 'text' && b.streaming ? { ...b, streaming: false } : b,
+      )
       return {
         ...s,
         running: false,
         endedBecause: event.reason,
         blocks: note
           ? [
-              ...s.blocks,
+              ...closed,
               {
                 kind: 'notice',
                 id: `${event.turnId}:end`,
@@ -270,7 +302,7 @@ export function reduceChat(state: ChatState, event: ChatEvent): ChatState {
                 retryable: event.reason !== 'session_budget' && event.reason !== 'halted',
               },
             ]
-          : s.blocks,
+          : closed,
       }
     }
 
@@ -305,7 +337,14 @@ export function withUserMessage(state: ChatState, text: string): ChatState {
     ...state,
     blocks: [
       ...state.blocks,
-      { kind: 'text', id: `user:${state.blocks.length}:${text.length}`, role: 'user', text, streaming: false },
+      {
+        kind: 'text',
+        id: `user:${state.blocks.length}:${text.length}`,
+        role: 'user',
+        turnId: null,
+        text,
+        streaming: false,
+      },
     ],
   }
 }

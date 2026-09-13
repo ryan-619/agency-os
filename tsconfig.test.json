@@ -23,6 +23,15 @@
   // or it becomes the only untyped code in a repo whose stated standard is
   // that the test suite belongs inside the type system. tools/*.ts was checked
   // by nothing at all until now.
+  //
+  // apps/web/test is the one exception, and it is excluded rather than
+  // dropped: `apps/web` has no `"type": "module"` (Next does not need one) and
+  // resolves as Bundler, so under this config's nodenext every file in that
+  // tree is a CommonJS file and every `import` in it is an error. It is
+  // typechecked by apps/web/tsconfig.json instead, which `npm run typecheck`
+  // also runs. The invariant is therefore "every glob vitest runs is
+  // typechecked by SOME config in `npm run typecheck`", not "by this one".
+  "exclude": ["apps/web/test/**"],
   "include": [
     "packages/*/test/**/*.ts",
     "packages/*/src/**/*.ts",
