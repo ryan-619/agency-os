@@ -59,7 +59,7 @@ describe('recovering from an interrupted worker', () => {
     const t = turn()
     await markTurnRunning(db, orgId, session.id, t)
 
-    const report = await reconcileAfterRestart(db, new Date(), silent)
+    const report = await reconcileAfterRestart(db, new Date(Date.now() + 1000), silent)
 
     expect(report.interruptedTurns.map((i) => i.turnId)).toEqual([t])
     expect((await readChatSession(db, orgId, session.id))!.runningTurnId).toBeNull()
@@ -136,7 +136,7 @@ describe('recovering from an interrupted worker', () => {
   it('records every recovery in the audit log', async () => {
     const session = await createChatSession(db, { orgId, userId })
     await markTurnRunning(db, orgId, session.id, turn())
-    await reconcileAfterRestart(db, new Date(), silent)
+    await reconcileAfterRestart(db, new Date(Date.now() + 1000), silent)
 
     const rows = await db.select().from(schema.auditLog).where(eq(schema.auditLog.orgId, orgId))
     expect(rows.map((r) => r.action)).toContain('turn.interrupted_by_worker_restart')
@@ -158,8 +158,8 @@ describe('recovering from an interrupted worker', () => {
       { identifier: 'stale@example.com', token: 'tok-old', expires: new Date(Date.now() - MINUTE) },
       { identifier: 'live@agency.test', token: 'tok-new', expires: new Date(Date.now() + MINUTE) },
     ])
-    const report = await reconcileAfterRestart(db, new Date(), silent)
-    expect(report.prunedVerificationTokens).toBe(1)
+    const report = await reconcileAfterRestart(db, new Date(Date.now() + 1000), silent)
+    expect(report.prunedSignInLinks).toBe(1)
     const left = await db.select().from(schema.verificationTokens)
     expect(left.map((t) => t.token)).toEqual(['tok-new'])
   })

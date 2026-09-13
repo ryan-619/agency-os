@@ -201,7 +201,8 @@ describe('chat sessions', () => {
       await markTurnRunning(db, orgId, a.id, ta)
       await markTurnRunning(db, orgId, b.id, tb)
 
-      const interrupted = await clearInterruptedTurns(db)
+      // Booted "now", so every turn above predates it.
+      const interrupted = await clearInterruptedTurns(db, new Date(Date.now() + 1000))
       const bySession = new Map(interrupted.map((i) => [i.sessionId, i]))
       expect(bySession.get(a.id)?.turnId).toBe(ta)
       expect(bySession.get(b.id)?.turnId).toBe(tb)
@@ -213,9 +214,25 @@ describe('chat sessions', () => {
       expect(await markTurnRunning(db, orgId, a.id, turn())).toBe(true)
     })
 
+    /**
+     * A turn that began AFTER this worker booted belongs to a worker that is
+     * alive. Clearing it would cancel live work — which is exactly what would
+     * happen on a dev machine, where the advisory lock does not actually
+     * exclude a second worker.
+     */
+    it('leaves alone a turn that started after the boot it is reconciling', async () => {
+      const s = await createChatSession(db, { orgId, userId })
+      const t = turn()
+      await markTurnRunning(db, orgId, s.id, t)
+      const bootedEarlier = new Date(Date.now() - 60_000)
+      expect(await clearInterruptedTurns(db, bootedEarlier)).toEqual([])
+      expect((await readChatSession(db, orgId, s.id))!.runningTurnId).toBe(t)
+    })
+
     it('finds nothing to clear on a clean start', async () => {
-      await clearInterruptedTurns(db)
-      expect(await clearInterruptedTurns(db)).toEqual([])
+      const later = new Date(Date.now() + 1000)
+      await clearInterruptedTurns(db, later)
+      expect(await clearInterruptedTurns(db, later)).toEqual([])
     })
   })
 

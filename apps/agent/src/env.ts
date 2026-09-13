@@ -9,21 +9,74 @@ const schema = z.object({
 
   /**
    * The Agent SDK authenticates with an API key from the environment (§5).
-   * Optional in Phase 0 — the query() loop lands in Phase 2 — so that the
-   * worker still boots and reports health without one.
+   *
+   * Still optional, and that is deliberate. The worker's other jobs — the
+   * restart reconciler, the approval sweeper, health — are useful on their
+   * own, and refusing to boot without a key would mean an unconfigured
+   * deployment has no approval queue and no recovery either. Chat reports
+   * `chat_disabled` instead, which is a sentence someone can act on.
    */
   ANTHROPIC_API_KEY: z.string().optional(),
+
+  /** Overrides the SDK's default model per §5.5's "pick a model per task". */
+  AGENT_MODEL: z.string().optional(),
+
+  /**
+   * Proves the caller is the web app. Defence in depth, not the trust anchor:
+   * the worker re-derives the principal from the database on every turn, so a
+   * forged body can only address a conversation that already exists and
+   * already belongs to the user it names.
+   */
+  AGENT_INTERNAL_TOKEN: z.string().min(32, 'AGENT_INTERNAL_TOKEN must be at least 32 characters'),
+
+  /** §5.1's bounds on one turn. */
+  AGENT_MAX_TURNS: z.coerce.number().int().positive().default(30),
+  AGENT_MAX_BUDGET_USD: z.coerce.number().positive().default(2),
+
+  /**
+   * A bound the SDK does not provide. maxTurns and maxBudgetUsd bound ONE
+   * turn, so twenty $2 turns in an hour sits inside every SDK limit.
+   */
+  AGENT_SESSION_BUDGET_USD: z.coerce.number().positive().default(20),
+
+  /** §5.4's approval window. */
+  APPROVAL_TTL_MINUTES: z.coerce.number().int().positive().default(30),
+  APPROVAL_POLL_MS: z.coerce.number().int().positive().default(2000),
+  APPROVAL_SWEEP_MS: z.coerce.number().int().positive().default(60_000),
+
+  /**
+   * The wall clock for one turn. Must EXCEED the approval window, or a turn
+   * gets killed while its approval is still live and a human's decision lands
+   * on a turn that no longer exists to consume it. Checked below.
+   */
+  AGENT_TURN_TIMEOUT_MINUTES: z.coerce.number().int().positive().default(35),
+
+  /** Parked approvals must not starve the tool handlers sharing this pool. */
+  DATABASE_POOL_MAX: z.coerce.number().int().positive().default(8),
 })
 
 export type Env = z.infer<typeof schema>
 
-export function loadEnv(): Env {
-  const parsed = schema.safeParse(process.env)
+export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
+  const parsed = schema.safeParse(source)
   if (!parsed.success) {
     const problems = parsed.error.issues
       .map((i) => `  ${i.path.join('.') || '(root)'}: ${i.message}`)
       .join('\n')
     throw new Error(`Invalid environment configuration:\n${problems}`)
   }
-  return parsed.data
+  const env = parsed.data
+
+  // A boot refusal rather than a comment. Getting this ordering wrong produces
+  // the confusing failure — a turn aborted at 20 minutes while its approval
+  // card says 10 minutes left, and a human clicking Approve into nothing.
+  if (env.AGENT_TURN_TIMEOUT_MINUTES <= env.APPROVAL_TTL_MINUTES) {
+    throw new Error(
+      `AGENT_TURN_TIMEOUT_MINUTES (${env.AGENT_TURN_TIMEOUT_MINUTES}) must be greater than ` +
+        `APPROVAL_TTL_MINUTES (${env.APPROVAL_TTL_MINUTES}), or a turn is killed while its own ` +
+        'approval is still live and the decision has nothing left to resume.',
+    )
+  }
+
+  return env
 }

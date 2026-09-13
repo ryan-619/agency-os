@@ -18,9 +18,21 @@
  * because the useful outcome of a crash is a sentence someone can read, not a
  * quietly tidied database.
  *
- * This runs only under the single-worker advisory lock. Without it, a healthy
- * second worker's live turns and live approvals would be exactly the rows this
- * function destroys.
+ * Both are scoped by `bootAt`: a turn that began, or an approval that was
+ * raised, AFTER this worker started belongs to a turn this worker or another
+ * live one is serving. Only rows that predate the boot can have been orphaned
+ * by the process that is gone.
+ *
+ * That scoping is what makes this safe, and the single-worker advisory lock is
+ * a second layer rather than the first — because the lock cannot be verified
+ * everywhere. Two connections through the PGlite socket bridge used for local
+ * development BOTH acquire the same advisory lock: the bridge multiplexes them
+ * onto one backend session, and Postgres lets a session re-take a lock it
+ * already holds. Proved with two pg.Clients, and it is the same class of
+ * limitation as the bridge silently dropping NOTIFY. On a real Postgres the
+ * lock excludes a second worker; on a developer's machine it does not, and the
+ * predicate above is what stops the second boot cancelling the first worker's
+ * live turns.
  */
 import { and, eq, lt, sql } from 'drizzle-orm'
 import {
@@ -32,7 +44,7 @@ import type { Logger } from '../logger.js'
 export interface ReconcileReport {
   readonly interruptedTurns: readonly InterruptedTurn[]
   readonly orphanedApprovals: number
-  readonly prunedVerificationTokens: number
+  readonly prunedSignInLinks: number
 }
 
 export async function reconcileAfterRestart(
@@ -41,7 +53,7 @@ export async function reconcileAfterRestart(
   log: Logger,
 ): Promise<ReconcileReport> {
   // --- turns nobody is going to finish ---------------------------------------
-  const interrupted = await clearInterruptedTurns(db)
+  const interrupted = await clearInterruptedTurns(db, bootAt)
   for (const turn of interrupted) {
     try {
       await appendChatMessage(db, {
@@ -134,13 +146,18 @@ export async function reconcileAfterRestart(
   // granting nothing, but nothing prunes them — and names this worker as where
   // the sweep belongs. It is three lines and it runs on a tick that already
   // exists.
-  let prunedVerificationTokens = 0
+  //
+  // Reported as `prunedSignInLinks`, not `...Tokens`: redact() matches on key
+  // NAMES and blanks anything matching /token/i, so a COUNT called
+  // prunedVerificationTokens logs as "[redacted]". Harmless but useless, and
+  // the fix belongs at the call site — redact() is deliberately blunt.
+  let prunedSignInLinks = 0
   try {
     const pruned = await db
       .delete(schema.verificationTokens)
       .where(lt(schema.verificationTokens.expires, sql`now()`))
       .returning({ identifier: schema.verificationTokens.identifier })
-    prunedVerificationTokens = pruned.length
+    prunedSignInLinks = pruned.length
   } catch (err) {
     log.warn('could not prune expired verification tokens', {
       error: err instanceof Error ? err.name : 'UnknownError',
@@ -150,7 +167,7 @@ export async function reconcileAfterRestart(
   const report: ReconcileReport = {
     interruptedTurns: interrupted,
     orphanedApprovals: orphaned.length,
-    prunedVerificationTokens,
+    prunedSignInLinks,
   }
 
   if (interrupted.length > 0 || orphaned.length > 0) {
@@ -159,7 +176,7 @@ export async function reconcileAfterRestart(
       orphanedApprovals: orphaned.length,
     })
   } else {
-    log.info('clean start; nothing to reconcile', { prunedVerificationTokens })
+    log.info('clean start; nothing to reconcile', { prunedSignInLinks })
   }
   return report
 }

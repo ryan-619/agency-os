@@ -377,6 +377,27 @@ numbers as literals. The threshold, channels and daily cap shown are whatever
 the active `icp_profiles` row says. A dashboard displaying a threshold the
 engine is not using is the same class of mistake as a finding nobody observed.
 
+**The local PGlite socket bridge is not a Postgres for concurrency.** It is an
+excellent stand-in for SQL and schema — `npm test` runs the real migrations on
+it — and it is not one for anything involving two sessions. Two limitations
+were found by probing rather than by reasoning, and both fail SILENTLY:
+
+- **`NOTIFY` is dropped entirely.** `pg.listen()` works in-process, but a
+  `pg.Client` over the bridge receives nothing, and the bridge's source has no
+  notification handling at all. A `LISTEN`-based approval waiter would hang on
+  a developer's own machine, which is why the waiter polls.
+- **Advisory locks do not isolate.** Two separate `pg.Client`s both get
+  `pg_try_advisory_lock(k)` → `true`, and `pg_locks` shows two. The bridge
+  multiplexes every TCP connection onto one PGlite backend, and Postgres lets a
+  session re-take a lock it already holds. So the single-worker lock does not
+  exclude a second worker locally, and two workers really do both start.
+
+Neither is an application bug and neither is worth working around — on a real
+Postgres both behave correctly. What matters is that nothing is allowed to
+DEPEND on them: the waiter polls, and the restart reconciler is scoped by boot
+time (below) so a second worker cannot cancel the first one's live turns even
+when the lock fails to exclude it.
+
 **`tools/scan.ts` uses a connection POOL, not a `Client`.** `recordScan` wraps
 its writes in a transaction, and a transaction on a single connection is not
 isolated from anything else using that connection. With four workers sharing

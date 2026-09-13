@@ -25,6 +25,8 @@ export interface TurnHandle {
   interrupt(): void
 }
 
+export type { ChatEvent }
+
 export interface StartTurnRequest {
   readonly chatSessionId: string
   readonly userId: string

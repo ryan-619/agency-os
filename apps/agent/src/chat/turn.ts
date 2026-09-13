@@ -54,6 +54,43 @@ export interface RunningTurn {
   events(): AsyncGenerator<ChatEvent, void>
   /** Stop the turn. The generator still finishes cleanly. */
   interrupt(): void
+  /**
+   * Push an event from outside the SDK loop.
+   *
+   * The approval gate produces cards while the turn is mid-flight, and it is
+   * built BEFORE the turn exists — it closes over the turn id, which is what
+   * the approval rows are keyed on. So the gate is handed a deferred emitter
+   * that forwards here once there is a turn to forward to, and the card
+   * appears in the stream exactly where the pause happened.
+   */
+  emit(body: ChatEventBody): void
+}
+
+/**
+ * An emitter that can be handed out before its destination exists.
+ *
+ * Buffers until bound, then forwards. Nothing is lost in the window between
+ * building the gate and starting the turn, which is where a synchronous gate
+ * failure would otherwise vanish.
+ */
+export interface DeferredEmitter {
+  emit(body: ChatEventBody): void
+  bind(sink: (body: ChatEventBody) => void): void
+}
+
+export function createDeferredEmitter(): DeferredEmitter {
+  const buffered: ChatEventBody[] = []
+  let sink: ((body: ChatEventBody) => void) | null = null
+  return {
+    emit(body) {
+      if (sink) sink(body)
+      else buffered.push(body)
+    },
+    bind(next) {
+      sink = next
+      while (buffered.length > 0) next(buffered.shift()!)
+    },
+  }
 }
 
 /**
@@ -238,5 +275,8 @@ export function startTurn(deps: TurnDeps, req: TurnRequest): RunningTurn {
     turnId: deps.turnId,
     events: () => queue.drain(),
     interrupt: () => req.abort.abort(),
+    emit: (body) => {
+      emit(body)
+    },
   }
 }

@@ -14,7 +14,7 @@
  * schema carries a running-turn marker so that state is visible in the
  * database rather than only in the memory of a process that no longer exists.
  */
-import { and, asc, desc, eq, isNotNull, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, isNotNull, lt, sql } from 'drizzle-orm'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 
@@ -240,7 +240,7 @@ export interface InterruptedTurn {
 }
 
 /**
- * Find and clear every turn that was running when the worker stopped.
+ * Find and clear every turn that was already running before `startedAt`.
  *
  * This is the single most important anti-hang measure in the phase. A browser
  * reattaching to a session whose turn died mid-flight otherwise shows a
@@ -249,15 +249,34 @@ export interface InterruptedTurn {
  * writing a `system` frame turns an invisible death into a sentence the person
  * can read and act on.
  *
- * Safe to run only because there is exactly one worker; the caller takes an
- * advisory lock before calling this.
+ * `startedAt` is the caller's boot time, and it is what makes this safe rather
+ * than merely careful. A turn that began AFTER this worker booted belongs to
+ * this worker or to another live one; only a turn that predates the boot can
+ * have been orphaned by the process that is gone. The approval sweep has
+ * always been scoped this way; this is the same rule, applied consistently.
+ *
+ * That matters more than it looks, because the single-worker advisory lock
+ * cannot be verified everywhere. On the PGlite socket bridge used for local
+ * development, two connections both acquire the same advisory lock — the
+ * bridge multiplexes them onto one backend session and Postgres lets a session
+ * re-take its own lock. So on a developer's machine the lock does not actually
+ * exclude a second worker, and without this predicate the second worker's boot
+ * would cancel the first worker's live turns.
  */
-export async function clearInterruptedTurns(db: AgencyDb): Promise<InterruptedTurn[]> {
+export async function clearInterruptedTurns(
+  db: AgencyDb,
+  startedAt: Date,
+): Promise<InterruptedTurn[]> {
   // Read BEFORE the update, not with RETURNING. Postgres returns the NEW row
   // from an UPDATE ... RETURNING, so asking for running_turn_id there hands
   // back the null we just wrote and the caller learns nothing about what was
   // interrupted. Two statements are safe here because this runs at boot under
   // the single-worker advisory lock, before the HTTP server accepts a turn.
+  const orphaned = and(
+    isNotNull(schema.chatSessions.runningTurnId),
+    lt(schema.chatSessions.runningSince, startedAt),
+  )
+
   const running = await db
     .select({
       sessionId: schema.chatSessions.id,
@@ -266,14 +285,11 @@ export async function clearInterruptedTurns(db: AgencyDb): Promise<InterruptedTu
       startedAt: schema.chatSessions.runningSince,
     })
     .from(schema.chatSessions)
-    .where(isNotNull(schema.chatSessions.runningTurnId))
+    .where(orphaned)
 
   if (running.length === 0) return []
 
-  await db
-    .update(schema.chatSessions)
-    .set({ runningTurnId: null, runningSince: null })
-    .where(isNotNull(schema.chatSessions.runningTurnId))
+  await db.update(schema.chatSessions).set({ runningTurnId: null, runningSince: null }).where(orphaned)
 
   return running.flatMap((r) =>
     r.turnId ? [{ sessionId: r.sessionId, orgId: r.orgId, turnId: r.turnId, startedAt: r.startedAt }] : [],
