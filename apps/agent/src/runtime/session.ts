@@ -18,8 +18,8 @@ import { and, eq } from 'drizzle-orm'
 import type { Options } from '@anthropic-ai/claude-agent-sdk'
 import { parseIcpDefinition, type ChatEventBody, type Principal } from '@agency/core'
 import {
-  activeIcpProfile, appendAudit, ensureApproval, expireApproval, readApproval, schema,
-  type AgencyDb, type ApprovalRow,
+  activeIcpProfile, appendAudit, enabledAgentDefs, ensureApproval, expireApproval, readApproval,
+  schema, type AgencyDb, type ApprovalRow,
 } from '@agency/db'
 import type { ToolContext } from '@agency/tools'
 import { makeCanUseTool } from '../gate/can-use-tool.js'
@@ -27,6 +27,8 @@ import { createLedger } from '../gate/ledger.js'
 import { makePostToolUse, makePreToolUse, HOOK_TIMEOUT_SECONDS } from '../gate/pre-tool-use.js'
 import { abortableSleep, createApprovalWaiter } from '../gate/waiter.js'
 import { createAgencyMcpServer, makeInputParser } from '../mcp/agency.js'
+import { buildAgents } from './agents.js'
+import { buildMcpServers, describeServers } from './connectors.js'
 import { buildQueryOptions, childEnv, systemPrompt } from './options.js'
 import type { Logger } from '../logger.js'
 
@@ -59,6 +61,12 @@ export interface SessionDeps {
   readonly model?: string | undefined
   readonly maxTurns: number
   readonly maxBudgetUsd: number
+  /**
+   * The master key for third-party credentials, or null when SECRETS_KEY is
+   * unset. Null means a connector that needs one is skipped with a reason
+   * rather than connecting unauthenticated.
+   */
+  readonly secretsKey: Buffer | null
   readonly approvalTtlMs: number
   readonly approvalPollMs: number
   /**
@@ -188,6 +196,34 @@ export async function buildTurnRuntime(
   })
 
   const hookDeps = { audit, log: deps.log }
+
+  /**
+   * §6 and §7's promise, kept literally: read on every turn, never cached.
+   *
+   * "The owner adds an MCP server through the UI and the agent uses one of its
+   * tools in the very next chat message, with no restart." A cache with any
+   * TTL at all breaks that in a way nobody can debug from the outside — the
+   * connector works, the row is right, and the agent cannot see it.
+   *
+   * Both builders SKIP a row they cannot use rather than throwing: one broken
+   * connector must not take the whole chat down.
+   */
+  const [connectors, agentRows] = await Promise.all([
+    buildMcpServers(deps.db, args.orgId, deps.secretsKey, deps.log),
+    enabledAgentDefs(deps.db, args.orgId),
+  ])
+  const subagents = buildAgents(agentRows, deps.log)
+  if (Object.keys(connectors.servers).length > 0 || Object.keys(subagents.agents).length > 0) {
+    deps.log.info('runtime assembled from the database', {
+      // Names and transports only. A connector URL can carry a token in a
+      // query string despite every instruction not to put one there (§2.3).
+      connectors: describeServers(connectors.servers),
+      subagents: Object.keys(subagents.agents),
+      ...(connectors.skipped.length > 0 ? { skippedConnectors: connectors.skipped } : {}),
+      ...(subagents.skipped.length > 0 ? { skippedSubagents: subagents.skipped } : {}),
+    })
+  }
+
   const icpRow = await activeIcpProfile(deps.db, args.orgId)
   let icpLabel: string | null = null
   if (icpRow) {
@@ -200,7 +236,12 @@ export async function buildTurnRuntime(
 
   const options = buildQueryOptions({
     canUseTool,
-    mcpServers: { agency: mcpServer },
+    // The in-process agency server always, plus whatever is registered and
+    // enabled. `agency` is spread LAST so a connector named "agency" cannot
+    // displace the app's own tools — the unique index on (org_id, name) does
+    // not know that name is taken.
+    mcpServers: { ...connectors.servers, agency: mcpServer },
+    agents: subagents.agents,
     hooks: {
       PreToolUse: [{ hooks: [makePreToolUse(hookDeps)], timeout: HOOK_TIMEOUT_SECONDS }],
       PostToolUse: [{ hooks: [makePostToolUse(hookDeps)], timeout: HOOK_TIMEOUT_SECONDS }],

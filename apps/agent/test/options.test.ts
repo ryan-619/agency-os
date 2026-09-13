@@ -17,6 +17,7 @@ const fixture = () =>
   buildQueryOptions({
     canUseTool: async () => ({ behavior: 'allow' }),
     mcpServers: {},
+    agents: {},
     hooks: {},
     systemPrompt: 'you are a test',
     cwd: '/tmp/agency',
@@ -37,6 +38,7 @@ describe('the option keyset is frozen', () => {
     const withBoth = buildQueryOptions({
       canUseTool: async () => ({ behavior: 'allow' }),
       mcpServers: {},
+      agents: {},
       hooks: {},
       systemPrompt: 's',
       cwd: '/tmp',
@@ -118,19 +120,27 @@ describe('the agent has no shell, no filesystem and no web', () => {
   })
 
   /**
-   * §7's agents and §6's skills both arrive in Phase 3. AgentDefinition
-   * carries its own permissionMode, so shipping the mapper before there is a
-   * test on its key set would open the gate from inside a database row.
+   * §7's subagents arrived in Phase 3, built against a frozen key whitelist
+   * (see agents.test.ts) — `AgentDefinition` carries its own `permissionMode`,
+   * so a mapper that spread a database row would open the gate from inside a
+   * settings form.
+   *
+   * The rest stay unset. Each is a way to reach the model or the tool set
+   * around the options this file asserts, and none has a reason to be here.
    */
-  it('registers no subagents and no skills yet', () => {
+  it('passes the subagents it was handed, and sets nothing else', () => {
     const o = fixture() as Record<string, unknown>
-    expect(o['agents']).toBeUndefined()
-    expect(o['skills']).toBeUndefined()
-    expect(o['plugins']).toBeUndefined()
-    expect(o['toolAliases']).toBeUndefined()
-    expect(o['permissionPromptToolName']).toBeUndefined()
-    expect(o['extraArgs']).toBeUndefined()
-    expect(o['settings']).toBeUndefined()
+    expect(o['agents']).toEqual({})
+    for (const key of [
+      'skills',
+      'plugins',
+      'toolAliases',
+      'permissionPromptToolName',
+      'extraArgs',
+      'settings',
+    ]) {
+      expect(o[key], key).toBeUndefined()
+    }
   })
 })
 

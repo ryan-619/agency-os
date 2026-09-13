@@ -31,6 +31,16 @@ const schema = z.object({
    */
   ANTHROPIC_API_KEY: z.string().optional(),
 
+  /**
+   * Encrypts third-party connector credentials at rest (§2.3).
+   *
+   * Optional, because a deployment with no connectors configured needs no key
+   * and must not be blocked from booting by one. A connector that HAS a
+   * credential is skipped with a reason when this is unset, rather than
+   * connecting unauthenticated and reporting an opaque 401.
+   */
+  SECRETS_KEY: z.string().optional(),
+
   /** Overrides the SDK's default model per §5.5's "pick a model per task". */
   AGENT_MODEL: z.string().optional(),
 

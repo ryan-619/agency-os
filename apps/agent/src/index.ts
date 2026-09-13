@@ -3,7 +3,7 @@ import { Pool } from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import {
   appendAudit, appendChatMessage, cancelPendingApprovals, clearTurnRunning,
-  ensureChatSessionTitle, markTurnRunning, schema, sessionCostUsd, setSdkSessionId, usd,
+  ensureChatSessionTitle, markTurnRunning, masterKey, schema, sessionCostUsd, setSdkSessionId, usd,
   type AgencyDb,
 } from '@agency/db'
 import { loadEnv } from './env.js'
@@ -76,6 +76,28 @@ async function main(): Promise<void> {
   halt = createHalt(log)
   const running = new Map<string, TurnHandle>()
 
+  /**
+   * Resolved ONCE, here, rather than on every turn.
+   *
+   * A malformed SECRETS_KEY is a configuration mistake, and it should be a
+   * line in the boot log — not a surprise at the moment someone asks a
+   * question that happens to need a connector. Unset is not an error: a
+   * deployment with no connectors needs no key, and a connector that does need
+   * one is skipped with a reason.
+   */
+  let secretsKey: Buffer | null = null
+  if (env.SECRETS_KEY) {
+    try {
+      secretsKey = masterKey(env.SECRETS_KEY)
+      log.info('connector credentials can be decrypted')
+    } catch (err) {
+      // The message names a length, never a value (§2.3).
+      log.error('SECRETS_KEY is set but unusable; connectors that need a credential will be skipped', {
+        error: err instanceof Error ? err.message : 'unknown',
+      })
+    }
+  }
+
   if (!env.ANTHROPIC_API_KEY) {
     log.warn('ANTHROPIC_API_KEY is not set — chat refuses turns; everything else still runs')
   }
@@ -94,7 +116,7 @@ async function main(): Promise<void> {
       return true
     },
     startTurn: (req) =>
-      beginTurn({ req, db, env, log, halt, running }),
+      beginTurn({ req, db, env, log, halt, running, secretsKey }),
   })
 
   const apiPort = env.AGENT_PORT + 1
@@ -153,8 +175,10 @@ async function beginTurn(args: {
   log: Logger
   halt: RuntimeHalt
   running: Map<string, TurnHandle>
+  /** Resolved once at boot; null when SECRETS_KEY is unset or unusable. */
+  secretsKey: Buffer | null
 }): Promise<{ ok: true; turn: TurnHandle } | { ok: false; status: number; message: string }> {
-  const { req, db, env, log, halt, running } = args
+  const { req, db, env, log, halt, running, secretsKey } = args
 
   if (!env.ANTHROPIC_API_KEY) return { ok: false, status: 503, message: 'chat_disabled' }
   if (halt.halted()) return { ok: false, status: 503, message: 'runtime_halted' }
@@ -178,6 +202,7 @@ async function beginTurn(args: {
       maxBudgetUsd: env.AGENT_MAX_BUDGET_USD,
       approvalTtlMs: env.APPROVAL_TTL_MINUTES * 60_000,
       approvalPollMs: env.APPROVAL_POLL_MS,
+      secretsKey,
       turnTimeoutMs: env.AGENT_TURN_TIMEOUT_MINUTES * 60_000,
       cwd: process.cwd(),
       now: () => new Date(),

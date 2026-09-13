@@ -35,6 +35,7 @@ import type { Options } from '@anthropic-ai/claude-agent-sdk'
  */
 export const ALLOWED_OPTION_KEYS = Object.freeze([
   'abortController',
+  'agents',
   'allowDangerouslySkipPermissions',
   'allowedTools',
   'canUseTool',
@@ -77,6 +78,16 @@ export const FORBIDDEN_TOOLS: readonly string[] = [
 export interface BuildOptionsInput {
   readonly canUseTool: Options['canUseTool']
   readonly mcpServers: NonNullable<Options['mcpServers']>
+  /**
+   * The subagents from `agent_defs` (§7).
+   *
+   * Built by `runtime/agents.ts` against a FROZEN key whitelist, never spread
+   * from a row: `AgentDefinition` accepts `permissionMode` in this SDK
+   * version, so a spread would make "add a subagent" a way to set
+   * `bypassPermissions` from a web form — the first of the three documented
+   * ways to skip `canUseTool` entirely.
+   */
+  readonly agents: NonNullable<Options['agents']>
   readonly hooks: NonNullable<Options['hooks']>
   readonly systemPrompt: string
   readonly cwd: string
@@ -104,6 +115,13 @@ export function buildQueryOptions(input: BuildOptionsInput): Options {
     // Only servers declared here. Without it, an `.mcp.json` on disk would add
     // servers nobody registered in the connectors table.
     strictMcpConfig: true,
+    // §7's subagents. Note what is NOT done alongside this: §7 says to include
+    // "Agent" in allowedTools "so delegation does not stall on approval". That
+    // is a bare entry, which auto-approves before the gate is consulted — and
+    // it would not stall anything anyway, because `canUseTool` answers
+    // delegation itself, in milliseconds, without a human (classifyRisk rates
+    // it `medium`, and the gate's medium path is a card, not a block).
+    agents: input.agents,
 
     // --- the gate ---------------------------------------------------------
     canUseTool: input.canUseTool,
