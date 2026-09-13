@@ -11,6 +11,7 @@
  *
  *   POST /internal/turns                     start a turn; the response IS the stream
  *   POST /internal/turns/:turnId/interrupt   stop one
+ *   POST /internal/connectors/:id/probe      Test connection (§6)
  *   GET  /livez  /readyz                     health (see health.ts)
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
@@ -42,6 +43,15 @@ export interface AgentHttpDeps {
     { ok: true; turn: TurnHandle } | { ok: false; status: number; message: string }
   >
   readonly interrupt: (turnId: string) => boolean
+  /**
+   * Test connection (§6). The web app has established who is asking and that
+   * they may manage connectors; this proves the connector belongs to their
+   * org, because the id is all that crosses the boundary.
+   */
+  readonly probeConnector: (
+    orgId: string,
+    connectorId: string,
+  ) => Promise<{ ok: boolean; tools: readonly { name: string; description: string }[]; message: string }>
   /** Answers /livez and /readyz. */
   readonly health: (url: string) => Promise<{ status: number; body: unknown } | null>
 }
@@ -154,6 +164,23 @@ async function handle(req: IncomingMessage, res: ServerResponse, deps: AgentHttp
       sse.close()
     }
     return
+  }
+
+  const probeMatch = /^\/internal\/connectors\/([^/]+)\/probe$/.exec(url)
+  if (req.method === 'POST' && probeMatch) {
+    let body: unknown
+    try {
+      body = await readBody(req)
+    } catch {
+      return json(res, 413, { error: 'body_too_large' })
+    }
+    const orgId = (body as Record<string, unknown> | null)?.['orgId']
+    if (typeof orgId !== 'string' || !orgId) return json(res, 400, { error: 'invalid_request' })
+
+    const result = await deps.probeConnector(orgId, probeMatch[1] ?? '')
+    // 200 whether or not the server answered. "It could not be reached" is the
+    // ANSWER to Test connection, not a failure of the request to test it.
+    return json(res, 200, result)
   }
 
   const interruptMatch = /^\/internal\/turns\/([^/]+)\/interrupt$/.exec(url)

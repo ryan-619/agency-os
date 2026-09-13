@@ -4,10 +4,20 @@ Internal operating system for a small application-security agency. Read
 [PROMPT.md](PROMPT.md) for the full build spec; this file is the working
 summary a session should read first.
 
-**Current state: Phases 0, 1 and 2 are built. Phase 2's Definition of Done is
-NOT yet proved — it needs one live turn against an account with credit, and the
-account available during the build had none. `npm run smoke:agent` is the gate;
-run it before calling Phase 2 finished or starting Phase 3.**
+**Current state: Phases 0, 1, 2 and 3 are built.**
+
+**Neither Phase 2's nor Phase 3's Definition of Done is fully proved, and both
+are blocked on the same thing: the Anthropic account has no credit, so no turn
+has ever reached the model.** Everything below that boundary IS proved, live:
+
+| | proved | not proved |
+|---|---|---|
+| Phase 2 | browser → route → worker → gate → SDK → API, authenticated; refused at billing | one live turn with tool cards |
+| Phase 3 | a connector added in the UI reaches a live turn with no restart — the worker logged `connectors: ["deepwiki (http)"]` for a turn on a worker started *before* that connector existed | the agent CALLING one of its tools |
+
+`npm run smoke:agent` gates Phase 2; `npm run smoke:agent -- --connector <name>`
+gates Phase 3. Run both against an account with credit before calling either
+phase finished.
 
 ---
 
@@ -153,6 +163,49 @@ packages/scanner   the public-surface signal collector (Phase 1)
 packages/tools     the agency's own MCP tools, as plain data (Phase 2)
 ```
 
+### The runtime is assembled from the database, every turn (Phase 3)
+
+`apps/agent/src/runtime/connectors.ts` turns `connectors` rows into the SDK's
+`mcpServers`, and `runtime/agents.ts` turns `agent_defs` rows into `agents`.
+Both are read **fresh on every turn and never cached**: §6's promise is that a
+server added in the UI is usable in the very next message, and a cache with any
+TTL at all breaks that in a way nobody can debug from the outside.
+
+A row that cannot be built is SKIPPED with a reason and logged, never thrown
+on — one broken connector must not take the whole chat down.
+
+**`AgentDefinition` carries its own `permissionMode`.** §7's snippet maps four
+fields, which is right, but a spread of the row — or a later innocent-looking
+`...extra` — would make "add a subagent" a way to set `bypassPermissions` from
+a web form. `ALLOWED_AGENT_KEYS` is frozen, asserted key by key, and a source
+test bans spreading the row outright (the same instrument that keeps
+`return null` out of `can-use-tool.ts`).
+
+**Three things a connector must not reach**, each with a test in
+`apps/agent/test/connectors.test.ts`:
+
+- **the worker's own environment.** A `stdio` connector is a process an owner
+  chose through a web form; inheriting `process.env` would hand it
+  `ANTHROPIC_API_KEY`, `DATABASE_URL` and `SECRETS_KEY`. Its env is built from
+  scratch, and its credential goes in `MCP_SECRET` rather than on a command
+  line, which is visible in `ps` to anyone on the host.
+- **the network the worker runs in.** `isReachableConnectorUrl` refuses the
+  same hosts the scanner does, for a worse reason: the worker would send the
+  connector's CREDENTIAL to whatever answered `169.254.169.254`. Re-checked at
+  BUILD time, not only when the row was written.
+- **the log.** Names and transports only. A URL carries a token in a query
+  string sooner or later, whatever the form says.
+
+**Test connection polls past `pending`.** MCP startup is non-blocking in this
+SDK: `mcpServerStatus()` answers immediately and a perfectly healthy server
+reports `pending` for the first second or two. Taking that first answer made
+Test connection report "could not be reached" for *every working server* —
+the worst possible failure for a button whose whole job is to say whether a
+server works. (`alwaysLoad: true` would make startup blocking instead, but it
+is capped at a 5s connect timeout and changes how the server's tools load into
+a real turn; a probe should not need a different config from the thing it
+tests.)
+
 Not yet created, because their phase has not arrived (§12 — do not scaffold all
 seven phases at once): `apps/voice` (Phase 6, and only after A2P 10DLC
 registration clears).
@@ -199,6 +252,7 @@ check and should be added if the scanner is ever aimed at untrusted input.
 | 0 ✅ | authorisation — `can(principal, capability)`, log redaction — `redact()` |
 | 1 ✅ | the ICP definition, scoring, tiering, disqualifiers, the `observed` rule |
 | 2 ✅ | risk classification (§5.4), the chat wire types, the freshness rule |
+| 3 ✅ | nothing new — §6 and §7 are assembly, and assembly needs the database |
 | 4 | consent, suppression, quiet hours, daily caps — the one send path |
 
 ---
@@ -209,7 +263,7 @@ check and should be added if the scanner is ever aimed at untrusted input.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 715 tests: domain + migrations + invariants + seed + parity + agent
+npm test                 # 833 tests: domain + migrations + invariants + seed + parity + agent
 npm run build            # packages, then the Next app
 
 # database (needs DATABASE_URL)
@@ -225,10 +279,14 @@ npm run scan -- --all         # re-scan everything
 npm run scan -- rentman.io    # one domain
 npm run scan -- --import f.csv  # import a domain,name CSV, then scan
 
+# a local Postgres on a machine with neither Postgres nor Docker
+npm run db:local              # PGlite behind a TCP socket; data in .pgdata/
+
 # the agent (Phase 2) — needs ANTHROPIC_API_KEY with credit, and a worker
 npx tsx --env-file=.env apps/agent/src/index.ts   # the worker: health 3001, api 3002
 npm run smoke:agent              # the Phase 2 Definition-of-Done gate. Costs money.
 npm run smoke:agent -- --draft   # ...and make it park a draft on a human
+npm run smoke:agent -- --connector deepwiki   # the Phase 3 gate (§6's "no restart")
 
 # the parity harness — regenerate only when re-recording on purpose
 npm run fixtures:capture      # re-record the seed domains' public surface
@@ -408,6 +466,13 @@ holds a definition with no `order` and will use that fallback; re-seed it.**
 numbers as literals. The threshold, channels and daily cap shown are whatever
 the active `icp_profiles` row says. A dashboard displaying a threshold the
 engine is not using is the same class of mistake as a finding nobody observed.
+
+**`npm run db:local` exists because `docker compose up` needs Docker.** The
+documented path is compose; a machine without it had no path at all, so
+`tools/local-db.ts` puts `@electric-sql/pglite-socket` in front of PGlite and
+the apps connect with an ordinary `postgres://` URL. Nothing in `apps/` or
+`packages/` contains a branch for "running locally", and nothing may. Read the
+next entry before trusting it for anything involving two connections.
 
 **The local PGlite socket bridge is not a Postgres for concurrency.** It is an
 excellent stand-in for SQL and schema — `npm test` runs the real migrations on

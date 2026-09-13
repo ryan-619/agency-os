@@ -236,3 +236,24 @@ export function secretsMatch(a: string, b: string): boolean {
   if (ba.length !== bb.length) return false
   return timingSafeEqual(ba, bb)
 }
+
+/**
+ * The master key from the environment, or null.
+ *
+ * The web app needs to store a credential (the Settings form) and the worker
+ * needs to read one (building a connector). Both want "is there a usable key?"
+ * rather than an exception, because both have something sensible to say when
+ * there is not — so this returns null where `masterKey` throws.
+ *
+ * Deliberately NOT called at module scope anywhere: `next build` evaluates
+ * route modules while collecting page data, and an image build must not need
+ * runtime credentials (CLAUDE.md §4).
+ */
+export function secretsKeyFromEnv(raw: string | undefined = process.env['SECRETS_KEY']): Buffer | null {
+  if (!raw) return null
+  try {
+    return masterKey(raw)
+  } catch {
+    return null
+  }
+}

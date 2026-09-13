@@ -29,3 +29,4 @@ coverage/
 # runtime
 *.log
 pgdata/
+.pgdata/

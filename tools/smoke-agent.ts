@@ -1,7 +1,9 @@
 /**
- * Prove the agent works end to end (PROMPT.md §9, Phase 2's Definition of Done).
+ * Prove the agent works end to end (PROMPT.md §9, Phases 2 and 3).
  *
- *   npm run smoke:agent
+ *   npm run smoke:agent            Phase 2's Definition of Done
+ *   npm run smoke:agent -- --draft ...and make it park a draft on a human
+ *   npm run smoke:agent -- --connector <name>   Phase 3's Definition of Done
  *
  * This is NOT part of `npm test` and never will be. It costs money, it needs a
  * real ANTHROPIC_API_KEY with credit on the account, and it talks to a running
@@ -33,11 +35,31 @@ import { createChatSession, schema, type AgencyDb } from '@agency/db/queries'
 const AGENT_URL = process.env['AGENT_URL'] ?? 'http://127.0.0.1:3002'
 const TOKEN = process.env['AGENT_INTERNAL_TOKEN'] ?? ''
 const DRAFT = process.argv.includes('--draft')
+/**
+ * Phase 3's Definition of Done: "the owner adds an MCP server through the UI
+ * and the agent uses one of its tools in the very next chat message, with no
+ * restart."
+ *
+ * The "no restart" half cannot be asserted from in here — it is a property of
+ * how the worker was started, not of what it answers. So this script checks
+ * the half it CAN check (the connector's tools are in the agent's hands) and
+ * prints the other half as an instruction: run this against a worker that has
+ * been up since before the connector was added, which is the case that matters
+ * and the case a person can actually verify.
+ */
+const CONNECTOR = argValue('--connector')
 
-const ASK = DRAFT
-  ? 'Find the best-fit company in the pipeline, then draft a short email opener to them about ' +
-    'the most demonstrable finding you have on them.'
-  : 'score the companies in the pipeline and tell me the top three by fit'
+function argValue(flag: string): string | null {
+  const i = process.argv.indexOf(flag)
+  return i === -1 ? null : (process.argv[i + 1] ?? null)
+}
+
+const ASK = CONNECTOR
+  ? 'List the exact names of every tool you have available to you right now. Names only, one per line.'
+  : DRAFT
+    ? 'Find the best-fit company in the pipeline, then draft a short email opener to them about ' +
+      'the most demonstrable finding you have on them.'
+    : 'score the companies in the pipeline and tell me the top three by fit'
 
 interface Frame {
   kind: string
@@ -155,6 +177,18 @@ async function main(): Promise<void> {
     ])
   }
 
+  if (CONNECTOR) {
+    // Phase 3. The agent naming the connector's namespace is the evidence
+    // that a row added in the UI reached a live turn — the assembly happens
+    // at the start of every turn, from the enabled rows, with nothing cached.
+    checks.push([
+      `can see the "${CONNECTOR}" connector's tools`,
+      new RegExp(`mcp__${CONNECTOR}__`).test(answer),
+      `the agent did not name a single mcp__${CONNECTOR}__* tool. Either the connector is not ` +
+        'enabled, or it failed to build — check the worker log for "connector skipped".',
+    ])
+  }
+
   let bad = 0
   console.log('  checks')
   for (const [name, passed, why] of checks) {
@@ -178,7 +212,17 @@ async function main(): Promise<void> {
 
   await pool.end()
   if (bad > 0) fail(`${bad} check(s) failed`)
-  console.log('  Phase 2 Definition of Done: PASSED\n')
+
+  if (CONNECTOR) {
+    console.log(
+      '  Phase 3 Definition of Done: PASSED — with one half you have to confirm yourself.\n' +
+        '  This proves the agent HAS the connector\'s tools. It does not prove the worker was\n' +
+        '  never restarted, which is the other half of §9\'s wording. Add the connector through\n' +
+        '  the UI while this worker is running, then run this without restarting it.\n',
+    )
+  } else {
+    console.log('  Phase 2 Definition of Done: PASSED\n')
+  }
 }
 
 main().catch((err: unknown) => {

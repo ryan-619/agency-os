@@ -23,12 +23,14 @@
     "fixtures:html-parity": "python3 tools/html-parity-corpus.py",
     "tables:python": "python3 tools/generate-python-tables.py",
     "scan": "tsx --env-file-if-exists=.env tools/scan.ts",
-    "smoke:agent": "tsx --env-file-if-exists=.env tools/smoke-agent.ts"
+    "smoke:agent": "tsx --env-file-if-exists=.env tools/smoke-agent.ts",
+    "db:local": "tsx tools/local-db.ts"
   },
   "devDependencies": {
-    "typescript": "5.9.3",
-    "vitest": "3.2.7",
+    "@electric-sql/pglite-socket": "^0.2.11",
     "@types/node": "22.18.1",
-    "tsx": "4.20.6"
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "vitest": "3.2.7"
   }
 }

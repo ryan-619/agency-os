@@ -45,6 +45,7 @@ describe('the agent HTTP surface', () => {
   let base: string
   let deps: AgentHttpDeps
   const interrupted: string[] = []
+  const probed: string[] = []
   let nextTurn: TurnHandle = fakeTurn([event(1), event(2, { kind: 'turn_finished', reason: 'success', sdkSessionId: 's' } as never)])
   let startResult: Awaited<ReturnType<AgentHttpDeps['startTurn']>> | null = null
 
@@ -57,6 +58,10 @@ describe('the agent HTTP surface', () => {
       interrupt: (id) => {
         interrupted.push(id)
         return true
+      },
+      probeConnector: async (orgId, id) => {
+        probed.push(`${orgId}/${id}`)
+        return { ok: true, tools: [{ name: 'search', description: 'Find things' }], message: 'Connected. 1 tool available.' }
       },
       health: async (url) =>
         url === '/livez' ? { status: 200, body: { status: 'ok' } } : null,
@@ -233,4 +238,40 @@ describe('the agent HTTP surface', () => {
     const res = await post('/internal/nope', {})
     expect(res.status).toBe(404)
   })
+  /**
+   * Test connection (§6). The org id is in the BODY rather than inferred,
+   * because the worker has no session: the web app establishes who is asking
+   * and this proves the connector belongs to their org.
+   */
+  describe('POST /internal/connectors/:id/probe', () => {
+    it('probes the connector and returns the tool list', async () => {
+      const res = await fetch(`${base}/internal/connectors/c1/probe`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ orgId: 'org-1' }),
+      })
+      expect(res.status).toBe(200)
+      expect(await res.json()).toMatchObject({ ok: true, tools: [{ name: 'search' }] })
+      expect(probed).toContain('org-1/c1')
+    })
+
+    it('refuses without the shared token', async () => {
+      const res = await fetch(`${base}/internal/connectors/c1/probe`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ orgId: 'org-1' }),
+      })
+      expect(res.status).toBe(401)
+    })
+
+    it('refuses a body with no org', async () => {
+      const res = await fetch(`${base}/internal/connectors/c1/probe`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({}),
+      })
+      expect(res.status).toBe(400)
+    })
+  })
+
 })

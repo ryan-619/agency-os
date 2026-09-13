@@ -3,8 +3,8 @@ import { Pool } from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import {
   appendAudit, appendChatMessage, cancelPendingApprovals, clearTurnRunning,
-  ensureChatSessionTitle, markTurnRunning, masterKey, schema, sessionCostUsd, setSdkSessionId, usd,
-  type AgencyDb,
+  ensureChatSessionTitle, markTurnRunning, masterKey, readConnector, schema, sessionCostUsd,
+  setSdkSessionId, usd, type AgencyDb,
 } from '@agency/db'
 import { loadEnv } from './env.js'
 import { createLogger, type Logger } from './logger.js'
@@ -14,6 +14,7 @@ import { reconcileAfterRestart, sweepExpired } from './boot/reconcile.js'
 import { createAgentHttpServer, type StartTurnRequest, type TurnHandle } from './http/server.js'
 import { createDeferredEmitter, startTurn } from './chat/turn.js'
 import { buildTurnRuntime, createHalt, resolvePrincipal, type RuntimeHalt } from './runtime/session.js'
+import { probeConnector } from './runtime/probe.js'
 
 /**
  * The agent worker.
@@ -109,6 +110,21 @@ async function main(): Promise<void> {
     // The same implementation the health port serves, so the two can never
     // disagree about whether the runtime is halted.
     health: (url) => answerHealth(url, healthInputs()),
+    probeConnector: async (orgId, connectorId) => {
+      if (!env.ANTHROPIC_API_KEY) {
+        return {
+          ok: false,
+          tools: [],
+          message: 'The worker has no API key, so it cannot start a session to test with.',
+        }
+      }
+      const row = await readConnector(db, orgId, connectorId)
+      // Answered identically to a connector that does not exist. The id is the
+      // only thing that crosses the boundary, so this is not a way to learn
+      // that one belongs to somebody else.
+      if (!row) return { ok: false, tools: [], message: 'That connector no longer exists.' }
+      return probeConnector(db, row, secretsKey, env.ANTHROPIC_API_KEY, process.cwd(), log)
+    },
     interrupt: (turnId) => {
       const turn = running.get(turnId)
       if (!turn) return false

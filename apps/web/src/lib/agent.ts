@@ -72,3 +72,41 @@ export async function interruptTurn(turnId: string): Promise<boolean> {
     return false
   }
 }
+
+export interface ProbeAnswer {
+  readonly ok: boolean
+  readonly tools: readonly { readonly name: string; readonly description: string }[]
+  readonly message: string
+}
+
+/**
+ * Ask the worker to test one connector (§6).
+ *
+ * Returns null only when the worker itself could not be reached — which is a
+ * different fact from "the connector could not be reached", and the two must
+ * not be shown as the same thing. A person told their connector is broken,
+ * when actually the agent worker is down, will spend an afternoon on the
+ * wrong problem.
+ */
+export async function probeConnector(orgId: string, connectorId: string): Promise<ProbeAnswer | null> {
+  const e = env()
+  if (!e.AGENT_URL || !e.AGENT_INTERNAL_TOKEN) return null
+  try {
+    const res = await fetch(
+      `${e.AGENT_URL}/internal/connectors/${encodeURIComponent(connectorId)}/probe`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${e.AGENT_INTERNAL_TOKEN}`,
+        },
+        body: JSON.stringify({ orgId }),
+        cache: 'no-store',
+      },
+    )
+    if (!res.ok) return null
+    return (await res.json()) as ProbeAnswer
+  } catch {
+    return null
+  }
+}

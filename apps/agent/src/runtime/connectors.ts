@@ -88,7 +88,7 @@ export async function buildMcpServers(
   const skipped: { name: string; why: string }[] = []
 
   for (const row of rows) {
-    const built = await buildOne(db, row, masterKey, log)
+    const built = await buildConnector(db, row, masterKey, log)
     if ('why' in built) {
       skipped.push({ name: row.name, why: built.why })
       log.warn('connector skipped', { connector: row.name, kind: row.kind, why: built.why })
@@ -100,7 +100,16 @@ export async function buildMcpServers(
   return { servers, skipped }
 }
 
-async function buildOne(
+/**
+ * Build ONE row, enabled or not.
+ *
+ * Exported for Test connection, which by definition runs on a connector that
+ * is still disabled — a server is enabled only after a person has seen it
+ * respond. The probe uses this rather than a builder of its own, so "Test
+ * connection passed" means the thing a turn would build is the thing that
+ * answered.
+ */
+export async function buildConnector(
   db: AgencyDb,
   row: ConnectorRow,
   masterKey: Buffer | null,

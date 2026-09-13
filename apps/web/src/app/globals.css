@@ -256,3 +256,114 @@ textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
   font-style: normal; font-size: 11px; background: var(--warn); color: var(--panel);
   border-radius: 999px; padding: 1px 7px; margin-left: 6px;
 }
+
+/* --- Settings: connectors and agents (Phase 3) ---------------------------- */
+/*
+ * Both screens are lists of things that can be turned on, and the state that
+ * matters is whether a thing IS on — so `enabled` is the only tag that gets a
+ * colour. Everything else is grey on purpose: a screen where five things are
+ * highlighted highlights nothing.
+ */
+
+.rows { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
+
+.row-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  padding: 14px 16px;
+}
+
+.row-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.row-actions button { padding: 5px 10px; font-size: 12.5px; }
+
+.tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  font-size: 11.5px;
+  color: var(--muted);
+  font-family: inherit;
+  vertical-align: middle;
+}
+.tag.on { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, var(--line)); }
+
+.ok-line { font-size: 12.5px; color: var(--ok); margin-top: 4px; }
+.err-line { font-size: 12.5px; color: var(--warn); margin-top: 6px; }
+
+.probe {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 6px;
+  font-size: 12.5px;
+}
+.probe.ok { border-left-color: var(--ok); }
+
+.tools { margin: 8px 0 6px; padding-left: 18px; }
+.tools li { margin: 3px 0; }
+.tools code { font-size: 12px; }
+
+/* A form inside a row card. The base `label` is a grey caption, which is right
+ * for a field name; the control under it needs the full width. */
+.row-card label { margin-top: 12px; }
+/* `input:not([type=checkbox])`, not `input[type=text]`. React renders a plain
+ * `<input>` with NO type attribute, and an attribute selector does not match an
+ * absent attribute however the DOM defaults it — so every text field on these
+ * forms was unstyled: a 150px browser-default box beside its label, while the
+ * one password field (which does carry a type) was full width. */
+.row-card input:not([type=checkbox]),
+.row-card select,
+.row-card textarea {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+.row-card input:focus, .row-card select:focus, .row-card textarea:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.hint { display: block; margin-top: 4px; font-size: 11.5px; color: var(--muted); line-height: 1.45; }
+.hint code { font-size: 11px; }
+
+.note.warn { border-left-color: var(--warn); margin: 12px 0; }
+
+.tool-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 4px 14px;
+}
+
+/* The checkbox rides beside its label rather than under it: the base `label`
+ * rule is display:block, which would otherwise stack every tick vertically
+ * away from the name it belongs to. */
+.tool-check {
+  display: flex !important;
+  align-items: center;
+  gap: 7px;
+  margin: 0 !important;
+  font-size: 12.5px;
+  color: var(--ink);
+}
+.tool-check input { margin: 0; width: auto !important; }
+.tool-check code { font-size: 12px; color: var(--muted); }
