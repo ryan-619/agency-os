@@ -241,6 +241,45 @@ export async function decideApproval(
  * millisecond wins and this matches nothing. The caller re-reads on a zero
  * result rather than assuming.
  */
+/**
+ * Close out every approval a finished turn left pending.
+ *
+ * A turn can end while a request is still on screen — the person pressed Stop,
+ * the wall clock ran out, the worker crashed, the budget refused it. The gate
+ * stops waiting, but the ROW stayed `pending`, so it kept sitting in
+ * /approvals looking live. Someone would eventually click Approve on it, the
+ * decision would be recorded against a turn that no longer exists, and nothing
+ * would happen — an approval with no action behind it, which is exactly the
+ * artefact §2.4's audit trail must never contain.
+ *
+ * They are marked `expired` rather than given a new status: `expired` already
+ * means "nobody's decision applies to this any more", the UI already renders
+ * it, and adding a fifth status would be a migration for a distinction only
+ * the audit log needs. `approvals_reason_belongs_to_a_decision` forbids a
+ * reason on a row that was not decided, so WHY belongs in the audit row the
+ * caller writes — not here.
+ *
+ * Unlike `expireApproval` this does NOT require the TTL to have lapsed: the
+ * turn ending is itself the reason the request is dead.
+ */
+export async function cancelPendingApprovals(
+  db: AgencyDb,
+  orgId: string,
+  turnId: string,
+): Promise<readonly ApprovalRow[]> {
+  return db
+    .update(schema.approvals)
+    .set({ status: 'expired' })
+    .where(
+      and(
+        eq(schema.approvals.orgId, orgId),
+        eq(schema.approvals.turnId, turnId),
+        eq(schema.approvals.status, 'pending'),
+      ),
+    )
+    .returning()
+}
+
 export async function expireApproval(db: AgencyDb, orgId: string, id: string): Promise<ApprovalRow | null> {
   const updated = await db
     .update(schema.approvals)

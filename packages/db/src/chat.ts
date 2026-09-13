@@ -232,6 +232,35 @@ export async function clearTurnRunning(
     )
 }
 
+/**
+ * Who owns a running turn, so the BFF can refuse to interrupt someone else's.
+ *
+ * The worker's interrupt endpoint takes a turn id and nothing else — it looks
+ * the handle up in an in-process map, because by the time a request reaches it
+ * the web app has already established who is asking. This is that check, and
+ * it has to happen on the Next side: a turn id is the only thing the browser
+ * holds, and without this the id alone would be enough to stop a stranger's
+ * turn in another org.
+ *
+ * Returns null once the turn has finished, which is not an error — a Stop
+ * pressed a moment too late is exactly the outcome the person wanted.
+ */
+export async function runningTurnOwner(
+  db: AgencyDb,
+  turnId: string,
+): Promise<{ readonly sessionId: string; readonly orgId: string; readonly userId: string } | null> {
+  const rows = await db
+    .select({
+      sessionId: schema.chatSessions.id,
+      orgId: schema.chatSessions.orgId,
+      userId: schema.chatSessions.userId,
+    })
+    .from(schema.chatSessions)
+    .where(eq(schema.chatSessions.runningTurnId, turnId))
+    .limit(1)
+  return rows[0] ?? null
+}
+
 export interface InterruptedTurn {
   readonly sessionId: string
   readonly orgId: string

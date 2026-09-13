@@ -2,8 +2,9 @@ import { and, eq } from 'drizzle-orm'
 import { Pool } from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import {
-  appendChatMessage, clearTurnRunning, ensureChatSessionTitle, markTurnRunning,
-  schema, sessionCostUsd, setSdkSessionId, usd, type AgencyDb,
+  appendAudit, appendChatMessage, cancelPendingApprovals, clearTurnRunning,
+  ensureChatSessionTitle, markTurnRunning, schema, sessionCostUsd, setSdkSessionId, usd,
+  type AgencyDb,
 } from '@agency/db'
 import { loadEnv } from './env.js'
 import { createLogger, type Logger } from './logger.js'
@@ -85,11 +86,12 @@ async function main(): Promise<void> {
   })
 
   const apiPort = env.AGENT_PORT + 1
-  await new Promise<void>((resolve) => server.listen(apiPort, '127.0.0.1', resolve))
+  await new Promise<void>((resolve) => server.listen(apiPort, env.AGENT_BIND, resolve))
   log.info('agent worker started', {
     nodeEnv: env.NODE_ENV,
     healthPort: env.AGENT_PORT,
     apiPort,
+    apiBind: env.AGENT_BIND,
     chat: env.ANTHROPIC_API_KEY ? 'enabled' : 'disabled',
   })
 
@@ -234,6 +236,27 @@ async function beginTurn(args: {
       sessionCostSoFar: () => sessionCostUsd(db, who.orgId, req.chatSessionId),
       sessionBudgetUsd: env.AGENT_SESSION_BUDGET_USD,
       setSdkSessionId: (id) => setSdkSessionId(db, who.orgId, req.chatSessionId, id),
+      cancelPendingApprovals: async () => {
+        const orphans = await cancelPendingApprovals(db, who.orgId, runtime.turnId)
+        // §2.4's audit trail records the lapse, since the row itself cannot:
+        // `approvals_reason_belongs_to_a_decision` forbids a reason on a row
+        // nobody decided, which is the right constraint — this was not a
+        // decision.
+        for (const orphan of orphans) {
+          await appendAudit(db, {
+            orgId: who.orgId,
+            actor: 'system',
+            action: 'approval.cancelled',
+            subjectType: 'approval',
+            subjectId: orphan.id,
+            detail: { toolName: orphan.toolName, turnId: runtime.turnId, why: 'the turn ended first' },
+          }).catch(() => {
+            // §5.4: the audit log remembers, but a failed insert must not stop
+            // the work. The cancellation itself already landed.
+          })
+        }
+        return orphans.map((o) => ({ id: o.id, toolName: o.toolName }))
+      },
       usd,
       now: () => new Date(),
       log,

@@ -259,6 +259,7 @@ describe('a turn always ends', () => {
     sessionBudgetUsd: 20,
     persist: async () => {},
     setSdkSessionId: async () => {},
+    cancelPendingApprovals: async () => [],
     usd: (n: number) => n.toFixed(6),
     now: () => new Date('2026-09-13T00:00:00.000Z'),
     log: { info: () => {}, warn: () => {}, error: () => {} },
@@ -294,6 +295,89 @@ describe('a turn always ends', () => {
     expect(events.at(-1)).toMatchObject({ kind: 'turn_finished', reason: 'session_budget' })
     // The claim was taken, so it has to be given back even on this path.
     expect(released).toHaveBeenCalled()
+  })
+
+  /**
+   * A turn can end while an approval card is still on screen: Stop, the wall
+   * clock, a crash, a budget refusal. The gate stops waiting — but the ROW
+   * stayed `pending`, so the request kept sitting in /approvals looking live,
+   * and whoever clicked Approve was approving into a turn that no longer
+   * existed. An approval with no action behind it is exactly what §2.4's
+   * audit trail must never contain.
+   */
+  describe('approvals the turn left pending', () => {
+    const orphan = [{ id: 'approval-1', toolName: 'mcp__agency__queue_touch' }]
+
+    it('closes them out on a budget refusal, and says so on the stream', async () => {
+      const { startTurn } = await import('../src/chat/turn.js')
+      const cancel = vi.fn(async () => orphan)
+      const turn = startTurn(
+        baseDeps({
+          sessionCostSoFar: async () => 25,
+          sessionBudgetUsd: 20,
+          cancelPendingApprovals: cancel,
+        }) as never,
+        { text: 'hello', options: {} as never, abort: new AbortController(), timeoutMs: 1000 },
+      )
+      const events = await collect(turn.events())
+      expect(cancel).toHaveBeenCalled()
+      const resolved = events.find((e) => e.kind === 'approval_resolved')
+      expect(resolved).toMatchObject({ approvalId: 'approval-1', status: 'expired' })
+      // Before the finish, so the card resolves rather than sitting under a
+      // chat that has already stopped.
+      expect(events.findIndex((e) => e.kind === 'approval_resolved')).toBeLessThan(
+        events.findIndex((e) => e.kind === 'turn_finished'),
+      )
+    })
+
+    it('closes them out when the turn throws', async () => {
+      vi.resetModules()
+      vi.doMock('@anthropic-ai/claude-agent-sdk', () => ({
+        query: () => {
+          throw new Error('the model exploded')
+        },
+      }))
+      const { startTurn } = await import('../src/chat/turn.js')
+      const cancel = vi.fn(async () => orphan)
+      const turn = startTurn(baseDeps({ cancelPendingApprovals: cancel }) as never, {
+        text: 'hello', options: {} as never, abort: new AbortController(), timeoutMs: 1000,
+      })
+      await collect(turn.events())
+      expect(cancel).toHaveBeenCalled()
+      vi.doUnmock('@anthropic-ai/claude-agent-sdk')
+      vi.resetModules()
+    })
+
+    /**
+     * `turn_finished` is the event the browser stops spinning on. A database
+     * blip while cancelling must not cost the turn its ending — that trades a
+     * stale approval card for a spinner that never resolves.
+     */
+    it('still ends the turn when the cancellation itself fails', async () => {
+      const { startTurn } = await import('../src/chat/turn.js')
+      const turn = startTurn(
+        baseDeps({
+          sessionCostSoFar: async () => 25,
+          sessionBudgetUsd: 20,
+          cancelPendingApprovals: async () => {
+            throw new Error('the database went away')
+          },
+        }) as never,
+        { text: 'hello', options: {} as never, abort: new AbortController(), timeoutMs: 1000 },
+      )
+      const events = await collect(turn.events())
+      expect(events.at(-1)).toMatchObject({ kind: 'turn_finished' })
+    })
+
+    it('emits nothing when there were none, which is the usual case', async () => {
+      const { startTurn } = await import('../src/chat/turn.js')
+      const turn = startTurn(
+        baseDeps({ sessionCostSoFar: async () => 25, sessionBudgetUsd: 20 }) as never,
+        { text: 'hello', options: {} as never, abort: new AbortController(), timeoutMs: 1000 },
+      )
+      const events = await collect(turn.events())
+      expect(events.some((e) => e.kind === 'approval_resolved')).toBe(false)
+    })
   })
 
   it('releases the conversation claim even when the turn throws', async () => {

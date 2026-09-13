@@ -5,6 +5,19 @@ const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
   AGENT_PORT: z.coerce.number().int().positive().default(3001),
+  /**
+   * What the internal API binds to. Loopback by default, which is right when
+   * the worker and the web app share a host.
+   *
+   * It is WRONG under compose, and silently so: each service has its own
+   * network namespace, so a worker bound to 127.0.0.1 is reachable from
+   * nothing but itself — the web container's request to `http://agent:3002`
+   * is refused, and chat reports the worker as unreachable while the worker's
+   * own logs say it started fine. Compose sets this to 0.0.0.0 and does NOT
+   * publish the port, so the docker network is the boundary instead of the
+   * bind address.
+   */
+  AGENT_BIND: z.string().min(1).default('127.0.0.1'),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 
   /**

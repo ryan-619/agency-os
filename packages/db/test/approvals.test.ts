@@ -17,8 +17,8 @@ import { expectRejection, freshDb, migrations, type TestDb } from './helpers.js'
 import { migrateUp } from '../src/migrator.js'
 import * as schema from '../src/schema.js'
 import {
-  appendAudit, approvalsForSession, canonicalJson, decideApproval, ensureApproval,
-  expireApproval, pendingApprovals, readApproval, sweepExpiredApprovals,
+  appendAudit, approvalsForSession, cancelPendingApprovals, canonicalJson, decideApproval,
+  ensureApproval, expireApproval, pendingApprovals, readApproval, sweepExpiredApprovals,
   type AgencyDb, type ApprovalRequest,
 } from '../src/index.js'
 
@@ -252,6 +252,74 @@ describe('the approval queue', () => {
         orgId, id: '00000000-0000-4000-8000-00000000dead', decision: 'approved', decidedBy: userId,
       })
       expect(out).toEqual({ ok: false, reason: 'not_found' })
+    })
+  })
+
+  /**
+   * A turn can end while a request is still on screen — Stop, the wall clock,
+   * a crash, a budget refusal. The gate stops waiting, but the ROW stayed
+   * `pending`: the card kept sitting in /approvals looking live, and whoever
+   * eventually clicked Approve recorded a human decision for a turn that no
+   * longer existed and an action nothing performed.
+   */
+  describe('cancelPendingApprovals', () => {
+    it('closes out what a turn left pending, before its TTL', async () => {
+      const req = request()
+      const raised = await ensureApproval(db, req)
+      expect(raised.status).toBe('pending')
+      // Deliberately still live: the turn ending is the reason, not the clock.
+      expect(raised.expiresAt.getTime()).toBeGreaterThan(Date.now())
+
+      const closed = await cancelPendingApprovals(db, orgId, req.turnId)
+      expect(closed).toHaveLength(1)
+      expect(closed[0]!.status).toBe('expired')
+      expect(await readApproval(db, orgId, raised.id)).toMatchObject({ status: 'expired' })
+    })
+
+    /**
+     * `approvals_expired_has_no_decider` and
+     * `approvals_reason_belongs_to_a_decision` both say the same thing: this
+     * was not a decision. The WHY belongs in the audit log, not on the row.
+     */
+    it('leaves no trace of a decider, because nobody decided', async () => {
+      const req = request()
+      await ensureApproval(db, req)
+      const [closed] = await cancelPendingApprovals(db, orgId, req.turnId)
+      expect(closed!.decidedBy).toBeNull()
+      expect(closed!.decidedAt).toBeNull()
+      expect(closed!.decidedReason).toBeNull()
+    })
+
+    it('does not touch a request someone already answered', async () => {
+      const req = request()
+      const raised = await ensureApproval(db, req)
+      await decideApproval(db, { orgId, id: raised.id, decision: 'approved', decidedBy: userId })
+      expect(await cancelPendingApprovals(db, orgId, req.turnId)).toHaveLength(0)
+      expect(await readApproval(db, orgId, raised.id)).toMatchObject({ status: 'approved' })
+    })
+
+    it('does not reach into another turn', async () => {
+      const mine = request()
+      const theirs = request({
+        turnId: '33333333-3333-4333-8333-333333333333',
+        toolUseId: `toolu_other_${seq}`,
+        payloadSha256: String(seq).padStart(64, 'c'),
+      })
+      await ensureApproval(db, mine)
+      const other = await ensureApproval(db, theirs)
+      await cancelPendingApprovals(db, orgId, mine.turnId)
+      expect(await readApproval(db, orgId, other.id)).toMatchObject({ status: 'pending' })
+    })
+
+    it('does not reach into another org', async () => {
+      const req = request()
+      const raised = await ensureApproval(db, req)
+      expect(await cancelPendingApprovals(db, otherOrgId, req.turnId)).toHaveLength(0)
+      expect(await readApproval(db, orgId, raised.id)).toMatchObject({ status: 'pending' })
+    })
+
+    it('is safe to call for a turn that raised nothing', async () => {
+      expect(await cancelPendingApprovals(db, orgId, '44444444-4444-4444-8444-444444444444')).toEqual([])
     })
   })
 

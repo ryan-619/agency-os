@@ -209,7 +209,7 @@ check and should be added if the scanner is ever aimed at untrusted input.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 639 tests: domain + migrations + invariants + seed + parity + agent
+npm test                 # 715 tests: domain + migrations + invariants + seed + parity + agent
 npm run build            # packages, then the Next app
 
 # database (needs DATABASE_URL)
@@ -238,7 +238,10 @@ npm run tables:python         # regenerate the entity/whitespace tables from CPy
 
 # the whole stack
 cp .env.example .env
-# set AUTH_SECRET: openssl rand -base64 32
+# Two secrets have no safe default, and compose REFUSES TO START without
+# either — a stack that half-starts is harder to diagnose than one that stops:
+#   AUTH_SECRET           openssl rand -base64 32
+#   AGENT_INTERNAL_TOKEN  openssl rand -base64 32   (web and worker share it)
 docker compose up --build -d   # -d, or the first command holds the terminal
 docker compose run --rm migrate
 docker compose run --rm seed

@@ -31,6 +31,16 @@ export interface TurnDeps {
   readonly sessionBudgetUsd: number
   readonly persist: (event: ChatEvent) => Promise<void>
   readonly setSdkSessionId: (id: string) => Promise<void>
+  /**
+   * Close out any approval this turn left pending, and say so on the stream.
+   *
+   * A turn can end while a card is still on screen: Stop, the wall clock, a
+   * crash, a budget refusal. The gate stops waiting, but the ROW stayed
+   * pending — so the request kept sitting in /approvals looking live, and
+   * whoever eventually clicked Approve was approving into a turn that no
+   * longer existed. Returns how many it closed.
+   */
+  readonly cancelPendingApprovals: () => Promise<readonly { id: string; toolName: string }[]>
   readonly usd: (n: number) => string
   readonly now: () => Date
   readonly log: {
@@ -262,6 +272,31 @@ export function startTurn(deps: TurnDeps, req: TurnRequest): RunningTurn {
           deps.log.warn('could not record the sdk session id', {
             error: err instanceof Error ? err.name : 'UnknownError',
           })
+        })
+      }
+      // Before the claim and before the finish: a person watching this turn
+      // should see the card resolve rather than watch it sit there under a
+      // chat that has stopped. Never allowed to throw — a failure here must
+      // not cost the turn its `turn_finished`, which is the event the browser
+      // stops spinning on.
+      try {
+        for (const orphan of await deps.cancelPendingApprovals()) {
+          emit({
+            kind: 'approval_resolved',
+            approvalId: orphan.id,
+            toolUseId: '',
+            status: 'expired',
+            decidedByEmail: null,
+            reason: 'The turn ended before anyone decided, so nothing was done.',
+          })
+          deps.log.info('cancelled an approval the turn left pending', {
+            turnId: deps.turnId, approvalId: orphan.id, toolName: orphan.toolName, reason,
+          })
+        }
+      } catch (err) {
+        deps.log.error('could not cancel the approvals this turn left pending', {
+          turnId: deps.turnId,
+          error: err instanceof Error ? err.name : 'UnknownError',
         })
       }
       if (claimed) {

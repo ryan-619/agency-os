@@ -72,6 +72,14 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       MAIL_FROM: "${MAIL_FROM:-Agency OS <agency-os@localhost>}"
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # The agent worker. Without BOTH of these the chat panel reports "the
+      # agent is not configured" and everything else keeps working — which is
+      # the right failure, but it made `docker compose up` look like a stack
+      # with no chat rather than a stack missing two variables.
+      #
+      # The port is the worker's API (AGENT_PORT + 1), not its health port.
+      AGENT_URL: ${AGENT_URL:-http://agent:3002}
+      AGENT_INTERNAL_TOKEN: "${AGENT_INTERNAL_TOKEN:?required - generate one with openssl rand -base64 32}"
     ports:
       - '3000:3000'
 
@@ -85,15 +93,42 @@ services:
     environment:
       NODE_ENV: production
       DATABASE_URL: postgres://${POSTGRES_USER:-agency}:${POSTGRES_PASSWORD:-agency}@db:5432/${POSTGRES_DB:-agency}
+      DATABASE_POOL_MAX: ${DATABASE_POOL_MAX:-8}
       AGENT_PORT: 3001
+      # Loopback is the default and is right on a VPS where both processes
+      # share a host. Here they do not: each service has its own network
+      # namespace, so a worker bound to 127.0.0.1 is reachable from nothing
+      # but itself and every call from `web` is refused. The API port below is
+      # deliberately NOT published, so the docker network is the boundary.
+      AGENT_BIND: 0.0.0.0
+      # The web app proves it is the web app. The worker REFUSES TO BOOT
+      # without it (32 chars minimum), so `docker compose up` died here with
+      # nothing in the compose file setting it.
+      AGENT_INTERNAL_TOKEN: "${AGENT_INTERNAL_TOKEN:?required - generate one with openssl rand -base64 32}"
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      # The Agent SDK reads this from the environment (§5). Optional in
-      # Phase 0 — the query() loop lands in Phase 2.
+      # The Agent SDK reads this from the environment (§5). Without it the
+      # worker still boots and still serves health; chat reports itself
+      # disabled and the rest of the product is unaffected.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # §2.3 — third-party credentials are encrypted at rest with this key.
+      # Optional until a connector is configured (Phase 3).
+      SECRETS_KEY: ${SECRETS_KEY:-}
+      # §5.4's bounds on one turn, and §8.1's on a conversation.
+      AGENT_MAX_TURNS: ${AGENT_MAX_TURNS:-30}
+      AGENT_MAX_BUDGET_USD: ${AGENT_MAX_BUDGET_USD:-2}
+      AGENT_SESSION_BUDGET_USD: ${AGENT_SESSION_BUDGET_USD:-20}
+      # The turn timeout MUST exceed the approval TTL or the worker refuses to
+      # boot: a turn killed while its own approval is still live means a
+      # human's decision lands on a turn that no longer exists.
+      APPROVAL_TTL_MINUTES: ${APPROVAL_TTL_MINUTES:-30}
+      AGENT_TURN_TIMEOUT_MINUTES: ${AGENT_TURN_TIMEOUT_MINUTES:-35}
       # Bound the blast radius of a subagent fan-out (§7).
       CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: ${CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS:-3}
       CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: ${CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH:-2}
     ports:
+      # Health only. The API on 3002 is reachable from `web` over the compose
+      # network and from nowhere else — publishing it would put an endpoint
+      # that starts agent turns on the host interface.
       - '127.0.0.1:3001:3001'
 
   # --- one-off tasks --------------------------------------------------------

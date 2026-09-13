@@ -34,6 +34,7 @@ export function ChatPanel({
 }) {
   const [state, setState] = useState<ChatState>(emptyChat)
   const [draft, setDraft] = useState('')
+  const [stopping, setStopping] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
   const endRef = useRef<HTMLDivElement | null>(null)
 
@@ -45,6 +46,7 @@ export function ChatPanel({
     const text = draft.trim()
     if (!text || state.running) return
     setDraft('')
+    setStopping(false)
     setState((s) => withUserMessage({ ...s, running: true, endedBecause: null }, text))
 
     const ac = new AbortController()
@@ -107,9 +109,67 @@ export function ChatPanel({
       // everything it did is in the transcript; nothing is lost but the view.
     } finally {
       setState((s) => ({ ...s, running: false }))
+      setStopping(false)
       abortRef.current = null
     }
   }, [draft, sessionId, state.running])
+
+  /**
+   * Stop the TURN, not just this browser's view of it.
+   *
+   * `AbortController.abort()` alone closes our end of the stream and leaves
+   * the agent running: still calling tools, still spending against the session
+   * budget, still holding the conversation claim — so the next message is
+   * refused as "already running" under a panel that looks idle. The abort is
+   * the fallback here, used only when the turn cannot be reached.
+   *
+   * On success nothing is aborted at all: the worker emits `turn_finished`
+   * with reason `interrupted`, the stream ends on its own, and the person sees
+   * the real ending rather than one this component invented.
+   */
+  const stop = useCallback(async () => {
+    const turnId = state.turnId
+    if (stopping) return
+    setStopping(true)
+
+    // No turn id yet means the worker has not answered the POST, so there is
+    // nothing on the other side to interrupt. Dropping our own request is the
+    // whole of the job.
+    if (!turnId) {
+      abortRef.current?.abort()
+      return
+    }
+
+    let ok = false
+    try {
+      const res = await fetch(`/api/chat/turns/${turnId}/interrupt`, { method: 'POST' })
+      ok = res.ok
+    } catch {
+      ok = false
+    }
+
+    if (!ok) {
+      // The worker could not be reached, so the turn was NOT stopped. Close
+      // our end and say so, rather than letting the panel imply otherwise.
+      abortRef.current?.abort()
+      setState((s) => ({
+        ...s,
+        blocks: [
+          ...s.blocks,
+          {
+            kind: 'notice',
+            id: `stop:${turnId}`,
+            tone: 'error',
+            code: 'internal',
+            text:
+              'Could not reach the agent to stop it, so it may still be working. ' +
+              'This conversation will refuse a new message until that turn ends.',
+            retryable: false,
+          } satisfies NoticeBlock,
+        ],
+      }))
+    }
+  }, [state.turnId, stopping])
 
   const decide = useCallback(async (approvalId: string, decision: 'approved' | 'denied') => {
     const res = await fetch(`/api/approvals/${approvalId}/decide`, {
@@ -177,7 +237,9 @@ export function ChatPanel({
           }}
         />
         {state.running ? (
-          <button type="button" onClick={() => abortRef.current?.abort()}>Stop</button>
+          <button type="button" onClick={() => void stop()} disabled={stopping}>
+            {stopping ? 'Stopping…' : 'Stop'}
+          </button>
         ) : (
           <button type="button" onClick={() => void send()} disabled={!draft.trim()}>Send</button>
         )}
