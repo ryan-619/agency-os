@@ -27,12 +27,22 @@ export function ChatPanel({
   sessionId,
   agentAvailable,
   canDecide,
+  initialBlocks = [],
 }: {
   sessionId: string
   agentAvailable: boolean
   canDecide: boolean
+  /**
+   * The conversation as it was written down, rebuilt on the server.
+   *
+   * Without it a reload showed an EMPTY panel while the worker resumed the SDK
+   * session with the whole conversation still in the model's context — so the
+   * agent remembered and the person did not, and the next answer referred to
+   * things that were no longer on screen.
+   */
+  initialBlocks?: readonly Block[]
 }) {
-  const [state, setState] = useState<ChatState>(emptyChat)
+  const [state, setState] = useState<ChatState>(() => ({ ...emptyChat, blocks: initialBlocks }))
   const [draft, setDraft] = useState('')
   const [stopping, setStopping] = useState(false)
   const abortRef = useRef<AbortController | null>(null)

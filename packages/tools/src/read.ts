@@ -15,6 +15,7 @@ import {
   activeIcpProfile, companyList, findCompanyByDomain, latestScanWithFindings,
   type AgencyDb, type CompanyListRow,
 } from '@agency/db'
+import { normaliseDomain } from '@agency/scanner'
 import { bounded, fail, ok, type AgencyToolSpec, type ToolContext, type ToolOutcome } from './spec.js'
 
 /** The ICP, or an explanation of why there is none. Used by several tools. */
@@ -161,7 +162,11 @@ export const searchCompanies: AgencyToolSpec<typeof searchShape> = {
 // ---------------------------------------------------------------------------
 
 const getCompanyShape = {
-  domain: z.string().min(1).max(253).describe('The company domain, as stored in the CRM.'),
+  domain: z
+    .string()
+    .min(1)
+    .max(253)
+    .describe('The company domain. A full URL is fine — it is reduced to the host.'),
 }
 
 export const getCompany: AgencyToolSpec<typeof getCompanyShape> = {
@@ -173,7 +178,13 @@ export const getCompany: AgencyToolSpec<typeof getCompanyShape> = {
     'absent here, it was not seen, and you must not claim it either way.',
   shape: getCompanyShape,
   async handler(input, ctx): Promise<ToolOutcome<unknown>> {
-    const domain = input.domain.trim().toLowerCase()
+    // The SAME normalisation the three write tools use, not a lowercase and a
+    // trim. The model pastes what it was given, which is often a URL — and
+    // `https://www.rentman.io/` used to be looked up verbatim and reported as
+    // "not in the CRM" by this tool while `scan_company` handled it fine. The
+    // model then believes the company is absent and says so.
+    const domain = normaliseDomain(input.domain)
+    if (!domain) return fail('not_found', `"${input.domain}" is not a domain.`)
     const company = await findCompanyByDomain(ctx.db, ctx.orgId, domain)
     if (!company) return fail('not_found', `No company with domain "${domain}" is in the CRM.`)
 

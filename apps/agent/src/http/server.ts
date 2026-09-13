@@ -46,7 +46,19 @@ export interface AgentHttpDeps {
   readonly health: (url: string) => Promise<{ status: number; body: unknown } | null>
 }
 
-const MAX_BODY_BYTES = 64 * 1024
+/**
+ * The request body cap, in BYTES — and `parseStartTurn` caps the message at
+ * 32,000 CHARACTERS. Those are different units, and the gap is where the bug
+ * was: 32,000 characters of Devanagari, Japanese or emoji is up to 128 KB of
+ * UTF-8, so a message the length rule accepts was refused by the byte rule
+ * first, as `body_too_large` — a 413 about a request size for a message the
+ * person was told they could send.
+ *
+ * Four bytes per character plus room for the JSON envelope, so the CHARACTER
+ * limit is always the one that speaks. The byte cap stays as the defence
+ * against an unbounded body, which is its actual job.
+ */
+const MAX_BODY_BYTES = 160 * 1024
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body)

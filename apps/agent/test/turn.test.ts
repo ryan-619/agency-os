@@ -305,6 +305,96 @@ describe('a turn always ends', () => {
    * existed. An approval with no action behind it is exactly what §2.4's
    * audit trail must never contain.
    */
+  /**
+   * A turn killed by its own wall clock aborts exactly as a person pressing
+   * Stop does, so both ended as `interrupted` and the browser rendered
+   * "Stopped." — telling someone they cancelled an answer they were waiting
+   * for. `turn_timeout` has been in the wire protocol and in the reducer's
+   * vocabulary since they were written; nothing ever emitted it.
+   */
+  /**
+   * Stands in for the SDK loop: it produces nothing and rejects when the turn
+   * is aborted, which is what the real `query()` does. A generator that simply
+   * returned would prove nothing — the turn would end as a clean success.
+   */
+  const runUntilAborted = async (
+    abort: AbortController,
+    timeoutMs: number,
+  ): Promise<ChatEvent[]> => {
+    vi.resetModules()
+    vi.doMock('@anthropic-ai/claude-agent-sdk', () => ({
+      query: () =>
+        (async function* (): AsyncGenerator<never, void> {
+          await new Promise<never>((_resolve, reject) => {
+            abort.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+          })
+        })(),
+    }))
+    const { startTurn } = await import('../src/chat/turn.js')
+    const turn = startTurn(baseDeps() as never, {
+      text: 'hello', options: {} as never, abort, timeoutMs,
+    })
+    if (timeoutMs > 1000) setTimeout(() => turn.interrupt(), 20)
+    const events = await collect(turn.events())
+    vi.doUnmock('@anthropic-ai/claude-agent-sdk')
+    vi.resetModules()
+    return events
+  }
+
+  it('reports its own wall clock as a timeout, not as a cancellation', async () => {
+    const events = await runUntilAborted(new AbortController(), 20)
+    expect(events.at(-1)).toMatchObject({ kind: 'turn_finished', reason: 'turn_timeout' })
+  })
+
+  it('still reports a person pressing Stop as an interruption', async () => {
+    const events = await runUntilAborted(new AbortController(), 60_000)
+    expect(events.at(-1)).toMatchObject({ kind: 'turn_finished', reason: 'interrupted' })
+  })
+
+  /**
+   * A single failed release left `running_turn_id` set for good: every later
+   * message on the thread was refused as "already running", under a panel
+   * showing a finished turn, and only a worker restart cleared it — the
+   * reconciler looks at rows predating its OWN boot. A two-second blip wedged
+   * a conversation permanently.
+   */
+  it('retries a failed release rather than wedging the conversation', async () => {
+    const { startTurn } = await import('../src/chat/turn.js')
+    let calls = 0
+    const release = vi.fn(async () => {
+      calls += 1
+      if (calls < 3) throw new Error('the database blinked')
+    })
+    const turn = startTurn(
+      baseDeps({ sessionCostSoFar: async () => 25, sessionBudgetUsd: 20, release }) as never,
+      { text: 'hello', options: {} as never, abort: new AbortController(), timeoutMs: 5000 },
+    )
+    const events = await collect(turn.events())
+    expect(calls).toBe(3)
+    expect(events.at(-1)).toMatchObject({ kind: 'turn_finished' })
+  }, 10_000)
+
+  it('gives up after three attempts rather than holding the turn open', async () => {
+    const { startTurn } = await import('../src/chat/turn.js')
+    const release = vi.fn(async () => {
+      throw new Error('the database is gone')
+    })
+    const errors: string[] = []
+    const turn = startTurn(
+      baseDeps({
+        sessionCostSoFar: async () => 25,
+        sessionBudgetUsd: 20,
+        release,
+        log: { info: () => {}, warn: () => {}, error: (m: string) => errors.push(m) },
+      }) as never,
+      { text: 'hello', options: {} as never, abort: new AbortController(), timeoutMs: 5000 },
+    )
+    const events = await collect(turn.events())
+    expect(release).toHaveBeenCalledTimes(3)
+    expect(errors.some((e) => e.includes('release the session claim'))).toBe(true)
+    expect(events.at(-1)).toMatchObject({ kind: 'turn_finished' })
+  }, 10_000)
+
   describe('approvals the turn left pending', () => {
     const orphan = [{ id: 'approval-1', toolName: 'mcp__agency__queue_touch' }]
 

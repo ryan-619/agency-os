@@ -296,6 +296,30 @@ describe('the agency tools', () => {
       if (out.ok) return
       expect(out.code).toBe('not_found')
     })
+
+    /**
+     * This tool used to lower-case and trim while the three write tools ran
+     * `normaliseDomain`, so the same company was findable by one and missing
+     * from the other. The model pastes what it was given — usually a URL —
+     * and a company reported as "not in the CRM" is one it will then tell the
+     * user about, in words, wrongly.
+     */
+    it.each([
+      'ACME.test',
+      '  acme.test  ',
+      'www.acme.test',
+      'https://acme.test',
+      'https://www.acme.test/pricing?utm=x#top',
+      'acme.test:443',
+    ])('finds the company from %s, like every other tool does', async (given) => {
+      const out = await run(getCompany, { domain: given })
+      expect(out.ok, `${given} was not resolved`).toBe(true)
+    })
+
+    it('says so plainly when the input reduces to no host at all', async () => {
+      const out = await run(getCompany, { domain: 'https://' })
+      expect(out.ok).toBe(false)
+    })
   })
 
   describe('score_company', () => {

@@ -190,8 +190,16 @@ export function startTurn(deps: TurnDeps, req: TurnRequest): RunningTurn {
     // unexpectedly, try again" on top of that reads as two separate problems
     // and the advice contradicts the first message.
     let explained = false
+    // WHY the abort fired, because the AbortController cannot say. A turn
+    // killed by its own wall clock aborts exactly as a person pressing Stop
+    // does, so both used to end as `interrupted` and the browser rendered
+    // "Stopped." — telling someone they cancelled an answer they were waiting
+    // for. `turn_timeout` exists in the wire protocol and the reducer has
+    // always had words for it; nothing ever emitted it.
+    let timedOut = false
     const timer = setTimeout(() => {
-      deps.log.warn('turn timed out', { turnId: deps.turnId })
+      timedOut = true
+      deps.log.warn('turn timed out', { turnId: deps.turnId, timeoutMs: req.timeoutMs })
       req.abort.abort()
     }, req.timeoutMs)
 
@@ -247,7 +255,7 @@ export function startTurn(deps: TurnDeps, req: TurnRequest): RunningTurn {
       }
     } catch (err) {
       if (req.abort.signal.aborted) {
-        reason = 'interrupted'
+        reason = timedOut ? 'turn_timeout' : 'interrupted'
       } else {
         reason = 'error'
         deps.log.error('turn failed', {
@@ -299,14 +307,7 @@ export function startTurn(deps: TurnDeps, req: TurnRequest): RunningTurn {
           error: err instanceof Error ? err.name : 'UnknownError',
         })
       }
-      if (claimed) {
-        await deps.release().catch((err: unknown) => {
-          deps.log.error('could not release the session claim', {
-            turnId: deps.turnId,
-            error: err instanceof Error ? err.name : 'UnknownError',
-          })
-        })
-      }
+      if (claimed) await releaseClaim(deps)
       // Exactly one, on every path — including a crash, a timeout and an
       // interrupt. This is the event the browser stops spinning on.
       emit({ kind: 'turn_finished', reason, sdkSessionId })
@@ -323,5 +324,44 @@ export function startTurn(deps: TurnDeps, req: TurnRequest): RunningTurn {
     emit: (body) => {
       emit(body)
     },
+  }
+}
+
+/**
+ * Give the conversation back, and try more than once.
+ *
+ * A single attempt that failed left `running_turn_id` set for good: every
+ * later message on that thread was refused as "already running", under a panel
+ * showing a finished turn, and nothing cleared it short of restarting the
+ * worker — the reconciler only looks at rows that predate ITS OWN boot. So a
+ * two-second database blip wedged a conversation permanently.
+ *
+ * Three attempts over about a second and a half, then give up loudly. It
+ * cannot throw, and it cannot be allowed to delay `turn_finished` for long: a
+ * spinner that never resolves is worse than a thread that needs a restart.
+ */
+async function releaseClaim(deps: TurnDeps): Promise<void> {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      await deps.release()
+      return
+    } catch (err) {
+      const last = attempt === 3
+      const fields = {
+        turnId: deps.turnId,
+        attempt,
+        error: err instanceof Error ? err.name : 'UnknownError',
+      }
+      if (last) {
+        deps.log.error('could not release the session claim', {
+          ...fields,
+          consequence:
+            'This conversation will refuse new messages until the worker restarts, which clears it.',
+        })
+      } else {
+        deps.log.warn('could not release the session claim; retrying', fields)
+        await new Promise<void>((r) => setTimeout(r, 500 * attempt))
+      }
+    }
   }
 }

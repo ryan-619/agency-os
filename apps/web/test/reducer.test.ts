@@ -13,8 +13,8 @@
 import { describe, it, expect } from 'vitest'
 import type { ChatEvent } from '@agency/core'
 import {
-  emptyChat, endedMessage, parseFrame, reduceChat, withUserMessage,
-  type ApprovalBlock, type TextBlock, type ToolBlock,
+  blocksFromTranscript, emptyChat, endedMessage, parseFrame, reduceChat, withUserMessage,
+  type ApprovalBlock, type NoticeBlock, type TextBlock, type ToolBlock, type TranscriptRow,
 } from '../src/components/chat/reducer'
 
 const TURN_A = 'turn-aaaa'
@@ -315,5 +315,151 @@ describe('withUserMessage', () => {
     expect(text.role).toBe('user')
     expect(text.text).toBe('score the pipeline')
     expect(text.streaming).toBe(false)
+  })
+})
+
+describe('rebuilding a conversation from what was written down', () => {
+  /**
+   * Nothing did this. A reload showed an EMPTY panel — while the worker
+   * resumed the SDK session with the whole conversation still in the model's
+   * context. The agent remembered and the person did not, so the next answer
+   * referred to things no longer on screen and the obvious repair (asking
+   * again) spent money re-deriving what was already stored.
+   */
+  const row = (over: Partial<TranscriptRow> & { id: string }): TranscriptRow => ({
+    role: 'assistant', content: {}, toolName: null, toolUseId: null, turnId: TURN_A, ...over,
+  })
+
+  it('puts the exchange back in the order it happened', () => {
+    const blocks = blocksFromTranscript([
+      row({ id: '1', role: 'user', content: { text: 'who is worth working?' } }),
+      row({ id: '2', content: { text: 'Rentman, on the evidence.' } }),
+    ])
+    expect(blocks.map((b) => (b as TextBlock).text)).toEqual([
+      'who is worth working?',
+      'Rentman, on the evidence.',
+    ])
+    expect((blocks[0] as TextBlock).role).toBe('user')
+    expect((blocks[1] as TextBlock).role).toBe('assistant')
+  })
+
+  /**
+   * Deltas are deliberately not persisted, so nothing rebuilt is mid-stream.
+   * A restored block left `streaming` would blink a caret under an answer
+   * that finished days ago.
+   */
+  it('never restores a block as still streaming', () => {
+    const blocks = blocksFromTranscript([row({ id: '1', content: { text: 'done' } })])
+    expect((blocks[0] as TextBlock).streaming).toBe(false)
+  })
+
+  it('pairs a tool call with the result that was stored for it', () => {
+    const blocks = blocksFromTranscript([
+      row({
+        id: '1', toolName: 'mcp__agency__scan_company', toolUseId: 't1',
+        content: { kind: 'tool_call', input: { domain: 'rentman.io' }, risk: 'low', displayName: 'Scan company' },
+      }),
+      row({
+        id: '2', role: 'tool', toolUseId: 't1',
+        content: { kind: 'tool_result', ok: true, summary: 'scored 77, tier A' },
+      }),
+    ])
+    const tool = blocks.find((b): b is ToolBlock => b.kind === 'tool')!
+    expect(tool.status).toBe('ok')
+    expect(tool.summary).toBe('scored 77, tier A')
+    expect(tool.displayName).toBe('Scan company')
+    expect(blocks).toHaveLength(1)
+  })
+
+  /**
+   * A call whose result never landed is exactly what it was when the worker
+   * died. Showing it as finished would be a claim nobody made.
+   */
+  it('leaves a call with no result showing as still running', () => {
+    const blocks = blocksFromTranscript([
+      row({
+        id: '1', toolName: 'mcp__agency__scan_company', toolUseId: 't1',
+        content: { kind: 'tool_call', input: {}, risk: 'low', displayName: 'Scan company' },
+      }),
+    ])
+    expect((blocks[0] as ToolBlock).status).toBe('running')
+  })
+
+  it('drops a result whose call is missing rather than drawing a nameless card', () => {
+    const blocks = blocksFromTranscript([
+      row({ id: '1', role: 'tool', toolUseId: 'ghost', content: { kind: 'tool_result', ok: true, summary: 'x' } }),
+    ])
+    expect(blocks).toHaveLength(0)
+  })
+
+  it('explains the reconciler’s notes in words a person can act on', () => {
+    const blocks = blocksFromTranscript([
+      row({ id: '1', role: 'system', content: { kind: 'worker_restart', turnId: TURN_A } }),
+      row({ id: '2', role: 'system', content: { kind: 'approval_orphaned', approvalId: 'a1', toolName: 'queue_touch' } }),
+    ])
+    const notices = blocks.filter((b): b is NoticeBlock => b.kind === 'notice')
+    expect(notices).toHaveLength(2)
+    expect(notices[0]!.text).toMatch(/restarted/i)
+    expect(notices[1]!.text).toMatch(/cancelled/i)
+    expect(notices[1]!.text).toMatch(/Nothing was done/)
+  })
+
+  it('ignores a system note it does not recognise instead of rendering an empty box', () => {
+    const blocks = blocksFromTranscript([row({ id: '1', role: 'system', content: { kind: 'something_new' } })])
+    expect(blocks).toHaveLength(0)
+  })
+
+  const approval = {
+    id: 'a1', toolName: 'mcp__agency__queue_touch', payload: { channel: 'email' }, risk: 'high',
+    expiresAt: '2026-09-13T00:30:00.000Z', toolUseId: 't1', decidedReason: null,
+  }
+
+  it('brings back a request that is still waiting for someone', () => {
+    const blocks = blocksFromTranscript([], [{ ...approval, status: 'pending' }])
+    const card = blocks.find((b): b is ApprovalBlock => b.kind === 'approval')!
+    expect(card.status).toBe('pending')
+    expect(card.payload).toEqual({ channel: 'email' })
+  })
+
+  /**
+   * A decided card belongs to a turn that already reported its outcome in
+   * words. Re-rendering it invites a second click on a question nobody is
+   * asking any more.
+   */
+  it.each(['approved', 'denied', 'expired'])('does not bring back a %s one', (status) => {
+    expect(blocksFromTranscript([], [{ ...approval, status }])).toHaveLength(0)
+  })
+
+  it('survives rows whose content is missing or the wrong shape', () => {
+    expect(() =>
+      blocksFromTranscript([
+        row({ id: '1', role: 'user', content: null }),
+        row({ id: '2', content: { text: 42 } }),
+        row({ id: '3', role: 'tool', toolUseId: null, content: undefined }),
+        row({ id: '4', role: 'something-new', content: { text: 'x' } }),
+      ]),
+    ).not.toThrow()
+  })
+
+  it('starts from nothing for a brand-new conversation', () => {
+    expect(blocksFromTranscript([], [])).toEqual([])
+  })
+
+  /**
+   * The restored blocks go straight into the reducer's state, so their ids
+   * have to be unique — React keys off them, and a duplicate silently drops a
+   * message.
+   */
+  it('gives every restored block a distinct id', () => {
+    const blocks = blocksFromTranscript(
+      [
+        row({ id: '1', role: 'user', content: { text: 'a' } }),
+        row({ id: '2', content: { text: 'b' } }),
+        row({ id: '3', toolName: 't', toolUseId: 'u', content: { kind: 'tool_call', risk: 'low' } }),
+        row({ id: '4', role: 'system', content: { kind: 'worker_restart' } }),
+      ],
+      [{ ...approval, status: 'pending' }],
+    )
+    expect(new Set(blocks.map((b) => b.id)).size).toBe(blocks.length)
   })
 })

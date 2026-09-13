@@ -1,9 +1,12 @@
 import { redirect } from 'next/navigation'
 import { can, parseIcpDefinition } from '@agency/core'
-import { createChatSession, listChatSessions, type AgencyDb } from '@agency/db/queries'
+import {
+  approvalsForSession, chatMessages, createChatSession, listChatSessions, type AgencyDb,
+} from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { ChatPanel } from '@/components/chat/panel'
+import { blocksFromTranscript } from '@/components/chat/reducer'
 import { getDb } from '@/lib/db'
 import { agentConfigured } from '@/lib/agent'
 import { icpForOrg } from '@/lib/queries'
@@ -32,6 +35,23 @@ export default async function ChatPage() {
   const existing = await listChatSessions(db, user.orgId, user.id, 1)
   const thread = existing[0] ?? (await createChatSession(db, { orgId: user.orgId, userId: user.id }))
 
+  // What was said last time. Rebuilt on the server so the panel is never blank
+  // while the worker resumes a conversation the model still remembers in full.
+  const [rows, approvals] = await Promise.all([
+    chatMessages(db, user.orgId, thread.id),
+    approvalsForSession(db, user.orgId, thread.id),
+  ])
+  const initialBlocks = blocksFromTranscript(
+    rows.map((r) => ({
+      id: r.id, role: r.role, content: r.content, toolName: r.toolName,
+      toolUseId: r.toolUseId, turnId: r.turnId,
+    })),
+    approvals.map((a) => ({
+      id: a.id, toolName: a.toolName, payload: a.payload, risk: a.risk, status: a.status,
+      expiresAt: a.expiresAt.toISOString(), toolUseId: a.toolUseId, decidedReason: a.decidedReason,
+    })),
+  )
+
   const icpRow = await icpForOrg(user.orgId)
   let orgLabel = 'Agency'
   if (icpRow) {
@@ -58,6 +78,7 @@ export default async function ChatPage() {
         sessionId={thread.id}
         agentAvailable={agentConfigured()}
         canDecide={can({ id: user.id, orgId: user.orgId, role: user.role }, 'approvals:decide')}
+        initialBlocks={initialBlocks}
       />
     </Shell>
   )

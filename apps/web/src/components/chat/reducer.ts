@@ -12,10 +12,14 @@ import {
  * component test would need a new dependency and a decision nobody has made —
  * a pure function needs neither.
  *
- * The §2.2 rule applies here too, at the last possible moment. A finding whose
- * `observed` is false must never be rendered as a gap, and the tools already
- * drop those before the model sees them. This drops them again. CLAUDE.md is
- * explicit about why one guard has never been enough in this codebase.
+ * §2.2 is NOT enforced here, and the comment that used to say it was has been
+ * removed. There is no filter in this file: `tool_result` bodies arrive as an
+ * already-summarised `summary` string, so there is nothing shaped like a
+ * finding to inspect. The guards are in `packages/tools` (unobserved findings
+ * are dropped before the model sees them), in the database (four constraints
+ * and a trigger), and in the system prompt. A comment claiming a fifth one
+ * here is worse than no comment: it is the kind of thing a reviewer reads,
+ * believes, and does not check.
  */
 
 export interface TextBlock {
@@ -362,4 +366,157 @@ export function parseFrame(data: string): ChatEvent | null {
   } catch {
     return null
   }
+}
+
+// ---------------------------------------------------------------------------
+// Rebuilding a conversation from what was written down
+// ---------------------------------------------------------------------------
+
+/**
+ * One persisted `chat_messages` row, as much of it as this needs.
+ *
+ * Typed structurally rather than imported from `@agency/db`, because this
+ * module is shared with the browser and must not pull drizzle into the client
+ * bundle. The server passes rows straight in; the shape is checked here.
+ */
+export interface TranscriptRow {
+  readonly id: string
+  readonly role: string
+  readonly content: unknown
+  readonly toolName: string | null
+  readonly toolUseId: string | null
+  readonly turnId: string | null
+}
+
+/** One persisted `approvals` row, likewise. */
+export interface TranscriptApproval {
+  readonly id: string
+  readonly toolName: string
+  readonly payload: unknown
+  readonly risk: string
+  readonly status: string
+  readonly expiresAt: string
+  readonly toolUseId: string | null
+  readonly decidedReason: string | null
+}
+
+function str(o: Record<string, unknown>, key: string): string {
+  const v = o[key]
+  return typeof v === 'string' ? v : ''
+}
+
+/**
+ * Turn a stored conversation back into blocks.
+ *
+ * Nothing did this. A reload showed an EMPTY panel — while the worker
+ * cheerfully resumed the SDK session with the whole conversation in the
+ * model's context. So the agent remembered and the person did not, which is
+ * the worst possible split: the next answer refers to things that are no
+ * longer on screen, and the obvious repair (asking again) spends money
+ * re-deriving what is already in the transcript.
+ *
+ * Text deltas are deliberately not persisted — there are hundreds per answer
+ * and `message_complete` carries the same words — so a rebuilt block is never
+ * `streaming`. A tool call whose result never landed stays `running`, which is
+ * exactly what it was when the worker died.
+ */
+export function blocksFromTranscript(
+  rows: readonly TranscriptRow[],
+  approvals: readonly TranscriptApproval[] = [],
+): Block[] {
+  const blocks: Block[] = []
+  const toolIndex = new Map<string, ToolBlock>()
+
+  for (const row of rows) {
+    const content = (row.content ?? {}) as Record<string, unknown>
+
+    if (row.role === 'user') {
+      const text = str(content, 'text')
+      if (text) {
+        blocks.push({ kind: 'text', id: `m:${row.id}`, role: 'user', turnId: null, text, streaming: false })
+      }
+      continue
+    }
+
+    if (row.role === 'system') {
+      // The reconciler's notes: a worker died mid-turn, or an approval was
+      // orphaned by it. Both are things the person is owed an explanation for.
+      const kind = str(content, 'kind')
+      const text =
+        kind === 'worker_restart'
+          ? 'The agent was restarted while it was working on this, so that answer never finished.'
+          : kind === 'approval_orphaned'
+            ? `A request to use ${str(content, 'toolName') || 'a tool'} was cancelled when the agent restarted. Nothing was done.`
+            : ''
+      if (text) {
+        blocks.push({ kind: 'notice', id: `m:${row.id}`, tone: 'info', code: 'internal', text, retryable: false })
+      }
+      continue
+    }
+
+    if (row.role === 'tool') {
+      const block = row.toolUseId ? toolIndex.get(row.toolUseId) : undefined
+      // A result with no call above it: the call's row failed to write, or the
+      // transcript was trimmed. Dropped rather than rendered as a card with no
+      // name — an unlabelled result tells a person nothing.
+      if (!block) continue
+      block.status = content['ok'] === true ? 'ok' : 'failed'
+      block.summary = str(content, 'summary')
+      continue
+    }
+
+    // role === 'assistant'
+    if (str(content, 'kind') === 'tool_call') {
+      const block: ToolBlock = {
+        kind: 'tool',
+        id: `m:${row.id}`,
+        toolUseId: row.toolUseId ?? '',
+        toolName: row.toolName ?? 'a tool',
+        displayName: str(content, 'displayName') || row.toolName || 'a tool',
+        risk: (str(content, 'risk') || 'low') as Risk,
+        input: content['input'] ?? null,
+        inputTruncated: false,
+        agentId: null,
+        status: 'running',
+        summary: '',
+        detail: null,
+        detailTruncated: false,
+        durationMs: 0,
+      }
+      blocks.push(block)
+      if (row.toolUseId) toolIndex.set(row.toolUseId, block)
+      continue
+    }
+
+    const text = str(content, 'text')
+    if (text) {
+      blocks.push({
+        kind: 'text', id: `m:${row.id}`, role: 'assistant', turnId: row.turnId, text, streaming: false,
+      })
+    }
+  }
+
+  // Approvals last, because the only one worth putting on screen is one that
+  // is still PENDING — a decided card belongs to a turn that has already
+  // reported its outcome in words, and re-rendering it invites a second click
+  // on a question nobody is asking any more.
+  for (const a of approvals) {
+    if (a.status !== 'pending') continue
+    blocks.push({
+      kind: 'approval',
+      id: `approval:${a.id}`,
+      approvalId: a.id,
+      toolUseId: a.toolUseId ?? '',
+      toolName: a.toolName,
+      payload: a.payload,
+      risk: (a.risk || 'high') as Risk,
+      explain: 'This was waiting for a decision when you last left this conversation.',
+      expiresAt: a.expiresAt,
+      status: 'pending',
+      decidedByEmail: null,
+      reason: a.decidedReason,
+    })
+  }
+
+  return blocks
 }
