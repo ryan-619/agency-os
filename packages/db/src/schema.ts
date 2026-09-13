@@ -335,6 +335,9 @@ export const touches = pgTable(
     campaignId: uuid('campaign_id').references(() => campaigns.id, { onDelete: 'set null' }),
     /** Nullable: the message log outlives the contact. See 0004_outreach.up.sql. */
     contactId: uuid('contact_id').references(() => contacts.id, { onDelete: 'set null' }),
+    /** What the message is ABOUT. A draft exists before its recipient does
+     *  (0008), and Phase 4 needs it to re-verify the findings a draft quotes. */
+    companyId: uuid('company_id').references(() => companies.id, { onDelete: 'set null' }),
     channel: text('channel').notNull(),
     /** 'out' | 'in' */
     direction: text('direction').notNull(),
@@ -352,6 +355,7 @@ export const touches = pgTable(
   (t) => [
     index('touches_campaign_status_scheduled_idx').on(t.campaignId, t.status, t.scheduledFor),
     index('touches_contact_idx').on(t.contactId, t.createdAt.desc()),
+    index('touches_company_idx').on(t.companyId, t.createdAt.desc()),
   ],
 )
 

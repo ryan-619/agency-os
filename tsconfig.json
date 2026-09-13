@@ -11,6 +11,9 @@
       "path": "./packages/scanner"
     },
     {
+      "path": "./packages/tools"
+    },
+    {
       "path": "./apps/agent"
     }
   ]

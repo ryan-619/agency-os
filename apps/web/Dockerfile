@@ -19,6 +19,7 @@ COPY package.json package-lock.json ./
 COPY packages/core/package.json    packages/core/
 COPY packages/db/package.json      packages/db/
 COPY packages/scanner/package.json packages/scanner/
+COPY packages/tools/package.json   packages/tools/
 COPY apps/web/package.json         apps/web/
 COPY apps/agent/package.json       apps/agent/
 RUN npm ci

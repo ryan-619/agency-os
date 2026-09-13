@@ -10,6 +10,7 @@ COPY package.json package-lock.json ./
 COPY packages/core/package.json    packages/core/
 COPY packages/db/package.json      packages/db/
 COPY packages/scanner/package.json packages/scanner/
+COPY packages/tools/package.json   packages/tools/
 COPY apps/web/package.json         apps/web/
 COPY apps/agent/package.json       apps/agent/
 RUN npm ci
@@ -38,6 +39,7 @@ COPY package.json package-lock.json ./
 COPY packages/core/package.json    packages/core/
 COPY packages/db/package.json      packages/db/
 COPY packages/scanner/package.json packages/scanner/
+COPY packages/tools/package.json   packages/tools/
 COPY apps/web/package.json         apps/web/
 COPY apps/agent/package.json       apps/agent/
 RUN npm ci --omit=dev --workspace @agency/agent --include-workspace-root
@@ -45,6 +47,7 @@ RUN npm ci --omit=dev --workspace @agency/agent --include-workspace-root
 COPY --from=build --chown=agent:nodejs /app/packages/core/dist    ./packages/core/dist
 COPY --from=build --chown=agent:nodejs /app/packages/db/dist      ./packages/db/dist
 COPY --from=build --chown=agent:nodejs /app/packages/scanner/dist ./packages/scanner/dist
+COPY --from=build --chown=agent:nodejs /app/packages/tools/dist   ./packages/tools/dist
 COPY --from=build --chown=agent:nodejs /app/apps/agent/dist       ./apps/agent/dist
 # The migration CLI reads these off disk at run time.
 COPY --chown=agent:nodejs packages/db/migrations ./packages/db/migrations
