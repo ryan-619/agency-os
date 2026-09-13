@@ -7,7 +7,7 @@ import { MIGRATIONS_DIR } from '../src/paths.js'
 const BUSINESS_TABLES = [
   'agent_defs', 'approvals', 'audit_log', 'calls', 'campaigns', 'chat_messages',
   'chat_sessions', 'companies', 'connectors', 'consents', 'contacts', 'deals',
-  'findings', 'icp_profiles', 'scans', 'scores', 'suppressions', 'touches',
+  'findings', 'icp_profiles', 'scans', 'scores', 'secrets', 'suppressions', 'touches',
 ]
 const AUTH_TABLES = ['accounts', 'sessions', 'users', 'verification_tokens']
 const ALL_TABLES = [...BUSINESS_TABLES, ...AUTH_TABLES, 'orgs'].sort()

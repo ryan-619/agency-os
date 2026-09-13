@@ -425,6 +425,29 @@ export const approvals = pgTable(
 // Agent runtime
 // ---------------------------------------------------------------------------
 
+/**
+ * Third-party credentials, encrypted at rest (§2.3, migration 0009).
+ *
+ * `ciphertext` holds nonce, tag and body together under AES-256-GCM, and the
+ * master key lives only in the environment — so a dump of this table decrypts
+ * to nothing on its own.
+ */
+export const secrets = pgTable(
+  'secrets',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    /** What the credential is for, in words. Never the value. */
+    label: text('label').notNull(),
+    ciphertext: text('ciphertext').notNull(),
+    /** Which master key encrypted it, so a rotation does not brick the rest. */
+    keyVersion: integer('key_version').notNull().default(1),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    ...timestamps,
+  },
+  (t) => [index('secrets_org_idx').on(t.orgId, t.createdAt.desc())],
+)
+
 /** Runtime MCP server registry — what makes the tool set customizable (§6). */
 export const connectors = pgTable(
   'connectors',
@@ -437,7 +460,8 @@ export const connectors = pgTable(
     enabled: boolean('enabled').notNull().default(false),
     config: jsonb('config').notNull().default(sql`'{}'::jsonb`),
     /** Pointer to the encrypted credential. Never the credential itself (§2.3). */
-    secretRef: text('secret_ref'),
+    /** Points at `secrets.id`. Never holds a credential (§2.3, 0009). */
+    secretRef: uuid('secret_ref').references(() => secrets.id, { onDelete: 'restrict' }),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
     lastOkAt: timestamp('last_ok_at', { withTimezone: true }),
     lastError: text('last_error'),

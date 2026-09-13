@@ -107,7 +107,7 @@ jobs:
             );
             const names = rows.map(r => r.tablename);
             console.log(names.length, 'tables:', names.join(', '));
-            if (names.length !== 24) {
+            if (names.length !== 25) {
               console.error('expected 23 application tables + schema_migrations');
               process.exit(1);
             }

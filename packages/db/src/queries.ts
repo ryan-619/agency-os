@@ -15,4 +15,5 @@
 export * from './repository.js'
 export * from './approvals.js'
 export * from './chat.js'
+export * from './secrets.js'
 export * as schema from './schema.js'
