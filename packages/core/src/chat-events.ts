@@ -64,6 +64,16 @@ export type ChatErrorCode =
   | 'session_budget_exceeded'
   /** No ANTHROPIC_API_KEY, so there is no agent to talk to. */
   | 'chat_disabled'
+  /**
+   * The API refused for a reason a person has to fix: no credit, a rejected
+   * key, an account on hold. Distinct from `sdk_error` because the useful
+   * advice is different — "try again" is wrong when the balance is zero, and
+   * telling someone to retry a request that cannot succeed is worse than
+   * saying nothing.
+   */
+  | 'chat_account'
+  /** Rate limited or overloaded. This one really is worth retrying. */
+  | 'chat_busy'
   | 'internal'
 
 export type ChatEvent = ChatEventBase &

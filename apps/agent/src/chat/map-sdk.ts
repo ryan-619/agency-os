@@ -54,6 +54,69 @@ function endReasonFor(subtype: string): TurnEndReason {
   }
 }
 
+/**
+ * What the API said when it refused, translated into something a person can
+ * act on.
+ *
+ * The SDK reports these on the assistant message as `error`, and the model's
+ * "text" in that case is the raw API string — "Credit balance is too low",
+ * say. Rendering that as if the AGENT said it is misleading twice over: it
+ * reads as the agent's answer, and it arrives with no indication of who has to
+ * do what about it. Found by running a turn against an account with no credit.
+ */
+const API_REFUSALS: Readonly<
+  Record<string, { readonly code: 'chat_account' | 'chat_busy' | 'sdk_error'; readonly retryable: boolean; readonly message: string }>
+> = {
+  billing_error: {
+    code: 'chat_account', retryable: false,
+    message: 'The Anthropic account has no credit left, so the agent cannot run. Add credit and try again.',
+  },
+  authentication_failed: {
+    code: 'chat_account', retryable: false,
+    message: 'Anthropic rejected the API key. Check ANTHROPIC_API_KEY on the agent worker.',
+  },
+  cloud_credential_error: {
+    code: 'chat_account', retryable: false,
+    message: 'The agent could not authenticate with its cloud provider. Check the worker credentials.',
+  },
+  account_on_hold: {
+    code: 'chat_account', retryable: false,
+    message: 'The Anthropic account is on hold. Someone with access to the account has to resolve it.',
+  },
+  verification_required: {
+    code: 'chat_account', retryable: false,
+    message: 'The Anthropic account needs verification before it can be used.',
+  },
+  oauth_org_not_allowed: {
+    code: 'chat_account', retryable: false,
+    message: 'This Anthropic organisation is not permitted to use the API.',
+  },
+  model_not_found: {
+    code: 'chat_account', retryable: false,
+    message: 'The configured model does not exist. Check AGENT_MODEL on the worker.',
+  },
+  rate_limit: {
+    code: 'chat_busy', retryable: true,
+    message: 'Anthropic is rate limiting this account. Wait a moment and ask again.',
+  },
+  overloaded: {
+    code: 'chat_busy', retryable: true,
+    message: 'Anthropic is overloaded right now. Wait a moment and ask again.',
+  },
+  server_error: {
+    code: 'chat_busy', retryable: true,
+    message: 'Anthropic returned a server error. Nothing was done. Try again.',
+  },
+  max_output_tokens: {
+    code: 'sdk_error', retryable: true,
+    message: 'The answer was cut off at the model output limit. Ask for something narrower.',
+  },
+  invalid_request: {
+    code: 'sdk_error', retryable: false,
+    message: 'The agent sent a request the API rejected. This is a bug; nothing was done.',
+  },
+}
+
 interface ContentBlock {
   readonly type?: string
   readonly text?: string
@@ -104,6 +167,24 @@ export function mapSdkMessage(msg: SDKMessage, ctx: MapContext): ChatEventBody[]
       const message = msg.message as unknown as { id?: string; content?: ContentBlock[] }
       const blocks = message?.content ?? []
       const out: ChatEventBody[] = []
+
+      // The API refused. Its own words are in `content`, but they are an API
+      // diagnostic rather than an answer, so they are NOT rendered as the
+      // agent speaking — the reader gets a sentence naming who has to do what.
+      const refusal = (msg as { error?: string }).error
+      if (refusal) {
+        const known = API_REFUSALS[refusal]
+        return [
+          {
+            kind: 'error',
+            code: known?.code ?? 'sdk_error',
+            retryable: known?.retryable ?? true,
+            message:
+              known?.message ??
+              `Anthropic refused the request (${refusal}). Nothing was done.`,
+          },
+        ]
+      }
 
       // No text here: the deltas above already carried it. This closes the
       // block and gives the browser a stable id for the finished message.

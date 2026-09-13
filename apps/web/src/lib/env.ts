@@ -50,6 +50,26 @@ const schema = z.object({
     .transform((v) => v === 'true' || v === '1'),
   MAIL_FROM: z.string().min(1).default('Agency OS <agency-os@localhost>'),
 
+  /**
+   * The agent worker's internal API (PROMPT.md §3).
+   *
+   * The worker is a separate process so the web app never blocks on a turn —
+   * and so the Agent SDK and ANTHROPIC_API_KEY stay out of the Next module
+   * graph entirely. Nothing in apps/web imports the SDK, and CI builds this
+   * app with no secrets on purpose to keep it that way.
+   *
+   * Optional: a deployment without an agent worker still has a working CRM,
+   * and the chat panel says so rather than erroring.
+   */
+  AGENT_URL: z.string().url().optional(),
+  /**
+   * Proves to the worker that this request came from the web app. It is NOT
+   * what proves who the human is — the worker re-derives the principal from
+   * the database — so the worst a stolen token does is let someone address a
+   * conversation that already exists and already belongs to the user it names.
+   */
+  AGENT_INTERNAL_TOKEN: z.string().min(32).optional(),
+
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 })
 

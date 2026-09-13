@@ -169,6 +169,53 @@ describe('mapping SDK messages to wire events', () => {
    * The SDK's message union has thirty-odd members and gains more. A turn must
    * not die because a new status frame appeared.
    */
+  /**
+   * Found by running a real turn: the account had no credit, and the API's own
+   * words — "Credit balance is too low" — arrived as the assistant's TEXT.
+   * Rendering that as the agent speaking is misleading twice: it reads as an
+   * answer, and it says nothing about who has to do what. The generic
+   * "try again" that followed was worse, because retrying cannot work.
+   */
+  it.each([
+    ['billing_error', 'chat_account', false, /no credit/i],
+    ['authentication_failed', 'chat_account', false, /API key/i],
+    ['rate_limit', 'chat_busy', true, /rate limiting/i],
+    ['overloaded', 'chat_busy', true, /overloaded/i],
+    ['model_not_found', 'chat_account', false, /AGENT_MODEL/],
+  ])('turns the %s refusal into something a person can act on', (err, code, retryable, matches) => {
+    const refused = {
+      type: 'assistant', parent_tool_use_id: null, uuid: 'u', session_id: 's',
+      error: err,
+      message: { id: 'm', content: [{ type: 'text', text: 'Credit balance is too low' }] },
+    } as unknown as SDKMessage
+    const events = mapSdkMessage(refused, ctx)
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ kind: 'error', code, retryable })
+    expect((events[0] as { message: string }).message).toMatch(matches)
+  })
+
+  it('does not render the API’s diagnostic as if the agent had said it', () => {
+    const refused = {
+      type: 'assistant', parent_tool_use_id: null, uuid: 'u', session_id: 's',
+      error: 'billing_error',
+      message: { id: 'm', content: [{ type: 'text', text: 'Credit balance is too low' }] },
+    } as unknown as SDKMessage
+    const events = mapSdkMessage(refused, ctx)
+    expect(events.some((e) => e.kind === 'message_complete')).toBe(false)
+    expect(JSON.stringify(events)).not.toContain('Credit balance is too low')
+  })
+
+  it('still says something useful for a refusal it has never seen', () => {
+    const refused = {
+      type: 'assistant', parent_tool_use_id: null, uuid: 'u', session_id: 's',
+      error: 'some_new_reason_from_a_later_sdk',
+      message: { id: 'm', content: [] },
+    } as unknown as SDKMessage
+    const [event] = mapSdkMessage(refused, ctx)
+    expect(event).toMatchObject({ kind: 'error' })
+    expect((event as { message: string }).message).toContain('some_new_reason_from_a_later_sdk')
+  })
+
   it('ignores the many frame kinds the chat does not render', () => {
     for (const type of ['system', 'status', 'hook_started', 'task_started', 'rate_limit', 'auth_status']) {
       expect(kinds({ type } as unknown as SDKMessage), type).toEqual([])
