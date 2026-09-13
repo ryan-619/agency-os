@@ -196,6 +196,47 @@ test bans spreading the row outright (the same instrument that keeps
 - **the log.** Names and transports only. A URL carries a token in a query
   string sooner or later, whatever the form says.
 
+### Skills, and the one bypass that is genuinely unavoidable (§6)
+
+§6 says to mount a skills volume and set `settingSources: ["project"]`,
+`skills: "all"`, and `"Skill"` in `allowedTools`. Two of those three are
+refused and the third is real:
+
+- **`"Skill"` in `allowedTools` — refused, and the SDK agrees.** A bare entry
+  auto-approves before `canUseTool` is consulted, and it is also unnecessary:
+  the SDK says of the `skills` option, verbatim, *"This is the single place to
+  turn skills on; you do not need to add `'Skill'` to `allowedTools` yourself
+  when using this option."* The recommendation costs a bypass and buys nothing.
+- **`settingSources: ["project"]` — required. Measured, not assumed.** Against
+  a scratch directory holding one `SKILL.md`:
+
+  | settingSources | commands | the skill discovered |
+  |---|---|---|
+  | `[]` | 49 | no |
+  | `['project']` | 50 | yes |
+
+  And the SDK warns that *"Allow rules from settings files can also shadow the
+  callback but are not visible here"* — the third documented bypass.
+
+**What makes that acceptable: the bypass is in the FILES, not in the skills.**
+A skill is markdown, and everything it makes the model *do* still arrives at
+`canUseTool`. So `inspectSkillsRoot` refuses to turn skills on at all if the
+volume contains anything that could carry a permission rule, an agent, a
+command or a hook — checked at boot, naming the file that stopped it, and
+never fatal (the agent works fine without skills). Off entirely unless
+`AGENT_SKILLS_DIR` is set, so a deployment that does not use skills does not
+carry the setting source.
+
+The compose mount is **read-only**: a skill is instructions the agent follows
+on every later turn, so a writable mount is a prompt-injection surface with no
+expiry and no audit trail. `packages/db/test/deployment.test.ts` asserts it.
+
+**No upload UI.** §6 asks for one; it is the one §6 item not built. An endpoint
+that writes files into the directory the agent reads as instructions is the
+single highest-value target in the product, and it is not needed to use the
+feature — a skill is a file on a volume, put there the way the volume is
+administered. Flagged here rather than hidden (§13).
+
 **Test connection polls past `pending`.** MCP startup is non-blocking in this
 SDK: `mcpServerStatus()` answers immediately and a perfectly healthy server
 reports `pending` for the first second or two. Taking that first answer made
@@ -263,7 +304,7 @@ check and should be added if the scanner is ever aimed at untrusted input.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 833 tests: domain + migrations + invariants + seed + parity + agent
+npm test                 # 857 tests: domain + migrations + invariants + seed + parity + agent
 npm run build            # packages, then the Next app
 
 # database (needs DATABASE_URL)
@@ -846,6 +887,7 @@ bills a long conversation several times over.
 `draft_outreach`, `get_pipeline` and `update_deal` (§6 lists all three). The
 first belongs with Phase 4's single send path; the other two would read a
 `deals` table nothing writes, and §12 forbids a tool that teaches the model a
-false shape of the business. The `agents` and `skills` SDK options are Phase 3:
-`AgentDefinition` carries its own `permissionMode`, so the mapper needs a test
-on its key set before a database row can build one.
+false shape of the business.
+
+And §6's **skill-upload UI** — see the skills section above for why. Everything
+else in §6 and §7 ships.

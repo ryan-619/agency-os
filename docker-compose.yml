@@ -113,6 +113,17 @@ services:
       # §2.3 — third-party credentials are encrypted at rest with this key.
       # Optional until a connector is configured (Phase 3).
       SECRETS_KEY: ${SECRETS_KEY:-}
+      # §6's skills volume. Skills are filesystem-only in the SDK, and loading
+      # them means loading the project SETTING SOURCE — which is one of the
+      # three documented ways the approval gate is skipped. The worker
+      # therefore REFUSES to load skills from a directory containing anything
+      # that could carry a permission rule (.claude/settings.json, agents/,
+      # commands/, hooks/, mcp.json) and says which file stopped it.
+      #
+      # Mounted READ-ONLY below: a skill is instructions the model follows, so
+      # a writable mount would let anything that reaches the worker rewrite
+      # them for every later turn.
+      AGENT_SKILLS_DIR: /app/skills
       # §5.4's bounds on one turn, and §8.1's on a conversation.
       AGENT_MAX_TURNS: ${AGENT_MAX_TURNS:-30}
       AGENT_MAX_BUDGET_USD: ${AGENT_MAX_BUDGET_USD:-2}
@@ -125,6 +136,10 @@ services:
       # Bound the blast radius of a subagent fan-out (§7).
       CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: ${CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS:-3}
       CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: ${CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH:-2}
+    volumes:
+      # Put a skill at ./skills/.claude/skills/<name>/SKILL.md. The directory
+      # may hold NOTHING else under .claude/ — see AGENT_SKILLS_DIR above.
+      - ./skills:/app/skills:ro
     ports:
       # Health only. The API on 3002 is reachable from `web` over the compose
       # network and from nowhere else — publishing it would put an endpoint

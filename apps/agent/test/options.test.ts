@@ -18,6 +18,7 @@ const fixture = () =>
     canUseTool: async () => ({ behavior: 'allow' }),
     mcpServers: {},
     agents: {},
+    skills: { settingSources: [] },
     hooks: {},
     systemPrompt: 'you are a test',
     cwd: '/tmp/agency',
@@ -30,7 +31,9 @@ const fixture = () =>
 describe('the option keyset is frozen', () => {
   it('sets exactly the keys on the allow-list, and nothing else', () => {
     const keys = Object.keys(fixture()).sort()
-    const allowed = [...ALLOWED_OPTION_KEYS].filter((k) => k !== 'resume' && k !== 'model').sort()
+    const allowed = [...ALLOWED_OPTION_KEYS]
+      .filter((k) => k !== 'resume' && k !== 'model' && k !== 'skills')
+      .sort()
     expect(keys).toEqual(allowed)
   })
 
@@ -39,6 +42,7 @@ describe('the option keyset is frozen', () => {
       canUseTool: async () => ({ behavior: 'allow' }),
       mcpServers: {},
       agents: {},
+      skills: { settingSources: [] },
       hooks: {},
       systemPrompt: 's',
       cwd: '/tmp',
@@ -82,6 +86,46 @@ describe('the three documented bypasses are closed', () => {
    */
   it('loads no settings sources at all', () => {
     expect(fixture().settingSources).toEqual([])
+  })
+
+  /**
+   * The ONE exception, and the only one there will be.
+   *
+   * Skills are discovered only with the project source loaded — measured, not
+   * assumed (see skills.test.ts for the numbers). So `inspectSkillsRoot`
+   * decides, and it says `['project']` only after proving the skills volume
+   * contains no settings file, no agents, no commands, no hooks. Anything
+   * else setting this array is the bug these tests exist to catch.
+   */
+  it('takes the project source only when the skills volume asked for it', () => {
+    const withSkills = buildQueryOptions({
+      canUseTool: async () => ({ behavior: 'allow' }),
+      mcpServers: {},
+      agents: {},
+      skills: { settingSources: ['project'], skills: 'all' },
+      hooks: {},
+      systemPrompt: 's',
+      cwd: '/tmp',
+      abortController: new AbortController(),
+      maxTurns: 1,
+      maxBudgetUsd: 1,
+      env: {},
+    })
+    expect(withSkills.settingSources).toEqual(['project'])
+    expect(withSkills.skills).toBe('all')
+    // And it still buys no allowance anywhere else. The SDK says of `skills`:
+    // "This is the single place to turn skills on; you do not need to add
+    // 'Skill' to allowedTools yourself" — so §6's suggestion to add it costs a
+    // bypass and buys nothing.
+    expect(withSkills.allowedTools).toEqual([])
+    expect(withSkills.permissionMode).toBe('default')
+  })
+
+  it('omits `skills` entirely when they are off, which is not the same as empty', () => {
+    // The SDK: an absent `skills` means "no SDK auto-configuration — the CLI's
+    // own defaults still apply", which it says is NOT skills off. With no
+    // project setting source there is nothing for those defaults to find.
+    expect('skills' in fixture()).toBe(false)
   })
 
   /**

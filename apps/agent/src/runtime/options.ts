@@ -53,6 +53,7 @@ export const ALLOWED_OPTION_KEYS = Object.freeze([
   'permissionPrompts',
   'resume',
   'settingSources',
+  'skills',
   'strictMcpConfig',
   'systemPrompt',
   'tools',
@@ -88,6 +89,14 @@ export interface BuildOptionsInput {
    * ways to skip `canUseTool` entirely.
    */
   readonly agents: NonNullable<Options['agents']>
+  /**
+   * §6's skills, and the one setting source they need.
+   *
+   * Decided by `inspectSkillsRoot`, which refuses the whole feature if the
+   * skills volume contains anything that could carry a permission rule. Empty
+   * `settingSources` and absent `skills` is the default and the safe case.
+   */
+  readonly skills: { settingSources: readonly 'project'[]; skills?: 'all' }
   readonly hooks: NonNullable<Options['hooks']>
   readonly systemPrompt: string
   readonly cwd: string
@@ -166,9 +175,12 @@ export function buildQueryOptions(input: BuildOptionsInput): Options {
     // them. Telling the model about tools it does not have is how it spends a
     // turn trying to read a file.
     systemPrompt: input.systemPrompt,
-    // EMPTY. Omitting it loads every settings source, and an allow rule in one
-    // of them shadows the gate invisibly.
-    settingSources: [],
+    // EMPTY unless skills are on, and omitting it entirely is NOT the same
+    // thing: omitted loads EVERY settings source, and an allow rule in one of
+    // them shadows the gate invisibly. When skills are on this is ['project'],
+    // which the worker permits only after proving the skills volume holds no
+    // settings file — see runtime/skills.ts for the measurement behind that.
+    settingSources: [...input.skills.settingSources],
 
     // --- limits -----------------------------------------------------------
     maxTurns: input.maxTurns,
@@ -182,6 +194,11 @@ export function buildQueryOptions(input: BuildOptionsInput): Options {
     env: input.env,
   }
 
+  // Set only when skills are actually on. The SDK reads an ABSENT `skills` as
+  // "no SDK auto-configuration — the CLI's own defaults still apply", which it
+  // says in as many words is NOT the same as skills off; with no project
+  // setting source there is nothing for those defaults to discover.
+  if (input.skills.skills !== undefined) options.skills = input.skills.skills
   if (input.resume !== undefined) options.resume = input.resume
   if (input.model !== undefined) options.model = input.model
   return options

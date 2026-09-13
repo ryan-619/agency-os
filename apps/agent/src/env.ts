@@ -41,6 +41,17 @@ const schema = z.object({
    */
   SECRETS_KEY: z.string().optional(),
 
+  /**
+   * Where the skills volume is mounted (§6). Unset means no skills.
+   *
+   * Loading skills means loading the project SETTING SOURCE — measured, not
+   * assumed; see runtime/skills.ts — and a settings file in that source can
+   * allow tool calls without the gate being consulted. So the worker refuses
+   * to load skills from a directory that contains one, and a deployment that
+   * does not use skills does not carry the setting source at all.
+   */
+  AGENT_SKILLS_DIR: z.string().optional(),
+
   /** Overrides the SDK's default model per §5.5's "pick a model per task". */
   AGENT_MODEL: z.string().optional(),
 

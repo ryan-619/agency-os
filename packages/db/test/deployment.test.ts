@@ -144,6 +144,35 @@ describe('the web app can reach the agent worker', () => {
   })
 })
 
+describe('the skills volume', () => {
+  /**
+   * A skill is instructions the agent follows on every later turn. A writable
+   * mount would let anything that reaches the worker rewrite them — which is
+   * a prompt-injection surface with no expiry and no audit trail.
+   */
+  it('is mounted read-only', () => {
+    const agentBlock = compose.slice(compose.indexOf('\n  agent:\n'))
+    const mount = /- \.\/skills:[^\n]*/.exec(agentBlock)?.[0] ?? ''
+    expect(mount, 'the agent has no skills mount').not.toBe('')
+    expect(mount).toMatch(/:ro\s*$/)
+  })
+
+  it('is what AGENT_SKILLS_DIR points at', () => {
+    expect(compose).toMatch(/AGENT_SKILLS_DIR:\s*\/app\/skills/)
+    expect(compose).toMatch(/- \.\/skills:\/app\/skills:ro/)
+  })
+
+  /**
+   * Unset means no skills AND no project setting source, which is the safe
+   * default. Requiring it would make `docker compose up` fail on a stack that
+   * has no skills — and would push people to set it to something arbitrary.
+   */
+  it('is optional, and documented', () => {
+    expect(documented.has('AGENT_SKILLS_DIR')).toBe(true)
+    expect(compose).not.toMatch(/AGENT_SKILLS_DIR:\s*"?\$\{AGENT_SKILLS_DIR:\?/)
+  })
+})
+
 describe('what compose refuses to start without', () => {
   /**
    * `${VAR:?message}` makes compose fail with that message instead of starting

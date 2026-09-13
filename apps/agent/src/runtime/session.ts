@@ -67,6 +67,8 @@ export interface SessionDeps {
    * rather than connecting unauthenticated.
    */
   readonly secretsKey: Buffer | null
+  /** Decided once at boot by `inspectSkillsRoot`; see runtime/skills.ts. */
+  readonly skills: { settingSources: readonly 'project'[]; skills?: 'all' }
   readonly approvalTtlMs: number
   readonly approvalPollMs: number
   /**
@@ -242,6 +244,7 @@ export async function buildTurnRuntime(
     // not know that name is taken.
     mcpServers: { ...connectors.servers, agency: mcpServer },
     agents: subagents.agents,
+    skills: deps.skills,
     hooks: {
       PreToolUse: [{ hooks: [makePreToolUse(hookDeps)], timeout: HOOK_TIMEOUT_SECONDS }],
       PostToolUse: [{ hooks: [makePostToolUse(hookDeps)], timeout: HOOK_TIMEOUT_SECONDS }],

@@ -15,6 +15,7 @@ import { createAgentHttpServer, type StartTurnRequest, type TurnHandle } from '.
 import { createDeferredEmitter, startTurn } from './chat/turn.js'
 import { buildTurnRuntime, createHalt, resolvePrincipal, type RuntimeHalt } from './runtime/session.js'
 import { probeConnector } from './runtime/probe.js'
+import { inspectSkillsRoot } from './runtime/skills.js'
 
 /**
  * The agent worker.
@@ -86,6 +87,20 @@ async function main(): Promise<void> {
    * deployment with no connectors needs no key, and a connector that does need
    * one is skipped with a reason.
    */
+  /**
+   * §6's skills, decided once from what is actually on the volume.
+   *
+   * Loading skills means loading the project setting source, and a settings
+   * file in that source can allow tool calls the gate never sees. So this
+   * REFUSES rather than warns, and it refuses loudly — but it never stops the
+   * worker: the agent works perfectly well without skills.
+   */
+  const skills = inspectSkillsRoot(env.AGENT_SKILLS_DIR)
+  log[skills.status === 'refused' ? 'error' : 'info'](`skills: ${skills.status}`, {
+    reason: skills.reason,
+    ...(skills.names.length > 0 ? { names: skills.names } : {}),
+  })
+
   let secretsKey: Buffer | null = null
   if (env.SECRETS_KEY) {
     try {
@@ -132,7 +147,7 @@ async function main(): Promise<void> {
       return true
     },
     startTurn: (req) =>
-      beginTurn({ req, db, env, log, halt, running, secretsKey }),
+      beginTurn({ req, db, env, log, halt, running, secretsKey, skills }),
   })
 
   const apiPort = env.AGENT_PORT + 1
@@ -193,8 +208,10 @@ async function beginTurn(args: {
   running: Map<string, TurnHandle>
   /** Resolved once at boot; null when SECRETS_KEY is unset or unusable. */
   secretsKey: Buffer | null
+  /** Decided once at boot from what is on the skills volume (§6). */
+  skills: { settingSources: readonly 'project'[]; skills?: 'all' }
 }): Promise<{ ok: true; turn: TurnHandle } | { ok: false; status: number; message: string }> {
-  const { req, db, env, log, halt, running, secretsKey } = args
+  const { req, db, env, log, halt, running, secretsKey, skills } = args
 
   if (!env.ANTHROPIC_API_KEY) return { ok: false, status: 503, message: 'chat_disabled' }
   if (halt.halted()) return { ok: false, status: 503, message: 'runtime_halted' }
@@ -220,6 +237,7 @@ async function beginTurn(args: {
       approvalPollMs: env.APPROVAL_POLL_MS,
       secretsKey,
       turnTimeoutMs: env.AGENT_TURN_TIMEOUT_MINUTES * 60_000,
+      skills,
       cwd: process.cwd(),
       now: () => new Date(),
     },
