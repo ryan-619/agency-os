@@ -41,6 +41,15 @@ function hashKey(s: string): number {
 
 export interface WorkerLock {
   release(): Promise<void>
+  /**
+   * Is the lock still actually held?
+   *
+   * False once the connection has dropped. Postgres releases an advisory lock
+   * the moment its session ends, so from that point the worker is running
+   * WITHOUT the exclusion it thinks it has — and another worker can start.
+   * `/readyz` reports it so an operator sees it rather than inferring it.
+   */
+  readonly held: boolean
 }
 
 export interface LockOptions {
@@ -50,6 +59,32 @@ export interface LockOptions {
   readonly attempts?: number
   readonly retryMs?: number
   readonly sleep?: (ms: number) => Promise<void>
+}
+
+/**
+ * A dedicated `pg.Client` is an EventEmitter, and an EventEmitter with no
+ * `'error'` listener RE-THROWS — out of the event loop, where nothing catches
+ * it. So a database restart, a failover, or an idle-connection timeout on the
+ * lock connection did not degrade the worker: it killed the process, mid-turn,
+ * with a stack trace about a socket and no mention of a lock.
+ *
+ * The lock is the second layer rather than the first (the restart reconciler
+ * is scoped by boot time, see CLAUDE.md §4), so losing it is not a reason to
+ * stop serving turns that are already running. It IS a reason to say so
+ * loudly, in the log and on /readyz, because the exclusion is gone until
+ * someone restarts the worker.
+ */
+function watchForDisconnect(client: Client, log: Logger, onLost: () => void): void {
+  client.on('error', (err: Error) => {
+    onLost()
+    log.error('the worker lock connection dropped, so the lock is NO LONGER HELD', {
+      error: err.name,
+      consequence:
+        'Another worker can now start against this database. Turns already running are unaffected; ' +
+        'restart this worker when convenient.',
+    })
+  })
+  client.on('end', onLost)
 }
 
 /**
@@ -66,6 +101,8 @@ export async function acquireWorkerLock(opts: LockOptions): Promise<WorkerLock> 
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
 
   const client = new Client({ connectionString: opts.connectionString })
+  // Before connect(), so a failure during the handshake is handled too.
+  client.on('error', () => {})
   await client.connect()
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -75,12 +112,24 @@ export async function acquireWorkerLock(opts: LockOptions): Promise<WorkerLock> 
     )
     if (rows[0]?.locked) {
       opts.log.info('worker lock acquired', { attempt })
+      let held = true
+      watchForDisconnect(client, opts.log, () => {
+        held = false
+      })
       return {
+        get held() {
+          return held
+        },
         async release() {
+          held = false
           try {
             await client.query('SELECT pg_advisory_unlock($1)', [WORKER_LOCK_KEY])
+          } catch {
+            // The connection is already gone, which means Postgres released
+            // the lock for us. Nothing to do, and nothing worth failing a
+            // shutdown over.
           } finally {
-            await client.end()
+            await client.end().catch(() => {})
           }
         },
       }
@@ -91,7 +140,7 @@ export async function acquireWorkerLock(opts: LockOptions): Promise<WorkerLock> 
     }
   }
 
-  await client.end()
+  await client.end().catch(() => {})
   throw new Error(
     'Another agent worker is already running against this database. Only one may run at a time, ' +
       'because this one reconciles interrupted turns and pending approvals at boot — with two, each ' +

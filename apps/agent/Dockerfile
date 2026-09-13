@@ -54,9 +54,16 @@ COPY --chown=agent:nodejs packages/db/migrations ./packages/db/migrations
 COPY --chown=agent:nodejs packages/db/seed       ./packages/db/seed
 
 USER agent
-EXPOSE 3001
+# 3001 is health; 3002 is the internal API the web app calls. Neither is
+# published to the host by docker-compose.yml — 3001 is bound to loopback
+# there and 3002 is reachable only over the compose network.
+EXPOSE 3001 3002
 
-HEALTHCHECK --interval=15s --timeout=4s --start-period=10s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:3001/livez').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+# /readyz, not /livez. A liveness probe answers "the process is running",
+# which stays true when the runtime has HALTED because a tool ran that the
+# gate never authorised — the one condition an operator most needs to see.
+# /readyz reports it, along with an unreachable database.
+HEALTHCHECK --interval=15s --timeout=4s --start-period=20s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:3001/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 CMD ["node", "apps/agent/dist/index.js"]

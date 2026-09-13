@@ -8,8 +8,8 @@ import {
 } from '@agency/db'
 import { loadEnv } from './env.js'
 import { createLogger, type Logger } from './logger.js'
-import { startHealthServer } from './health.js'
-import { acquireWorkerLock } from './boot/singleton.js'
+import { answerHealth, startHealthServer, type HealthInputs } from './health.js'
+import { acquireWorkerLock, type WorkerLock } from './boot/singleton.js'
 import { reconcileAfterRestart, sweepExpired } from './boot/reconcile.js'
 import { createAgentHttpServer, type StartTurnRequest, type TurnHandle } from './http/server.js'
 import { createDeferredEmitter, startTurn } from './chat/turn.js'
@@ -41,7 +41,17 @@ async function main(): Promise<void> {
   const bootAt = new Date()
 
   let pool: Pool | null = null
-  const health = await startHealthServer(env.AGENT_PORT, () => pool, log)
+  // Nothing below exists yet, which is the point: /livez answers immediately
+  // and /readyz reports "starting" rather than refusing the connection.
+  let halt: RuntimeHalt | null = null
+  let lock: WorkerLock | null = null
+  const healthInputs = (): HealthInputs => ({
+    pool,
+    halted: halt?.halted() ?? false,
+    chatEnabled: Boolean(env.ANTHROPIC_API_KEY),
+    lockHeld: lock?.held ?? null,
+  })
+  const health = await startHealthServer(env.AGENT_PORT, healthInputs, log)
 
   pool = new Pool({ connectionString: env.DATABASE_URL, max: env.DATABASE_POOL_MAX })
   const db = drizzle(pool, { schema }) as unknown as AgencyDb
@@ -55,7 +65,7 @@ async function main(): Promise<void> {
     })
   }
 
-  const lock = await acquireWorkerLock({ connectionString: env.DATABASE_URL, log })
+  lock = await acquireWorkerLock({ connectionString: env.DATABASE_URL, log })
   await reconcileAfterRestart(db, bootAt, log)
 
   const sweeper = setInterval(() => {
@@ -63,7 +73,7 @@ async function main(): Promise<void> {
   }, env.APPROVAL_SWEEP_MS)
   sweeper.unref()
 
-  const halt = createHalt(log)
+  halt = createHalt(log)
   const running = new Map<string, TurnHandle>()
 
   if (!env.ANTHROPIC_API_KEY) {
@@ -74,7 +84,9 @@ async function main(): Promise<void> {
     port: env.AGENT_PORT,
     token: env.AGENT_INTERNAL_TOKEN,
     log,
-    health: (url) => answerHealth(url, pool, halt, Boolean(env.ANTHROPIC_API_KEY)),
+    // The same implementation the health port serves, so the two can never
+    // disagree about whether the runtime is halted.
+    health: (url) => answerHealth(url, healthInputs()),
     interrupt: (turnId) => {
       const turn = running.get(turnId)
       if (!turn) return false
@@ -123,41 +135,6 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => void shutdown('SIGINT'))
 }
 
-async function answerHealth(
-  url: string,
-  pool: Pool | null,
-  halt: RuntimeHalt,
-  chatEnabled: boolean,
-): Promise<{ status: number; body: unknown } | null> {
-  if (url !== '/livez' && url !== '/readyz') return null
-  if (url === '/livez') return { status: 200, body: { status: 'ok', service: 'agent' } }
-  try {
-    await pool?.query('SELECT 1')
-    // A halted runtime is NOT ready. It still answers, and it says why — an
-    // orchestrator restarting it is the correct response to a gate that was
-    // bypassed.
-    return {
-      status: halt.halted() ? 503 : 200,
-      body: {
-        status: halt.halted() ? 'halted' : 'ok',
-        service: 'agent',
-        database: 'ok',
-        chat: chatEnabled ? 'enabled' : 'disabled',
-      },
-    }
-  } catch (err) {
-    // Only the error class: a driver error can carry the DSN (§2.3).
-    return {
-      status: 503,
-      body: {
-        status: 'degraded',
-        service: 'agent',
-        database: 'unreachable',
-        error: err instanceof Error ? err.name : 'UnknownError',
-      },
-    }
-  }
-}
 
 /**
  * Start one turn.
@@ -201,6 +178,7 @@ async function beginTurn(args: {
       maxBudgetUsd: env.AGENT_MAX_BUDGET_USD,
       approvalTtlMs: env.APPROVAL_TTL_MINUTES * 60_000,
       approvalPollMs: env.APPROVAL_POLL_MS,
+      turnTimeoutMs: env.AGENT_TURN_TIMEOUT_MINUTES * 60_000,
       cwd: process.cwd(),
       now: () => new Date(),
     },

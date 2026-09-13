@@ -58,6 +58,7 @@ function makeDeps(over: Partial<GateDeps> = {}) {
     chatSessionId: 'session-1',
     turnId: 'turn-1',
     ttlMs: 30 * MINUTE,
+    turnDeadline: new Date(Date.now() + 35 * MINUTE),
     now: () => new Date(),
     parseToolInput: (_n, input) => ({ ok: true, value: input }),
     ensureApproval: async () => approvalRow(),
@@ -109,6 +110,11 @@ describe('canUseTool always settles', () => {
     [
       'an aborted turn',
       { waiter: { healthy: true, await: async () => ({ status: 'aborted' as const }) } },
+      'mcp__agency__queue_touch',
+    ],
+    [
+      'a waiter that could not read the row',
+      { waiter: { healthy: false, await: async () => ({ status: 'unavailable' as const }) } },
       'mcp__agency__queue_touch',
     ],
     [
@@ -276,6 +282,107 @@ describe('what the gate decides', () => {
     const { deps } = makeDeps()
     const result = await makeCanUseTool(deps)('mcp__agency__get_icp', { a: 1 }, options())
     expect(result && 'updatedInput' in result ? result.updatedInput : undefined).toBeUndefined()
+  })
+})
+
+describe('an approval never outlives its turn', () => {
+  /**
+   * The boot check that AGENT_TURN_TIMEOUT_MINUTES > APPROVAL_TTL_MINUTES is
+   * necessary and not sufficient: the two clocks start at different moments.
+   * An approval raised ten minutes into a 35-minute turn with a 30-minute TTL
+   * expires at minute 40 — five minutes in which a person sees a live card,
+   * with a countdown, for a turn that no longer exists.
+   */
+  it('clamps the expiry to the turn’s wall clock', async () => {
+    const now = new Date('2026-09-13T00:10:00.000Z')
+    let asked: Date | undefined
+    const { deps } = makeDeps({
+      now: () => now,
+      ttlMs: 30 * MINUTE,
+      // The turn began at 00:00 with a 35-minute clock.
+      turnDeadline: new Date('2026-09-13T00:35:00.000Z'),
+      ensureApproval: async (req) => {
+        asked = req.expiresAt
+        return approvalRow({ expiresAt: req.expiresAt })
+      },
+    })
+    await makeCanUseTool(deps)('mcp__agency__queue_touch', { channel: 'email' }, options())
+    // 00:40 unclamped; 00:35 is when the turn dies.
+    expect(asked?.toISOString()).toBe('2026-09-13T00:35:00.000Z')
+  })
+
+  it('leaves the TTL alone when the turn outlasts it, which is the usual case', async () => {
+    const now = new Date('2026-09-13T00:00:00.000Z')
+    let asked: Date | undefined
+    const { deps } = makeDeps({
+      now: () => now,
+      ttlMs: 30 * MINUTE,
+      turnDeadline: new Date('2026-09-13T00:35:00.000Z'),
+      ensureApproval: async (req) => {
+        asked = req.expiresAt
+        return approvalRow({ expiresAt: req.expiresAt })
+      },
+    })
+    await makeCanUseTool(deps)('mcp__agency__queue_touch', { channel: 'email' }, options())
+    expect(asked?.toISOString()).toBe('2026-09-13T00:30:00.000Z')
+  })
+})
+
+describe('the gate never claims an outcome that did not happen', () => {
+  /**
+   * A database the gate could not read is not an expiry. Both used to be
+   * reported as `approval_resolved: expired`, which wrote "expired" onto a
+   * card whose row was still pending — so a person could approve something
+   * their own screen had already written off, and the audit log would carry a
+   * decision for an action nothing performed.
+   *
+   * The row is closed out by the turn's `finally` instead, which is the one
+   * place that knows the request is really dead.
+   */
+  it.each(['aborted', 'unavailable'] as const)(
+    'emits no resolution when the wait ended as %s',
+    async (status) => {
+      const { deps, emitted } = makeDeps({
+        waiter: { healthy: status !== 'unavailable', await: async () => ({ status }) },
+      })
+      const result = await makeCanUseTool(deps)(
+        'mcp__agency__queue_touch',
+        { channel: 'email' },
+        options(),
+      )
+      expect(result?.behavior).toBe('deny')
+      expect(emitted.some((e) => e.kind === 'approval_resolved')).toBe(false)
+      // The request WAS shown, so the person knows what was asked.
+      expect(emitted.some((e) => e.kind === 'approval_requested')).toBe(true)
+    },
+  )
+
+  it.each(['expired', 'denied'] as const)('does resolve the card on a real %s', async (status) => {
+    const { deps, emitted } = makeDeps({
+      waiter: { healthy: true, await: async () => ({ status }) },
+    })
+    await makeCanUseTool(deps)('mcp__agency__queue_touch', { channel: 'email' }, options())
+    expect(emitted.find((e) => e.kind === 'approval_resolved')).toMatchObject({ status })
+  })
+
+  /**
+   * "The approval system could not be reached" and "nobody approved this in
+   * time" are different facts, and the model reports whichever it is told.
+   */
+  it('tells the model the difference between an expiry and an outage', async () => {
+    const expired = await makeCanUseTool(
+      makeDeps({ waiter: { healthy: true, await: async () => ({ status: 'expired' as const }) } }).deps,
+    )('mcp__agency__queue_touch', { channel: 'email' }, options())
+    const unavailable = await makeCanUseTool(
+      makeDeps({
+        waiter: { healthy: false, await: async () => ({ status: 'unavailable' as const }) },
+      }).deps,
+    )('mcp__agency__queue_touch', { channel: 'email' }, options())
+
+    expect(expired).toMatchObject({ behavior: 'deny' })
+    expect(unavailable).toMatchObject({ behavior: 'deny' })
+    expect((expired as { message: string }).message).toMatch(/expired/i)
+    expect((unavailable as { message: string }).message).toMatch(/could not be reached/i)
   })
 })
 
@@ -496,7 +603,11 @@ describe('the approval waiter', () => {
       expire: async () => null,
     })
     const d = await w.await('approval-1', { deadline: new Date(Date.now() + MINUTE) })
-    expect(d.status).toBe('aborted')
+    // 'unavailable', not 'aborted'. The row was never touched and may still be
+    // pending on somebody's screen — the DATABASE is what could not be
+    // reached, not the human. Reported as an expiry (which it was), the card
+    // said "expired" while the row was still live and still decidable.
+    expect(d.status).toBe('unavailable')
     expect(w.healthy).toBe(false)
   })
 
@@ -517,7 +628,7 @@ describe('the approval waiter', () => {
   it('settles when the row disappears underneath it', async () => {
     const w = createApprovalWaiter({ ...base, read: async () => null, expire: async () => null })
     const d = await w.await('gone', { deadline: new Date(Date.now() + MINUTE) })
-    expect(d.status).toBe('aborted')
+    expect(d.status).toBe('unavailable')
   })
 })
 

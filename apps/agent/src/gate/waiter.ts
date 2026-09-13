@@ -31,7 +31,16 @@
  */
 import type { ApprovalRow } from '@agency/db'
 
-export type DecisionStatus = 'approved' | 'denied' | 'expired' | 'aborted'
+/**
+ * `aborted` and `unavailable` are both "no decision", and they are separate
+ * because they mean opposite things to the person watching.
+ *
+ * `aborted` — the turn was stopped, so the request is genuinely dead.
+ * `unavailable` — the gate could not READ the row. The approval may be alive,
+ *   undecided, and on someone's screen right now. Reporting that as an expiry
+ *   (which it was) put "expired" on a card that was still decidable.
+ */
+export type DecisionStatus = 'approved' | 'denied' | 'expired' | 'aborted' | 'unavailable'
 
 export interface Decision {
   readonly status: DecisionStatus
@@ -105,7 +114,9 @@ export function createApprovalWaiter(deps: WaiterDeps): ApprovalWaiter {
             // give up, and it gives up by DENYING, never by hanging.
             healthy = false
             deps.log.error('approval waiter gave up reading', { approvalId })
-            return { status: 'aborted' }
+            // NOT 'aborted'. The row is untouched and may still be pending —
+            // the database is what could not be reached, not the human.
+            return { status: 'unavailable' }
           }
           // Exponential backoff, bounded by the deadline check below.
           await deps.sleep(Math.min(16_000, 1000 * 2 ** (consecutiveFailures - 1)), opts.signal)
@@ -115,7 +126,7 @@ export function createApprovalWaiter(deps: WaiterDeps): ApprovalWaiter {
         // 2. The row is gone. Nothing to wait for; deny rather than spin.
         if (!row) {
           deps.log.error('approval row vanished while waiting', { approvalId })
-          return { status: 'aborted' }
+          return { status: 'unavailable' }
         }
 
         // 3. Decided.

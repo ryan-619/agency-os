@@ -29,6 +29,12 @@ import type { ApprovalWaiter } from './waiter.js'
 const allow = (): PermissionResult => ({ behavior: 'allow' })
 const deny = (message: string): PermissionResult => ({ behavior: 'deny', message })
 
+/** The earlier of the approval's own TTL and the turn's wall clock. */
+function approvalDeadline(deps: Pick<GateDeps, 'now' | 'ttlMs' | 'turnDeadline'>): Date {
+  const ttl = deps.now().getTime() + deps.ttlMs
+  return new Date(Math.min(ttl, deps.turnDeadline.getTime()))
+}
+
 export interface ParsedInput {
   readonly ok: boolean
   readonly value?: unknown
@@ -40,6 +46,19 @@ export interface GateDeps {
   readonly chatSessionId: string
   readonly turnId: string
   readonly ttlMs: number
+  /**
+   * When this TURN is killed by its own wall clock.
+   *
+   * An approval may never outlive the turn it gates. `AGENT_TURN_TIMEOUT_
+   * MINUTES > APPROVAL_TTL_MINUTES` is checked at boot and is NOT sufficient,
+   * because the two clocks start at different moments: the turn's at the
+   * question, the approval's whenever the model gets round to asking. An
+   * approval raised ten minutes into a 35-minute turn with a 30-minute TTL
+   * expires at minute 40 — so for five minutes a person is looking at a live
+   * card, with a countdown, for a turn that no longer exists. Clamping here is
+   * what makes the card's own words true.
+   */
+  readonly turnDeadline: Date
   readonly now: () => Date
   /** Validate against the tool's own zod shape. Unknown tools parse as ok. */
   readonly parseToolInput: (toolName: string, input: Record<string, unknown>) => ParsedInput
@@ -136,7 +155,7 @@ export function makeCanUseTool(deps: GateDeps): CanUseTool {
         payload: input,
         payloadSha256: fp,
         risk: verdict.risk,
-        expiresAt: new Date(deps.now().getTime() + deps.ttlMs),
+        expiresAt: approvalDeadline(deps),
       })
 
       // Already answered: a redelivery, a retry, or a very fast human. The row
@@ -179,14 +198,22 @@ export function makeCanUseTool(deps: GateDeps): CanUseTool {
         deadline: approval.expiresAt,
       })
 
-      emit({
-        kind: 'approval_resolved',
-        approvalId: approval.id,
-        toolUseId: options.toolUseID,
-        status: decision.status === 'aborted' ? 'expired' : decision.status,
-        decidedByEmail: null,
-        reason: decision.reason ?? null,
-      })
+      // ONLY for an outcome that actually happened. `aborted` and
+      // `unavailable` both leave the row pending: the first because the turn
+      // was stopped, the second because the database could not be read. Both
+      // used to be reported as `expired`, which put "expired" on a card whose
+      // row was still live and still decidable — a person could then approve
+      // something the screen had already written off.
+      if (decision.status !== 'aborted' && decision.status !== 'unavailable') {
+        emit({
+          kind: 'approval_resolved',
+          approvalId: approval.id,
+          toolUseId: options.toolUseID,
+          status: decision.status,
+          decidedByEmail: null,
+          reason: decision.reason ?? null,
+        })
+      }
 
       switch (decision.status) {
         case 'approved':
@@ -209,15 +236,32 @@ export function makeCanUseTool(deps: GateDeps): CanUseTool {
               'Do not retry it. Report the denial to the user.',
           )
 
-        case 'expired':
+        case 'expired': {
           await deps.audit('approval.expired', { approvalId: approval.id, toolName })
+          // The window the person actually SAW, which is the TTL clamped by
+          // the turn's wall clock — not the configured TTL.
+          const windowMin = Math.max(
+            1,
+            Math.round((approval.expiresAt.getTime() - approval.createdAt.getTime()) / 60_000),
+          )
           return deny(
-            `No one approved this within ${Math.round(deps.ttlMs / 60_000)} minutes, so it expired. ` +
+            `No one approved this within ${windowMin} minutes, so it expired. ` +
               'Nothing was done. Ask the user to try again when someone is available to approve it.',
           )
+        }
 
         case 'aborted':
           return deny('The turn was stopped before anyone decided. Nothing was done.')
+
+        case 'unavailable':
+          // The gate could not find out. The row is STILL PENDING and a person
+          // may still be looking at it — so nothing here claims an outcome.
+          // The turn's `finally` closes it out and emits the resolution, which
+          // is the one place that knows the request is really dead.
+          return deny(
+            'The approval system could not be reached, so nobody was able to decide this. ' +
+              'Nothing was done. Tell the user the request could not be confirmed, and stop.',
+          )
       }
     } catch (err) {
       // The only correct behaviour is a deny. See the note at the top of the

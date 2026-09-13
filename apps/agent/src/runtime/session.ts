@@ -61,6 +61,16 @@ export interface SessionDeps {
   readonly maxBudgetUsd: number
   readonly approvalTtlMs: number
   readonly approvalPollMs: number
+  /**
+   * The turn's own wall clock, used to clamp every approval this turn raises.
+   *
+   * The boot check that `AGENT_TURN_TIMEOUT_MINUTES > APPROVAL_TTL_MINUTES` is
+   * necessary and NOT sufficient: the two clocks start at different moments.
+   * An approval raised ten minutes into a 35-minute turn with a 30-minute TTL
+   * would expire at minute 40, leaving five minutes in which a person sees a
+   * live card, counting down, for a turn that is already gone.
+   */
+  readonly turnTimeoutMs: number
   readonly cwd: string
   readonly now: () => Date
 }
@@ -129,6 +139,7 @@ export async function buildTurnRuntime(
     chatSessionId: args.chatSessionId,
     turnId,
     ttlMs: deps.approvalTtlMs,
+    turnDeadline: new Date(deps.now().getTime() + deps.turnTimeoutMs),
     now: deps.now,
     parseToolInput,
     ensureApproval: (req) =>

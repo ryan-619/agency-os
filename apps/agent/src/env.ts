@@ -83,6 +83,14 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   // A boot refusal rather than a comment. Getting this ordering wrong produces
   // the confusing failure — a turn aborted at 20 minutes while its approval
   // card says 10 minutes left, and a human clicking Approve into nothing.
+  //
+  // It is NECESSARY and NOT SUFFICIENT, because the two clocks start at
+  // different moments: the turn's at the question, the approval's whenever the
+  // model gets round to asking. An approval raised ten minutes into a
+  // 35-minute turn with a 30-minute TTL still expires at minute 40. What
+  // actually makes the card's countdown true is the clamp in the gate
+  // (`turnDeadline`); this check keeps the configuration sane so that clamp is
+  // rarely the thing doing the work.
   if (env.AGENT_TURN_TIMEOUT_MINUTES <= env.APPROVAL_TTL_MINUTES) {
     throw new Error(
       `AGENT_TURN_TIMEOUT_MINUTES (${env.AGENT_TURN_TIMEOUT_MINUTES}) must be greater than ` +
