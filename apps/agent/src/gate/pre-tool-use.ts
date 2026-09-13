@@ -18,7 +18,7 @@
  * human intent. This hook therefore decides from what it already knows and
  * never waits for anything.
  */
-import type { HookJSONOutput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk'
+import type { PreToolUseHookInput, SyncHookJSONOutput } from '@anthropic-ai/claude-agent-sdk'
 import { classifyRisk } from '@agency/core'
 
 export interface HookDeps {
@@ -30,7 +30,7 @@ export interface HookDeps {
 export const HOOK_TIMEOUT_SECONDS = 10
 
 export function makePreToolUse(deps: HookDeps) {
-  return async (input: unknown): Promise<HookJSONOutput> => {
+  return async (input: unknown): Promise<SyncHookJSONOutput> => {
     try {
       const h = input as PreToolUseHookInput
       if (h?.hook_event_name !== 'PreToolUse') return {}
@@ -95,7 +95,7 @@ export function makePreToolUse(deps: HookDeps) {
 }
 
 export function makePostToolUse(deps: HookDeps) {
-  return async (input: unknown): Promise<HookJSONOutput> => {
+  return async (input: unknown): Promise<SyncHookJSONOutput> => {
     try {
       const h = input as { hook_event_name?: string; tool_name?: string; tool_use_id?: string }
       if (h?.hook_event_name !== 'PostToolUse') return {}

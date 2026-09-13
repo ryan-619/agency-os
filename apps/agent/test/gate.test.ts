@@ -328,7 +328,7 @@ describe('the PreToolUse backstop', () => {
    */
   it('forces a prompt for anything above low risk', async () => {
     const out = await makePreToolUse(deps)(hookInput('mcp__agency__queue_touch', { channel: 'email' }))
-    expect(out.hookSpecificOutput).toMatchObject({
+    expect(out['hookSpecificOutput']).toMatchObject({
       hookEventName: 'PreToolUse',
       permissionDecision: 'ask',
     })
@@ -336,7 +336,7 @@ describe('the PreToolUse backstop', () => {
 
   it('denies a refused tool at the hook, before the gate is even reached', async () => {
     const out = await makePreToolUse(deps)(hookInput('Bash', { command: 'ls' }))
-    expect(out.hookSpecificOutput).toMatchObject({ permissionDecision: 'deny' })
+    expect(out['hookSpecificOutput']).toMatchObject({ permissionDecision: 'deny' })
   })
 
   /**
