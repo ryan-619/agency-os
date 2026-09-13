@@ -139,6 +139,9 @@ export const companies = pgTable(
     domain: text('domain').notNull(),
     name: text('name'),
     country: text('country'),
+    /** IANA zone for the company's main office. A FALLBACK for a contact who
+     *  has none — never derived from `country`, which is not a timezone (0010). */
+    timeZone: text('time_zone'),
     stage: text('stage'),
     headcount: integer('headcount'),
     title: text('title'),
@@ -237,9 +240,21 @@ export const contacts = pgTable(
     linkedinUrl: text('linkedin_url'),
     source: text('source').notNull().default('manual'),
     verifiedAt: timestamp('verified_at', { withTimezone: true }),
+    /** IANA zone. §2.1 evaluates quiet hours HERE, not at the sender. Null is
+     *  a refusal, not a default — see `decideSend` (0010). */
+    timeZone: text('time_zone'),
+    /** Set the moment this contact replies. Pauses every sequence they are in,
+     *  in every campaign, without anything having to enumerate them (0010). */
+    pausedAt: timestamp('paused_at', { withTimezone: true }),
+    /** NOT NULL whenever `pausedAt` is: a pause with no cause gets cleared by
+     *  whoever finds it. */
+    pausedReason: text('paused_reason'),
     ...timestamps,
   },
-  (t) => [index('contacts_company_idx').on(t.companyId)],
+  (t) => [
+    index('contacts_company_idx').on(t.companyId),
+    index('contacts_paused_idx').on(t.orgId, t.pausedAt),
+  ],
 )
 
 /** One row per channel per contact. Absence means NO (§2.1). */
@@ -350,12 +365,18 @@ export const touches = pgTable(
     scheduledFor: timestamp('scheduled_for', { withTimezone: true }),
     sentAt: timestamp('sent_at', { withTimezone: true }),
     error: text('error'),
+    /** Why the send path refused, from `decideSend` — 'suppressed',
+     *  'quiet_hours', 'daily_cap' and the rest. NOT NULL exactly when
+     *  `status = 'refused'`. Distinct from `error`, which is something going
+     *  wrong; a refusal is the system working (0010). */
+    refusalCode: text('refusal_code'),
     ...timestamps,
   },
   (t) => [
     index('touches_campaign_status_scheduled_idx').on(t.campaignId, t.status, t.scheduledFor),
     index('touches_contact_idx').on(t.contactId, t.createdAt.desc()),
     index('touches_company_idx').on(t.companyId, t.createdAt.desc()),
+    index('touches_refused_idx').on(t.orgId, t.refusalCode, t.createdAt.desc()),
   ],
 )
 

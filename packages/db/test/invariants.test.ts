@@ -876,6 +876,144 @@ describe('§2 invariants are enforced by the schema', () => {
       expect(msg).toMatch(/companies_org_domain_key|duplicate key/)
     })
 
+    /**
+     * 0010. §2.1 evaluates quiet hours in the RECIPIENT's timezone, and until
+     * 0010 there was nothing on any row to read. `companies.country` is not
+     * it — the United States has six zones and Australia's differ from each
+     * other by half an hour.
+     */
+    describe('a recipient’s timezone (0010)', () => {
+      it.each(['Europe/London', 'America/New_York', 'Asia/Kolkata', 'UTC', 'America/Argentina/Salta'])(
+        'accepts the IANA zone %j',
+        async (zone) => {
+          const [{ id }] = await db.driver.select<{ id: string }>(
+            `INSERT INTO contacts (org_id, company_id, email, time_zone) VALUES ($1, $2, $3, $4) RETURNING id`,
+            [orgId, companyId, `tz-${zone.replace(/\W/g, '')}@example.com`, zone],
+          )
+          expect(id).toBeTruthy()
+        },
+      )
+
+      /**
+       * The CHECK is loose on purpose — the authoritative zone list lives in
+       * the runtime's ICU data and changes with it, so a database that
+       * enumerated them would reject a zone that had just been added. It stops
+       * the shapes that are obviously not zones, so a country name typed into
+       * the field fails where somebody typed it.
+       */
+      it.each(['United States', 'GMT+5', 'Pacific Time', '', 'Europe London'])(
+        'refuses %j, which is not a zone name',
+        async (bad) => {
+          const msg = await expectRejection(() =>
+            db.driver.select(
+              `INSERT INTO contacts (org_id, company_id, email, time_zone) VALUES ($1, $2, 'bad-tz@example.com', $3)`,
+              [orgId, companyId, bad],
+            ),
+          )
+          expect(msg).toContain('contacts_time_zone_looks_like_iana')
+        },
+      )
+
+      it('allows null, because not knowing is a refusal the send path makes', async () => {
+        const [{ id }] = await db.driver.select<{ id: string }>(
+          `INSERT INTO contacts (org_id, company_id, email) VALUES ($1, $2, 'no-tz@example.com') RETURNING id`,
+          [orgId, companyId],
+        )
+        expect(id).toBeTruthy()
+      })
+    })
+
+    /**
+     * 0010. §8.4: "an inbound reply flips the deal to `replied` and pauses the
+     * sequence for that contact immediately." A pause with no cause is
+     * indistinguishable from a bug and gets cleared by whoever finds it.
+     */
+    describe('pausing a contact (0010)', () => {
+      it('refuses a pause with no reason', async () => {
+        const msg = await expectRejection(() =>
+          db.driver.select(
+            `INSERT INTO contacts (org_id, company_id, email, paused_at)
+             VALUES ($1, $2, 'paused@example.com', now())`,
+            [orgId, companyId],
+          ),
+        )
+        expect(msg).toContain('contacts_pause_has_a_reason')
+      })
+
+      it('refuses a reason with no pause', async () => {
+        const msg = await expectRejection(() =>
+          db.driver.select(
+            `INSERT INTO contacts (org_id, company_id, email, paused_reason)
+             VALUES ($1, $2, 'reason@example.com', 'they replied')`,
+            [orgId, companyId],
+          ),
+        )
+        expect(msg).toContain('contacts_pause_has_a_reason')
+      })
+
+      it('accepts the two together', async () => {
+        const [{ id }] = await db.driver.select<{ id: string }>(
+          `INSERT INTO contacts (org_id, company_id, email, paused_at, paused_reason)
+           VALUES ($1, $2, 'both@example.com', now(), 'replied 2026-09-15') RETURNING id`,
+          [orgId, companyId],
+        )
+        expect(id).toBeTruthy()
+      })
+    })
+
+    /**
+     * 0010. A refusal is the system working, not something going wrong, and it
+     * is what somebody reads when they ask why a campaign of 40 sent 12.
+     */
+    describe('a refused touch (0010)', () => {
+      it('must say why it was refused', async () => {
+        const msg = await expectRejection(() =>
+          db.driver.select(
+            `INSERT INTO touches (org_id, company_id, channel, direction, status)
+             VALUES ($1, $2, 'email', 'out', 'refused')`,
+            [orgId, companyId],
+          ),
+        )
+        expect(msg).toContain('touches_refusal_is_explained')
+      })
+
+      it('may not carry a refusal code unless it was refused', async () => {
+        const msg = await expectRejection(() =>
+          db.driver.select(
+            `INSERT INTO touches (org_id, company_id, channel, direction, status, refusal_code)
+             VALUES ($1, $2, 'email', 'out', 'queued', 'suppressed')`,
+            [orgId, companyId],
+          ),
+        )
+        expect(msg).toContain('touches_refusal_is_explained')
+      })
+
+      /**
+       * The one that matters. Without it a bug in the sender could write a row
+       * that reads as both refused and delivered — and `touches` is the record
+       * anyone would consult to find out which.
+       */
+      it('may never also claim it was sent', async () => {
+        const msg = await expectRejection(() =>
+          db.driver.select(
+            `INSERT INTO touches (org_id, company_id, channel, direction, status, refusal_code, sent_at)
+             VALUES ($1, $2, 'email', 'out', 'refused', 'suppressed', now())`,
+            [orgId, companyId],
+          ),
+        )
+        expect(msg).toContain('touches_refused_was_not_sent')
+      })
+
+      it('records a refusal that names its code and nothing else', async () => {
+        const [{ id }] = await db.driver.select<{ id: string }>(
+          `INSERT INTO touches (org_id, company_id, channel, direction, status, refusal_code)
+           VALUES ($1, $2, 'email', 'out', 'refused', 'quiet_hours') RETURNING id`,
+          [orgId, companyId],
+        )
+        expect(id).toBeTruthy()
+      })
+    })
+
     it('cascades a deleted org to its business rows rather than orphaning them', async () => {
       const [{ id: doomed }] = await db.driver.select<{ id: string }>(
         `INSERT INTO orgs (name) VALUES ('Doomed') RETURNING id`,
