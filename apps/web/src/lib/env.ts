@@ -70,6 +70,15 @@ const schema = z.object({
    */
   AGENT_INTERNAL_TOKEN: z.string().min(32).optional(),
 
+  /**
+   * Proves an inbound-email webhook (§8.4's "or the provider webhook") came
+   * from the provider it was configured on. Unset means the route refuses
+   * everything — a webhook with no secret is an endpoint that lets anyone on
+   * the internet mark a contact as having replied, pause their sequence, and
+   * put their address on the suppression list.
+   */
+  INBOUND_WEBHOOK_SECRET: z.string().min(32).optional(),
+
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 })
 

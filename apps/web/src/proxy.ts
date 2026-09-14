@@ -13,7 +13,14 @@ import type { NextRequest } from 'next/server'
  * re-establishes the real session with `auth()` and checks capabilities with
  * `can()` from packages/core. A forged cookie gets past this and then fails.
  */
-const PUBLIC = ['/signin', '/api/auth', '/api/health']
+/**
+ * `/api/inbound` is public here because a mail provider's webhook cannot carry
+ * a session cookie. It is NOT unauthenticated: the route itself demands
+ * `INBOUND_WEBHOOK_SECRET` in a header, compared in constant time, and refuses
+ * everything when the secret is unset. Found by probing rather than by
+ * reading — the first live POST came back as a 307 to /signin.
+ */
+const PUBLIC = ['/signin', '/api/auth', '/api/health', '/api/inbound']
 
 export default function proxy(req: NextRequest): NextResponse {
   const { pathname } = req.nextUrl

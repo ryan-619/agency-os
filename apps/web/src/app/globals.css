@@ -367,3 +367,44 @@ textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 }
 .tool-check input { margin: 0; width: auto !important; }
 .tool-check code { font-size: 12px; color: var(--muted); }
+
+
+/* --- Outreach: drafts, campaigns, suppressions, people (Phase 4) ---------- */
+
+.tag.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.row-card.slim { padding: 10px 14px; }
+
+.draft-choices { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; margin: 8px 0 4px; }
+.draft-choices label:last-child { grid-column: 1 / -1; }
+@media (max-width: 720px) { .draft-choices { grid-template-columns: 1fr; } }
+
+.two-up { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+@media (max-width: 560px) { .two-up { grid-template-columns: 1fr; } }
+
+/* What a campaign has done. Numbers lead; the reason follows in words. */
+.activity { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 8px; font-size: 12.5px; color: var(--muted); }
+.activity strong { color: var(--ink); }
+
+/* Consent per channel. Four states, and the colour is the state: a recorded
+ * yes, a recorded no, nothing recorded on a cold channel (allowed), nothing
+ * recorded on an opt-in channel (not allowed). */
+.consents { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 8px; font-size: 12px; }
+.consent { color: var(--muted); }
+.consent.yes { color: var(--ok); }
+.consent.no { color: var(--warn); }
+.consent.none { color: var(--warn); }
+.consent.cold { color: var(--muted); }
+
+.linkish {
+  background: none; border: 0; padding: 0; margin: 0;
+  color: var(--accent); font: inherit; font-size: 12px; cursor: pointer; text-decoration: underline;
+}
+.linkish:hover { opacity: .8; }
+
+/* The conversation on a company page. Inbound on the right edge, like every
+ * mail client, so direction is visible before the label is read. */
+.thread { display: flex; flex-direction: column; gap: 10px; }
+.touch { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; }
+.touch-in { border-left: 3px solid var(--accent); }
+.touch-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; font-size: 12.5px; }
+.touch-body { margin: 6px 0 0; white-space: pre-wrap; font-size: 12.5px; max-height: 240px; overflow: auto; }

@@ -1,0 +1,72 @@
+import { redirect } from 'next/navigation'
+import { can, parseIcpDefinition } from '@agency/core'
+import { campaignActivity, listCampaigns, type AgencyDb } from '@agency/db/queries'
+import { auth, signOut } from '@/auth'
+import { Shell } from '@/components/shell'
+import { CampaignsPanel, type CampaignView } from '@/components/outreach/campaigns'
+import { getDb } from '@/lib/db'
+import { icpForOrg } from '@/lib/queries'
+
+/**
+ * Campaigns (PROMPT.md §8.4).
+ *
+ * The list, what each has actually done, and the builder. The numbers beside
+ * a campaign are read from `touches`, not kept on the campaign row: a counter
+ * is a second source of truth and its drift always favours sending.
+ */
+export const dynamic = 'force-dynamic'
+
+export default async function CampaignsPage() {
+  const session = await auth()
+  if (!session?.user) redirect('/signin')
+  const user = session.user
+  const principal = { id: user.id, orgId: user.orgId, role: user.role }
+
+  const db = getDb() as unknown as AgencyDb
+  const rows = await listCampaigns(db, user.orgId)
+  const views: CampaignView[] = await Promise.all(
+    rows.map(async (c) => ({
+      id: c.id,
+      name: c.name,
+      channel: (c.channel === 'linkedin' ? 'linkedin' : 'email') as 'email' | 'linkedin',
+      dailyCap: c.dailyCap,
+      quietStart: c.quietStart,
+      quietEnd: c.quietEnd,
+      autoSend: c.autoSend,
+      status: c.status as CampaignView['status'],
+      activity: await campaignActivity(db, user.orgId, c.id),
+    })),
+  )
+
+  const icpRow = await icpForOrg(user.orgId)
+  let orgLabel = 'Agency'
+  if (icpRow) {
+    try {
+      orgLabel = parseIcpDefinition(icpRow.definition).label
+    } catch {
+      orgLabel = 'Agency'
+    }
+  }
+
+  const signOutAction = async () => {
+    'use server'
+    await signOut({ redirectTo: '/signin' })
+  }
+
+  return (
+    <Shell user={user} orgName={orgLabel} current="campaigns" signOut={signOutAction}>
+      <h1>Campaigns</h1>
+      <p className="lede">
+        A campaign is where a message&apos;s daily cap and quiet hours come from, and whether it needs
+        a person per message. Every message, approved or automatic, is checked against the
+        suppression list, consent, quiet hours and the cap at the moment it is sent — the campaign
+        sets the numbers, it does not skip the rules.
+      </p>
+      <CampaignsPanel
+        campaigns={views}
+        canWrite={can(principal, 'campaigns:write')}
+        canAutoSend={can(principal, 'campaigns:set_auto_send')}
+      />
+    </Shell>
+  )
+}

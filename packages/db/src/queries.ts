@@ -18,6 +18,7 @@ export * from './chat.js'
 export * from './agents.js'
 export * from './campaigns.js'
 export * from './connectors.js'
+export * from './contacts.js'
 export * from './deals.js'
 export * from './outreach.js'
 // NOT './smtp.js'. This subpath exists so the Next app can import queries

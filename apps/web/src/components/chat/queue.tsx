@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { When } from '@/components/when'
 
 /**
  * The approval queue's interactive half.
@@ -61,8 +62,8 @@ export function ApprovalQueue({
               <strong>{item.toolName}</strong>
               <span className="pill pill-risk">{item.risk} risk</span>
               <span className="muted" style={{ fontSize: 12 }}>
-                asked {new Date(item.createdAt).toLocaleTimeString()} · expires{' '}
-                {new Date(item.expiresAt).toLocaleTimeString()}
+                asked <When iso={item.createdAt} mode="time" /> · expires{' '}
+                <When iso={item.expiresAt} mode="time" />
               </span>
             </div>
 

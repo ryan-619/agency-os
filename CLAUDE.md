@@ -4,16 +4,18 @@ Internal operating system for a small application-security agency. Read
 [PROMPT.md](PROMPT.md) for the full build spec; this file is the working
 summary a session should read first.
 
-**Current state: Phases 0, 1, 2 and 3 are built.**
+**Current state: Phases 0, 1, 2, 3 and 4 are built.**
 
-**Neither Phase 2's nor Phase 3's Definition of Done is fully proved, and both
-are blocked on the same thing: the Anthropic account has no credit, so no turn
-has ever reached the model.** Everything below that boundary IS proved, live:
+**Phases 2 and 3's Definitions of Done are not fully proved, both blocked on
+the same thing: the Anthropic account has no credit, so no turn has ever
+reached the model. Phase 4's is proved against a local SMTP sink, not a real
+mailbox.** Everything below those boundaries IS proved, live:
 
 | | proved | not proved |
 |---|---|---|
 | Phase 2 | browser → route → worker → gate → SDK → API, authenticated; refused at billing | one live turn with tool cards |
 | Phase 3 | a connector added in the UI reaches a live turn with no restart — the worker logged `connectors: ["deepwiki (http)"]` for a turn on a worker started *before* that connector existed | the agent CALLING one of its tools |
+| Phase 4 | draft → approved in the UI → deferred for quiet hours (live, 21:50 London) → sent in a real SMTP transaction → deal `contacted` → a reply by Message-ID pauses, ties, moves the deal to `replied` → "unsubscribe" suppresses. One test per §2.1 rule. | deliverability through a real mailbox; IMAP IDLE against a live server; a provider webhook with a real secret |
 
 `npm run smoke:agent` gates Phase 2; `npm run smoke:agent -- --connector <name>`
 gates Phase 3. Run both against an account with credit before calling either
@@ -298,13 +300,86 @@ check and should be added if the scanner is ever aimed at untrusted input.
 
 ---
 
+### The send path (Phase 4, §8.4)
+
+**One function decides; one function sends; nothing else may.** `decideSend`
+in `packages/core` is pure — facts in, decision out — and it is the ONLY
+place §2.1's rules live. A caller cannot reorder the checks because it does
+not perform them, and cannot skip one because the facts for all of them are
+required arguments: a caller that forgot the suppression lookup cannot call
+the function at all. `dispatchTouch` in `packages/db` is the only function
+that reaches a provider, and both an auto-send message and a human-approved
+draft go through it. The order is §8.4's, and `packages/core/test/send.test.ts`
+asserts the ORDER, not just the outcomes — the refusal code is what somebody
+reads six months later.
+
+**A person approves the words, not the moment.** Approving a draft names the
+recipient, the campaign and the approver (0011: a row may not say "approved"
+without both, like `approvals`) and marks it `approved`. The worker's tick
+then runs it through every rule AT THE MOMENT OF SENDING, because the
+recipient may have opted out in the hour since. `approvedByHuman` satisfies
+the approval gate exactly as `autoSend` does and nothing else.
+
+**Absence is never permission.** `consent: null` is a refusal, distinct from
+`{granted:false}` because "nobody asked" and "they said no" are different
+facts and only one must never be re-asked. `recipientTimeZone: null` is a
+refusal — not knowing when it is where somebody lives is a reason to wait,
+and the shortcut (the sender's zone) is the mistake §2.1 names. An address
+that cannot be normalised is a refusal, because no suppression row could
+ever have matched it: `suppressed: false` there means unknown, not clear.
+
+**Three refusals nobody can approve past.** A suppression (somebody asking
+to be left alone), a recorded refusal, and cold voice/SMS/WhatsApp. §2.1
+says cold SMS must be "structurally impossible"; an approver offered enough
+impossible things learns to click yes.
+
+**The clock is not a refusal.** Quiet hours and the cap DEFER a message
+(`scheduled_for`, same status, approver kept); everything else is terminal.
+The default window wraps midnight, and the naive comparison is not merely
+wrong for 21:00–08:00, it is inverted.
+
+**Every outbound message carries a campaign**, because the campaign is where
+the cap and the quiet hours live. Companies and contacts carry an IANA
+`time_zone` (0010) — never derived from `companies.country`, which is not a
+timezone (the US has six).
+
+**A reply does four things in one call** (`recordInboundReply`): logs the
+inbound touch, pauses the contact (one UPDATE, every campaign, immediately),
+cancels what was queued for them, and moves the deal FORWARD to `replied` —
+forward only, so a late reply never knocks a booked meeting back. If it
+says stop in so many words, the address goes on the suppression list: the
+reply IS the opt-out. Inbound mail is matched by the Message-ID this system
+sent (unambiguous), then by an address that belongs to exactly ONE contact
+across every org — two orgs with the same address on file is a reply nobody
+can place, and it is dropped and logged rather than filed under the wrong
+agency.
+
+**`sending` is the worker's claim** on a row (0011), so two workers picking
+one row produce one UPDATE that matches. A worker that died mid-send leaves
+a row that says so, and `recoverStuckSends` marks it `failed` with a reason
+— the safe direction; the alternative is guessing the provider was not
+reached and sending it twice.
+
+**The mail transport stays out of the Next graph.** `@agency/db/queries`
+does not export `smtp.ts`: the web app queues, the worker sends, and a
+transport that can deliver has no business in a bundle CI builds with no
+secrets. The inbound webhook (`/api/inbound/email`) is exempt from the
+cookie gate — a provider cannot carry a session — and refuses everything
+when `INBOUND_WEBHOOK_SECRET` is unset.
+
+**Not built:** SendGrid behind the provider interface (the interface is the
+point; the second implementation is a few lines when it is needed) and
+LinkedIn suppression — `suppressions.kind` has no LinkedIn value, so
+`suppressionKeysFor` returns "nothing to check" for that channel honestly,
+and closing it needs a fourth kind and a migration.
+
 ## 3. Commands
 
 ```bash
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 857 tests: domain + migrations + invariants + seed + parity + agent
+npm test                 # 1153 tests: domain + migrations + invariants + seed + parity + agent + send path
 npm run build            # packages, then the Next app
 
 # database (needs DATABASE_URL)

@@ -18,7 +18,7 @@ export function Shell({
 }: {
   user: ShellUser
   orgName: string
-  current: 'dashboard' | 'companies' | 'chat' | 'approvals' | 'connectors' | 'agents'
+  current: 'dashboard' | 'companies' | 'chat' | 'approvals' | 'campaigns' | 'suppressions' | 'connectors' | 'agents'
   children: React.ReactNode
   signOut: () => Promise<void>
   /**
@@ -42,11 +42,14 @@ export function Shell({
             Approvals
             {pendingApprovals > 0 ? <em className="badge">{pendingApprovals}</em> : null}
           </a>
+          <a href="/campaigns" className={current === 'campaigns' ? 'on' : undefined}>Campaigns</a>
+          <a href="/suppressions" className={current === 'suppressions' ? 'on' : undefined}>
+            Suppressions
+          </a>
           <a href="/settings/connectors" className={current === 'connectors' ? 'on' : undefined}>
             Connectors
           </a>
           <a href="/settings/agents" className={current === 'agents' ? 'on' : undefined}>Agents</a>
-          <span>Campaigns <em className="phase-tag">phase 4</em></span>
           <span>Pipeline <em className="phase-tag">phase 5</em></span>
         </nav>
 

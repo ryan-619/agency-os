@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { When } from '@/components/when'
 
 /**
  * Settings → Connectors (PROMPT.md §6).
@@ -180,7 +181,9 @@ export function ConnectorsPanel({
               <div className="muted" style={{ fontSize: 12.5 }}>{c.summary}</div>
 
               {c.lastOkAt ? (
-                <div className="ok-line">Last answered {new Date(c.lastOkAt).toLocaleString()}</div>
+                <div className="ok-line">
+                  Last answered <When iso={c.lastOkAt} />
+                </div>
               ) : justPassed.has(c.id) ? (
                 <div className="ok-line">Answered just now.</div>
               ) : (

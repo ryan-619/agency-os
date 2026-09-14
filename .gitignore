@@ -30,3 +30,5 @@ coverage/
 *.log
 pgdata/
 .pgdata/
+.smtp-sink.local.mjs
+sink.jsonl

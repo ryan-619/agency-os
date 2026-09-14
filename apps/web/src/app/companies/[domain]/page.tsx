@@ -2,6 +2,10 @@ import { notFound, redirect } from 'next/navigation'
 import { DEFAULT_STALE_AFTER_DAYS, isStale, parseIcpDefinition } from '@agency/core'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
+import { can } from '@agency/core'
+import { companyThread, listContactsForCompany, openDealFor, type AgencyDb } from '@agency/db/queries'
+import { ContactsPanel } from '@/components/outreach/contacts'
+import { getDb } from '@/lib/db'
 import { companyByDomain, icpForOrg, scanWithFindings } from '@/lib/queries'
 
 export const dynamic = 'force-dynamic'
@@ -23,9 +27,13 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
   const company = await companyByDomain(user.orgId, decodeURIComponent(domain))
   if (!company) notFound()
 
-  const [found, icpRow] = await Promise.all([
+  const db = getDb() as unknown as AgencyDb
+  const [found, icpRow, contacts, thread, deal] = await Promise.all([
     scanWithFindings(user.orgId, company.id),
     icpForOrg(user.orgId),
+    listContactsForCompany(db, user.orgId, company.id),
+    companyThread(db, user.orgId, company.id, 30),
+    openDealFor(db, user.orgId, company.id),
   ])
   const icp = icpRow ? parseIcpDefinition(icpRow.definition) : null
   const staleAfter = icp?.freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
@@ -191,6 +199,57 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
           </table>
         </>
       )}
+      <ContactsPanel
+        companyId={company.id}
+        canWrite={can({ id: user.id, orgId: user.orgId, role: user.role }, 'contacts:write')}
+        contacts={contacts.map((c) => ({
+          id: c.id,
+          name: [c.firstName, c.lastName].filter(Boolean).join(' ') || c.email || 'unnamed',
+          title: c.title,
+          email: c.email,
+          phone: c.phone,
+          linkedinUrl: c.linkedinUrl,
+          timeZone: c.timeZone,
+          pausedAt: c.pausedAt ? c.pausedAt.toISOString() : null,
+          pausedReason: c.pausedReason,
+          consents: c.consents.map((k) => ({ channel: k.channel, granted: k.granted, source: k.source })),
+        }))}
+      />
+
+      <section className="card" style={{ marginTop: 18 }}>
+        <h2>Conversation</h2>
+        {deal ? (
+          <p className="muted" style={{ fontSize: 12.5, marginTop: 0 }}>
+            Deal stage <strong>{deal.stage}</strong>
+            {deal.nextAction ? <> · next: {deal.nextAction}</> : null}
+          </p>
+        ) : null}
+        {thread.length === 0 ? (
+          <p className="muted" style={{ fontSize: 13 }}>Nothing has been sent or received yet.</p>
+        ) : (
+          <div className="thread">
+            {thread.map((t) => (
+              <div key={t.id} className={`touch touch-${t.direction}`}>
+                <div className="touch-head">
+                  <span className="pill">{t.direction === 'in' ? 'reply' : t.channel}</span>
+                  <span className={`tag${t.status === 'sent' || t.status === 'replied' ? ' on' : t.status === 'refused' || t.status === 'failed' ? ' warn' : ''}`}>
+                    {t.status}
+                    {t.refusalCode ? ` — ${t.refusalCode.replace(/_/g, ' ')}` : ''}
+                  </span>
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    {(t.sentAt ?? t.createdAt).toLocaleString()}
+                    {t.recipient ? ` · ${t.recipient}` : ''}
+                  </span>
+                </div>
+                {t.subject ? <div style={{ fontSize: 13.5, fontWeight: 600 }}>{t.subject}</div> : null}
+                {t.body ? <pre className="mono touch-body">{t.body}</pre> : null}
+                {t.error ? <div className="err-line">{t.error}</div> : null}
+                {t.decisionNote ? <div className="muted" style={{ fontSize: 12.5 }}>Note: {t.decisionNote}</div> : null}
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
     </Shell>
   )
 }

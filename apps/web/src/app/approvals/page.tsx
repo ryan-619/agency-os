@@ -1,11 +1,14 @@
 import { redirect } from 'next/navigation'
 import { can, parseIcpDefinition } from '@agency/core'
-import { pendingApprovals, type AgencyDb } from '@agency/db/queries'
+import {
+  listCampaigns, listContactsForCompany, pendingApprovals, pendingDrafts, type AgencyDb,
+} from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { getDb } from '@/lib/db'
 import { icpForOrg } from '@/lib/queries'
 import { ApprovalQueue } from '@/components/chat/queue'
+import { DraftQueue, type DraftView } from '@/components/outreach/drafts'
 
 /**
  * The approval queue (PROMPT.md §2.4, §5.4).
@@ -29,7 +32,47 @@ export default async function ApprovalsPage() {
   const user = session.user
 
   const db = getDb() as unknown as AgencyDb
-  const rows = await pendingApprovals(db, user.orgId)
+  const [rows, drafts, campaigns] = await Promise.all([
+    pendingApprovals(db, user.orgId),
+    pendingDrafts(db, user.orgId),
+    listCampaigns(db, user.orgId),
+  ])
+
+  /**
+   * Who each draft could go to: the contacts at its company, with the ones the
+   * send path would refuse anyway marked as such and why. The reason is shown
+   * rather than the person silently omitted — "not offered: Priya (no
+   * timezone)" is something a person can fix; an empty list is not.
+   */
+  const companyIds = [...new Set(drafts.map((d) => d.company?.id).filter((id): id is string => Boolean(id)))]
+  const contactsByCompany = new Map(
+    await Promise.all(
+      companyIds.map(async (id) => [id, await listContactsForCompany(db, user.orgId, id)] as const),
+    ),
+  )
+  const draftViews: DraftView[] = drafts.map((d) => ({
+    id: d.touch.id,
+    channel: d.touch.channel,
+    subject: d.touch.subject,
+    body: d.touch.body,
+    createdAt: d.touch.createdAt.toISOString(),
+    company: d.company,
+    candidates: (d.company ? contactsByCompany.get(d.company.id) ?? [] : []).map((c) => {
+      const name = [c.firstName, c.lastName].filter(Boolean).join(' ') || c.email || 'unnamed'
+      const address = d.touch.channel === 'linkedin' ? c.linkedinUrl : c.email
+      const declined = c.consents.find((k) => k.channel === d.touch.channel && !k.granted)
+      const why = !address
+        ? `no ${d.touch.channel === 'linkedin' ? 'LinkedIn profile' : 'email address'}`
+        : c.pausedAt
+          ? 'paused — they replied'
+          : declined
+            ? 'declined this channel'
+            : !c.timeZone
+              ? 'no timezone, so quiet hours cannot be checked'
+              : null
+      return { id: c.id, label: address ? `${name} <${address}>` : name, reachable: why === null, why }
+    }),
+  }))
 
   const icpRow = await icpForOrg(user.orgId)
   let orgLabel = 'Agency'
@@ -58,16 +101,29 @@ export default async function ApprovalsPage() {
     >
       <h1>Approvals</h1>
       <p className="lede">
-        Anything that would leave the building waits here for a person. Nothing in Agency OS can
-        send a message yet — the send path lands in Phase 4 — so approving a draft records the
-        decision and lets the agent carry on, and nothing is delivered to anyone.
+        Anything that would leave the building waits here for a person. Two kinds of thing arrive:
+        a message the agent drafted, which you address and approve — the worker then sends it after
+        checking every rule again — and a tool the agent is asking to use right now, which a
+        conversation is parked on.
       </p>
 
+      <h2 style={{ fontSize: 15, margin: '18px 0 8px' }}>Messages to approve</h2>
+      {draftViews.length === 0 ? (
+        <p className="muted" style={{ fontSize: 13 }}>No drafts are waiting.</p>
+      ) : (
+        <DraftQueue
+          drafts={draftViews}
+          campaigns={campaigns.map((c) => ({ id: c.id, name: c.name, channel: c.channel, autoSend: c.autoSend }))}
+          canDecide={decidable}
+        />
+      )}
+
+      <h2 style={{ fontSize: 15, margin: '22px 0 8px' }}>Tools waiting on you</h2>
       {rows.length === 0 ? (
-        <div className="note">
-          <strong>Nothing is waiting.</strong> When the agent tries to do something that leaves the
-          building, it parks here and the conversation waits for your answer.
-        </div>
+        <p className="muted" style={{ fontSize: 13 }}>
+          No conversation is parked. When the agent tries to do something that leaves the building
+          mid-conversation, it waits here for your answer.
+        </p>
       ) : (
         <ApprovalQueue
           canDecide={decidable}
