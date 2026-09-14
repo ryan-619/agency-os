@@ -87,6 +87,46 @@ const schema = z.object({
 
   /** Parked approvals must not starve the tool handlers sharing this pool. */
   DATABASE_POOL_MAX: z.coerce.number().int().positive().default(8),
+
+  // --- outreach (Phase 4, §8.4) -------------------------------------------
+  //
+  // All optional, because a worker with no mailbox configured is a worker that
+  // runs chat and scanning and sends nothing — which is a complete, honest
+  // configuration and the one CI runs. `outreach: disabled` is logged at boot
+  // and reported on /readyz so nobody wonders why a campaign is not moving.
+
+  /** The mailbox that sends. The same SMTP_* the web app uses for magic links
+   *  is the usual answer; a warmed outreach mailbox is the better one. */
+  SMTP_HOST: z.string().optional(),
+  SMTP_PORT: z.coerce.number().int().positive().default(587),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASSWORD: z.string().optional(),
+  SMTP_SECURE: z
+    .string()
+    .optional()
+    .transform((v) => v === 'true' || v === '1'),
+  /** The From header on outreach. A display name and an address. */
+  MAIL_FROM: z.string().optional(),
+
+  /**
+   * The mailbox that RECEIVES replies (§8.4: "reply detection via IMAP IDLE").
+   * Normally the same mailbox as SMTP_*, read back over IMAP. Unset means
+   * replies are detected only through the inbound webhook, if one is wired.
+   */
+  IMAP_HOST: z.string().optional(),
+  IMAP_PORT: z.coerce.number().int().positive().default(993),
+  IMAP_USER: z.string().optional(),
+  IMAP_PASSWORD: z.string().optional(),
+  IMAP_SECURE: z
+    .string()
+    .optional()
+    .transform((v) => v === undefined || v === 'true' || v === '1'),
+  IMAP_MAILBOX: z.string().default('INBOX'),
+
+  /** How often the sender looks for approved and queued messages. */
+  OUTREACH_TICK_MS: z.coerce.number().int().positive().default(15_000),
+  /** How many it will dispatch per tick, across every campaign. */
+  OUTREACH_BATCH: z.coerce.number().int().positive().default(20),
 })
 
 export type Env = z.infer<typeof schema>

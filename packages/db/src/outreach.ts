@@ -13,18 +13,31 @@
  *      ↑ gathered here, decided in core ↑         ↑ this file, from here on ↑
  *   → provider send → write `touches` → write `audit_log`
  *
- * `sendOne` below is the only function in this codebase that may cause a
+ * ## The shape of a message's life
+ *
+ *   awaiting_approval  the agent's `queue_touch`, or a person's own draft;
+ *                      a person reads it in /approvals …
+ *   approved           … and says yes, naming a recipient and a campaign.
+ *   queued             an auto-send campaign's message, needing nobody.
+ *   → dispatchTouch    the ONE function that calls a provider. It re-runs
+ *                      every §2.1 rule on the way — a human approved the
+ *                      WORDS, not the recipient's opt-out status an hour later.
+ *   sent | refused | failed
+ *
+ * `dispatchTouch` is the only function in this codebase that may cause a
  * message to leave the building, and it takes the provider as an argument so
  * that every channel and every test uses the same path.
  */
-import { and, count, eq, gte, inArray, isNotNull, or, sql } from 'drizzle-orm'
+import { and, asc, count, desc, eq, gte, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm'
 import {
-  decideSend, suppressionKeysFor,
+  decideSend, normaliseEmail, suppressionKeysFor,
   type Channel, type SendDecision, type SendFacts,
 } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
+import { addSuppression } from './campaigns.js'
+import { advanceDeal } from './deals.js'
 
 export type TouchRow = typeof schema.touches.$inferSelect
 
@@ -72,12 +85,12 @@ export interface SendResult {
 }
 
 /**
- * Send one message, or record exactly why not.
+ * Send one message programmatically: record it, then dispatch it.
  *
- * Every path writes a `touches` row. That is deliberate and it is the reason
- * anyone can answer "why did a campaign of 40 send 12?" — a refusal that left
- * no trace would make the send path silently lossy, which is the failure mode
- * that destroys trust in an outreach tool.
+ * The campaign engine's entry point. It exists so that "send this to this
+ * contact under this campaign" is one call — but everything that matters
+ * happens in `dispatchTouch`, which is also what an approved draft goes
+ * through. Two entry points, one path.
  */
 export async function sendOne(
   db: AgencyDb,
@@ -85,15 +98,13 @@ export async function sendOne(
   req: SendRequest,
 ): Promise<SendResult> {
   const now = req.now ?? new Date()
-  const facts = await gatherFacts(db, req, now)
 
-  // A contact whose row has vanished, a campaign that has, or either belonging
-  // to another org. Not a decision the rules can make — there is nothing to
-  // decide about, and nothing to file a record against either: a touch row
-  // here would carry a dangling contact_id, or sit in an org that never asked
-  // for it. Audited instead, which is where an attempt with no valid subject
-  // belongs.
-  if ('missing' in facts) {
+  // The subject has to exist before a row can be filed against it. A row
+  // pointing at a contact that is not there, or filed in an org that never
+  // asked, is worse than no row — so this is checked before anything is
+  // written, and the attempt is audited instead.
+  const subject = await subjectExists(db, req.orgId, req.campaignId, req.contactId)
+  if (!subject) {
     await appendAudit(db, {
       orgId: req.orgId,
       actor: 'system',
@@ -107,9 +118,71 @@ export async function sendOne(
       decision: {
         allowed: false,
         code: 'unparseable_recipient',
-        reason: facts.missing,
+        reason: 'That campaign or contact no longer exists. Nothing was sent.',
         humanCanResolve: true,
       },
+      sent: false,
+    }
+  }
+
+  const rows = await db
+    .insert(schema.touches)
+    .values({
+      orgId: req.orgId,
+      campaignId: req.campaignId,
+      contactId: req.contactId,
+      companyId: req.companyId ?? subject.companyId,
+      channel: subject.channel,
+      direction: 'out',
+      status: 'queued',
+      subject: req.subject,
+      body: req.body,
+    })
+    .returning()
+  const touch = rows[0]
+  if (!touch) throw new Error('touch insert returned no row')
+
+  return dispatchTouch(db, provider, touch, { now })
+}
+
+/**
+ * Take a message that is `approved` or `queued` and either send it or record
+ * exactly why not.
+ *
+ * Every path leaves the row in a terminal, explained state. That is what lets
+ * anyone answer "why did a campaign of 40 send 12?" — a refusal that left no
+ * trace would make the send path silently lossy, which is the failure mode
+ * that destroys trust in an outreach tool.
+ */
+export async function dispatchTouch(
+  db: AgencyDb,
+  provider: MessageProvider,
+  touch: TouchRow,
+  opts: { readonly now?: Date } = {},
+): Promise<SendResult> {
+  const now = opts.now ?? new Date()
+
+  // Only these two statuses may reach a provider. Anything else arriving here
+  // is a caller that skipped the queue, and it is refused rather than obeyed.
+  if (touch.status !== 'approved' && touch.status !== 'queued') {
+    return {
+      touchId: touch.id,
+      decision: {
+        allowed: false,
+        code: 'needs_approval',
+        reason: `A message in status "${touch.status}" cannot be dispatched. Nothing was sent.`,
+        humanCanResolve: true,
+      },
+      sent: false,
+    }
+  }
+
+  const facts = await gatherFacts(db, touch, now)
+  if ('missing' in facts) {
+    await settle(db, touch.id, { status: 'refused', refusalCode: 'unparseable_recipient', error: facts.missing })
+    return {
+      touchId: touch.id,
+      decision: { allowed: false, code: 'unparseable_recipient', reason: facts.missing, humanCanResolve: true },
       sent: false,
     }
   }
@@ -117,60 +190,53 @@ export async function sendOne(
   const decision = decideSend(facts.facts)
 
   if (!decision.allowed) {
-    const touchId = await recordTouch(db, req, {
-      status: decision.code === 'needs_approval' ? 'awaiting_approval' : 'refused',
-      // A message waiting for a person is not refused, so it carries no
-      // refusal code — `touches_refusal_is_explained` requires exactly that
-      // correspondence.
-      refusalCode: decision.code === 'needs_approval' ? null : decision.code,
-      recipient: facts.recipient,
-    })
+    if (decision.code === 'needs_approval') {
+      // A `queued` message whose campaign turned auto-send OFF between
+      // queueing and now. Not refused: it goes to a person, which is what the
+      // campaign now asks for.
+      await settle(db, touch.id, { status: 'awaiting_approval', refusalCode: null, recipient: facts.recipient })
+    } else {
+      await settle(db, touch.id, { status: 'refused', refusalCode: decision.code, recipient: facts.recipient })
+    }
     await appendAudit(db, {
-      orgId: req.orgId,
+      orgId: touch.orgId,
       actor: 'system',
       action: `send.${decision.code}`,
       subjectType: 'touch',
-      subjectId: touchId,
+      subjectId: touch.id,
       // §2.3: never the body, never the recipient. The rule and the campaign.
-      detail: { campaignId: req.campaignId, channel: facts.facts.channel, code: decision.code },
+      detail: { campaignId: touch.campaignId, channel: facts.facts.channel, code: decision.code },
     }).catch(() => {})
-    return { touchId, decision, sent: false }
+    return { touchId: touch.id, decision, sent: false }
   }
 
   // Past every check. From here the message really does leave the building.
-  const touchId = await recordTouch(db, req, {
-    status: 'queued',
-    refusalCode: null,
-    recipient: facts.recipient,
-  })
-
   let providerId: string
   try {
     const sent = await provider.send({
       to: facts.recipient,
-      subject: req.subject,
-      body: req.body,
+      subject: touch.subject ?? '',
+      body: touch.body ?? '',
     })
     providerId = sent.providerId
   } catch (err) {
     // A provider failure is NOT a refusal — the rules said yes and the
     // transport did not work, which is a thing to retry. The distinction is
     // why `error` and `refusal_code` are separate columns.
-    await db
-      .update(schema.touches)
-      .set({
-        status: 'failed',
-        error: (err instanceof Error ? err.message : 'the provider failed').slice(0, 500),
-      })
-      .where(eq(schema.touches.id, touchId))
+    await settle(db, touch.id, {
+      status: 'failed',
+      refusalCode: null,
+      recipient: facts.recipient,
+      error: (err instanceof Error ? err.message : 'the provider failed').slice(0, 500),
+    })
     await appendAudit(db, {
-      orgId: req.orgId,
+      orgId: touch.orgId,
       actor: 'system',
       action: 'send.failed',
       subjectType: 'touch',
-      subjectId: touchId,
+      subjectId: touch.id,
       detail: {
-        campaignId: req.campaignId,
+        campaignId: touch.campaignId,
         provider: provider.name,
         error: err instanceof Error ? err.name : 'UnknownError',
       },
@@ -180,28 +246,69 @@ export async function sendOne(
 
   await db
     .update(schema.touches)
-    .set({ status: 'sent', sentAt: now, providerId })
-    .where(eq(schema.touches.id, touchId))
+    .set({ status: 'sent', sentAt: now, providerId, recipient: facts.recipient })
+    .where(eq(schema.touches.id, touch.id))
+
+  // A company that has been written to is `contacted`, unless it is already
+  // further along. Forward only, so a follow-up never knocks a deal back.
+  if (touch.companyId) {
+    await advanceDeal(db, { orgId: touch.orgId, companyId: touch.companyId, to: 'contacted' }).catch(() => {})
+  }
 
   // §8.4's last step, and §2.3's constraint on it: the audit row records that
   // a message went, to whom it was addressed by ID, and through what. Not the
   // subject and not the body.
   await appendAudit(db, {
-    orgId: req.orgId,
+    orgId: touch.orgId,
     actor: 'system',
     action: 'send.sent',
     subjectType: 'touch',
-    subjectId: touchId,
+    subjectId: touch.id,
     detail: {
-      campaignId: req.campaignId,
-      contactId: req.contactId,
+      campaignId: touch.campaignId,
+      contactId: touch.contactId,
       channel: facts.facts.channel,
       provider: provider.name,
       providerId,
+      approvedBy: touch.approvedBy,
     },
   }).catch(() => {})
 
-  return { touchId, decision, sent: true }
+  return { touchId: touch.id, decision, sent: true }
+}
+
+async function settle(
+  db: AgencyDb,
+  touchId: string,
+  state: { status: string; refusalCode: string | null; recipient?: string; error?: string },
+): Promise<void> {
+  await db
+    .update(schema.touches)
+    .set({
+      status: state.status,
+      refusalCode: state.refusalCode,
+      ...(state.recipient !== undefined ? { recipient: state.recipient } : {}),
+      ...(state.error !== undefined ? { error: state.error } : {}),
+    })
+    .where(eq(schema.touches.id, touchId))
+}
+
+async function subjectExists(
+  db: AgencyDb,
+  orgId: string,
+  campaignId: string,
+  contactId: string,
+): Promise<{ companyId: string; channel: string } | null> {
+  const rows = await db
+    .select({ companyId: schema.contacts.companyId, channel: schema.campaigns.channel })
+    .from(schema.campaigns)
+    .innerJoin(
+      schema.contacts,
+      and(eq(schema.contacts.id, contactId), eq(schema.contacts.orgId, orgId)),
+    )
+    .where(and(eq(schema.campaigns.id, campaignId), eq(schema.campaigns.orgId, orgId)))
+    .limit(1)
+  return rows[0] ?? null
 }
 
 /**
@@ -214,9 +321,19 @@ export async function sendOne(
  */
 async function gatherFacts(
   db: AgencyDb,
-  req: SendRequest,
+  touch: TouchRow,
   now: Date,
 ): Promise<{ facts: SendFacts; recipient: string } | { missing: string }> {
+  if (!touch.campaignId) {
+    // Every outbound message carries a campaign, because the campaign is
+    // where the cap and the quiet hours live. A draft without one is a draft
+    // the approver has not finished with.
+    return { missing: 'This message has no campaign, so it has no daily cap or quiet hours. Nothing was sent.' }
+  }
+  if (!touch.contactId) {
+    return { missing: 'This message has no recipient. Nothing was sent.' }
+  }
+
   const rows = await db
     .select({
       campaign: schema.campaigns,
@@ -226,16 +343,30 @@ async function gatherFacts(
     .from(schema.campaigns)
     .innerJoin(
       schema.contacts,
-      and(eq(schema.contacts.id, req.contactId), eq(schema.contacts.orgId, req.orgId)),
+      and(eq(schema.contacts.id, touch.contactId), eq(schema.contacts.orgId, touch.orgId)),
     )
     .leftJoin(schema.companies, eq(schema.companies.id, schema.contacts.companyId))
-    .where(and(eq(schema.campaigns.id, req.campaignId), eq(schema.campaigns.orgId, req.orgId)))
+    .where(and(eq(schema.campaigns.id, touch.campaignId), eq(schema.campaigns.orgId, touch.orgId)))
     .limit(1)
 
   const row = rows[0]
   if (!row) return { missing: 'That campaign or contact no longer exists. Nothing was sent.' }
 
   const channel = row.campaign.channel as Channel
+  const recipient = recipientFor(channel, row.contact)
+  const base = {
+    channel,
+    recipient,
+    // The contact's zone, or their company's. Never the sender's, and never
+    // derived from a country (§2.1; see 0010).
+    recipientTimeZone: row.contact.timeZone ?? row.companyTimeZone ?? null,
+    quietStart: row.campaign.quietStart,
+    quietEnd: row.campaign.quietEnd,
+    dailyCap: row.campaign.dailyCap,
+    autoSend: row.campaign.autoSend,
+    approvedByHuman: touch.status === 'approved' && touch.approvedBy !== null,
+    now,
+  }
 
   /**
    * A paused contact replied, and a follow-up after a reply reads as nobody
@@ -246,24 +377,15 @@ async function gatherFacts(
    */
   if (row.contact.pausedAt) {
     return {
-      recipient: row.contact.email ?? '',
+      recipient,
       facts: {
-        channel,
-        recipient: row.contact.email ?? '',
+        ...base,
         suppressed: false,
         consent: { granted: false, source: row.contact.pausedReason ?? 'paused' },
-        recipientTimeZone: row.contact.timeZone ?? row.companyTimeZone ?? null,
-        quietStart: row.campaign.quietStart,
-        quietEnd: row.campaign.quietEnd,
         sentToday: 0,
-        dailyCap: row.campaign.dailyCap,
-        autoSend: row.campaign.autoSend,
-        now,
       },
     }
   }
-
-  const recipient = recipientFor(channel, row.contact)
 
   // The suppression lookup, over EVERY key this recipient matches — an email
   // is suppressed by its address and by its domain. `suppressionKeysFor`
@@ -276,7 +398,7 @@ async function gatherFacts(
       .from(schema.suppressions)
       .where(
         and(
-          eq(schema.suppressions.orgId, req.orgId),
+          eq(schema.suppressions.orgId, touch.orgId),
           or(
             ...keys.map((k) =>
               and(eq(schema.suppressions.kind, k.kind), eq(schema.suppressions.value, k.value)),
@@ -293,9 +415,9 @@ async function gatherFacts(
     .from(schema.consents)
     .where(
       and(
-        eq(schema.consents.contactId, req.contactId),
+        eq(schema.consents.contactId, touch.contactId),
         eq(schema.consents.channel, channel),
-        eq(schema.consents.orgId, req.orgId),
+        eq(schema.consents.orgId, touch.orgId),
       ),
     )
     .limit(1)
@@ -310,8 +432,8 @@ async function gatherFacts(
     .from(schema.touches)
     .where(
       and(
-        eq(schema.touches.orgId, req.orgId),
-        eq(schema.touches.campaignId, req.campaignId),
+        eq(schema.touches.orgId, touch.orgId),
+        eq(schema.touches.campaignId, touch.campaignId),
         eq(schema.touches.direction, 'out'),
         isNotNull(schema.touches.sentAt),
         gte(schema.touches.sentAt, startOfDay),
@@ -321,19 +443,10 @@ async function gatherFacts(
   return {
     recipient,
     facts: {
-      channel,
-      recipient,
+      ...base,
       suppressed,
       consent: consentRows[0] ?? null,
-      // The contact's zone, or their company's. Never the sender's, and never
-      // derived from a country (§2.1; see 0010).
-      recipientTimeZone: row.contact.timeZone ?? row.companyTimeZone ?? null,
-      quietStart: row.campaign.quietStart,
-      quietEnd: row.campaign.quietEnd,
       sentToday: sentTodayRows[0]?.n ?? 0,
-      dailyCap: row.campaign.dailyCap,
-      autoSend: row.campaign.autoSend,
-      now,
     },
   }
 }
@@ -356,37 +469,230 @@ function recipientFor(channel: Channel, contact: typeof schema.contacts.$inferSe
   }
 }
 
-async function recordTouch(
+// ---------------------------------------------------------------------------
+// A person decides on a draft (§2.4)
+// ---------------------------------------------------------------------------
+
+/** Drafts waiting for a person, oldest first, with what they are about. */
+export async function pendingDrafts(
   db: AgencyDb,
-  req: SendRequest,
-  state: {
-    status: string
-    refusalCode: string | null
-    recipient?: string
-    error?: string
-  },
-): Promise<string> {
+  orgId: string,
+  limit = 100,
+): Promise<
+  Array<{
+    touch: TouchRow
+    company: { id: string; domain: string; name: string | null } | null
+    contact: { id: string; email: string | null; firstName: string | null; lastName: string | null } | null
+  }>
+> {
   const rows = await db
-    .insert(schema.touches)
-    .values({
-      orgId: req.orgId,
-      campaignId: req.campaignId,
-      contactId: req.contactId,
-      companyId: req.companyId ?? null,
-      channel: 'email',
-      direction: 'out',
-      status: state.status,
-      refusalCode: state.refusalCode,
-      subject: req.subject,
-      body: req.body,
-      recipient: state.recipient ?? null,
-      error: state.error ?? null,
+    .select({
+      touch: schema.touches,
+      companyId: schema.companies.id,
+      companyDomain: schema.companies.domain,
+      companyName: schema.companies.name,
+      contactId: schema.contacts.id,
+      contactEmail: schema.contacts.email,
+      contactFirst: schema.contacts.firstName,
+      contactLast: schema.contacts.lastName,
     })
-    .returning({ id: schema.touches.id })
-  const id = rows[0]?.id
-  if (!id) throw new Error('touch insert returned no row')
-  return id
+    .from(schema.touches)
+    .leftJoin(schema.companies, eq(schema.companies.id, schema.touches.companyId))
+    .leftJoin(schema.contacts, eq(schema.contacts.id, schema.touches.contactId))
+    .where(
+      and(
+        eq(schema.touches.orgId, orgId),
+        eq(schema.touches.direction, 'out'),
+        eq(schema.touches.status, 'awaiting_approval'),
+      ),
+    )
+    .orderBy(asc(schema.touches.createdAt))
+    .limit(limit)
+  return rows.map((r) => ({
+    touch: r.touch,
+    company: r.companyId ? { id: r.companyId, domain: r.companyDomain ?? '', name: r.companyName ?? null } : null,
+    contact: r.contactId
+      ? { id: r.contactId, email: r.contactEmail ?? null, firstName: r.contactFirst ?? null, lastName: r.contactLast ?? null }
+      : null,
+  }))
 }
+
+export type DraftDecision =
+  | { readonly ok: true; readonly touch: TouchRow }
+  | {
+      readonly ok: false
+      readonly reason: 'not_found' | 'already_decided' | 'no_such_contact' | 'no_such_campaign' | 'wrong_company'
+    }
+
+/**
+ * Approve a draft: name the recipient, the campaign, and yourself.
+ *
+ * One UPDATE with `status = 'awaiting_approval'` in the predicate, so two
+ * people approving at once produce exactly one approval — the same
+ * arbitration `decideApproval` uses. The recipient and campaign are set HERE,
+ * not by the agent: a draft from chat has neither (Phase 2 had no contacts),
+ * and the person approving is the right one to choose.
+ *
+ * Approving does not send. It marks the row `approved`, and the worker's next
+ * tick runs it through every §2.1 rule and then the provider. That is
+ * deliberate: the person approved the words, and the rules are re-checked at
+ * the moment of sending, not the moment of reading.
+ */
+export async function approveDraft(
+  db: AgencyDb,
+  args: {
+    readonly orgId: string
+    readonly touchId: string
+    readonly contactId: string
+    readonly campaignId: string
+    readonly approvedBy: string
+    readonly note?: string | null
+    readonly now?: Date
+  },
+): Promise<DraftDecision> {
+  const touchRows = await db
+    .select()
+    .from(schema.touches)
+    .where(and(eq(schema.touches.orgId, args.orgId), eq(schema.touches.id, args.touchId)))
+    .limit(1)
+  const touch = touchRows[0]
+  if (!touch) return { ok: false, reason: 'not_found' }
+  if (touch.status !== 'awaiting_approval') return { ok: false, reason: 'already_decided' }
+
+  const contactRows = await db
+    .select({ id: schema.contacts.id, companyId: schema.contacts.companyId })
+    .from(schema.contacts)
+    .where(and(eq(schema.contacts.orgId, args.orgId), eq(schema.contacts.id, args.contactId)))
+    .limit(1)
+  const contact = contactRows[0]
+  if (!contact) return { ok: false, reason: 'no_such_contact' }
+
+  // A draft written about one company must not be approved to a person at
+  // another. The draft quotes that company's findings (§2.2), and sending it
+  // elsewhere is a claim about the wrong company.
+  if (touch.companyId && contact.companyId !== touch.companyId) {
+    return { ok: false, reason: 'wrong_company' }
+  }
+
+  const campaignRows = await db
+    .select({ id: schema.campaigns.id, channel: schema.campaigns.channel })
+    .from(schema.campaigns)
+    .where(and(eq(schema.campaigns.orgId, args.orgId), eq(schema.campaigns.id, args.campaignId)))
+    .limit(1)
+  const campaign = campaignRows[0]
+  if (!campaign) return { ok: false, reason: 'no_such_campaign' }
+
+  const updated = await db
+    .update(schema.touches)
+    .set({
+      status: 'approved',
+      contactId: contact.id,
+      companyId: touch.companyId ?? contact.companyId,
+      campaignId: campaign.id,
+      channel: campaign.channel,
+      approvedBy: args.approvedBy,
+      approvedAt: args.now ?? new Date(),
+      decisionNote: args.note?.trim() || null,
+    })
+    .where(
+      and(
+        eq(schema.touches.id, touch.id),
+        eq(schema.touches.orgId, args.orgId),
+        eq(schema.touches.status, 'awaiting_approval'),
+        sql`EXISTS (SELECT 1 FROM users u WHERE u.id = ${args.approvedBy} AND u.org_id = ${args.orgId})`,
+      ),
+    )
+    .returning()
+  const row = updated[0]
+  if (!row) return { ok: false, reason: 'already_decided' }
+
+  await appendAudit(db, {
+    orgId: args.orgId,
+    actor: args.approvedBy,
+    action: 'draft.approved',
+    subjectType: 'touch',
+    subjectId: row.id,
+    detail: { contactId: contact.id, campaignId: campaign.id, channel: campaign.channel },
+  }).catch(() => {})
+  return { ok: true, touch: row }
+}
+
+/**
+ * Deny a draft. The reason is recorded on the row: a draft denied with no note
+ * is one the agent will rewrite the same way.
+ */
+export async function denyDraft(
+  db: AgencyDb,
+  args: {
+    readonly orgId: string
+    readonly touchId: string
+    readonly decidedBy: string
+    readonly note?: string | null
+  },
+): Promise<DraftDecision> {
+  const updated = await db
+    .update(schema.touches)
+    .set({
+      status: 'refused',
+      refusalCode: 'needs_approval',
+      decisionNote: args.note?.trim() || 'denied',
+    })
+    .where(
+      and(
+        eq(schema.touches.id, args.touchId),
+        eq(schema.touches.orgId, args.orgId),
+        eq(schema.touches.status, 'awaiting_approval'),
+        sql`EXISTS (SELECT 1 FROM users u WHERE u.id = ${args.decidedBy} AND u.org_id = ${args.orgId})`,
+      ),
+    )
+    .returning()
+  const row = updated[0]
+  if (!row) {
+    const current = await db
+      .select({ status: schema.touches.status })
+      .from(schema.touches)
+      .where(and(eq(schema.touches.id, args.touchId), eq(schema.touches.orgId, args.orgId)))
+      .limit(1)
+    return { ok: false, reason: current[0] ? 'already_decided' : 'not_found' }
+  }
+  await appendAudit(db, {
+    orgId: args.orgId,
+    actor: args.decidedBy,
+    action: 'draft.denied',
+    subjectType: 'touch',
+    subjectId: row.id,
+    detail: { note: row.decisionNote },
+  }).catch(() => {})
+  return { ok: true, touch: row }
+}
+
+/**
+ * What the worker's tick dispatches: approved and queued messages that are
+ * due, oldest first, across every org.
+ *
+ * Bounded, because one campaign of a thousand must not monopolise a tick and
+ * starve everyone else's — and because the per-campaign cap is enforced
+ * inside `dispatchTouch`, the batch size here is about fairness, not about
+ * volume.
+ */
+export async function dueTouches(db: AgencyDb, limit: number, now: Date = new Date()): Promise<TouchRow[]> {
+  return db
+    .select()
+    .from(schema.touches)
+    .where(
+      and(
+        eq(schema.touches.direction, 'out'),
+        inArray(schema.touches.status, ['approved', 'queued']),
+        or(isNull(schema.touches.scheduledFor), lte(schema.touches.scheduledFor, now)),
+      ),
+    )
+    .orderBy(asc(schema.touches.createdAt))
+    .limit(limit)
+}
+
+// ---------------------------------------------------------------------------
+// Replies (§8.4)
+// ---------------------------------------------------------------------------
 
 /**
  * Stop every sequence this contact is in (§8.4).
@@ -421,11 +727,7 @@ export async function pauseContact(
 }
 
 /** Let a paused contact be contacted again — deliberately, by a person. */
-export async function resumeContact(
-  db: AgencyDb,
-  orgId: string,
-  contactId: string,
-): Promise<boolean> {
+export async function resumeContact(db: AgencyDb, orgId: string, contactId: string): Promise<boolean> {
   const rows = await db
     .update(schema.contacts)
     .set({ pausedAt: null, pausedReason: null })
@@ -435,11 +737,40 @@ export async function resumeContact(
 }
 
 /**
+ * Words that mean "stop", in a reply.
+ *
+ * Deliberately narrow: a whole short message, or a first line, that IS an
+ * opt-out — not a message that merely contains the word "stop" somewhere in a
+ * paragraph about their roadmap. A match adds a SUPPRESSION, which is the
+ * strongest thing this system can do, so the bar is a clear statement. A
+ * reply that is not clearly an opt-out still pauses the contact, so nothing
+ * further goes to them either way; the difference is whether they can ever be
+ * contacted again without a person removing a suppression.
+ */
+const OPT_OUT =
+  /^\s*(?:please\s+)?(?:stop|unsubscribe(?:\s+me)?|remove\s+me|opt(?:\s+me)?[\s-]?out|do\s+not\s+(?:contact|email)\s+me(?:\s+again)?|no\s+more\s+emails?|take\s+me\s+off\s+(?:your|the)\s+list|leave\s+me\s+alone)\b[\s.!,]*$/i
+
+export function looksLikeOptOut(body: string | null | undefined): boolean {
+  if (!body) return false
+  // The person's own words: everything above a quoted reply. A quoted
+  // "unsubscribe" link in the message they are replying to must not be read
+  // as theirs.
+  const own = body.split(/\r?\n(?:>|On .+ wrote:|-{2,}\s*Original Message)/)[0] ?? body
+  const first = own.split(/\r?\n/).find((l) => l.trim().length > 0) ?? ''
+  return OPT_OUT.test(first) || (own.trim().length <= 60 && OPT_OUT.test(own.trim()))
+}
+
+/**
  * Record an inbound reply, and stop everything queued for that contact.
  *
  * Both halves in one call, because doing one without the other is the bug:
  * a logged reply that did not pause is a follow-up sent to somebody who
  * already answered.
+ *
+ * Also the deal: §8.4 says a reply flips it to `replied`, forward only. And
+ * if the reply is an opt-out in so many words, the address goes on the
+ * suppression list — the reply IS the opt-out, and recording it anywhere
+ * weaker is a promise the send path does not keep.
  */
 export async function recordInboundReply(
   db: AgencyDb,
@@ -451,16 +782,25 @@ export async function recordInboundReply(
     readonly subject: string | null
     readonly body: string | null
     readonly providerId?: string | null
+    readonly inReplyTo?: string | null
     readonly now?: Date
   },
-): Promise<{ touchId: string; paused: boolean; cancelled: number }> {
+): Promise<{ touchId: string; paused: boolean; cancelled: number; suppressed: boolean; deal: string | null }> {
   const now = args.now ?? new Date()
+
+  const contactRows = await db
+    .select({ companyId: schema.contacts.companyId })
+    .from(schema.contacts)
+    .where(and(eq(schema.contacts.orgId, args.orgId), eq(schema.contacts.id, args.contactId)))
+    .limit(1)
+  const companyId = contactRows[0]?.companyId ?? null
 
   const inserted = await db
     .insert(schema.touches)
     .values({
       orgId: args.orgId,
       contactId: args.contactId,
+      companyId,
       channel: args.channel,
       direction: 'in',
       status: 'replied',
@@ -468,6 +808,7 @@ export async function recordInboundReply(
       body: args.body,
       recipient: args.from,
       providerId: args.providerId ?? null,
+      inReplyTo: args.inReplyTo ?? null,
       sentAt: now,
     })
     .returning({ id: schema.touches.id })
@@ -492,15 +833,158 @@ export async function recordInboundReply(
     )
     .returning({ id: schema.touches.id })
 
+  let suppressed = false
+  if (args.channel === 'email' && looksLikeOptOut(args.body)) {
+    const added = await addSuppression(db, {
+      orgId: args.orgId,
+      kind: 'email',
+      value: args.from,
+      reason: `replied asking to stop, ${now.toISOString().slice(0, 10)}`,
+    })
+    suppressed = added.ok
+  }
+
+  let deal: string | null = null
+  if (companyId) {
+    const moved = await advanceDeal(db, {
+      orgId: args.orgId,
+      companyId,
+      to: 'replied',
+      nextAction: 'Read the reply and answer it',
+    }).catch(() => null)
+    deal = moved ? `${moved.outcome}:${moved.deal.stage}` : null
+  }
+
   await appendAudit(db, {
     orgId: args.orgId,
     actor: 'system',
     action: 'contact.replied',
     subjectType: 'contact',
     subjectId: args.contactId,
-    // §2.3: the fact and the count, never the reply's text.
-    detail: { channel: args.channel, paused, cancelledQueued: cancelled.length },
+    // §2.3: the facts and the counts, never the reply's text.
+    detail: { channel: args.channel, paused, cancelledQueued: cancelled.length, suppressed, deal },
   }).catch(() => {})
 
-  return { touchId, paused, cancelled: cancelled.length }
+  return { touchId, paused, cancelled: cancelled.length, suppressed, deal }
+}
+
+export type InboundOutcome =
+  | {
+      readonly matched: 'message' | 'contact'
+      readonly contactId: string
+      readonly orgId: string
+      readonly touchId: string
+      readonly paused: boolean
+      readonly suppressed: boolean
+    }
+  | { readonly matched: 'none'; readonly why: string }
+
+/**
+ * An inbound email, from IMAP or from a webhook — one function for both.
+ *
+ * Matching, in order of confidence:
+ *
+ *  1. `In-Reply-To` / `References` against the Message-ID a provider assigned
+ *     to something this system sent. Unambiguous: it names the exact message,
+ *     the contact, the campaign and the org.
+ *  2. The From address against `contacts.email` — ONLY if it matches exactly
+ *     one contact across every org. A mailbox that serves two orgs and gets a
+ *     reply from an address both have on file cannot tell which conversation
+ *     it belongs to, and guessing files somebody's reply under the wrong
+ *     agency. It is logged and dropped instead.
+ *
+ * Returns what happened so the caller can log it. Never throws on a message
+ * it cannot place: an IMAP listener that crashed on one odd email would stop
+ * detecting every reply after it.
+ */
+export async function handleInboundEmail(
+  db: AgencyDb,
+  mail: {
+    readonly from: string
+    readonly subject: string | null
+    readonly text: string | null
+    readonly messageId?: string | null
+    /** Every Message-ID in In-Reply-To and References, in that order. */
+    readonly references?: readonly string[]
+    readonly now?: Date
+  },
+): Promise<InboundOutcome> {
+  const from = normaliseEmail(mail.from)
+  if (!from) return { matched: 'none', why: 'the From address could not be read' }
+
+  // 1. By the message it answers.
+  const refs = (mail.references ?? []).map((r) => r.trim()).filter(Boolean)
+  if (refs.length > 0) {
+    const hits = await db
+      .select({ id: schema.touches.id, orgId: schema.touches.orgId, contactId: schema.touches.contactId })
+      .from(schema.touches)
+      .where(
+        and(
+          eq(schema.touches.direction, 'out'),
+          isNotNull(schema.touches.providerId),
+          inArray(schema.touches.providerId, refs),
+        ),
+      )
+      .limit(1)
+    const hit = hits[0]
+    if (hit?.contactId) {
+      const r = await recordInboundReply(db, {
+        orgId: hit.orgId,
+        contactId: hit.contactId,
+        channel: 'email',
+        from,
+        subject: mail.subject,
+        body: mail.text,
+        providerId: mail.messageId ?? null,
+        inReplyTo: hit.id,
+        ...(mail.now ? { now: mail.now } : {}),
+      })
+      return {
+        matched: 'message',
+        contactId: hit.contactId,
+        orgId: hit.orgId,
+        touchId: r.touchId,
+        paused: r.paused,
+        suppressed: r.suppressed,
+      }
+    }
+  }
+
+  // 2. By the address, only when it is unambiguous.
+  const contacts = await db
+    .select({ id: schema.contacts.id, orgId: schema.contacts.orgId })
+    .from(schema.contacts)
+    .where(sql`lower(${schema.contacts.email}) = ${from}`)
+    .limit(2)
+  if (contacts.length === 0) return { matched: 'none', why: 'no contact has this address' }
+  if (contacts.length > 1) {
+    return { matched: 'none', why: 'this address belongs to contacts in more than one org, and nothing says which' }
+  }
+  const only = contacts[0]!
+  const r = await recordInboundReply(db, {
+    orgId: only.orgId,
+    contactId: only.id,
+    channel: 'email',
+    from,
+    subject: mail.subject,
+    body: mail.text,
+    providerId: mail.messageId ?? null,
+    ...(mail.now ? { now: mail.now } : {}),
+  })
+  return { matched: 'contact', contactId: only.id, orgId: only.orgId, touchId: r.touchId, paused: r.paused, suppressed: r.suppressed }
+}
+
+/** The most recent outbound and inbound touches for a company — the thread. */
+export async function companyThread(
+  db: AgencyDb,
+  orgId: string,
+  companyId: string,
+  limit = 50,
+): Promise<TouchRow[]> {
+  return db
+    .select()
+    .from(schema.touches)
+    .where(and(eq(schema.touches.orgId, orgId), eq(schema.touches.companyId, companyId)))
+    .orderBy(desc(schema.touches.createdAt))
+    .limit(limit)
 }

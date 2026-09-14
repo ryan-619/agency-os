@@ -18,7 +18,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import {
-  pauseContact, recordInboundReply, resumeContact, schema, sendOne,
+  approveDraft, denyDraft, dispatchTouch, dueTouches, handleInboundEmail, looksLikeOptOut,
+  pauseContact, pendingDrafts, recordInboundReply, resumeContact, schema, sendOne,
   type AgencyDb, type MessageProvider,
 } from '../src/index.js'
 import { freshDb, migrations, type TestDb } from './helpers.js'
@@ -48,6 +49,7 @@ describe('the single send path', () => {
   let companyId: string
   let contactId: string
   let campaignId: string
+  let userId: string
   let provider: ReturnType<typeof countingProvider>
 
   beforeEach(async () => {
@@ -58,6 +60,11 @@ describe('the single send path', () => {
 
     const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
     orgId = org!.id
+    const [user] = await db
+      .insert(schema.users)
+      .values({ orgId, email: 'owner@agency.test', role: 'owner' })
+      .returning({ id: schema.users.id })
+    userId = user!.id
     const [company] = await db
       .insert(schema.companies)
       .values({ orgId, domain: 'rentman.io', timeZone: 'Europe/London' })
@@ -425,4 +432,258 @@ describe('the single send path', () => {
     await send({ now: new Date('2026-09-15T12:00:00.000Z'), contactId })
     expect(provider.sent).toEqual([])
   })
+  /**
+   * A draft from chat has no recipient and no campaign (Phase 2 had no
+   * contacts). The person approving names both, and their name goes on the
+   * row. Approving does not send: the worker's tick re-checks every rule at
+   * the moment of sending.
+   */
+  describe('a person decides on a draft (§2.4)', () => {
+    const draft = async () => {
+      const [row] = await db
+        .insert(schema.touches)
+        .values({
+          orgId, companyId, contactId: null, campaignId: null, channel: 'email', direction: 'out',
+          status: 'awaiting_approval', subject: 'A gap', body: 'Hello.',
+        })
+        .returning()
+      return row!
+    }
+
+    it('lists what is waiting, with what it is about', async () => {
+      const d = await draft()
+      const pending = await pendingDrafts(db, orgId)
+      expect(pending.map((p) => p.touch.id)).toEqual([d.id])
+      expect(pending[0]!.company?.domain).toBe('rentman.io')
+      expect(pending[0]!.contact).toBeNull()
+    })
+
+    it('approves with a recipient, a campaign, and a name', async () => {
+      const d = await draft()
+      const r = await approveDraft(db, { orgId, touchId: d.id, contactId, campaignId, approvedBy: userId, note: 'good' })
+      expect(r.ok).toBe(true)
+      if (!r.ok) return
+      expect(r.touch.status).toBe('approved')
+      expect(r.touch.contactId).toBe(contactId)
+      expect(r.touch.campaignId).toBe(campaignId)
+      expect(r.touch.approvedBy).toBe(userId)
+      expect(r.touch.approvedAt).not.toBeNull()
+      expect(r.touch.decisionNote).toBe('good')
+      // Nothing was sent by approving.
+      expect(provider.sent).toEqual([])
+    })
+
+    it('is then picked up as due, and sends through every rule', async () => {
+      const d = await draft()
+      await approveDraft(db, { orgId, touchId: d.id, contactId, campaignId, approvedBy: userId })
+      const due = await dueTouches(db, 10, NOON)
+      expect(due.map((t) => t.id)).toEqual([d.id])
+      // The campaign has auto-send here, but even without it the human's
+      // approval is what satisfies the gate — and only the gate.
+      await db.update(schema.campaigns).set({ autoSend: false }).where(eq(schema.campaigns.id, campaignId))
+      const result = await dispatchTouch(db, provider, due[0]!, { now: NOON })
+      expect(result.sent).toBe(true)
+      expect((await touch(d.id)).status).toBe('sent')
+    })
+
+    it('still refuses an approved draft for a suppression at the moment of sending', async () => {
+      const d = await draft()
+      await approveDraft(db, { orgId, touchId: d.id, contactId, campaignId, approvedBy: userId })
+      await db.insert(schema.suppressions).values({
+        orgId, kind: 'email', value: 'priya@rentman.io', reason: 'opted out after approval',
+      })
+      const [row] = await dueTouches(db, 10, NOON)
+      const result = await dispatchTouch(db, provider, row!, { now: NOON })
+      expect(result.sent).toBe(false)
+      expect((await touch(d.id)).refusalCode).toBe('suppressed')
+      expect(provider.sent).toEqual([])
+    })
+
+    /**
+     * The draft quotes one company's findings (§2.2). Sending it to a person
+     * at another company is a claim about the wrong company.
+     */
+    it('refuses to approve a draft to a contact at a different company', async () => {
+      const [other] = await db
+        .insert(schema.companies)
+        .values({ orgId, domain: 'other.io' })
+        .returning({ id: schema.companies.id })
+      const [stranger] = await db
+        .insert(schema.contacts)
+        .values({ orgId, companyId: other!.id, email: 'x@other.io' })
+        .returning({ id: schema.contacts.id })
+      const d = await draft()
+      const r = await approveDraft(db, { orgId, touchId: d.id, contactId: stranger!.id, campaignId, approvedBy: userId })
+      expect(r).toEqual({ ok: false, reason: 'wrong_company' })
+      expect((await touch(d.id)).status).toBe('awaiting_approval')
+    })
+
+    it('lets exactly one of two simultaneous approvers win', async () => {
+      const d = await draft()
+      const [a, b] = await Promise.all([
+        approveDraft(db, { orgId, touchId: d.id, contactId, campaignId, approvedBy: userId }),
+        approveDraft(db, { orgId, touchId: d.id, contactId, campaignId, approvedBy: userId }),
+      ])
+      expect([a.ok, b.ok].filter(Boolean)).toHaveLength(1)
+    })
+
+    it('refuses an approver from another org', async () => {
+      const [other] = await db.insert(schema.orgs).values({ name: 'Rival' }).returning({ id: schema.orgs.id })
+      const [outsider] = await db
+        .insert(schema.users)
+        .values({ orgId: other!.id, email: 'o@rival.test', role: 'owner' })
+        .returning({ id: schema.users.id })
+      const d = await draft()
+      const r = await approveDraft(db, { orgId, touchId: d.id, contactId, campaignId, approvedBy: outsider!.id })
+      expect(r.ok).toBe(false)
+      expect((await touch(d.id)).status).toBe('awaiting_approval')
+    })
+
+    it('denies with a note, and the note is kept', async () => {
+      const d = await draft()
+      const r = await denyDraft(db, { orgId, touchId: d.id, decidedBy: userId, note: 'wrong tone' })
+      expect(r.ok).toBe(true)
+      const row = await touch(d.id)
+      expect(row.status).toBe('refused')
+      expect(row.decisionNote).toBe('wrong tone')
+      expect(await dueTouches(db, 10, NOON)).toEqual([])
+    })
+
+    it('cannot approve or deny a draft twice', async () => {
+      const d = await draft()
+      await denyDraft(db, { orgId, touchId: d.id, decidedBy: userId })
+      expect((await approveDraft(db, { orgId, touchId: d.id, contactId, campaignId, approvedBy: userId })).ok).toBe(false)
+      expect((await denyDraft(db, { orgId, touchId: d.id, decidedBy: userId })).ok).toBe(false)
+    })
+
+    it('does not dispatch anything that is not approved or queued', async () => {
+      const d = await draft()
+      const result = await dispatchTouch(db, provider, d, { now: NOON })
+      expect(result.sent).toBe(false)
+      expect(provider.sent).toEqual([])
+      expect((await touch(d.id)).status).toBe('awaiting_approval')
+    })
+  })
+
+  describe('dueTouches', () => {
+    it('leaves a message scheduled for later, and picks it up once due', async () => {
+      const d = await send()
+      await db
+        .update(schema.touches)
+        .set({ status: 'approved', approvedBy: userId, approvedAt: NOON, scheduledFor: new Date(NOON.getTime() + 3_600_000) })
+        .where(eq(schema.touches.id, d.touchId!))
+      expect(await dueTouches(db, 10, NOON)).toEqual([])
+      expect((await dueTouches(db, 10, new Date(NOON.getTime() + 3_600_001))).length).toBe(1)
+    })
+  })
+
+  describe('matching an inbound email (§8.4)', () => {
+    /** Send one, so there is a Message-ID to reply to. */
+    const sent = async () => {
+      const r = await send()
+      return (await touch(r.touchId!)).providerId!
+    }
+
+    it('matches by the Message-ID the reply names, and ties the reply to it', async () => {
+      const messageId = await sent()
+      const outcome = await handleInboundEmail(db, {
+        from: 'Priya Sharma <priya@rentman.io>'.replace(/.*<|>.*/g, ''),
+        subject: 'Re: A gap',
+        text: 'Thursday works.',
+        references: [messageId],
+        now: NOON,
+      })
+      expect(outcome.matched).toBe('message')
+      if (outcome.matched === 'none') return
+      const reply = await touch(outcome.touchId)
+      expect(reply.direction).toBe('in')
+      expect(reply.inReplyTo).not.toBeNull()
+      expect(outcome.paused).toBe(true)
+    })
+
+    it('matches by address when there is no reference and the address is unambiguous', async () => {
+      const outcome = await handleInboundEmail(db, {
+        from: 'PRIYA@rentman.io', subject: null, text: 'hi', references: [], now: NOON,
+      })
+      expect(outcome.matched).toBe('contact')
+    })
+
+    /**
+     * Two orgs, one address. Nothing says which conversation this belongs to,
+     * and guessing files somebody's reply under the wrong agency.
+     */
+    it('drops a reply whose address belongs to contacts in two orgs', async () => {
+      const [other] = await db.insert(schema.orgs).values({ name: 'Rival' }).returning({ id: schema.orgs.id })
+      const [c2] = await db.insert(schema.companies).values({ orgId: other!.id, domain: 'rentman.io' }).returning({ id: schema.companies.id })
+      await db.insert(schema.contacts).values({ orgId: other!.id, companyId: c2!.id, email: 'priya@rentman.io' })
+      const outcome = await handleInboundEmail(db, { from: 'priya@rentman.io', subject: null, text: 'hi', now: NOON })
+      expect(outcome.matched).toBe('none')
+      expect(await db.select().from(schema.touches)).toEqual([])
+    })
+
+    it('drops a message from nobody it knows', async () => {
+      const outcome = await handleInboundEmail(db, { from: 'stranger@example.com', subject: null, text: 'hi', now: NOON })
+      expect(outcome).toMatchObject({ matched: 'none' })
+    })
+
+    it('prefers the reference over the address when both are present', async () => {
+      const messageId = await sent()
+      const outcome = await handleInboundEmail(db, {
+        from: 'priya@rentman.io', subject: null, text: 'ok', references: [messageId], now: NOON,
+      })
+      expect(outcome.matched).toBe('message')
+    })
+
+    /**
+     * "Stop" in a reply IS the opt-out. It goes on the suppression list —
+     * anything weaker is a promise the send path does not keep.
+     */
+    it('suppresses the address when the reply says stop', async () => {
+      const outcome = await handleInboundEmail(db, {
+        from: 'priya@rentman.io', subject: 'Re', text: 'Please unsubscribe me.', now: NOON,
+      })
+      expect(outcome).toMatchObject({ suppressed: true })
+      const rows = await db.select().from(schema.suppressions)
+      expect(rows).toHaveLength(1)
+      expect(rows[0]!.value).toBe('priya@rentman.io')
+      expect(rows[0]!.reason).toMatch(/replied asking to stop/)
+    })
+
+    it('does not suppress a reply that merely mentions stopping', async () => {
+      await handleInboundEmail(db, {
+        from: 'priya@rentman.io', subject: 'Re',
+        text: 'We had to stop the migration last week, but yes, let us talk Thursday.', now: NOON,
+      })
+      expect(await db.select().from(schema.suppressions)).toEqual([])
+    })
+  })
+
+  describe('looksLikeOptOut', () => {
+    it.each([
+      'stop',
+      'STOP',
+      'Unsubscribe',
+      'please remove me',
+      'Opt out.',
+      'Do not contact me again',
+      'No more emails!',
+      'take me off your list',
+      'Unsubscribe\n\n> On Tue, you wrote:\n> A gap on your security page',
+    ])('reads %j as an opt-out', (body) => {
+      expect(looksLikeOptOut(body)).toBe(true)
+    })
+
+    it.each([
+      'We had to stop the migration; let us talk Thursday.',
+      'Interested — can we stop by your office?',
+      'Thanks, I will unsubscribe from the newsletter but keep me on this one.',
+      '',
+      null,
+      // Their quoted footer, not their words.
+      'Sounds good.\n\n> Reply STOP to unsubscribe',
+    ])('does not read %j as an opt-out', (body) => {
+      expect(looksLikeOptOut(body)).toBe(false)
+    })
+  })
+
 })

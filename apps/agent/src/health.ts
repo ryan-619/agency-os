@@ -42,6 +42,12 @@ export interface HealthInputs {
    * False means the lock connection dropped and another worker can now start.
    */
   readonly lockHeld: boolean | null
+  /**
+   * What the outreach half is doing. 'disabled' is a complete, honest
+   * configuration (no mailbox) and the one CI runs; it is reported so nobody
+   * wonders why a campaign is not moving.
+   */
+  readonly outreach: 'disabled' | 'send-only' | 'send-and-receive' | 'receive-only'
 }
 
 export async function answerHealth(
@@ -80,6 +86,7 @@ export async function answerHealth(
       service: 'agent',
       database: 'ok',
       chat: inputs.chatEnabled ? 'enabled' : 'disabled',
+      outreach: inputs.outreach,
       // Reported rather than made fatal. The restart reconciler is scoped by
       // boot time, so a lock lost mid-run does not endanger live turns — but
       // the exclusion is gone until someone restarts, and that should be

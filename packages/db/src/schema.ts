@@ -370,6 +370,17 @@ export const touches = pgTable(
      *  `status = 'refused'`. Distinct from `error`, which is something going
      *  wrong; a refusal is the system working (0010). */
     refusalCode: text('refusal_code'),
+    // --- a person's decision on a draft (0011) ---------------------------
+    /** RESTRICT, like approvals.decided_by: whoever approved a message that
+     *  was sent stays identifiable as long as the record of the message. */
+    approvedBy: uuid('approved_by').references(() => users.id, { onDelete: 'restrict' }),
+    approvedAt: timestamp('approved_at', { withTimezone: true }),
+    /** What the approver said. A denial's reason lives here too. */
+    decisionNote: text('decision_note'),
+    /** For an INBOUND message: the outbound touch it answers, matched by the
+     *  In-Reply-To header against `provider_id`. Address matching alone is
+     *  ambiguous once one person is in two campaigns (0011). */
+    inReplyTo: uuid('in_reply_to'),
     ...timestamps,
   },
   (t) => [
@@ -377,6 +388,8 @@ export const touches = pgTable(
     index('touches_contact_idx').on(t.contactId, t.createdAt.desc()),
     index('touches_company_idx').on(t.companyId, t.createdAt.desc()),
     index('touches_refused_idx').on(t.orgId, t.refusalCode, t.createdAt.desc()),
+    index('touches_provider_id_idx').on(t.orgId, t.providerId),
+    index('touches_due_idx').on(t.status, t.scheduledFor),
   ],
 )
 

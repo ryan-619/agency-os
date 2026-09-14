@@ -3,14 +3,16 @@ import { Pool } from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import {
   appendAudit, appendChatMessage, cancelPendingApprovals, clearTurnRunning,
-  ensureChatSessionTitle, markTurnRunning, masterKey, readConnector, schema, sessionCostUsd,
-  setSdkSessionId, usd, type AgencyDb,
+  createSmtpProvider, ensureChatSessionTitle, markTurnRunning, masterKey, readConnector, schema,
+  sessionCostUsd, setSdkSessionId, usd, type AgencyDb,
 } from '@agency/db'
 import { loadEnv } from './env.js'
 import { createLogger, type Logger } from './logger.js'
 import { answerHealth, startHealthServer, type HealthInputs } from './health.js'
 import { acquireWorkerLock, type WorkerLock } from './boot/singleton.js'
-import { reconcileAfterRestart, sweepExpired } from './boot/reconcile.js'
+import { reconcileAfterRestart, recoverStuckSends, sweepExpired } from './boot/reconcile.js'
+import { startSender } from './outreach/sender.js'
+import { startInbox } from './outreach/inbox.js'
 import { createAgentHttpServer, type StartTurnRequest, type TurnHandle } from './http/server.js'
 import { createDeferredEmitter, startTurn } from './chat/turn.js'
 import { buildTurnRuntime, createHalt, resolvePrincipal, type RuntimeHalt } from './runtime/session.js'
@@ -47,11 +49,13 @@ async function main(): Promise<void> {
   // and /readyz reports "starting" rather than refusing the connection.
   let halt: RuntimeHalt | null = null
   let lock: WorkerLock | null = null
+  const outreachMode = outreachModeFrom(env)
   const healthInputs = (): HealthInputs => ({
     pool,
     halted: halt?.halted() ?? false,
     chatEnabled: Boolean(env.ANTHROPIC_API_KEY),
     lockHeld: lock?.held ?? null,
+    outreach: outreachMode,
   })
   const health = await startHealthServer(env.AGENT_PORT, healthInputs, log)
 
@@ -69,6 +73,7 @@ async function main(): Promise<void> {
 
   lock = await acquireWorkerLock({ connectionString: env.DATABASE_URL, log })
   await reconcileAfterRestart(db, bootAt, log)
+  await recoverStuckSends(db, bootAt, log)
 
   const sweeper = setInterval(() => {
     void sweepExpired(db, log)
@@ -152,12 +157,50 @@ async function main(): Promise<void> {
 
   const apiPort = env.AGENT_PORT + 1
   await new Promise<void>((resolve) => server.listen(apiPort, env.AGENT_BIND, resolve))
+
+  /**
+   * Outreach (Phase 4, §8.4). Started AFTER the lock and the reconciler, like
+   * the HTTP server: a second worker must never run a sender tick, and a tick
+   * must never run before mid-send rows from the last worker have been
+   * settled. Both halves are optional and independent — a mailbox that can
+   * send but has no IMAP still sends, and is reported as 'send-only'.
+   */
+  const stops: Array<() => Promise<void>> = []
+  if (env.SMTP_HOST && env.MAIL_FROM) {
+    const provider = createSmtpProvider({
+      host: env.SMTP_HOST,
+      port: env.SMTP_PORT,
+      secure: env.SMTP_SECURE,
+      user: env.SMTP_USER,
+      password: env.SMTP_PASSWORD,
+      from: env.MAIL_FROM,
+    })
+    stops.push(startSender({ db, provider, log, batch: env.OUTREACH_BATCH, intervalMs: env.OUTREACH_TICK_MS }))
+  }
+  if (env.IMAP_HOST && env.IMAP_USER && env.IMAP_PASSWORD) {
+    stops.push(
+      startInbox({
+        db,
+        log,
+        config: {
+          host: env.IMAP_HOST,
+          port: env.IMAP_PORT,
+          secure: env.IMAP_SECURE,
+          user: env.IMAP_USER,
+          password: env.IMAP_PASSWORD,
+          mailbox: env.IMAP_MAILBOX,
+        },
+      }),
+    )
+  }
+
   log.info('agent worker started', {
     nodeEnv: env.NODE_ENV,
     healthPort: env.AGENT_PORT,
     apiPort,
     apiBind: env.AGENT_BIND,
     chat: env.ANTHROPIC_API_KEY ? 'enabled' : 'disabled',
+    outreach: outreachMode,
   })
 
   let shuttingDown = false
@@ -172,6 +215,10 @@ async function main(): Promise<void> {
     // better than a recovery.
     for (const turn of running.values()) turn.interrupt()
     try {
+      // The sender first, and it waits for a tick in flight: a message half
+      // way to the provider must finish or fail, never be abandoned as
+      // `sending` for the next boot to write off.
+      await Promise.all(stops.map((stop) => stop()))
       await new Promise<void>((res) => server.close(() => res()))
       await health.close()
       await lock.release()
@@ -366,6 +413,16 @@ async function beginTurn(args: {
       },
     } satisfies TurnHandle,
   }
+}
+
+/** What the mailbox configuration adds up to, for the boot log and /readyz. */
+function outreachModeFrom(env: ReturnType<typeof loadEnv>): HealthInputs['outreach'] {
+  const send = Boolean(env.SMTP_HOST && env.MAIL_FROM)
+  const receive = Boolean(env.IMAP_HOST && env.IMAP_USER && env.IMAP_PASSWORD)
+  if (send && receive) return 'send-and-receive'
+  if (send) return 'send-only'
+  if (receive) return 'receive-only'
+  return 'disabled'
 }
 
 main().catch((err: unknown) => {

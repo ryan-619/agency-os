@@ -38,9 +38,11 @@ export const campaignInput = z.object({
   /**
    * A cap, not a target. The upper bound is a deliverability judgement rather
    * than a rule: a warmed mailbox sending 500 cold emails in a day stops being
-   * a warmed mailbox.
+   * a warmed mailbox. The LOWER bound is the database's
+   * (`campaigns_daily_cap_check`, 0004): a campaign is paused by its status,
+   * not by a cap of zero, and a form that accepted zero would be a 500.
    */
-  dailyCap: z.number().int().min(0).max(200),
+  dailyCap: z.number().int().min(1).max(200),
   quietStart: clock,
   quietEnd: clock,
   /** §2.4. Default off, and turning it on is owner-only at the route. */

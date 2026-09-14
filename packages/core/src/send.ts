@@ -130,6 +130,16 @@ export interface SendFacts {
   readonly dailyCap: number
   /** §2.4. False means the message goes to the approval queue. */
   readonly autoSend: boolean
+  /**
+   * A person has already read THIS message and said yes.
+   *
+   * Satisfies the approval gate exactly as `autoSend` does, and nothing else:
+   * every §2.1 rule above still runs. That is the whole point of routing an
+   * approved draft back through here rather than straight to the provider —
+   * the human decided the message was right, not that the recipient had not
+   * opted out in the hour since. Absent means false.
+   */
+  readonly approvedByHuman?: boolean
   /** Evaluated against the recipient's zone. */
   readonly now: Date
 }
@@ -241,7 +251,9 @@ export function decideSend(facts: SendFacts): SendDecision {
 
   // 5. The approval gate (§2.4). Everything above passed, so the only question
   //    left is whether a human has to see it — and the default is that they do.
-  if (!facts.autoSend) {
+  //    A human who already has seen it counts, and counts for THIS message
+  //    only: nothing here remembers a decision.
+  if (!facts.autoSend && !facts.approvedByHuman) {
     return refuse(
       'needs_approval',
       'This campaign does not have auto-send, so the message is queued for a person to approve.',

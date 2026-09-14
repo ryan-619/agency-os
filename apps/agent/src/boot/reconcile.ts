@@ -203,3 +203,44 @@ export async function sweepExpired(db: AgencyDb, log: Logger): Promise<number> {
     return 0
   }
 }
+
+/**
+ * A message the last worker claimed and never finished (Phase 4).
+ *
+ * `sending` is the sender tick's claim on a row. A worker that died between
+ * the claim and the provider's answer leaves that row claimed forever, and
+ * nobody can tell whether the mail went. So it is marked `failed`, with a
+ * reason a person can read and act on — the SAFE direction. The alternative,
+ * putting it back to `approved`, is guessing that the provider was not
+ * reached, and being wrong means the recipient gets it twice.
+ *
+ * Scoped by boot time like everything else here: only a claim older than this
+ * process can be one this process did not make.
+ */
+export async function recoverStuckSends(db: AgencyDb, bootAt: Date, log: Logger): Promise<number> {
+  try {
+    const stuck = await db
+      .update(schema.touches)
+      .set({
+        status: 'failed',
+        error: 'The worker restarted while this was being sent. It may or may not have gone; check the mailbox, then re-approve to send it again.',
+      })
+      // `updated_at` is set by a trigger on UPDATE and is NULL until then; the
+      // claim itself is an update, so it is normally set — but a row that
+      // was inserted as `sending` (nothing does, today) would be invisible
+      // to a bare comparison. Coalesce, so "older than the boot" is answered
+      // for every row.
+      .where(
+        and(
+          eq(schema.touches.status, 'sending'),
+          lt(sql`coalesce(${schema.touches.updatedAt}, ${schema.touches.createdAt})`, bootAt),
+        ),
+      )
+      .returning({ id: schema.touches.id })
+    if (stuck.length > 0) log.warn('marked messages the last worker left mid-send as failed', { count: stuck.length })
+    return stuck.length
+  } catch (err) {
+    log.warn('could not recover stuck sends', { error: err instanceof Error ? err.name : 'UnknownError' })
+    return 0
+  }
+}

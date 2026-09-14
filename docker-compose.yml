@@ -124,6 +124,22 @@ services:
       # a writable mount would let anything that reaches the worker rewrite
       # them for every later turn.
       AGENT_SKILLS_DIR: /app/skills
+      # Outreach (§8.4). The worker sends and reads replies; the web app only
+      # queues. Optional — unset means `outreach: disabled` on /readyz.
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      MAIL_FROM: "${MAIL_FROM:-Agency OS <agency-os@localhost>}"
+      IMAP_HOST: ${IMAP_HOST:-}
+      IMAP_PORT: ${IMAP_PORT:-993}
+      IMAP_USER: ${IMAP_USER:-}
+      IMAP_PASSWORD: ${IMAP_PASSWORD:-}
+      IMAP_SECURE: ${IMAP_SECURE:-true}
+      IMAP_MAILBOX: ${IMAP_MAILBOX:-INBOX}
+      OUTREACH_TICK_MS: ${OUTREACH_TICK_MS:-15000}
+      OUTREACH_BATCH: ${OUTREACH_BATCH:-20}
       # §5.4's bounds on one turn, and §8.1's on a conversation.
       AGENT_MAX_TURNS: ${AGENT_MAX_TURNS:-30}
       AGENT_MAX_BUDGET_USD: ${AGENT_MAX_BUDGET_USD:-2}

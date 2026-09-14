@@ -53,12 +53,14 @@ describe('campaignInput', () => {
   })
 
   /**
-   * Zero is how a campaign is paused without changing its status, and it must
-   * be allowed. A negative cap is not a pause, it is a typo.
+   * The database refuses a cap of zero (`campaigns_daily_cap_check`), so the
+   * form must too — otherwise "0" is a 500. A campaign is paused by its
+   * status, not by starving its cap.
    */
-  it('allows a cap of zero and refuses a negative one', () => {
-    expect(campaignInput.safeParse({ ...valid, dailyCap: 0 }).success).toBe(true)
+  it('refuses a cap of zero, as the database does', () => {
+    expect(campaignInput.safeParse({ ...valid, dailyCap: 0 }).success).toBe(false)
     expect(campaignInput.safeParse({ ...valid, dailyCap: -1 }).success).toBe(false)
+    expect(campaignInput.safeParse({ ...valid, dailyCap: 1 }).success).toBe(true)
   })
 
   it('refuses a cap no warmed mailbox would survive', () => {

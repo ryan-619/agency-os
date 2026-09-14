@@ -333,6 +333,31 @@ describe('§2.4 — the approval gate is the default', () => {
   })
 
   /**
+   * A person who has read this message and said yes satisfies the gate the
+   * same way auto-send does — and ONLY the gate. The human decided the message
+   * was right, not that the recipient had not opted out in the hour since.
+   */
+  it('lets a human-approved message through a campaign without auto-send', () => {
+    expect(decideSend(facts({ autoSend: false, approvedByHuman: true }))).toEqual({
+      allowed: true,
+      code: 'send_now',
+    })
+  })
+
+  it.each([
+    ['suppression', { suppressed: true }, 'suppressed'],
+    ['a declined channel', { consent: { granted: false, source: 'reply' } }, 'consent_revoked'],
+    ['quiet hours', { now: new Date('2026-09-15T22:30:00.000Z') }, 'quiet_hours'],
+    ['the daily cap', { sentToday: 25 }, 'daily_cap'],
+    ['an unknown timezone', { recipientTimeZone: null }, 'unknown_timezone'],
+  ])('does not let a human approval past %s either', (_label, over, code) => {
+    const d = decideSend(facts({ autoSend: false, approvedByHuman: true, ...over }))
+    expect(d.allowed).toBe(false)
+    if (d.allowed) return
+    expect(d.code).toBe(code)
+  })
+
+  /**
    * Auto-send is the ONLY check it skips. A campaign with auto-send on is
    * still subject to every §2.1 rule — that switch is about who decides, not
    * about which rules apply.

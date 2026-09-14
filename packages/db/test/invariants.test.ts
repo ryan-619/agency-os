@@ -1014,6 +1014,115 @@ describe('§2 invariants are enforced by the schema', () => {
       })
     })
 
+    /**
+     * 0011. A message may not claim a person approved it without naming the
+     * person and the moment — the same rule 0004 applied to `approvals`. A
+     * message that went out "approved" with nobody's name on it is exactly the
+     * audit gap §2.4 exists to close.
+     */
+    describe('a person’s approval on a draft (0011)', () => {
+      let n = 0
+      /** A fresh member each time, so the RESTRICT test can try to delete one. */
+      const approver = async (): Promise<string> => {
+        n += 1
+        const [{ id }] = await db.driver.select<{ id: string }>(
+          `INSERT INTO users (org_id, email, role) VALUES ($1, $2, 'member') RETURNING id`,
+          [orgId, `approver-${n}@agency.test`],
+        )
+        return id
+      }
+
+      it('refuses status approved with no approver', async () => {
+        const msg = await expectRejection(() =>
+          db.driver.select(
+            `INSERT INTO touches (org_id, company_id, channel, direction, status)
+             VALUES ($1, $2, 'email', 'out', 'approved')`,
+            [orgId, companyId],
+          ),
+        )
+        expect(msg).toContain('touches_approved_has_approver')
+      })
+
+      it('refuses an approver without a time, and a time without an approver', async () => {
+        const who = await approver()
+        // On a row that is NOT approved, so the only rule in play is that the
+        // two columns move together — an approved row without a time trips
+        // `touches_approved_has_approver` first, which is the other test.
+        const noTime = await expectRejection(() =>
+          db.driver.select(
+            `INSERT INTO touches (org_id, company_id, channel, direction, status, approved_by)
+             VALUES ($1, $2, 'email', 'out', 'awaiting_approval', $3)`,
+            [orgId, companyId, who],
+          ),
+        )
+        expect(noTime).toContain('touches_approver_and_time_agree')
+        const noWho = await expectRejection(() =>
+          db.driver.select(
+            `INSERT INTO touches (org_id, company_id, channel, direction, status, approved_at)
+             VALUES ($1, $2, 'email', 'out', 'awaiting_approval', now())`,
+            [orgId, companyId],
+          ),
+        )
+        expect(noWho).toContain('touches_approver_and_time_agree')
+      })
+
+      it('accepts an approval that names who and when', async () => {
+        const who = await approver()
+        const [{ id }] = await db.driver.select<{ id: string }>(
+          `INSERT INTO touches (org_id, company_id, channel, direction, status, approved_by, approved_at)
+           VALUES ($1, $2, 'email', 'out', 'approved', $3, now()) RETURNING id`,
+          [orgId, companyId, who],
+        )
+        expect(id).toBeTruthy()
+      })
+
+      /**
+       * RESTRICT: whoever approved a sent message stays identifiable for as
+       * long as the record of the message does.
+       */
+      it('will not delete a user who approved a message', async () => {
+        const who = await approver()
+        await db.driver.select(
+          `INSERT INTO touches (org_id, company_id, channel, direction, status, approved_by, approved_at)
+           VALUES ($1, $2, 'email', 'out', 'approved', $3, now())`,
+          [orgId, companyId, who],
+        )
+        const msg = await expectRejection(() => db.driver.select(`DELETE FROM users WHERE id = $1`, [who]))
+        expect(msg.length).toBeGreaterThan(0)
+      })
+
+      it('knows the sender’s claim status', async () => {
+        const [{ id }] = await db.driver.select<{ id: string }>(
+          `INSERT INTO touches (org_id, company_id, channel, direction, status)
+           VALUES ($1, $2, 'email', 'out', 'sending') RETURNING id`,
+          [orgId, companyId],
+        )
+        expect(id).toBeTruthy()
+      })
+
+      it('lets only an inbound message answer something', async () => {
+        const [{ id: sent }] = await db.driver.select<{ id: string }>(
+          `INSERT INTO touches (org_id, company_id, channel, direction, status)
+           VALUES ($1, $2, 'email', 'out', 'sent') RETURNING id`,
+          [orgId, companyId],
+        )
+        const msg = await expectRejection(() =>
+          db.driver.select(
+            `INSERT INTO touches (org_id, company_id, channel, direction, status, in_reply_to)
+             VALUES ($1, $2, 'email', 'out', 'sent', $3)`,
+            [orgId, companyId, sent],
+          ),
+        )
+        expect(msg).toContain('touches_only_inbound_replies')
+        const [{ id: reply }] = await db.driver.select<{ id: string }>(
+          `INSERT INTO touches (org_id, company_id, channel, direction, status, in_reply_to)
+           VALUES ($1, $2, 'email', 'in', 'replied', $3) RETURNING id`,
+          [orgId, companyId, sent],
+        )
+        expect(reply).toBeTruthy()
+      })
+    })
+
     it('cascades a deleted org to its business rows rather than orphaning them', async () => {
       const [{ id: doomed }] = await db.driver.select<{ id: string }>(
         `INSERT INTO orgs (name) VALUES ('Doomed') RETURNING id`,
