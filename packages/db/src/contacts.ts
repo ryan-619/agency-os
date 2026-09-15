@@ -17,6 +17,18 @@ import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 
 export type ContactRow = typeof schema.contacts.$inferSelect
+
+/** Postgres's unique_violation, wherever drizzle wrapped it. */
+function isUniqueViolation(err: unknown): boolean {
+  const seen = new Set<unknown>()
+  let cur: unknown = err
+  while (cur && typeof cur === 'object' && !seen.has(cur)) {
+    seen.add(cur)
+    if ((cur as { code?: unknown }).code === '23505') return true
+    cur = (cur as { cause?: unknown }).cause
+  }
+  return false
+}
 export type ConsentRow = typeof schema.consents.$inferSelect
 
 export const contactInput = z.object({
@@ -118,7 +130,21 @@ export async function createContact(
     .limit(1)
   if (company.length === 0) return { ok: false, message: 'That company is not in the CRM.' }
 
-  const rows = await db
+  // `contacts_org_email_key` is on (org_id, lower(email)). Checked first so
+  // the person gets a sentence; caught below so a race gets the same one
+  // rather than a 500.
+  if (email) {
+    const taken = await db
+      .select({ id: schema.contacts.id })
+      .from(schema.contacts)
+      .where(and(eq(schema.contacts.orgId, orgId), sql`lower(${schema.contacts.email}) = ${email}`))
+      .limit(1)
+    if (taken.length > 0) return { ok: false, message: `${email} is already a contact in this CRM.` }
+  }
+
+  let rows
+  try {
+    rows = await db
     .insert(schema.contacts)
     .values({
       orgId,
@@ -133,6 +159,10 @@ export async function createContact(
       source: input.source,
     })
     .returning()
+  } catch (err) {
+    if (isUniqueViolation(err)) return { ok: false, message: `${email} is already a contact in this CRM.` }
+    throw err
+  }
   const contact = rows[0]
   if (!contact) throw new Error('contact insert returned no row')
   return { ok: true, contact }

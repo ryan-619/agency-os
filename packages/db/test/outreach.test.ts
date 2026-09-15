@@ -30,6 +30,7 @@ function countingProvider(): MessageProvider & { sent: { to: string; subject: st
   const sent: { to: string; subject: string }[] = []
   return {
     name: 'test',
+    channels: ['email', 'linkedin', 'sms', 'voice', 'whatsapp'],
     sent,
     async send(m) {
       sent.push({ to: m.to, subject: m.subject })
@@ -77,7 +78,7 @@ describe('the single send path', () => {
     contactId = contact!.id
     const [campaign] = await db
       .insert(schema.campaigns)
-      .values({ orgId, name: 'Q4 security gaps', channel: 'email', autoSend: true, dailyCap: 25 })
+      .values({ orgId, name: 'Q4 security gaps', channel: 'email', autoSend: true, dailyCap: 25, status: 'active' })
       .returning({ id: schema.campaigns.id })
     campaignId = campaign!.id
   }, 30_000)
@@ -307,6 +308,7 @@ describe('the single send path', () => {
     it('records a failure, not a refusal, and re-throws', async () => {
       const broken: MessageProvider = {
         name: 'broken',
+        channels: ['email'],
         async send() {
           throw new Error('SMTP 421 service not available')
         },
@@ -683,6 +685,91 @@ describe('the single send path', () => {
       'Sounds good.\n\n> Reply STOP to unsubscribe',
     ])('does not read %j as an opt-out', (body) => {
       expect(looksLikeOptOut(body)).toBe(false)
+    })
+  })
+
+  describe('findings from review', () => {
+    /**
+     * A LinkedIn draft approved under an email campaign used to have its
+     * channel silently rewritten to email — a message written for one medium
+     * sent through another.
+     */
+    it('refuses to approve a draft under a campaign on a different channel', async () => {
+      const [li] = await db
+        .insert(schema.campaigns)
+        .values({ orgId, name: 'LinkedIn Q4', channel: 'linkedin', autoSend: false, dailyCap: 10, status: 'active' })
+        .returning({ id: schema.campaigns.id })
+      const [draft] = await db
+        .insert(schema.touches)
+        .values({ orgId, companyId, channel: 'linkedin', direction: 'out', status: 'awaiting_approval', subject: 's', body: 'b' })
+        .returning()
+      const wrong = await approveDraft(db, { orgId, touchId: draft!.id, contactId, campaignId, approvedBy: userId })
+      expect(wrong).toEqual({ ok: false, reason: 'wrong_channel' })
+      expect((await touch(draft!.id)).channel).toBe('linkedin')
+      const right = await approveDraft(db, { orgId, touchId: draft!.id, contactId, campaignId: li!.id, approvedBy: userId })
+      expect(right.ok).toBe(true)
+    })
+
+    /**
+     * An SMTP transport carries email and only email. Handed a LinkedIn touch
+     * it would have mailed whatever was in `linkedin_url`, with the email
+     * suppression list never consulted. The row is left exactly as it was.
+     */
+    it('leaves a message on a channel the provider cannot carry untouched', async () => {
+      await db.update(schema.contacts).set({ linkedinUrl: 'https://linkedin.com/in/priya' }).where(eq(schema.contacts.id, contactId))
+      const [li] = await db
+        .insert(schema.campaigns)
+        .values({ orgId, name: 'LinkedIn Q4', channel: 'linkedin', autoSend: true, dailyCap: 10, status: 'active' })
+        .returning({ id: schema.campaigns.id })
+      const [row] = await db
+        .insert(schema.touches)
+        .values({ orgId, companyId, contactId, campaignId: li!.id, channel: 'linkedin', direction: 'out', status: 'queued', subject: 's', body: 'b' })
+        .returning()
+      const emailOnly: MessageProvider = { name: 'smtp-like', channels: ['email'], send: provider.send }
+      const result = await dispatchTouch(db, emailOnly, row!, { now: NOON })
+      expect(result.sent).toBe(false)
+      expect(provider.sent).toEqual([])
+      expect((await touch(row!.id)).status).toBe('queued')
+      // And the due query never offers it to an email-only sender.
+      expect(await dueTouches(db, 10, NOON, ['email'])).toEqual([])
+      expect((await dueTouches(db, 10, NOON, ['linkedin'])).map((t) => t.id)).toEqual([row!.id])
+    })
+
+    /**
+     * A webhook provider retries; an IMAP reconnect re-presents. The same
+     * Message-ID must be one reply, one pause, one audit row.
+     */
+    it('records a reply with the same Message-ID once', async () => {
+      const first = await handleInboundEmail(db, {
+        from: 'priya@rentman.io', subject: 'Re', text: 'yes', messageId: '<abc@rentman.io>', now: NOON,
+      })
+      const again = await handleInboundEmail(db, {
+        from: 'priya@rentman.io', subject: 'Re', text: 'yes', messageId: '<abc@rentman.io>', now: NOON,
+      })
+      expect(first.matched).toBe('contact')
+      expect(again.matched).toBe('message')
+      if (again.matched === 'none' || first.matched === 'none') return
+      expect(again.touchId).toBe(first.touchId)
+      const inbound = await db.select().from(schema.touches).where(eq(schema.touches.direction, 'in'))
+      expect(inbound).toHaveLength(1)
+    })
+
+    /**
+     * `sendOne` claims its freshly inserted row before dispatching, so a tick
+     * that reads the queue in between finds nothing to pick up.
+     */
+    it('claims the row it inserts before the provider sees it', async () => {
+      const slow: MessageProvider = {
+        name: 'slow',
+        channels: ['email'],
+        async send(m) {
+          // While the provider is "on the wire", the queue must not offer the row.
+          expect(await dueTouches(db, 10, NOON)).toEqual([])
+          return provider.send(m)
+        },
+      }
+      const r = await sendOne(db, slow, { orgId, campaignId, contactId, companyId, subject: 's', body: 'b', now: NOON })
+      expect(r.sent).toBe(true)
     })
   })
 

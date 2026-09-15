@@ -253,6 +253,20 @@ describe('against a real engine', () => {
       expect(await listSuppressions(db, orgId)).toHaveLength(1)
     })
 
+    /**
+     * Two replies saying "stop" in the same second are two inserts. The
+     * loser used to throw — out of `recordInboundReply`, after the pause and
+     * before the audit row. Both now succeed, and exactly one row exists.
+     */
+    it('survives two identical suppressions arriving at once', async () => {
+      const results = await Promise.all([
+        addSuppression(db, { orgId, kind: 'email', value: 'stop@example.com', reason: 'first' }),
+        addSuppression(db, { orgId, kind: 'email', value: 'STOP@example.com', reason: 'second' }),
+      ])
+      expect(results.every((r) => r.ok)).toBe(true)
+      expect(await listSuppressions(db, orgId)).toHaveLength(1)
+    })
+
     it('keeps each org’s list separate', async () => {
       await addSuppression(db, { orgId, kind: 'email', value: 'stop@example.com', reason: 'ours' })
       expect(await listSuppressions(db, otherOrgId)).toEqual([])

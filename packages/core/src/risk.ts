@@ -102,6 +102,20 @@ export const AGENCY_TOOL_RISK = {
     'leaves_the_building',
     'Drafts a message intended for someone outside the company.',
   ],
+  // Phase 5. §6 lists all three; Phase 2 withheld them because nothing wrote
+  // the deals table yet and a tool that reliably returns [] teaches the model
+  // a false shape of the business. Phase 4's send path writes deals now.
+  get_pipeline: ['low', 'read_only', 'Reads the deal pipeline: every open deal, its stage and next action.'],
+  update_deal: [
+    'medium',
+    'writes_internal_state',
+    'Moves a deal to another stage or sets its next action. Nothing leaves the building.',
+  ],
+  book_meeting: [
+    'medium',
+    'writes_internal_state',
+    'Records a meeting with a company and moves its deal to the meeting stage. Does not send an invitation.',
+  ],
 } as const satisfies Readonly<Record<string, readonly [Risk, RiskRule, string]>>
 
 export type AgencyToolName = keyof typeof AGENCY_TOOL_RISK

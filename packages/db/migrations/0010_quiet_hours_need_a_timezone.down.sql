@@ -9,7 +9,11 @@
 -- 'failed' first. That LOSES the distinction this migration added — a refusal
 -- reading as a failure afterwards — which is the honest consequence of
 -- reverting and is why it is written down here rather than discovered.
-UPDATE touches SET status = 'failed' WHERE status = 'refused';
+-- Both columns in one statement: `touches_refusal_is_explained` still holds
+-- at this point, and a row that says 'failed' with a refusal code would trip
+-- it. (Corrected before any deployment; the migrator's hash check means a
+-- database that applied the earlier text needs `reset`.)
+UPDATE touches SET status = 'failed', refusal_code = NULL WHERE status = 'refused';
 ALTER TABLE touches DROP CONSTRAINT IF EXISTS touches_status_check;
 ALTER TABLE touches ADD CONSTRAINT touches_status_check
   CHECK (status IN ('queued', 'awaiting_approval', 'approved', 'sent',

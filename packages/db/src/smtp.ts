@@ -58,6 +58,7 @@ export function createSmtpProvider(config: SmtpConfig): MessageProvider {
 
   return {
     name: 'smtp',
+    channels: ['email'],
     async send(message) {
       const info = await get().sendMail({
         from: config.from,
@@ -88,6 +89,7 @@ export function createDryRunProvider(
   const sent: { to: string; subject: string }[] = []
   return {
     name: 'dry-run',
+    channels: ['email', 'linkedin', 'sms', 'voice', 'whatsapp'],
     sent,
     async send(message) {
       sent.push({ to: message.to, subject: message.subject })

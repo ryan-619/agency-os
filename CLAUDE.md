@@ -4,7 +4,7 @@ Internal operating system for a small application-security agency. Read
 [PROMPT.md](PROMPT.md) for the full build spec; this file is the working
 summary a session should read first.
 
-**Current state: Phases 0, 1, 2, 3 and 4 are built.**
+**Current state: Phases 0, 1, 2, 3, 4 and 5 are built.** Phase 6 (voice/SMS) is next.
 
 **Phases 2 and 3's Definitions of Done are not fully proved, both blocked on
 the same thing: the Anthropic account has no credit, so no turn has ever
@@ -16,6 +16,7 @@ mailbox.** Everything below those boundaries IS proved, live:
 | Phase 2 | browser → route → worker → gate → SDK → API, authenticated; refused at billing | one live turn with tool cards |
 | Phase 3 | a connector added in the UI reaches a live turn with no restart — the worker logged `connectors: ["deepwiki (http)"]` for a turn on a worker started *before* that connector existed | the agent CALLING one of its tools |
 | Phase 4 | draft → approved in the UI → deferred for quiet hours (live, 21:50 London) → sent in a real SMTP transaction → deal `contacted` → a reply by Message-ID pauses, ties, moves the deal to `replied` → "unsubscribe" suppresses. One test per §2.1 rule. | deliverability through a real mailbox; IMAP IDLE against a live server; a provider webhook with a real secret |
+| Phase 5 | live, in the browser: a `replied` deal dragged to `meeting` (HTML5 drop → `deal.moved` audit row) → meeting recorded from the company page at 15:00 London, stored as 14:00Z → brief generated from the rows → proposal generated from the scan (8 scope items with evidence, 2 workstreams, USD 9,600–15,600 at a 1,200 day rate) → `sent` → `accepted` closes the deal `won`. A stranger on `/book/agency` became a company, a contact with E.164 phone, three consent rows carrying the form's wording, a meeting, and a deal at `meeting`. | the agent's `book_meeting`/`update_deal` in a live turn (same blocker as Phase 2); a calendar invitation (deliberately not sent from here) |
 
 `npm run smoke:agent` gates Phase 2; `npm run smoke:agent -- --connector <name>`
 gates Phase 3. Run both against an account with credit before calling either
@@ -263,12 +264,14 @@ recorded-session mode, so anything needing the SDK to be *defined* is also
 untestable — and a package that CANNOT import the SDK cannot drag it into the
 Next module graph, which CI builds with no secrets on purpose.
 
-Six tools ship: `get_icp`, `search_companies`, `get_company`, `scan_company`,
-`score_company` (all low risk) and `queue_touch` (high). Three of §6's eight
-deliberately do not: `draft_outreach` belongs with Phase 4's single send path,
-and `get_pipeline`/`update_deal` would read a `deals` table nothing writes — a
-tool that reliably returns `[]` teaches the model a false shape of the business.
-The system prompt redirects the phrase instead.
+Nine tools ship: `get_icp`, `search_companies`, `get_company`, `scan_company`,
+`score_company`, `get_pipeline` (low risk), `update_deal`, `book_meeting`
+(medium — they write internal state, never anything outbound) and
+`queue_touch` (high). `get_pipeline` and `update_deal` arrived with Phase 5,
+once `deals` was a table something writes — before that a tool that reliably
+returned `[]` would have taught the model a false shape of the business.
+`draft_outreach` is the one §6 tool that does not exist by that name: a draft
+is `queue_touch` parked on a human, which is Phase 4's single send path.
 
 ### packages/scanner
 `fetch.ts` does the I/O; `extract.ts` is pure. That split is not cosmetic — it
@@ -296,7 +299,8 @@ check and should be added if the scanner is ever aimed at untrusted input.
 | 1 ✅ | the ICP definition, scoring, tiering, disqualifiers, the `observed` rule |
 | 2 ✅ | risk classification (§5.4), the chat wire types, the freshness rule |
 | 3 ✅ | nothing new — §6 and §7 are assembly, and assembly needs the database |
-| 4 | consent, suppression, quiet hours, daily caps — the one send path |
+| 4 ✅ | consent, suppression, quiet hours, daily caps — the one send path |
+| 5 ✅ | `proposalFromFindings` and `meetingBrief` — the two documents the pipeline writes, pure, refusing stale evidence |
 
 ---
 
@@ -373,13 +377,77 @@ LinkedIn suppression — `suppressions.kind` has no LinkedIn value, so
 `suppressionKeysFor` returns "nothing to check" for that channel honestly,
 and closing it needs a fourth kind and a migration.
 
+### The pipeline (Phase 5, §8.6)
+
+**The board moves cards; the rules do not live on the board.** A drop is one
+`PATCH /api/deals/:id` through `setDealStage` — the one caller allowed to move
+a deal in either direction, because a person said so — and every move writes
+an audit row with the stage it left and the stage it reached; the pipeline's
+history is the audit log, not a column. Everything automatic goes through
+`advanceDeal`, which only moves FORWARD, so a late reply never knocks a booked
+meeting back. `deals_one_open_per_company` (0012) makes two automatic callers
+that both found no deal produce one deal, and the loser re-reads. A drop on
+`lost` asks for the reason first: the route refuses without one, and it is the
+only thing anyone learns from a lost deal. The card also carries a "Move to"
+control that does the same PATCH, so the board works from a keyboard and can
+be driven by a test; the drag handlers were proved with synthetic `DragEvent`s
+in the live browser.
+
+**A proposal is derived, never written.** `proposalFromFindings` in
+`packages/core` turns the latest scan into scope: one item per gap the
+scanner OBSERVED, grouped into workstreams, with the finding's raw evidence
+attached so the buyer can check the scope against their own site. §2.2 governs
+it harder than any other rule: a signal the scanner could not observe is
+listed as *not assessed*, never as fine; a stale scan produces NO proposal —
+the generator refuses with the reason (`stale | unreachable | no_gaps |
+no_scan`), the company page's button says why before it is pressed, and the
+fix is a re-scan. `proposals.scan_id` is `RESTRICT`, so the evidence a sent
+proposal quotes cannot be deleted from under it. Effort is rounded to halves
+ONCE, at the end — rounding each increment compounded the error. Accepting a
+proposal is what closes the deal `won`, through `setDealStage` (it stamps
+`closed_at`; `advanceDeal` only moves the stage).
+
+**The ICP's `why` describes the gap, so it must never be quoted as a
+strength.** The first live brief listed "Already in place: Known-outdated JS
+library served in production" — the opposite of what was observed. Strengths
+are signal keys, and the proposal page says "not the case here (…)" with the
+wording in brackets identified as what the scan looks for.
+
+**A meeting is a wall-clock time somewhere, and the page says where.**
+`meetings.time_zone` is required; `wallClockToInstant` (`apps/web/src/lib/
+wall-clock.ts`) converts the form's local time in the CHOSEN zone, not the
+browser's, and is tested across DST and a half-hour zone. Meeting times are
+rendered with `inZone()` in the meeting's zone — `<When>` renders in the
+viewer's, which showed a 15:00 London call as "19:30 (Europe/London)" on the
+first live brief. Browser-only values (the detected zone, the zone list) are
+set in an effect, never in the first render: Node names a zone
+`Asia/Kolkata` where Chrome says `Asia/Calcutta`, and that was a hydration
+error on the public booking page.
+
+**The booking page is the one place a stranger writes to the database.** It
+is exempt from the cookie gate, bounded field by field, refuses bodies over
+8 KB, reveals nothing about the org but its display name, and does not return
+the meeting id (an id is a thing to enumerate with). The consent rows it
+writes carry the form's exact wording as `evidence`, imported from the same
+module the form renders (`lib/booking-copy.ts`) — a consent whose recorded
+wording is not what the person saw is a claim. A free-mail address does not
+name a company, so the row is `<address>.inbound` named after the person, for
+a human to fix. Rate limiting belongs at the reverse proxy, like `/api/health`.
+
+**Not built:** calendar invitations (a meeting recorded here moves the deal;
+the invite goes from a person's calendar or the calendar connector, and
+`book_meeting`'s summary says so), a proposal PDF or e-mail send (the document
+is the JSON; sending anything is Phase 4's single path), and deal ownership
+(`deals.owner_user_id` exists and nothing sets it yet — a two-person agency
+did not need it to close).
+
 ## 3. Commands
 
 ```bash
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 1153 tests: domain + migrations + invariants + seed + parity + agent + send path
+npm test                 # 1291 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline
 npm run build            # packages, then the Next app
 
 # database (needs DATABASE_URL)
@@ -583,6 +651,31 @@ numbers as literals. The threshold, channels and daily cap shown are whatever
 the active `icp_profiles` row says. A dashboard displaying a threshold the
 engine is not using is the same class of mistake as a finding nobody observed.
 
+**Migration 0010's down file was edited before any deployment.** Its original
+down reverted `refused` rows to `failed` without clearing `refusal_code`,
+which 0009's CHECK forbids, so `db:migrate down` from 0010 could not run. The
+migrator's checksum then refused the corrected file against a local database
+that had applied the old one, which is exactly what it exists to do; the local
+`.pgdata/` was rebuilt from zero. The rule stands — never edit a shipped
+migration — and 0010 had shipped to no database but a developer's.
+
+**Findings from the Phase 4 review, all fixed, listed so nobody re-derives
+them:** a paused or done campaign was still sendable (`campaign_inactive`
+refusal, step 5, humans can resolve it by re-activating); the SMTP provider
+would accept a LinkedIn touch (`MessageProvider.channels`, and `dispatchTouch`
+refuses a channel the provider lacks WITHOUT touching the row); two workers
+could send one row (`sendOne` claims `sending` before dispatch); a contact
+paused between the decision and the send was still sent (`pausedAt`
+re-read before `provider.send`); a draft could be approved into a campaign
+on another channel (`wrong_channel`); a redelivered inbound mail made two
+replies (dedup by inbound `providerId`); a duplicate contact was a 500
+(`isUniqueViolation` → a sentence); `advanceDeal` raced into two open deals
+(0012's partial unique index, loser re-reads); the reconciler's `bootAt` was
+taken before the worker lock, so a second worker could cancel the first's
+turns; a blank consent source passed once the route suffixed it (checked
+before the suffix); and `Japan`, `GMT`, `EST5EDT` — zones the runtime knows
+— were refused by 0010's CHECK (0013 loosens it to the runtime's own test).
+
 **`npm run db:local` exists because `docker compose up` needs Docker.** The
 documented path is compose; a machine without it had no path at all, so
 `tools/local-db.ts` puts `@electric-sql/pglite-socket` in front of PGlite and
@@ -592,8 +685,16 @@ next entry before trusting it for anything involving two connections.
 
 **The local PGlite socket bridge is not a Postgres for concurrency.** It is an
 excellent stand-in for SQL and schema — `npm test` runs the real migrations on
-it — and it is not one for anything involving two sessions. Two limitations
-were found by probing rather than by reasoning, and both fail SILENTLY:
+it — and it is not one for anything involving two sessions. Three limitations
+were found by probing rather than by reasoning, and all three fail SILENTLY:
+
+- **It accepted ONE TCP connection until `maxConnections` was raised.**
+  `@electric-sql/pglite-socket` 0.2.11 defaults `maxConnections` to 1 and
+  applies it as `net.Server.maxConnections`, so the second connection — the
+  web pool's, a CLI's — is answered "Too many connections" and closed, which
+  the client sees as ECONNRESET and Auth.js reports as an `AdapterError` on
+  sign-in. `tools/local-db.ts` passes 64; queries are still serialised onto
+  the one backend by the bridge's own queue.
 
 - **`NOTIFY` is dropped entirely.** `pg.listen()` works in-process, but a
   `pg.Client` over the bridge receives nothing, and the bridge's source has no
@@ -959,10 +1060,12 @@ bills a long conversation several times over.
 
 ### What is deliberately not built
 
-`draft_outreach`, `get_pipeline` and `update_deal` (§6 lists all three). The
-first belongs with Phase 4's single send path; the other two would read a
-`deals` table nothing writes, and §12 forbids a tool that teaches the model a
-false shape of the business.
+`draft_outreach` by that name (§6 lists it): a draft is `queue_touch` parked
+on a human, which is Phase 4's single send path. `get_pipeline` and
+`update_deal` were held back until Phase 5 gave `deals` a writer — §12
+forbids a tool that teaches the model a false shape of the business — and
+ship now, with `book_meeting` beside them; all three write internal state
+only and say in their summary that nothing was sent.
 
 And §6's **skill-upload UI** — see the skills section above for why. Everything
 else in §6 and §7 ships.

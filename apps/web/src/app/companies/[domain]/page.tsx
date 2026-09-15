@@ -3,9 +3,14 @@ import { DEFAULT_STALE_AFTER_DAYS, isStale, parseIcpDefinition } from '@agency/c
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { can } from '@agency/core'
-import { companyThread, listContactsForCompany, openDealFor, type AgencyDb } from '@agency/db/queries'
+import {
+  companyThread, listContactsForCompany, meetingsForCompany, openDealFor, proposalsForCompany, type AgencyDb,
+} from '@agency/db/queries'
 import { ContactsPanel } from '@/components/outreach/contacts'
+import { CompanyActions } from '@/components/pipeline/company-actions'
+import { When } from '@/components/when'
 import { getDb } from '@/lib/db'
+import { inZone } from '@/lib/format'
 import { companyByDomain, icpForOrg, scanWithFindings } from '@/lib/queries'
 
 export const dynamic = 'force-dynamic'
@@ -28,12 +33,14 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
   if (!company) notFound()
 
   const db = getDb() as unknown as AgencyDb
-  const [found, icpRow, contacts, thread, deal] = await Promise.all([
+  const [found, icpRow, contacts, thread, deal, meetings, proposals] = await Promise.all([
     scanWithFindings(user.orgId, company.id),
     icpForOrg(user.orgId),
     listContactsForCompany(db, user.orgId, company.id),
     companyThread(db, user.orgId, company.id, 30),
     openDealFor(db, user.orgId, company.id),
+    meetingsForCompany(db, user.orgId, company.id),
+    proposalsForCompany(db, user.orgId, company.id),
   ])
   const icp = icpRow ? parseIcpDefinition(icpRow.definition) : null
   const staleAfter = icp?.freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
@@ -58,6 +65,19 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
   // without waiting for a scan to relabel it.
   const stale = isStale(found?.scan.ranAt, staleAfter)
   const staleGaps = stale ? gaps : []
+
+  // Whether a proposal can be written, decided HERE from the same facts the
+  // generator refuses on, so the button says why before it is pressed.
+  const canGenerate: { ok: true } | { ok: false; why: string } = !found
+    ? { ok: false, why: 'Scan the company first — a proposal is written from findings.' }
+    : !found.scan.ok
+      ? { ok: false, why: 'The last scan never reached the site; nothing was observed to propose from.' }
+      : stale
+        ? { ok: false, why: `The findings are stale (older than ${staleAfter} days). Re-scan before generating (§2.2).` }
+        : gaps.length === 0
+          ? { ok: false, why: 'No gaps were observed. There is nothing to propose.' }
+          : { ok: true }
+  const principal = { id: user.id, orgId: user.orgId, role: user.role }
 
   const signOutAction = async () => {
     'use server'
@@ -199,9 +219,63 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
           </table>
         </>
       )}
+      <CompanyActions
+        companyId={company.id}
+        companyDomain={company.domain}
+        contacts={contacts.map((c) => ({ id: c.id, name: [c.firstName, c.lastName].filter(Boolean).join(' ') || c.email || 'unnamed' }))}
+        dealStage={deal?.stage ?? null}
+        canWrite={can(principal, 'deals:write')}
+        canGenerate={canGenerate}
+      />
+
+      {meetings.length > 0 || proposals.length > 0 ? (
+        <section className="card" style={{ marginTop: 18 }}>
+          {meetings.length > 0 ? (
+            <>
+              <h2 style={{ marginTop: 0 }}>Meetings</h2>
+              <table>
+                <thead><tr><th>When</th><th>Title</th><th>Source</th><th></th></tr></thead>
+                <tbody>
+                  {meetings.map((m) => (
+                    <tr key={m.id} className={m.cancelledAt ? 'row-stale' : undefined}>
+                      <td className="mono">{inZone(m.startsAt, m.timeZone)}</td>
+                      <td>{m.title ?? '—'}{m.cancelledAt ? <span className="pill pill-stale">cancelled</span> : null}</td>
+                      <td className="mono">{m.source.replace(/_/g, ' ')}</td>
+                      <td><a href={`/meetings/${m.id}`}>Brief →</a></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          ) : null}
+          {proposals.length > 0 ? (
+            <>
+              <h2 style={{ marginTop: meetings.length > 0 ? 22 : 0 }}>Proposals</h2>
+              <table>
+                <thead><tr><th>Title</th><th>Status</th><th>Estimate</th><th>Generated</th></tr></thead>
+                <tbody>
+                  {proposals.map((p) => (
+                    <tr key={p.id}>
+                      <td><a href={`/proposals/${p.id}`}>{p.title}</a></td>
+                      <td><span className={`tag${p.status === 'accepted' ? ' on' : p.status === 'declined' || p.status === 'withdrawn' ? ' warn' : ''}`}>{p.status}</span></td>
+                      <td className="mono">
+                        {p.totalLow != null && p.totalHigh != null
+                          ? `${p.currency} ${p.totalLow.toLocaleString('en-US')}–${p.totalHigh.toLocaleString('en-US')}`
+                          : 'effort only'}
+                      </td>
+                      <td className="mono"><When iso={p.generatedAt.toISOString()} mode="date" /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          ) : null}
+        </section>
+      ) : null}
+
       <ContactsPanel
         companyId={company.id}
-        canWrite={can({ id: user.id, orgId: user.orgId, role: user.role }, 'contacts:write')}
+        canWrite={can(principal, 'contacts:write')}
         contacts={contacts.map((c) => ({
           id: c.id,
           name: [c.firstName, c.lastName].filter(Boolean).join(' ') || c.email || 'unnamed',
@@ -237,7 +311,7 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
                     {t.refusalCode ? ` — ${t.refusalCode.replace(/_/g, ' ')}` : ''}
                   </span>
                   <span className="muted" style={{ fontSize: 12 }}>
-                    {(t.sentAt ?? t.createdAt).toLocaleString()}
+                    <When iso={(t.sentAt ?? t.createdAt).toISOString()} />
                     {t.recipient ? ` · ${t.recipient}` : ''}
                   </span>
                 </div>

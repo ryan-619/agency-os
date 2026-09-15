@@ -51,6 +51,14 @@ export type TouchRow = typeof schema.touches.$inferSelect
  */
 export interface MessageProvider {
   readonly name: string
+  /**
+   * What this provider can carry. An SMTP transport carries email and only
+   * email; handed a LinkedIn touch it would mail whatever was in
+   * `linkedin_url`, with the email suppression list never consulted. Found
+   * by review. `dispatchTouch` refuses a channel the provider does not name,
+   * and the sender never picks one up.
+   */
+  readonly channels: readonly Channel[]
   send(message: {
     readonly to: string
     readonly subject: string
@@ -142,6 +150,24 @@ export async function sendOne(
   const touch = rows[0]
   if (!touch) throw new Error('touch insert returned no row')
 
+  // Claim it before dispatching, exactly as the sender tick does. Between
+  // the insert above and the provider below, a tick could otherwise find
+  // this same `queued` row, claim it, and send it a second time. Found by
+  // review. The claim must succeed here — nothing else has seen the row —
+  // and if it somehow does not, the tick owns it now.
+  const claimed = await db
+    .update(schema.touches)
+    .set({ status: 'sending' })
+    .where(and(eq(schema.touches.id, touch.id), eq(schema.touches.status, 'queued')))
+    .returning({ id: schema.touches.id })
+  if (claimed.length === 0) {
+    return {
+      touchId: touch.id,
+      decision: { allowed: false, code: 'needs_approval', reason: 'The worker picked this message up first; it will report on it.', humanCanResolve: true },
+      sent: false,
+    }
+  }
+
   return dispatchTouch(db, provider, touch, { now })
 }
 
@@ -171,6 +197,23 @@ export async function dispatchTouch(
         allowed: false,
         code: 'needs_approval',
         reason: `A message in status "${touch.status}" cannot be dispatched. Nothing was sent.`,
+        humanCanResolve: true,
+      },
+      sent: false,
+    }
+  }
+
+  // A channel this provider cannot carry is left exactly as it is — not
+  // refused, because a provider that CAN carry it may exist later — and the
+  // caller is told. The sender's due query never hands over such a row in
+  // the first place; this is the guard for a direct caller.
+  if (!provider.channels.includes(touch.channel as Channel)) {
+    return {
+      touchId: touch.id,
+      decision: {
+        allowed: false,
+        code: 'needs_approval',
+        reason: `No configured provider sends ${touch.channel}. Nothing was sent; the message is left as it was.`,
         humanCanResolve: true,
       },
       sent: false,
@@ -210,7 +253,26 @@ export async function dispatchTouch(
     return { touchId: touch.id, decision, sent: false }
   }
 
-  // Past every check. From here the message really does leave the building.
+  // Past every check. One last look before the wire: a reply can land
+  // between `gatherFacts` reading the contact and this line, and the cancel
+  // that reply performs skips rows that are already `sending`. Cheap, and
+  // it closes the window to the width of the provider call itself.
+  if (touch.contactId) {
+    const [fresh] = await db
+      .select({ pausedAt: schema.contacts.pausedAt })
+      .from(schema.contacts)
+      .where(eq(schema.contacts.id, touch.contactId))
+      .limit(1)
+    if (fresh?.pausedAt) {
+      await settle(db, touch.id, { status: 'refused', refusalCode: 'consent_revoked', recipient: facts.recipient })
+      return {
+        touchId: touch.id,
+        decision: { allowed: false, code: 'consent_revoked', reason: 'This contact replied a moment ago. Nothing was sent.', humanCanResolve: false },
+        sent: false,
+      }
+    }
+  }
+
   let providerId: string
   try {
     const sent = await provider.send({
@@ -364,6 +426,7 @@ async function gatherFacts(
     quietEnd: row.campaign.quietEnd,
     dailyCap: row.campaign.dailyCap,
     autoSend: row.campaign.autoSend,
+    campaignStatus: row.campaign.status as SendFacts['campaignStatus'],
     approvedByHuman: touch.status === 'approved' && touch.approvedBy !== null,
     now,
   }
@@ -521,7 +584,7 @@ export type DraftDecision =
   | { readonly ok: true; readonly touch: TouchRow }
   | {
       readonly ok: false
-      readonly reason: 'not_found' | 'already_decided' | 'no_such_contact' | 'no_such_campaign' | 'wrong_company'
+      readonly reason: 'not_found' | 'already_decided' | 'no_such_contact' | 'no_such_campaign' | 'wrong_company' | 'wrong_channel'
     }
 
 /**
@@ -581,6 +644,11 @@ export async function approveDraft(
     .limit(1)
   const campaign = campaignRows[0]
   if (!campaign) return { ok: false, reason: 'no_such_campaign' }
+
+  // A LinkedIn draft approved under an email campaign is not "an email now"
+  // — it is a message written for one medium sent through another. Found by
+  // review: the row's channel used to be silently rewritten to the campaign's.
+  if (campaign.channel !== touch.channel) return { ok: false, reason: 'wrong_channel' }
 
   const updated = await db
     .update(schema.touches)
@@ -675,7 +743,14 @@ export async function denyDraft(
  * inside `dispatchTouch`, the batch size here is about fairness, not about
  * volume.
  */
-export async function dueTouches(db: AgencyDb, limit: number, now: Date = new Date()): Promise<TouchRow[]> {
+export async function dueTouches(
+  db: AgencyDb,
+  limit: number,
+  now: Date = new Date(),
+  /** The channels the caller's provider can carry. Others are left alone. */
+  channels: readonly Channel[] = ['email'],
+): Promise<TouchRow[]> {
+  if (channels.length === 0) return []
   return db
     .select()
     .from(schema.touches)
@@ -683,6 +758,7 @@ export async function dueTouches(db: AgencyDb, limit: number, now: Date = new Da
       and(
         eq(schema.touches.direction, 'out'),
         inArray(schema.touches.status, ['approved', 'queued']),
+        inArray(schema.touches.channel, [...channels]),
         or(isNull(schema.touches.scheduledFor), lte(schema.touches.scheduledFor, now)),
       ),
     )
@@ -911,6 +987,20 @@ export async function handleInboundEmail(
 ): Promise<InboundOutcome> {
   const from = normaliseEmail(mail.from)
   if (!from) return { matched: 'none', why: 'the From address could not be read' }
+
+  // 0. Seen before. A webhook provider retries on any non-2xx and sometimes
+  //    on a slow 2xx, and an IMAP reconnect can re-present a message; the
+  //    Message-ID is the same each time, so the reply is recorded once.
+  if (mail.messageId) {
+    const dup = await db
+      .select({ id: schema.touches.id, orgId: schema.touches.orgId, contactId: schema.touches.contactId })
+      .from(schema.touches)
+      .where(and(eq(schema.touches.direction, 'in'), eq(schema.touches.providerId, mail.messageId)))
+      .limit(1)
+    if (dup[0]?.contactId) {
+      return { matched: 'message', contactId: dup[0].contactId, orgId: dup[0].orgId, touchId: dup[0].id, paused: false, suppressed: false }
+    }
+  }
 
   // 1. By the message it answers.
   const refs = (mail.references ?? []).map((r) => r.trim()).filter(Boolean)

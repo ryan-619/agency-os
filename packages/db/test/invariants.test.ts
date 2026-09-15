@@ -883,7 +883,7 @@ describe('§2 invariants are enforced by the schema', () => {
      * other by half an hour.
      */
     describe('a recipient’s timezone (0010)', () => {
-      it.each(['Europe/London', 'America/New_York', 'Asia/Kolkata', 'UTC', 'America/Argentina/Salta'])(
+      it.each(['Europe/London', 'America/New_York', 'Asia/Kolkata', 'UTC', 'America/Argentina/Salta', 'Japan', 'GMT', 'EST5EDT'])(
         'accepts the IANA zone %j',
         async (zone) => {
           const [{ id }] = await db.driver.select<{ id: string }>(
@@ -901,7 +901,7 @@ describe('§2 invariants are enforced by the schema', () => {
        * the shapes that are obviously not zones, so a country name typed into
        * the field fails where somebody typed it.
        */
-      it.each(['United States', 'GMT+5', 'Pacific Time', '', 'Europe London'])(
+      it.each(['United States', 'Pacific Time', '', 'Europe London', 'Europe/London; DROP'])(
         'refuses %j, which is not a zone name',
         async (bad) => {
           const msg = await expectRejection(() =>

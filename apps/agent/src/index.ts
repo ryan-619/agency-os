@@ -42,7 +42,6 @@ import { inspectSkillsRoot } from './runtime/skills.js'
 async function main(): Promise<void> {
   const env = loadEnv()
   const log = createLogger(env.LOG_LEVEL)
-  const bootAt = new Date()
 
   let pool: Pool | null = null
   // Nothing below exists yet, which is the point: /livez answers immediately
@@ -72,6 +71,11 @@ async function main(): Promise<void> {
   }
 
   lock = await acquireWorkerLock({ connectionString: env.DATABASE_URL, log })
+  // Stamped AFTER the lock. Everything before this instant is the outgoing
+  // worker's — including a message it claimed during the seconds this one
+  // spent waiting for the lock, which a stamp taken at process start would
+  // have read as this worker's own and left mid-send forever. Found by review.
+  const bootAt = new Date()
   await reconcileAfterRestart(db, bootAt, log)
   await recoverStuckSends(db, bootAt, log)
 

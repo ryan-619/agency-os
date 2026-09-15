@@ -66,7 +66,7 @@ export async function runSenderTick(deps: SenderDeps): Promise<TickSummary> {
 
   let due
   try {
-    due = await dueTouches(deps.db, deps.batch, now)
+    due = await dueTouches(deps.db, deps.batch, now, deps.provider.channels)
   } catch (err) {
     deps.log.warn('sender could not read the queue', {
       error: err instanceof Error ? err.name : 'UnknownError',
@@ -76,6 +76,10 @@ export async function runSenderTick(deps: SenderDeps): Promise<TickSummary> {
   summary.picked = due.length
 
   for (const touch of due) {
+    // The clock is read per row, not per tick: with a slow provider a batch
+    // can straddle midnight or the edge of a quiet window, and every row was
+    // stamped and judged as if it went at the tick's first instant.
+    const now = deps.now?.() ?? new Date()
     // Claim it. `sending` is a status the CHECK knows (0011), and the
     // predicate is what makes a second worker's identical pick match nothing.
     // The ORIGINAL row is what goes to `dispatchTouch`, so it still reads as
@@ -107,8 +111,8 @@ export async function runSenderTick(deps: SenderDeps): Promise<TickSummary> {
        * neither needs to be: the tick re-checks the real rule when it arrives,
        * and a message that is still too early is deferred again.
        */
-      if (code === 'quiet_hours' || code === 'daily_cap') {
-        const retryAt = new Date(now.getTime() + (code === 'daily_cap' ? 6 : 1) * 60 * 60 * 1000)
+      if (code === 'quiet_hours' || code === 'daily_cap' || code === 'campaign_inactive') {
+        const retryAt = new Date(now.getTime() + (code === 'quiet_hours' ? 1 : 6) * 60 * 60 * 1000)
         await deps.db
           .update(schema.touches)
           .set({ status: touch.status, refusalCode: null, scheduledFor: retryAt })
@@ -136,13 +140,23 @@ export async function runSenderTick(deps: SenderDeps): Promise<TickSummary> {
 /** Start the tick. Returns a stop function that resolves once no tick is mid-flight. */
 export function startSender(deps: SenderDeps & { readonly intervalMs: number }): () => Promise<void> {
   let inFlight: Promise<unknown> = Promise.resolve()
+  let queued = false
   let stopped = false
 
   const timer = setInterval(() => {
-    if (stopped) return
-    // Never overlap: a slow provider must not produce two concurrent ticks
-    // both holding the same rows.
-    inFlight = inFlight.then(() => runSenderTick(deps)).catch(() => {})
+    if (stopped || queued) return
+    // Never overlap, and never QUEUE more than one: with a slow provider the
+    // old chain grew a tick per interval, and every one of them ran after
+    // stop() had been called — claiming and sending during shutdown. Found
+    // by review. One tick may wait behind the one in flight; the rest are
+    // skipped, and the next interval tries again.
+    queued = true
+    inFlight = inFlight
+      .then(() => {
+        queued = false
+        return stopped ? undefined : runSenderTick(deps)
+      })
+      .catch(() => {})
   }, deps.intervalMs)
   timer.unref()
 

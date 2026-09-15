@@ -1,7 +1,8 @@
 import { redirect } from 'next/navigation'
 import { can, parseIcpDefinition } from '@agency/core'
+import { and, eq, inArray } from 'drizzle-orm'
 import {
-  listCampaigns, listContactsForCompany, pendingApprovals, pendingDrafts, type AgencyDb,
+  listCampaigns, listContactsForCompany, pendingApprovals, pendingDrafts, schema, type AgencyDb,
 } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
@@ -50,6 +51,17 @@ export default async function ApprovalsPage() {
       companyIds.map(async (id) => [id, await listContactsForCompany(db, user.orgId, id)] as const),
     ),
   )
+  // The send path falls back to the company's zone when the contact has none
+  // (0010), so the page must too — or it refuses to offer people the worker
+  // would happily send to. Found by review.
+  const companyZones = new Map(
+    (
+      await db
+        .select({ id: schema.companies.id, timeZone: schema.companies.timeZone })
+        .from(schema.companies)
+        .where(and(eq(schema.companies.orgId, user.orgId), inArray(schema.companies.id, companyIds.length ? companyIds : ['00000000-0000-4000-8000-000000000000'])))
+    ).map((c) => [c.id, c.timeZone] as const),
+  )
   const draftViews: DraftView[] = drafts.map((d) => ({
     id: d.touch.id,
     channel: d.touch.channel,
@@ -61,14 +73,15 @@ export default async function ApprovalsPage() {
       const name = [c.firstName, c.lastName].filter(Boolean).join(' ') || c.email || 'unnamed'
       const address = d.touch.channel === 'linkedin' ? c.linkedinUrl : c.email
       const declined = c.consents.find((k) => k.channel === d.touch.channel && !k.granted)
+      const zone = c.timeZone ?? (d.company ? companyZones.get(d.company.id) ?? null : null)
       const why = !address
         ? `no ${d.touch.channel === 'linkedin' ? 'LinkedIn profile' : 'email address'}`
         : c.pausedAt
-          ? 'paused — they replied'
+          ? `paused — ${c.pausedReason ?? 'by a person'}`
           : declined
             ? 'declined this channel'
-            : !c.timeZone
-              ? 'no timezone, so quiet hours cannot be checked'
+            : !zone
+              ? 'no timezone on them or their company, so quiet hours cannot be checked'
               : null
       return { id: c.id, label: address ? `${name} <${address}>` : name, reachable: why === null, why }
     }),

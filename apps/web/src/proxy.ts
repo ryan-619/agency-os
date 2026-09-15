@@ -20,7 +20,13 @@ import type { NextRequest } from 'next/server'
  * everything when the secret is unset. Found by probing rather than by
  * reading — the first live POST came back as a 307 to /signin.
  */
-const PUBLIC = ['/signin', '/api/auth', '/api/health', '/api/inbound']
+/**
+ * `/book` and `/api/book` are the public booking page (§8.6): an inbound lead
+ * has no account and never will. The route validates everything it is given,
+ * creates rows only under the org whose slug is in the URL, and writes an
+ * audit row — see packages/db/src/booking.ts for what it refuses to guess.
+ */
+const PUBLIC = ['/signin', '/api/auth', '/api/health', '/api/inbound', '/book', '/api/book']
 
 export default function proxy(req: NextRequest): NextResponse {
   const { pathname } = req.nextUrl

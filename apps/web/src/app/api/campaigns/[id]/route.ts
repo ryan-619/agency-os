@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { assertCan } from '@agency/core'
+import { assertCan, can } from '@agency/core'
 import { appendAudit, campaignInput, readCampaign, updateCampaign, type AgencyDb } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
@@ -66,8 +66,20 @@ export async function PATCH(
     }
   }
 
-  const updated = await updateCampaign(db, user.orgId, id, parsed.data)
-  if (!updated) return NextResponse.json({ error: 'No such campaign.' }, { status: 404 })
+  // A caller who may not switch auto-send on writes with `current.autoSend`
+  // in the predicate: if an owner turned it off between this caller's read
+  // and their save, the UPDATE matches nothing rather than turning it back
+  // on. An owner is not gated, so nothing is checked for them.
+  const mayToggle = can(principal, 'campaigns:set_auto_send')
+  const updated = await updateCampaign(db, user.orgId, id, parsed.data, mayToggle ? null : current.autoSend)
+  if (!updated) {
+    const still = await readCampaign(db, user.orgId, id)
+    if (!still) return NextResponse.json({ error: 'No such campaign.' }, { status: 404 })
+    return NextResponse.json(
+      { error: 'Someone changed this campaign’s auto-send while you were editing. Reload and try again.' },
+      { status: 409 },
+    )
+  }
 
   await appendAudit(db, {
     orgId: user.orgId,

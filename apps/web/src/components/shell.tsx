@@ -9,16 +9,15 @@ export interface ShellUser {
 }
 
 /**
- * The sidebar every signed-in page sits inside. Phases that have not been
- * built are shown but not linked — an honest map of the product, rather than
- * a nav that pretends.
+ * The sidebar every signed-in page sits inside. Every link here is a page
+ * that exists; a phase that has not been built is not shown as if it had.
  */
 export function Shell({
   user, orgName, current, children, signOut, pendingApprovals = 0,
 }: {
   user: ShellUser
   orgName: string
-  current: 'dashboard' | 'companies' | 'chat' | 'approvals' | 'campaigns' | 'suppressions' | 'connectors' | 'agents'
+  current: 'dashboard' | 'companies' | 'chat' | 'approvals' | 'campaigns' | 'suppressions' | 'connectors' | 'agents' | 'pipeline'
   children: React.ReactNode
   signOut: () => Promise<void>
   /**
@@ -42,6 +41,7 @@ export function Shell({
             Approvals
             {pendingApprovals > 0 ? <em className="badge">{pendingApprovals}</em> : null}
           </a>
+          <a href="/pipeline" className={current === 'pipeline' ? 'on' : undefined}>Pipeline</a>
           <a href="/campaigns" className={current === 'campaigns' ? 'on' : undefined}>Campaigns</a>
           <a href="/suppressions" className={current === 'suppressions' ? 'on' : undefined}>
             Suppressions
@@ -50,7 +50,6 @@ export function Shell({
             Connectors
           </a>
           <a href="/settings/agents" className={current === 'agents' ? 'on' : undefined}>Agents</a>
-          <span>Pipeline <em className="phase-tag">phase 5</em></span>
         </nav>
 
         <div className="who">

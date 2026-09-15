@@ -78,7 +78,9 @@ export default async function Dashboard() {
     <Shell user={user} orgName={org?.name ?? 'Agency'} current="dashboard" signOut={signOutAction}>
         <h1>Dashboard</h1>
         <p className="lede">
-          Phase 1 — data core. Companies can be imported, scanned and scored; nothing reaches out yet.
+          Companies are found, scanned from the outside and scored; the agent researches and drafts
+          under a human gate; outreach goes out through one send path; the pipeline runs from reply to
+          proposal. Nothing sends, calls or texts without a person or a recorded consent.
         </p>
 
         <div className="cards">
@@ -106,12 +108,11 @@ export default async function Dashboard() {
 
         <h2>What is not built yet</h2>
         <div className="note">
-          <strong>Phase 1 ends here, deliberately.</strong>
+          <strong>Phases 0–5 are built. Two things are deliberately not.</strong>
           <ul>
-            <li>Scanning, scoring and the company detail page are built — run <code>npm run scan</code>.</li>
-            <li>Nothing sources new companies automatically yet; import a CSV or add them by hand.</li>
-            <li>The agent chat panel, the approval queue and audit logging arrive in Phase 2.</li>
-            <li>Nothing in this system can send a message yet. The send path lands in Phase 4.</li>
+            <li>Voice and SMS (Phase 6) — inbound only, and only after A2P 10DLC registration clears. Nothing here can place a call or send a text.</li>
+            <li>Nothing sources new companies on its own; import a CSV, add them by hand, or let the agent search a connector and put what it finds on the board through the gate.</li>
+            <li>Calendar invitations are not sent from here — a meeting recorded here moves the deal, and the invite goes from your calendar or the calendar connector.</li>
           </ul>
         </div>
     </Shell>

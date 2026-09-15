@@ -7,6 +7,8 @@
 export * from './spec.js'
 export { getIcp, searchCompanies, getCompany } from './read.js'
 export { scanCompany, scoreCompanyTool, queueTouch } from './write.js'
+export { getPipeline, updateDeal, bookMeeting } from './pipeline.js'
+import { getPipeline, updateDeal, bookMeeting } from './pipeline.js'
 
 import { AGENCY_TOOL_NAMES } from '@agency/core'
 import type { AgencyToolSpec } from './spec.js'
@@ -31,6 +33,9 @@ export const AGENCY_TOOLS: readonly AgencyToolSpec[] = [
   scanCompany,
   scoreCompanyTool,
   queueTouch,
+  getPipeline,
+  updateDeal,
+  bookMeeting,
 ] as unknown as readonly AgencyToolSpec[]
 
 export { AGENCY_TOOL_NAMES }

@@ -54,6 +54,8 @@ export function ContactsPanel({
         return
       }
       window.location.reload()
+    } catch {
+      setErrors((e) => ({ ...e, [id]: 'The request did not complete. Try again.' }))
     } finally {
       setBusy(null)
     }
@@ -63,7 +65,11 @@ export function ContactsPanel({
     const source = window.prompt(
       `Where did this ${granted ? 'consent' : 'refusal'} for ${channel} come from? (a form, a call, a reply — it is recorded)`,
     )
-    if (!source?.trim()) return
+    if (source === null) return
+    if (!source.trim()) {
+      setErrors((e) => ({ ...e, [id]: 'A consent needs a source — where it came from is the record.' }))
+      return
+    }
     setBusy(id)
     try {
       const res = await fetch(`/api/contacts/${id}/consent`, {
@@ -77,6 +83,8 @@ export function ContactsPanel({
         return
       }
       window.location.reload()
+    } catch {
+      setErrors((e) => ({ ...e, [id]: 'The request did not complete. Try again.' }))
     } finally {
       setBusy(null)
     }

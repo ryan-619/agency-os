@@ -31,6 +31,7 @@ function facts(over: Partial<SendFacts> = {}): SendFacts {
     quietEnd: '08:00',
     sentToday: 0,
     dailyCap: 25,
+    campaignStatus: 'active',
     autoSend: true,
     now: NOON_UTC,
     ...over,
@@ -320,6 +321,41 @@ describe('§2.1 rule 4 — the daily cap', () => {
     const d = decideSend(facts({ sentToday: 0, dailyCap: 0 }))
     expect(d.allowed).toBe(false)
     if (!d.allowed) expect(d.code).toBe('daily_cap')
+  })
+})
+
+describe('the campaign’s own status', () => {
+  /**
+   * Found by review: the campaign form offered draft / active / paused / done
+   * and the send path read none of them — a paused campaign kept sending.
+   * Only `active` sends. A pause is a deferral, not a death: the sender puts
+   * the message back and tries again after the campaign is reactivated.
+   */
+  it.each(['draft', 'paused', 'done'] as const)('refuses to send from a %s campaign', (campaignStatus) => {
+    const d = decideSend(facts({ campaignStatus }))
+    expect(d.allowed).toBe(false)
+    if (d.allowed) return
+    expect(d.code).toBe('campaign_inactive')
+    expect(d.humanCanResolve).toBe(true)
+    expect(d.reason).toContain(campaignStatus)
+  })
+
+  it('sends from an active one', () => {
+    expect(decideSend(facts({ campaignStatus: 'active' })).allowed).toBe(true)
+  })
+
+  /**
+   * After the per-person rules — a suppressed recipient in a paused campaign
+   * is logged as suppressed, which is the reason that matters — and before
+   * the approval gate, so nobody is asked to approve what will not send.
+   */
+  it('reports the person’s rule first, and the campaign before the gate', () => {
+    const suppressed = decideSend(facts({ campaignStatus: 'paused', suppressed: true }))
+    expect(suppressed.allowed).toBe(false)
+    if (!suppressed.allowed) expect(suppressed.code).toBe('suppressed')
+    const paused = decideSend(facts({ campaignStatus: 'paused', autoSend: false }))
+    expect(paused.allowed).toBe(false)
+    if (!paused.allowed) expect(paused.code).toBe('campaign_inactive')
   })
 })
 

@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { When } from '@/components/when'
 import {
   emptyChat, parseFrame, reduceChat, withUserMessage,
   type ApprovalBlock, type Block, type ChatState, type NoticeBlock, type TextBlock, type ToolBlock,
@@ -380,7 +381,7 @@ function ApprovalCard({
               Deny
             </button>
             <span className="muted">
-              Expires {new Date(block.expiresAt).toLocaleTimeString()}. Nothing happens until you decide.
+              Expires <When iso={block.expiresAt} mode="time" />. Nothing happens until you decide.
             </span>
           </div>
         ) : (

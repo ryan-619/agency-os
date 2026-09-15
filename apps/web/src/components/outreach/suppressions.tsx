@@ -101,13 +101,21 @@ export function SuppressionsPanel({
 
   const resume = async (p: PausedView): Promise<void> => {
     setBusy(p.id)
+    setError('')
     try {
       const res = await fetch(`/api/contacts/${p.id}`, {
         method: 'PATCH',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ action: 'resume' }),
       })
-      if (res.ok) window.location.reload()
+      if (res.ok) {
+        window.location.reload()
+        return
+      }
+      const body = (await res.json().catch(() => ({}))) as { error?: string }
+      setError(body.error ?? 'That did not work.')
+    } catch {
+      setError('The request did not complete. Try again.')
     } finally {
       setBusy(null)
     }

@@ -33,6 +33,8 @@ const id = () => uuid('id').primaryKey().defaultRandom()
 export const orgs = pgTable('orgs', {
   id: id(),
   name: text('name').notNull(),
+  /** The public booking page lives at /book/<slug>. NULL means none (0012). */
+  bookingSlug: text('booking_slug').unique(),
   ...timestamps,
 })
 
@@ -311,12 +313,71 @@ export const deals = pgTable(
   (t) => [
     index('deals_org_stage_idx').on(t.orgId, t.stage),
     index('deals_company_idx').on(t.companyId),
+    uniqueIndex('deals_one_open_per_company').on(t.orgId, t.companyId),
   ],
 )
 
 // ---------------------------------------------------------------------------
 // Outreach
 // ---------------------------------------------------------------------------
+
+export const meetings = pgTable(
+  'meetings',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    companyId: uuid('company_id').notNull().references(() => companies.id, { onDelete: 'cascade' }),
+    /** SET NULL: the meeting happened even if the person's row is removed. */
+    contactId: uuid('contact_id').references(() => contacts.id, { onDelete: 'set null' }),
+    dealId: uuid('deal_id').references(() => deals.id, { onDelete: 'set null' }),
+    title: text('title'),
+    startsAt: timestamp('starts_at', { withTimezone: true }).notNull(),
+    endsAt: timestamp('ends_at', { withTimezone: true }),
+    /** A meeting is a wall-clock commitment; the zone says which "2 o'clock". */
+    timeZone: text('time_zone').notNull(),
+    /** 'manual' | 'agent' | 'booking_page' */
+    source: text('source').notNull().default('manual'),
+    /** The calendar event id or the booking request id. Never a credentialed link. */
+    externalRef: text('external_ref'),
+    notes: text('notes'),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    index('meetings_org_starts_idx').on(t.orgId, t.startsAt),
+    index('meetings_company_idx').on(t.companyId, t.startsAt.desc()),
+  ],
+)
+
+export const proposals = pgTable(
+  'proposals',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    companyId: uuid('company_id').notNull().references(() => companies.id, { onDelete: 'cascade' }),
+    dealId: uuid('deal_id').references(() => deals.id, { onDelete: 'set null' }),
+    /** The scan the scope was written from. RESTRICT: the evidence stays
+     *  readable as long as the proposal does (0012, the 0006 discipline). */
+    scanId: uuid('scan_id').notNull().references(() => scans.id, { onDelete: 'restrict' }),
+    /** 'draft' | 'sent' | 'accepted' | 'declined' | 'withdrawn' */
+    status: text('status').notNull().default('draft'),
+    title: text('title').notNull(),
+    /** The generated `Proposal` from packages/core, whole. */
+    document: jsonb('document').notNull(),
+    currency: text('currency').notNull().default('USD'),
+    totalLow: integer('total_low'),
+    totalHigh: integer('total_high'),
+    generatedAt: timestamp('generated_at', { withTimezone: true }).notNull().defaultNow(),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    decidedAt: timestamp('decided_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    index('proposals_org_status_idx').on(t.orgId, t.status, t.createdAt.desc()),
+    index('proposals_company_idx').on(t.companyId, t.createdAt.desc()),
+  ],
+)
 
 export const campaigns = pgTable(
   'campaigns',
@@ -388,7 +449,8 @@ export const touches = pgTable(
     index('touches_contact_idx').on(t.contactId, t.createdAt.desc()),
     index('touches_company_idx').on(t.companyId, t.createdAt.desc()),
     index('touches_refused_idx').on(t.orgId, t.refusalCode, t.createdAt.desc()),
-    index('touches_provider_id_idx').on(t.orgId, t.providerId),
+    index('touches_out_by_provider_id_idx').on(t.providerId),
+    index('touches_in_by_provider_id_idx').on(t.providerId),
     index('touches_due_idx').on(t.status, t.scheduledFor),
   ],
 )

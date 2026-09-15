@@ -88,6 +88,11 @@ export async function POST(
           'one company’s findings and cannot be sent to another.',
         400,
       ],
+      wrong_channel: [
+        'That campaign is for a different channel from this draft. A message written for one medium ' +
+          'is not sent through another; choose a campaign on the same channel.',
+        400,
+      ],
     }
     const [message, status] = messages[r.reason]
     return NextResponse.json({ error: message, reason: r.reason }, { status })

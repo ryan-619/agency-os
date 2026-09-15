@@ -71,6 +71,7 @@ export type SendRefusalCode =
   | 'quiet_hours'
   | 'unknown_timezone'
   | 'daily_cap'
+  | 'campaign_inactive'
   | 'needs_approval'
 
 export interface SendRefusal {
@@ -128,6 +129,13 @@ export interface SendFacts {
   /** How many messages this campaign has already sent today. */
   readonly sentToday: number
   readonly dailyCap: number
+  /**
+   * The campaign's own status. Only `active` sends. A `paused` campaign is
+   * exactly what somebody reaches for when something is wrong, and a
+   * campaign builder whose Pause button changed nothing was found by review:
+   * the status was offered by the form and honoured nowhere.
+   */
+  readonly campaignStatus: 'draft' | 'active' | 'paused' | 'done'
   /** §2.4. False means the message goes to the approval queue. */
   readonly autoSend: boolean
   /**
@@ -249,7 +257,24 @@ export function decideSend(facts: SendFacts): SendDecision {
     )
   }
 
-  // 5. The approval gate (§2.4). Everything above passed, so the only question
+  // 5. The campaign itself. After the per-person rules, so a suppressed
+  //    recipient in a paused campaign is still logged as suppressed — the
+  //    reason that matters — and before the approval gate, because a person
+  //    should not be asked to approve a message its campaign will not send.
+  if (facts.campaignStatus !== 'active') {
+    return refuse(
+      'campaign_inactive',
+      `This campaign is ${facts.campaignStatus}, so nothing in it is sent. ` +
+        (facts.campaignStatus === 'paused'
+          ? 'It will resume when the campaign is set active again.'
+          : facts.campaignStatus === 'draft'
+            ? 'Set it active to start sending.'
+            : 'It is finished.'),
+      true,
+    )
+  }
+
+  // 6. The approval gate (§2.4). Everything above passed, so the only question
   //    left is whether a human has to see it — and the default is that they do.
   //    A human who already has seen it counts, and counts for THIS message
   //    only: nothing here remembers a decision.

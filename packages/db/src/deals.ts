@@ -72,6 +72,10 @@ export async function advanceDeal(
   const existing = await openDealFor(db, args.orgId, args.companyId)
 
   if (!existing) {
+    // `deals_one_open_per_company` (0012) arbitrates two callers that both
+    // found nothing: one insert wins, the other re-reads the winner's row and
+    // proceeds as an advance. Without it a send and a reply landing together
+    // left the company with two open deals.
     const rows = await db
       .insert(schema.deals)
       .values({
@@ -80,10 +84,16 @@ export async function advanceDeal(
         stage: args.to,
         nextAction: args.nextAction ?? null,
       })
+      .onConflictDoNothing({
+        target: [schema.deals.orgId, schema.deals.companyId],
+        where: sql`closed_at IS NULL`,
+      })
       .returning()
     const deal = rows[0]
-    if (!deal) throw new Error('deal insert returned no row')
-    return { deal, outcome: 'created' }
+    if (deal) return { deal, outcome: 'created' }
+    const winner = await openDealFor(db, args.orgId, args.companyId)
+    if (!winner) throw new Error('deal insert conflicted but no open deal was found')
+    return advanceDeal(db, args)
   }
 
   if (RANK[args.to] <= RANK[existing.stage as DealStage]) {
@@ -140,4 +150,26 @@ export async function listDeals(db: AgencyDb, orgId: string): Promise<DealRow[]>
     .from(schema.deals)
     .where(eq(schema.deals.orgId, orgId))
     .orderBy(desc(schema.deals.updatedAt), desc(schema.deals.createdAt))
+}
+
+export interface BoardDeal extends DealRow {
+  readonly companyDomain: string
+  readonly companyName: string | null
+}
+
+/**
+ * Every deal in an org with the company it is about, for the board.
+ *
+ * Closed deals are included: `won` and `lost` are columns, and a board that
+ * hid its outcomes would be a to-do list. The page decides how far back to
+ * show them.
+ */
+export async function listDealsForBoard(db: AgencyDb, orgId: string): Promise<BoardDeal[]> {
+  const rows = await db
+    .select({ deal: schema.deals, companyDomain: schema.companies.domain, companyName: schema.companies.name })
+    .from(schema.deals)
+    .innerJoin(schema.companies, eq(schema.companies.id, schema.deals.companyId))
+    .where(eq(schema.deals.orgId, orgId))
+    .orderBy(desc(schema.deals.updatedAt), desc(schema.deals.createdAt))
+  return rows.map((r) => ({ ...r.deal, companyDomain: r.companyDomain, companyName: r.companyName }))
 }

@@ -26,7 +26,11 @@ const request = (path: string, cookie?: string): NextRequest =>
   })
 
 describe('the cookie gate', () => {
-  it.each(['/signin', '/signin/check-email', '/api/auth/session', '/api/auth/callback/nodemailer', '/api/health'])(
+  it.each([
+    '/signin', '/signin/check-email', '/api/auth/session', '/api/auth/callback/nodemailer', '/api/health',
+    // The booking page (§8.6): an inbound lead has no account.
+    '/book/agency-intro', '/api/book/agency-intro',
+  ])(
     'lets anonymous traffic reach %s',
     (path) => {
       const res = proxy(request(path))
@@ -72,7 +76,7 @@ describe('the cookie gate', () => {
    * not the public routes, and a startsWith without the slash would let them
    * through.
    */
-  it.each(['/signinx', '/api/healthz', '/api/inboundish'])('does not exempt the lookalike %s', (path) => {
+  it.each(['/signinx', '/api/healthz', '/api/inboundish', '/booking', '/api/bookings'])('does not exempt the lookalike %s', (path) => {
     expect(proxy(request(path)).status).toBe(307)
   })
 })

@@ -59,7 +59,9 @@ describe('the sender tick', () => {
     contactId = contact!.id
     const [campaign] = await db
       .insert(schema.campaigns)
-      .values({ orgId, name: 'Q4', channel: 'email', autoSend: false, dailyCap: 25 })
+      // `status` defaults to 'draft', and a draft campaign does not send —
+      // which is the review finding the campaign_inactive rule fixed.
+      .values({ orgId, name: 'Q4', channel: 'email', autoSend: false, dailyCap: 25, status: 'active' })
       .returning({ id: schema.campaigns.id })
     campaignId = campaign!.id
   }, 30_000)
@@ -209,6 +211,7 @@ describe('the sender tick', () => {
   it('leaves a provider failure as failed, with the reason, and keeps ticking', async () => {
     const broken = {
       name: 'broken',
+      channels: ['email'] as const,
       async send() {
         throw new Error('SMTP 421 service not available')
       },
@@ -250,4 +253,24 @@ describe('the sender tick', () => {
     expect(deals).toHaveLength(1)
     expect(deals[0]!.stage).toBe('contacted')
   })
+  it('never picks up a message on a channel its provider cannot carry', async () => {
+    const [li] = await db
+      .insert(schema.campaigns)
+      .values({ orgId, name: 'LinkedIn', channel: 'linkedin', autoSend: true, dailyCap: 10, status: 'active' })
+      .returning({ id: schema.campaigns.id })
+    await approved({ campaignId: li!.id, channel: 'linkedin', status: 'queued', approvedBy: null, approvedAt: null })
+    const emailOnly = { name: 'smtp-like', channels: ['email'] as const, send: provider.send }
+    const s = await runSenderTick({ db, provider: emailOnly, log: silent, batch: 20, now: () => NOON })
+    expect(s.picked).toBe(0)
+    expect(provider.sent).toEqual([])
+  })
+
+  it('defers, rather than refuses, a message in a paused campaign', async () => {
+    await db.update(schema.campaigns).set({ status: 'paused' }).where(eq(schema.campaigns.id, campaignId))
+    const t = await approved()
+    const s = await tick()
+    expect(s).toMatchObject({ picked: 1, sent: 0, deferred: 1 })
+    expect((await reread(t.id)).status).toBe('approved')
+  })
+
 })

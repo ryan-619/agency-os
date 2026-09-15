@@ -103,6 +103,14 @@ export async function updateCampaign(
   orgId: string,
   id: string,
   input: CampaignInput,
+  /**
+   * The auto-send value the caller READ before deciding it was allowed to
+   * write. Put in the predicate, so a member's save built on a stale read —
+   * auto-send was on when they opened the form and an owner turned it off
+   * since — matches nothing instead of turning it back on. Null skips the
+   * check, for a caller allowed to set it either way.
+   */
+  expectAutoSend: boolean | null = null,
 ): Promise<CampaignRow | null> {
   const rows = await db
     .update(schema.campaigns)
@@ -116,7 +124,13 @@ export async function updateCampaign(
       autoSend: input.autoSend,
       status: input.status,
     })
-    .where(and(eq(schema.campaigns.orgId, orgId), eq(schema.campaigns.id, id)))
+    .where(
+      and(
+        eq(schema.campaigns.orgId, orgId),
+        eq(schema.campaigns.id, id),
+        ...(expectAutoSend === null ? [] : [eq(schema.campaigns.autoSend, expectAutoSend)]),
+      ),
+    )
     .returning()
   return rows[0] ?? null
 }
@@ -216,23 +230,18 @@ export async function addSuppression(
     }
   }
 
-  const existing = await db
-    .select({ id: schema.suppressions.id })
-    .from(schema.suppressions)
-    .where(
-      and(
-        eq(schema.suppressions.orgId, args.orgId),
-        eq(schema.suppressions.kind, args.kind),
-        eq(schema.suppressions.value, value),
-      ),
-    )
-    .limit(1)
-  if (existing.length > 0) return { ok: true, value, alreadyPresent: true }
-
-  await db
+  // ON CONFLICT on the unique index, not select-then-insert: two replies
+  // saying "stop" in the same second are two inserts, and the loser used to
+  // throw — out of `recordInboundReply`, after the pause and before the
+  // audit row. A duplicate is the outcome the caller wanted.
+  const inserted = await db
     .insert(schema.suppressions)
     .values({ orgId: args.orgId, kind: args.kind, value, reason })
-  return { ok: true, value, alreadyPresent: false }
+    .onConflictDoNothing({
+      target: [schema.suppressions.orgId, schema.suppressions.kind, schema.suppressions.value],
+    })
+    .returning({ id: schema.suppressions.id })
+  return { ok: true, value, alreadyPresent: inserted.length === 0 }
 }
 
 /**

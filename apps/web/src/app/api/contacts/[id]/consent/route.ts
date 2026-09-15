@@ -54,8 +54,12 @@ export async function POST(
   if (typeof granted !== 'boolean') {
     return NextResponse.json({ error: 'granted must be true or false' }, { status: 400 })
   }
-  if (typeof source !== 'string') {
-    return NextResponse.json({ error: 'source is required' }, { status: 400 })
+  // Checked HERE, before the "(recorded by …)" suffix is appended: with the
+  // suffix, a blank source is non-blank, and `recordConsent`'s own check —
+  // the one the schema's `consents_source_is_not_blank` backs — never fires.
+  // Found by review.
+  if (typeof source !== 'string' || source.trim().length === 0) {
+    return NextResponse.json({ error: 'Say where this consent came from — a form, a call, a reply.' }, { status: 400 })
   }
 
   const r = await recordConsent(db, {

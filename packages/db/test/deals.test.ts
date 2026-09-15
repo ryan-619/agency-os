@@ -79,6 +79,27 @@ describe('deals', () => {
     expect(r.deal.nextAction).toBe('first')
   })
 
+  /**
+   * A send and a reply landing together both find no deal and both insert.
+   * `deals_one_open_per_company` (0012) makes one of them lose, and the loser
+   * re-reads and advances instead. One open deal, at the further stage.
+   */
+  it('creates one open deal when two callers race, at the further stage', async () => {
+    const [a, b] = await Promise.all([
+      advanceDeal(db, { orgId, companyId, to: 'contacted' }),
+      advanceDeal(db, { orgId, companyId, to: 'replied' }),
+    ])
+    expect(a.deal.id).toBe(b.deal.id)
+    const open = await db.select().from(schema.deals)
+    expect(open).toHaveLength(1)
+    expect(open[0]!.stage).toBe('replied')
+  })
+
+  it('refuses a second open deal for a company at the database', async () => {
+    await advanceDeal(db, { orgId, companyId, to: 'contacted' })
+    await expect(db.insert(schema.deals).values({ orgId, companyId, stage: 'new' })).rejects.toThrow()
+  })
+
   it('opens a NEW deal for a company whose last deal was closed', async () => {
     const first = await advanceDeal(db, { orgId, companyId, to: 'proposal' })
     await setDealStage(db, { orgId, dealId: first.deal.id, stage: 'lost', lostReason: 'no budget' })

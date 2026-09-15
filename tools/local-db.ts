@@ -55,7 +55,15 @@ async function main(): Promise<void> {
   const db = await PGlite.create({ dataDir: DATA_DIR, defaults: { timezone: 'UTC' } })
   await db.waitReady
 
-  const server = new PGLiteSocketServer({ db, port: PORT, host: HOST })
+  // `maxConnections` defaults to ONE in @electric-sql/pglite-socket 0.2.11,
+  // and it is applied as `net.Server.maxConnections`, so the second TCP
+  // connection is answered "Too many connections" and closed — which the
+  // client sees as ECONNRESET. A `pg.Pool` opens a second connection the
+  // moment two queries overlap, and a CLI running beside the web app is a
+  // second client by definition. Found by watching sign-in fail with an
+  // AdapterError while `npm run scan` held four connections. The queries are
+  // still serialised onto the one PGlite backend by the bridge's own queue.
+  const server = new PGLiteSocketServer({ db, port: PORT, host: HOST, maxConnections: 64 })
   await server.start()
 
   console.log(`
