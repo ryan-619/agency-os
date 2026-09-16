@@ -182,6 +182,7 @@ describe('against a real engine', () => {
       expect(await campaignActivity(db, orgId, c.id)).toEqual({
         sent: 0,
         awaitingApproval: 0,
+        waitingToSend: 0,
         refusals: [],
       })
     })
