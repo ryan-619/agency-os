@@ -253,7 +253,7 @@ describe('the booking page', () => {
 
   /** Nothing pre-existing to corrupt: the full §8.6 flow still runs. */
   it('lands a brand new lead on the board, with consent recorded', async () => {
-    const r = await bookInbound(db, request({ consent: { sms: true, voice: false, whatsapp: false }, phone: '+31 20 794 0000' }))
+    const r = await bookInbound(db, request())
     expect(r).toMatchObject({ ok: true, needsReview: false })
     const [company] = await db.select().from(schema.companies)
     expect(company).toMatchObject({ domain: 'rentman.io', source: 'inbound' })
@@ -262,7 +262,29 @@ describe('the booking page', () => {
     const [meeting] = await db.select().from(schema.meetings)
     expect(meeting).toMatchObject({ needsReview: false })
     const consents = await db.select().from(schema.consents)
+    expect(consents.map((c) => c.channel)).toEqual(['email'])
+  })
+
+  /**
+   * §2.1 makes SMS and voice opt-in only, and nothing here verifies that the
+   * number belongs to the person who typed it. The lead still lands — the
+   * form is where an opt-in legitimately happens (§8.6) — but the row that
+   * would later unlock a cold-adjacent channel is not worth anything until a
+   * person has confirmed it, and the evidence says the number was unverified.
+   */
+  it('flags a phone opt-in for a person, and records that the number was not verified', async () => {
+    const r = await bookInbound(db, request({ consent: { sms: true, voice: false, whatsapp: false }, phone: '+31 20 794 0000' }))
+    expect(r).toMatchObject({ ok: true, needsReview: true })
+    const [meeting] = await db.select().from(schema.meetings)
+    expect(meeting).toMatchObject({ needsReview: true })
+    // It still lands on the board: a new lead is a new lead.
+    const [company] = await db.select().from(schema.companies)
+    expect((await openDealFor(db, orgId, company!.id))!.stage).toBe('meeting')
+    const consents = await db.select().from(schema.consents)
     expect(consents.map((c) => c.channel).sort()).toEqual(['email', 'sms'])
+    const sms = consents.find((c) => c.channel === 'sms')!
+    expect(sms.granted).toBe(true)
+    expect(sms.evidence).toMatchObject({ form: 'booking_page', phoneVerified: false })
   })
 
   /**

@@ -138,6 +138,23 @@ npx vercel --prod
    `UPDATE orgs SET booking_slug = 'agency' WHERE …`, then check
    `/book/agency` loads for a signed-out browser.
 
+## Scanning, once deployed
+
+`npm run scan` is a CLI, not a service — on Vercel nothing runs it, so a
+freshly deployed instance has companies with no scores, no findings, and
+"Generate proposal" refused for want of evidence. That is not a gap in the
+deploy; it is where the scanner lives. Run it from your machine against the
+same database:
+
+```bash
+DATABASE_URL='<the DIRECT neon url>' npm run scan            # everything unscanned
+DATABASE_URL='<the DIRECT neon url>' npm run scan -- --all   # re-scan
+```
+
+It reads public pages only, from wherever you run it, and writes findings to
+the database the deployed app reads. Same for `npm run db:seed` and the CSV
+import.
+
 ## The public surface, and what is not protected
 
 `apps/web/src/proxy.ts` exempts `/signin`, `/api/auth`, `/api/health`,

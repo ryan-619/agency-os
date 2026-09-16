@@ -184,6 +184,21 @@ export async function bookInbound(db: AgencyDb, req: BookingRequest): Promise<Bo
     .limit(1)
 
   const recognised = Boolean(existingCompany || knownContact)
+  /**
+   * They ticked a box for a channel §2.1 makes opt-in only — and nothing here
+   * has verified that the number is theirs. Somebody can type a stranger's
+   * number and tick "you may call me". Cold voice and SMS are structurally
+   * impossible regardless (`decideSend` refuses them without a consent row,
+   * and Phase 6 is not deployed), but the row this writes is exactly the one
+   * that would later unlock them, so a person confirms it before it is worth
+   * anything. Real verification is an OTP to that number, which belongs with
+   * Phase 6 where there is something that can send one.
+   */
+  const claimsPhoneChannel = req.consent.sms || req.consent.voice || req.consent.whatsapp
+
+  /** Computed once: the row that is written and the answer that is returned
+   *  must be the same fact, or the caller reports something else happened. */
+  const needsReview = recognised || claimsPhoneChannel
 
   // What they told us about themselves. Kept as TEXT on the meeting when we
   // may not act on it, so the team can see the claim and decide.
@@ -267,7 +282,14 @@ export async function bookInbound(db: AgencyDb, req: BookingRequest): Promise<Bo
       // the row is about, and overwriting a recorded refusal is the one
       // thing §2.1 says can never be approved past.
       if (createdContact) {
-        const evidence = { form: 'booking_page', wording: req.consentWording.slice(0, 1000), at: now.toISOString() }
+        const evidence = {
+          form: 'booking_page',
+          wording: req.consentWording.slice(0, 1000),
+          at: now.toISOString(),
+          // Stated plainly in the evidence, because the evidence is what gets
+          // produced if anybody ever asks how this consent was obtained.
+          phoneVerified: false,
+        }
         const source = `booking page, ${now.toISOString().slice(0, 10)}`
         await recordConsent(txDb, { orgId: org.id, contactId, channel: 'email', granted: true, source, evidence })
         for (const channel of ['sms', 'voice', 'whatsapp'] as const) {
@@ -288,7 +310,7 @@ export async function bookInbound(db: AgencyDb, req: BookingRequest): Promise<Bo
         source: 'booking_page',
         notes,
         actor: 'booking_page',
-        needsReview: recognised,
+        needsReview,
         // A recognised company's deal is not moved by a stranger. A brand new
         // lead's is: there is nothing pre-existing to corrupt, and landing the
         // lead on the board is what the booking link is for (§8.6).
@@ -317,7 +339,7 @@ export async function bookInbound(db: AgencyDb, req: BookingRequest): Promise<Bo
       return { meetingId: meeting.meeting.id }
     })
 
-    return { ok: true, meetingId: result.meetingId, companyDomain, needsReview: recognised }
+    return { ok: true, meetingId: result.meetingId, companyDomain, needsReview }
   } catch (err) {
     if (err instanceof BookingRefused) return { ok: false, status: 400, message: err.message }
     throw err

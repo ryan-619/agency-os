@@ -24,7 +24,8 @@
     "tables:python": "python3 tools/generate-python-tables.py",
     "scan": "tsx --env-file-if-exists=.env tools/scan.ts",
     "smoke:agent": "tsx --env-file-if-exists=.env tools/smoke-agent.ts",
-    "db:local": "tsx tools/local-db.ts"
+    "db:local": "tsx tools/local-db.ts",
+    "build:vercel": "tsc --build && next build apps/web"
   },
   "devDependencies": {
     "@electric-sql/pglite-socket": "^0.2.11",

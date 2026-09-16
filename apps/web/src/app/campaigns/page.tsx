@@ -5,6 +5,7 @@ import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { CampaignsPanel, type CampaignView } from '@/components/outreach/campaigns'
 import { getDb } from '@/lib/db'
+import { deployment } from '@/lib/deployment'
 import { icpForOrg } from '@/lib/queries'
 
 /**
@@ -66,6 +67,7 @@ export default async function CampaignsPage() {
         campaigns={views}
         canWrite={can(principal, 'campaigns:write')}
         canAutoSend={can(principal, 'campaigns:set_auto_send')}
+        senderConnected={deployment().worker}
       />
     </Shell>
   )

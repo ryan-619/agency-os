@@ -49,10 +49,13 @@ export function CampaignsPanel({
   campaigns,
   canWrite,
   canAutoSend,
+  senderConnected = true,
 }: {
   campaigns: readonly CampaignView[]
   canWrite: boolean
   canAutoSend: boolean
+  /** False when no worker exists to drain the queue — see lib/deployment.ts. */
+  senderConnected?: boolean
 }) {
   const [editing, setEditing] = useState<string | null>(null)
   const [adding, setAdding] = useState(false)
@@ -69,7 +72,7 @@ export function CampaignsPanel({
 
         {campaigns.map((c) =>
           editing === c.id ? (
-            <CampaignForm key={c.id} campaign={c} canAutoSend={canAutoSend} onCancel={() => setEditing(null)} />
+            <CampaignForm key={c.id} campaign={c} canAutoSend={canAutoSend} senderConnected={senderConnected} onCancel={() => setEditing(null)} />
           ) : (
             <div key={c.id} className="row-card">
               <div className="row-head">
@@ -114,7 +117,7 @@ export function CampaignsPanel({
 
       {canWrite ? (
         adding ? (
-          <CampaignForm canAutoSend={canAutoSend} onCancel={() => setAdding(false)} />
+          <CampaignForm canAutoSend={canAutoSend} senderConnected={senderConnected} onCancel={() => setAdding(false)} />
         ) : (
           <button type="button" style={{ marginTop: 16 }} onClick={() => setAdding(true)}>
             New campaign
@@ -128,10 +131,12 @@ export function CampaignsPanel({
 function CampaignForm({
   campaign,
   canAutoSend,
+  senderConnected,
   onCancel,
 }: {
   campaign?: CampaignView
   canAutoSend: boolean
+  senderConnected: boolean
   onCancel: () => void
 }) {
   const [name, setName] = useState(campaign?.name ?? '')
@@ -235,7 +240,10 @@ function CampaignForm({
           onChange={(e) => setAutoSend(e.target.checked)}
         />
         <span>
-          <strong>Auto-send.</strong> Messages in this campaign leave without a person reading each one.
+          <strong>Auto-send.</strong>{' '}
+          {senderConnected
+            ? 'Messages in this campaign leave without a person reading each one.'
+            : 'Messages in this campaign would leave without a person reading each one — but no worker is connected to this deployment, so none of them will leave at all until one is.'}
           Every rule — suppression, consent, quiet hours, the cap — still applies to every message.
           {!canAutoSend ? ' Only an owner can turn this on.' : ''}
         </span>

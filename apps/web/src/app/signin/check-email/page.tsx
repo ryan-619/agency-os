@@ -1,5 +1,22 @@
 import { deployment } from '@/lib/deployment'
 
+/**
+ * Rendered per request, because it reads configuration.
+ *
+ * This page has no data and was therefore statically prerendered — which
+ * means it ran at BUILD time, where runtime configuration does not exist.
+ * `deployment()` calls `env()`, `env()` throws on a missing DATABASE_URL, and
+ * the build died on this one page with production secrets absent. That is
+ * the same trap CLAUDE.md §4 records for `getDb()`: an image build must not
+ * need runtime credentials, and the way that rule gets broken is a module
+ * reading configuration somewhere that runs before deploy rather than after.
+ *
+ * It was invisible locally because `apps/web/.env` is a symlink to the repo
+ * root `.env`, so a build on this machine has the variables whether or not
+ * the shell exports them.
+ */
+export const dynamic = 'force-dynamic'
+
 export default function CheckEmail() {
   return (
     <div className="auth-wrap">
