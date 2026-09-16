@@ -28,6 +28,7 @@ export interface CampaignView {
   readonly activity: {
     readonly sent: number
     readonly awaitingApproval: number
+    readonly waitingToSend: number
     readonly refusals: readonly { readonly code: string; readonly n: number }[]
   }
 }
@@ -96,6 +97,9 @@ export function CampaignsPanel({
                 </span>
                 <span>
                   <strong>{c.activity.awaitingApproval}</strong> waiting for a person
+                </span>
+                <span>
+                  <strong>{c.activity.waitingToSend}</strong> approved, waiting to send
                 </span>
                 {c.activity.refusals.map((r) => (
                   <span key={r.code}>

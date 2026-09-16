@@ -146,7 +146,7 @@ export async function campaignActivity(
   db: AgencyDb,
   orgId: string,
   campaignId: string,
-): Promise<{ sent: number; awaitingApproval: number; refusals: { code: string; n: number }[] }> {
+): Promise<{ sent: number; awaitingApproval: number; waitingToSend: number; refusals: { code: string; n: number }[] }> {
   const rows = await db
     .select({
       status: schema.touches.status,
@@ -159,16 +159,22 @@ export async function campaignActivity(
 
   let sent = 0
   let awaitingApproval = 0
+  // Approved, queued and mid-send were counted by NOTHING — so a message a
+  // person had approved showed up in no number on any screen, and a
+  // deployment with no worker to drain the queue looked identical to one
+  // that had sent everything.
+  let waitingToSend = 0
   const refusals: { code: string; n: number }[] = []
   for (const row of rows) {
     if (row.status === 'sent' || row.status === 'delivered' || row.status === 'replied') sent += row.n
     else if (row.status === 'awaiting_approval') awaitingApproval += row.n
+    else if (row.status === 'approved' || row.status === 'queued' || row.status === 'sending') waitingToSend += row.n
     else if (row.status === 'refused' && row.refusalCode) {
       refusals.push({ code: row.refusalCode, n: row.n })
     }
   }
   refusals.sort((a, b) => b.n - a.n)
-  return { sent, awaitingApproval, refusals }
+  return { sent, awaitingApproval, waitingToSend, refusals }
 }
 
 // ---------------------------------------------------------------------------

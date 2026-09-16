@@ -5,6 +5,7 @@ import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { PipelineBoard, type DealCard, type Stage } from '@/components/pipeline/board'
 import { When } from '@/components/when'
+import { deployment } from '@/lib/deployment'
 import { getDb } from '@/lib/db'
 import { inZone } from '@/lib/format'
 import { icpForOrg } from '@/lib/queries'
@@ -71,8 +72,10 @@ export default async function PipelinePage() {
     <Shell user={user} orgName={orgLabel} current="pipeline" signOut={signOutAction}>
       <h1>Pipeline</h1>
       <p className="lede">
-        One card per company something has happened to. Sends and replies move cards forward on their
-        own; a person moves them anywhere, and a lost deal is asked for its reason.
+        One card per company something has happened to.{' '}
+        {deployment().worker
+          ? 'Sends and replies move cards forward on their own; a person moves them anywhere, and a lost deal is asked for its reason.'
+          : 'A person moves cards anywhere, and a lost deal is asked for its reason. Nothing moves them on its own here: no worker is connected to this deployment, so nothing is sending or reading replies.'}
         {hiddenClosed > 0 ? <> {hiddenClosed} closed more than {CLOSED_SHOWN_FOR_DAYS} days ago {hiddenClosed === 1 ? 'is' : 'are'} not shown.</> : null}
       </p>
       <PipelineBoard deals={cards} canWrite={can(principal, 'deals:write')} />

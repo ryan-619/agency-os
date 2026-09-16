@@ -7,6 +7,7 @@ import {
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { getDb } from '@/lib/db'
+import { deployment } from '@/lib/deployment'
 import { icpForOrg } from '@/lib/queries'
 import { ApprovalQueue } from '@/components/chat/queue'
 import { DraftQueue, type DraftView } from '@/components/outreach/drafts'
@@ -128,6 +129,7 @@ export default async function ApprovalsPage() {
           drafts={draftViews}
           campaigns={campaigns.map((c) => ({ id: c.id, name: c.name, channel: c.channel, autoSend: c.autoSend }))}
           canDecide={decidable}
+          senderConnected={deployment().worker}
         />
       )}
 

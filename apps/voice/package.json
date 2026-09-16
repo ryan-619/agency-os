@@ -1,0 +1,26 @@
+{
+  "name": "@agency/voice",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@agency/core": "*",
+    "@agency/db": "*",
+    "pg": "8.16.3",
+    "ws": "^8.18.3",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.1",
+    "@types/pg": "8.15.5",
+    "@types/ws": "^8.18.1",
+    "tsx": "4.20.6"
+  }
+}

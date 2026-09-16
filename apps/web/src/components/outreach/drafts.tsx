@@ -46,10 +46,18 @@ export function DraftQueue({
   drafts,
   campaigns,
   canDecide,
+  senderConnected = true,
 }: {
   drafts: readonly DraftView[]
   campaigns: readonly CampaignChoice[]
   canDecide: boolean
+  /**
+   * Whether a worker exists to drain the queue. False on a deployment that
+   * runs only the web app, where an approved message stays approved forever
+   * — and telling somebody "it will send on the next pass" would be the
+   * product claiming something it did not do.
+   */
+  senderConnected?: boolean
 }) {
   const [settled, setSettled] = useState<Record<string, Settled>>({})
   const [busy, setBusy] = useState<string | null>(null)
@@ -77,8 +85,11 @@ export function DraftQueue({
             outcome: decision === 'approved' ? 'approved' : 'refused',
             message:
               decision === 'approved'
-                ? 'Approved. The worker will send it on its next pass — after checking the suppression list, ' +
-                  'consent, quiet hours and the daily cap again. If it lands in quiet hours it waits for morning.'
+                ? senderConnected
+                  ? 'Approved. The worker will send it on its next pass — after checking the suppression list, ' +
+                    'consent, quiet hours and the daily cap again. If it lands in quiet hours it waits for morning.'
+                  : 'Approved, and queued. No worker is connected to this deployment, so nothing will send it ' +
+                    'until one is — every rule is still checked at that moment, not now.'
                 : 'Denied. Nothing was sent, and the note is kept with the draft.',
           },
         }))
@@ -208,7 +219,9 @@ export function DraftQueue({
                     Deny
                   </button>
                   <span className="muted">
-                    Approving queues it. The worker sends on its next pass, after checking every rule again.
+                    {senderConnected
+                      ? 'Approving queues it. The worker sends on its next pass, after checking every rule again.'
+                      : 'Approving records your decision and queues it. No worker is connected to this deployment, so it will not be sent until one is.'}
                   </span>
                 </div>
               </>

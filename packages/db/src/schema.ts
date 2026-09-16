@@ -342,6 +342,9 @@ export const meetings = pgTable(
     notes: text('notes'),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
     cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
+    /** An unauthenticated booking matched records already on file (0015).
+     *  Nothing about them was modified; a person confirms who booked. */
+    needsReview: boolean('needs_review').notNull().default(false),
     ...timestamps,
   },
   (t) => [
@@ -460,21 +463,44 @@ export const calls = pgTable(
   {
     id: id(),
     orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    /** SET NULL: the record of a call outlives the contact row (0004). */
     contactId: uuid('contact_id').references(() => contacts.id, { onDelete: 'set null' }),
+    companyId: uuid('company_id').references(() => companies.id, { onDelete: 'set null' }),
+    /** 'in' | 'out' */
     direction: text('direction').notNull(),
+    /** ringing | in_progress | completed | failed | no_answer | busy | cancelled (0014) */
+    status: text('status').notNull().default('ringing'),
+    fromNumber: text('from_number'),
+    toNumber: text('to_number'),
+    provider: text('provider').notNull().default('twilio'),
     providerCallSid: text('provider_call_sid'),
     startedAt: timestamp('started_at', { withTimezone: true }),
+    answeredAt: timestamp('answered_at', { withTimezone: true }),
     endedAt: timestamp('ended_at', { withTimezone: true }),
     durationS: integer('duration_s'),
     recordingUrl: text('recording_url'),
+    /** `TranscriptEntry[]` from packages/core. */
     transcript: jsonb('transcript').notNull().default(sql`'[]'::jsonb`),
     summary: text('summary'),
+    /** qualified | not_qualified | handoff | opted_out | incomplete | no_answer | failed */
     outcome: text('outcome'),
+    /** positive | neutral | negative */
     sentiment: text('sentiment'),
     handoffToUserId: uuid('handoff_to_user_id').references(() => users.id, { onDelete: 'set null' }),
+    handoffReason: text('handoff_reason'),
+    /** §2.1: the instant the AI said it was an AI. Written before it says anything else. */
+    disclosedAiAt: timestamp('disclosed_ai_at', { withTimezone: true }),
+    /** §2.1: the instant the caller asked to be left alone — and a suppression row was written. */
+    optedOutAt: timestamp('opted_out_at', { withTimezone: true }),
+    /** For an OUTBOUND call: the touch whose approval placed it (§2.4). NOT NULL when direction = 'out'. */
+    touchId: uuid('touch_id').references(() => touches.id, { onDelete: 'set null' }),
     ...timestamps,
   },
-  (t) => [index('calls_contact_idx').on(t.contactId, t.startedAt.desc())],
+  (t) => [
+    index('calls_contact_idx').on(t.contactId, t.startedAt.desc()),
+    index('calls_org_started_idx').on(t.orgId, t.startedAt.desc()),
+    index('calls_company_idx').on(t.companyId, t.startedAt.desc()),
+  ],
 )
 
 /** The human-in-the-loop gate the agent's canUseTool blocks on (§5.4). */

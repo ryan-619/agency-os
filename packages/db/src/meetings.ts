@@ -6,6 +6,11 @@
  * Recording one moves the company's deal forward to `meeting` — forward only,
  * so a second meeting with a company already at `proposal` changes nothing.
  *
+ * `moveDeal: false` is the exception, and it exists for the one caller that
+ * is not trusted: a public booking that recognised a company already on file.
+ * The meeting is recorded so the team sees the request; the deal is theirs
+ * and a stranger does not get to walk it forward. See booking.ts.
+ *
  * The calendar event itself is not here. §8.6 puts the calendar behind the
  * Google Calendar MCP connector, which the agent reaches like any other
  * connector — through the gate, with a person approving — and `external_ref`
@@ -40,6 +45,21 @@ export interface MeetingInput {
   readonly createdBy?: string | null
   /** Who or what is recording it, for the audit row. */
   readonly actor: string
+  /**
+   * An unauthenticated booking matched a contact or company already on file
+   * (0015). The meeting is recorded and nothing else about them is touched;
+   * a person confirms who booked before acting on it.
+   */
+  readonly needsReview?: boolean
+  /**
+   * Whether recording this moves the company's deal forward to `meeting`.
+   * Default true — booking a meeting IS the deal reaching that stage.
+   *
+   * False for a booking that recognised an existing company: the deal is the
+   * team's record of a real relationship, and a stranger who can guess an
+   * address at that domain must not be able to walk it forward.
+   */
+  readonly moveDeal?: boolean
 }
 
 /**
@@ -82,12 +102,16 @@ export async function createMeeting(
   }
 
   // The deal first, so the meeting row can point at it.
-  const moved = await advanceDeal(db, {
-    orgId: input.orgId,
-    companyId: input.companyId,
-    to: 'meeting',
-    nextAction: `Prepare for the meeting on ${input.startsAt.toISOString().slice(0, 10)}`,
-  })
+  const moved =
+    input.moveDeal === false
+      ? null
+      : await advanceDeal(db, {
+          orgId: input.orgId,
+          companyId: input.companyId,
+          to: 'meeting',
+          nextAction: `Prepare for the meeting on ${input.startsAt.toISOString().slice(0, 10)}`,
+        })
+  const dealLabel = moved ? `${moved.outcome}:${moved.deal.stage}` : 'not moved'
 
   const rows = await db
     .insert(schema.meetings)
@@ -95,7 +119,7 @@ export async function createMeeting(
       orgId: input.orgId,
       companyId: input.companyId,
       contactId: input.contactId ?? null,
-      dealId: moved.deal.id,
+      dealId: moved?.deal.id ?? null,
       title: input.title?.trim() || null,
       startsAt: input.startsAt,
       endsAt: input.endsAt ?? null,
@@ -104,6 +128,7 @@ export async function createMeeting(
       externalRef: input.externalRef ?? null,
       notes: input.notes?.trim() || null,
       createdBy: input.createdBy ?? null,
+      needsReview: input.needsReview ?? false,
     })
     .returning()
   const meeting = rows[0]
@@ -121,11 +146,12 @@ export async function createMeeting(
       startsAt: input.startsAt.toISOString(),
       timeZone: input.timeZone,
       source: input.source,
-      deal: `${moved.outcome}:${moved.deal.stage}`,
+      deal: dealLabel,
+      needsReview: input.needsReview ?? false,
     },
   }).catch(() => {})
 
-  return { ok: true, meeting, deal: `${moved.outcome}:${moved.deal.stage}` }
+  return { ok: true, meeting, deal: dealLabel }
 }
 
 export async function readMeeting(db: AgencyDb, orgId: string, id: string): Promise<MeetingRow | null> {

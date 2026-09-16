@@ -1,3 +1,5 @@
+import { deployment } from '@/lib/deployment'
+
 export default function CheckEmail() {
   return (
     <div className="auth-wrap">
@@ -10,10 +12,14 @@ export default function CheckEmail() {
         <p className="fine">
           You will see this page whether or not the address is on the team, and no account is
           ever created — so this screen reveals nothing about who has access.
-          <br />
-          <br />
-          In local development the message is waiting at{' '}
-          <a href="http://localhost:8025">localhost:8025</a>.
+          {deployment().mailIsLocalSink ? (
+            <>
+              <br />
+              <br />
+              This instance sends through a local mail sink: the message is waiting at{' '}
+              <a href="http://localhost:8025">localhost:8025</a>.
+            </>
+          ) : null}
         </p>
       </div>
     </div>

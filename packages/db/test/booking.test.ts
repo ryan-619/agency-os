@@ -4,8 +4,10 @@
  * The one place an outsider writes to the database without signing in, and
  * the one place an SMS or voice opt-in actually happens. So the tests are
  * about what it records — the consent rows, with the form's wording as
- * evidence — and what it refuses to guess: a phone number with no country
- * code, a timezone it cannot read, a slug that is not live.
+ * evidence — what it refuses to guess (a phone number with no country code,
+ * a timezone it cannot read, a slug that is not live), and above all what it
+ * refuses to TOUCH: nothing here authenticates anybody, so a booking may
+ * create records and may never modify one it did not create.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
@@ -138,14 +140,129 @@ describe('the booking page', () => {
     expect(await db.select().from(schema.meetings)).toEqual([])
   })
 
-  it('reuses a contact it already knows, and updates their timezone from the form', async () => {
-    const [company] = await db.insert(schema.companies).values({ orgId, domain: 'rentman.io' }).returning({ id: schema.companies.id })
-    await db.insert(schema.contacts).values({ orgId, companyId: company!.id, email: 'priya@rentman.io', timeZone: 'UTC' })
-    await bookInbound(db, request())
-    const contacts = await db.select().from(schema.contacts)
-    expect(contacts).toHaveLength(1)
-    expect(contacts[0]!.timeZone).toBe('Europe/Amsterdam')
-    expect(await db.select().from(schema.companies)).toHaveLength(1)
+  it('refuses a time further ahead than anyone books, and writes nothing on the way out', async () => {
+    const r = await bookInbound(db, request({ startsAt: new Date(8.64e15) }))
+    expect(r).toMatchObject({ ok: false, status: 400 })
+    if (r.ok) return
+    expect(r.message).toMatch(/within the next/)
+    // The unbounded version passed this straight to Postgres, which rejected
+    // it — AFTER the company, the contact and their consent rows were in.
+    expect(await db.select().from(schema.companies)).toEqual([])
+    expect(await db.select().from(schema.contacts)).toEqual([])
+    expect(await db.select().from(schema.consents)).toEqual([])
+  })
+
+  /**
+   * THE rule (§2.1). Nothing here authenticates anybody: the form asks for an
+   * address and believes it. So a booking may CREATE records and may never
+   * MODIFY one it did not create — every test below is the same sentence
+   * said about a different column.
+   */
+  describe('a booking may create records and may never modify one it did not create', () => {
+    let companyId: string
+    let contactId: string
+
+    beforeEach(async () => {
+      const [company] = await db
+        .insert(schema.companies)
+        .values({ orgId, domain: 'rentman.io', name: 'Rentman', timeZone: 'Europe/Amsterdam' })
+        .returning({ id: schema.companies.id })
+      companyId = company!.id
+      const [contact] = await db
+        .insert(schema.contacts)
+        .values({ orgId, companyId, email: 'priya@rentman.io', phone: '+31207940000', timeZone: 'Europe/Amsterdam' })
+        .returning({ id: schema.contacts.id })
+      contactId = contact!.id
+    })
+
+    /**
+     * The one that is law. A recorded refusal is one of the three things
+     * §2.1 says nobody can approve past, and `recordConsent` upserts — so
+     * an anonymous form submission used to turn "never call me" into a
+     * recorded opt-in, with the booking page's wording as the evidence.
+     */
+    it('never turns a recorded refusal into a grant', async () => {
+      await db.insert(schema.consents).values([
+        { orgId, contactId, channel: 'voice', granted: false, source: 'she said never call me' },
+        { orgId, contactId, channel: 'email', granted: false, source: 'she asked us to stop' },
+      ])
+
+      const r = await bookInbound(db, request({ phone: '+1 415 555 0100', consent: { sms: true, voice: true, whatsapp: false } }))
+      expect(r.ok).toBe(true)
+
+      const consents = await db.select().from(schema.consents).where(eq(schema.consents.contactId, contactId))
+      const byChannel = Object.fromEntries(consents.map((c) => [c.channel, c]))
+      expect(byChannel['voice']).toMatchObject({ granted: false, source: 'she said never call me' })
+      expect(byChannel['email']).toMatchObject({ granted: false, source: 'she asked us to stop' })
+      // And no NEW grant is invented for a channel that had no row either:
+      // the person who ticked the box is not certainly the person the row
+      // is about.
+      expect(byChannel['sms']).toBeUndefined()
+    })
+
+    it('never overwrites a known contact’s phone or timezone', async () => {
+      await bookInbound(db, request({ phone: '+1 415 555 0100', timeZone: 'Pacific/Kiritimati' }))
+      const [contact] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, contactId))
+      // `time_zone` is the clock quiet hours are evaluated against (§2.1), and
+      // `phone` is what an opt-in would point at.
+      expect(contact).toMatchObject({ phone: '+31207940000', timeZone: 'Europe/Amsterdam' })
+    })
+
+    it('never walks a known company’s deal forward', async () => {
+      const before = await openDealFor(db, orgId, companyId)
+      expect(before).toBeNull()
+      await bookInbound(db, request())
+      expect(await openDealFor(db, orgId, companyId)).toBeNull()
+    })
+
+    /**
+     * Recorded anyway. Refusing a real prospect because the team already has
+     * them on file would be the worse failure — so the request lands, marked
+     * for a person, with what they typed kept where that person can read it.
+     */
+    it('records the meeting, flags it for review, and keeps what they claimed', async () => {
+      const r = await bookInbound(db, request({ phone: '+1 415 555 0100', consent: { sms: true, voice: false, whatsapp: false } }))
+      expect(r).toMatchObject({ ok: true, needsReview: true })
+      const [meeting] = await db.select().from(schema.meetings)
+      expect(meeting).toMatchObject({ needsReview: true, source: 'booking_page', dealId: null })
+      expect(meeting!.notes).toMatch(/unverified booking/)
+      expect(meeting!.notes).toMatch(/\+14155550100/)
+      expect(meeting!.notes).toMatch(/NOT recorded/)
+    })
+
+    it('says in the audit row that it recognised them and changed nothing', async () => {
+      await bookInbound(db, request())
+      const audit = await db.select().from(schema.auditLog)
+      const lead = audit.find((a) => a.action === 'lead.inbound')!
+      expect(lead.detail).toMatchObject({ recognised: true, createdContact: false, createdCompany: false, consented: [] })
+    })
+
+    /** A different person at a company already on file is still a new lead. */
+    it('creates a new person at a known company without touching the company’s deal', async () => {
+      const r = await bookInbound(db, request({ name: 'Tom de Vries', email: 'tom@rentman.io' }))
+      expect(r).toMatchObject({ ok: true, needsReview: true })
+      expect(await db.select().from(schema.contacts)).toHaveLength(2)
+      expect(await openDealFor(db, orgId, companyId)).toBeNull()
+      // The new person's own consent IS recorded — they typed their own
+      // details and there was no row of the team's to overwrite.
+      const [contact] = await db.select().from(schema.contacts).where(eq(schema.contacts.email, 'tom@rentman.io'))
+      const consents = await db.select().from(schema.consents).where(eq(schema.consents.contactId, contact!.id))
+      expect(consents.map((c) => c.channel)).toEqual(['email'])
+    })
+  })
+
+  /** Nothing pre-existing to corrupt: the full §8.6 flow still runs. */
+  it('lands a brand new lead on the board, with consent recorded', async () => {
+    const r = await bookInbound(db, request({ consent: { sms: true, voice: false, whatsapp: false }, phone: '+31 20 794 0000' }))
+    expect(r).toMatchObject({ ok: true, needsReview: false })
+    const [company] = await db.select().from(schema.companies)
+    expect(company).toMatchObject({ domain: 'rentman.io', source: 'inbound' })
+    const deal = await openDealFor(db, orgId, company!.id)
+    expect(deal!.stage).toBe('meeting')
+    const [meeting] = await db.select().from(schema.meetings)
+    expect(meeting).toMatchObject({ needsReview: false })
+    const consents = await db.select().from(schema.consents)
+    expect(consents.map((c) => c.channel).sort()).toEqual(['email', 'sms'])
   })
 
   /**

@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation'
 import { AuthError } from 'next-auth'
 import { auth, signIn } from '@/auth'
+import { deployment } from '@/lib/deployment'
 
 export const dynamic = 'force-dynamic'
 
@@ -9,6 +10,7 @@ export const dynamic = 'force-dynamic'
  * to a team member (PROMPT.md §1), which the `signIn` callback in auth.ts
  * enforces before any mail is sent.
  */
+
 export default async function SignIn({
   searchParams,
 }: {
@@ -74,9 +76,13 @@ export default async function SignIn({
         </form>
 
         <p className="fine">
-          The link is valid for 15 minutes and can be used once. In local development,
-          mail is captured by Mailpit at <a href="http://localhost:8025">localhost:8025</a> and
-          never leaves the machine.
+          The link is valid for 15 minutes and can be used once.
+          {deployment().mailIsLocalSink ? (
+            <>
+              {' '}This instance sends through a local mail sink, so the message never leaves the
+              machine — read it at <a href="http://localhost:8025">localhost:8025</a>.
+            </>
+          ) : null}
         </p>
       </div>
     </div>

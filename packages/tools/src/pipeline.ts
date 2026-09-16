@@ -119,18 +119,30 @@ export const updateDeal: AgencyToolSpec<typeof updateDealShape> = {
     let deal = await openDealFor(ctx.db, ctx.orgId, company.id)
     let moved = 'unchanged'
     if (input.stage) {
+      const closes = input.stage === 'won' || input.stage === 'lost'
       if (!deal) {
+        // `advanceDeal` moves a stage; it never stamps `closed_at`. Creating
+        // straight at `won` or `lost` therefore left an OPEN deal reading a
+        // closed stage — which `deals_one_open_per_company` then counts as
+        // the company's open deal forever — and threw away `lostReason`,
+        // the only thing anyone learns from a lost deal. So a company with
+        // no deal is given an open one and it is closed below, in the same
+        // call, by the function that owns closing.
         const created = await advanceDeal(ctx.db, {
-          orgId: ctx.orgId, companyId: company.id, to: input.stage, nextAction: input.nextAction ?? null,
+          orgId: ctx.orgId,
+          companyId: company.id,
+          to: closes ? 'new' : input.stage,
+          nextAction: input.nextAction ?? null,
         })
         deal = created.deal
         moved = created.outcome
-      } else {
+      }
+      if (closes || deal.stage !== input.stage) {
         const set = await setDealStage(ctx.db, {
           orgId: ctx.orgId, dealId: deal.id, stage: input.stage, lostReason: input.lostReason ?? null, now: ctx.now(),
         })
         deal = set ?? deal
-        moved = 'set'
+        moved = moved === 'created' ? 'created' : 'set'
       }
     }
     if (input.nextAction !== undefined && deal) {

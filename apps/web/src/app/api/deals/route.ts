@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
+import { and, eq } from 'drizzle-orm'
 import { assertCan } from '@agency/core'
-import { DEAL_STAGES, advanceDeal, appendAudit, type AgencyDb, type DealStage } from '@agency/db/queries'
+import { DEAL_STAGES, advanceDeal, appendAudit, schema, type AgencyDb, type DealStage } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
 
@@ -41,6 +42,19 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
 
   const db = getDb() as unknown as AgencyDb
+
+  // `deals.company_id` is a plain FK to `companies(id)`, NOT a composite on
+  // (id, org_id) — so the database would happily accept another org's company
+  // under this org's id, and `listDealsForBoard` joins companies by id alone
+  // and would then print that company's domain on this org's board. Checked
+  // here, the way `createMeeting` and `generateProposal` already check.
+  const [company] = await db
+    .select({ id: schema.companies.id })
+    .from(schema.companies)
+    .where(and(eq(schema.companies.orgId, user.orgId), eq(schema.companies.id, companyId)))
+    .limit(1)
+  if (!company) return NextResponse.json({ error: 'That company is not in the CRM.' }, { status: 404 })
+
   let moved
   try {
     moved = await advanceDeal(db, {
@@ -50,7 +64,6 @@ export async function POST(request: Request): Promise<NextResponse> {
       nextAction: typeof nextAction === 'string' ? nextAction.slice(0, 300) : null,
     })
   } catch {
-    // The FK: a company id from another org, or one that is gone.
     return NextResponse.json({ error: 'That company is not in the CRM.' }, { status: 404 })
   }
 

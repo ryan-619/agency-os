@@ -50,7 +50,6 @@ export async function PATCH(
     stage?: unknown; lostReason?: unknown; nextAction?: unknown; valueCents?: unknown
   }
 
-  // Details first — they do not need a stage change and cannot fail on one.
   const details: { nextAction?: string | null; valueCents?: number | null } = {}
   if (nextAction !== undefined) {
     if (nextAction !== null && typeof nextAction !== 'string') {
@@ -64,11 +63,10 @@ export async function PATCH(
     }
     details.valueCents = valueCents as number | null
   }
-  if (Object.keys(details).length > 0) {
-    await db.update(schema.deals).set(details).where(eq(schema.deals.id, current.id))
-  }
-
-  let moved = current
+  // Every field is validated BEFORE anything is written. This used to save
+  // the details first and validate the stage after, so a request carrying a
+  // good nextAction and a bad stage got a 400 with the nextAction already
+  // persisted — a rejected request that changed the database.
   if (stage !== undefined) {
     if (typeof stage !== 'string' || !(DEAL_STAGES as readonly string[]).includes(stage)) {
       return NextResponse.json({ error: `stage must be one of ${DEAL_STAGES.join(', ')}` }, { status: 400 })
@@ -76,6 +74,14 @@ export async function PATCH(
     if (stage === 'lost' && (typeof lostReason !== 'string' || !lostReason.trim())) {
       return NextResponse.json({ error: 'A lost deal needs a reason. It is the only thing anyone learns from one.' }, { status: 400 })
     }
+  }
+
+  if (Object.keys(details).length > 0) {
+    await db.update(schema.deals).set(details).where(eq(schema.deals.id, current.id))
+  }
+
+  let moved = current
+  if (stage !== undefined) {
     if (stage !== current.stage || current.closedAt) {
       // A second OPEN deal for the company would violate `deals_one_open_per_company`
       // (0012) if this one is being reopened; surface that as a sentence.

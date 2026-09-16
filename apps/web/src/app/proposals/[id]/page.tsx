@@ -1,6 +1,6 @@
 import { notFound, redirect } from 'next/navigation'
 import { and, eq } from 'drizzle-orm'
-import { can, parseIcpDefinition, type Proposal } from '@agency/core'
+import { DEFAULT_STALE_AFTER_DAYS, can, isStale, parseIcpDefinition, type Proposal } from '@agency/core'
 import { readProposal, schema, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
@@ -37,13 +37,28 @@ export default async function ProposalPage({ params }: { params: Promise<{ id: s
   const doc = row.document as Proposal
 
   let orgLabel = 'Agency'
+  let staleAfter = DEFAULT_STALE_AFTER_DAYS
   if (icpRow) {
     try {
-      orgLabel = parseIcpDefinition(icpRow.definition).label
+      const icp = parseIcpDefinition(icpRow.definition)
+      orgLabel = icp.label
+      staleAfter = icp.freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
     } catch {
       orgLabel = 'Agency'
     }
   }
+
+  // §2.2. The generator refuses to write a proposal from a stale scan — but a
+  // proposal written while the scan was fresh keeps sitting here, and the
+  // evidence underneath it ages out on its own. Freshness is DERIVED from the
+  // scan's ran_at on every read, the way the meeting brief does it; reading a
+  // stored flag is how a three-week-old gap renders with no mark on it.
+  const [scan] = await db
+    .select({ ranAt: schema.scans.ranAt })
+    .from(schema.scans)
+    .where(and(eq(schema.scans.orgId, user.orgId), eq(schema.scans.id, row.scanId)))
+    .limit(1)
+  const evidenceStale = isStale(scan?.ranAt, staleAfter)
   const signOutAction = async () => {
     'use server'
     await signOut({ redirectTo: '/signin' })
@@ -61,6 +76,14 @@ export default async function ProposalPage({ params }: { params: Promise<{ id: s
         {' · generated '}<When iso={row.generatedAt.toISOString()} />
         {row.decidedAt ? <> · decided <When iso={row.decidedAt.toISOString()} /></> : null}
       </p>
+      {evidenceStale ? (
+        <div className="note note-warn">
+          <strong>The evidence under this proposal has aged out.</strong> It was written from a scan that ran{' '}
+          {scan ? <When iso={scan.ranAt.toISOString()} mode="date" /> : 'more than'} — more than {staleAfter} days ago.
+          §2.2 says stale findings are re-verified before they appear in anything outbound, so re-scan{' '}
+          {company ? <code>{company.domain}</code> : 'the company'} and generate a fresh proposal rather than sending this one.
+        </div>
+      ) : null}
       <ProposalStatus id={row.id} status={row.status} canWrite={can({ id: user.id, orgId: user.orgId, role: user.role }, 'deals:write')} />
 
       <article className="proposal">

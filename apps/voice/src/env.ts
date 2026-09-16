@@ -1,0 +1,85 @@
+import { z } from 'zod'
+
+/**
+ * Validated at startup (PROMPT.md §10). Never logged.
+ *
+ * Most of this is OPTIONAL on purpose, the way the agent worker's mail
+ * settings are: a voice service with no Twilio credentials boots, serves
+ * health, and refuses every webhook — which is the correct behaviour for a
+ * deployment whose A2P 10DLC registration has not cleared (§9, §12). What
+ * it never does is answer or place a call it cannot verify came from Twilio.
+ */
+const schema = z.object({
+  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
+  DATABASE_POOL_MAX: z.coerce.number().int().positive().max(100).default(4),
+  VOICE_PORT: z.coerce.number().int().positive().default(3003),
+  /** Loopback by default; compose sets 0.0.0.0 (see the agent worker's AGENT_BIND). */
+  VOICE_BIND: z.string().min(1).default('127.0.0.1'),
+  LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+
+  /**
+   * The origin Twilio reaches this service at — `https://voice.example.com`.
+   * Signatures are computed over the URL TWILIO requested, and behind a
+   * reverse proxy that is not the one the socket saw; and the TwiML has to
+   * hand Twilio a `wss://` URL for the relay. Optional only so the process
+   * can boot and report itself unconfigured on /readyz.
+   */
+  VOICE_PUBLIC_URL: z.string().url().optional(),
+
+  /** Twilio. Unset means every webhook is refused and nothing is dialled. */
+  TWILIO_ACCOUNT_SID: z.string().optional(),
+  TWILIO_AUTH_TOKEN: z.string().optional(),
+  /** The number calls and texts come from, E.164. */
+  TWILIO_FROM_NUMBER: z.string().optional(),
+
+  /**
+   * Which org answers the phone. One org is seeded (§12), so this is
+   * optional and the service uses the only org when exactly one exists;
+   * with more than one it refuses to guess.
+   */
+  VOICE_ORG_ID: z.string().uuid().optional(),
+
+  /** Where a warm handoff goes: a TaskRouter workflow, or a person's number. */
+  TASKROUTER_WORKFLOW_SID: z.string().optional(),
+  VOICE_HANDOFF_NUMBER: z.string().optional(),
+  /** The team member a handoff is recorded against (`calls.handoff_to_user_id`). */
+  VOICE_HANDOFF_USER_EMAIL: z.string().email().optional(),
+
+  /**
+   * The model behind the conversation. Optional: without it the scripted
+   * policy runs — a complete, deterministic qualification that discloses,
+   * asks three questions, and hands off — which is also what the tests
+   * drive. With it, the model speaks and the same rules still apply
+   * around it (opt-out and handoff are detected on the caller's words, not
+   * left to the model).
+   */
+  ANTHROPIC_API_KEY: z.string().optional(),
+  VOICE_MODEL: z.string().default('claude-haiku-4-5-20251001'),
+
+  /** TTS/STT choices, passed through to `<ConversationRelay>`. */
+  VOICE_LANGUAGE: z.string().default('en-US'),
+  VOICE_TTS_PROVIDER: z.string().optional(),
+  VOICE_TTS_VOICE: z.string().optional(),
+
+  /** Hard ceiling on one call, in seconds. A stuck session ends. */
+  VOICE_MAX_CALL_SECONDS: z.coerce.number().int().positive().default(900),
+})
+
+export type Env = z.infer<typeof schema>
+
+export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
+  const parsed = schema.safeParse(source)
+  if (!parsed.success) {
+    const problems = parsed.error.issues.map((i) => `  ${i.path.join('.') || '(root)'}: ${i.message}`).join('\n')
+    throw new Error(`Invalid environment configuration:\n${problems}`)
+  }
+  return parsed.data
+}
+
+/** What the service can do with what it was given — reported on /readyz. */
+export function voiceMode(env: Env): 'disabled' | 'inbound' | 'inbound-and-outbound' {
+  const twilio = Boolean(env.TWILIO_ACCOUNT_SID && env.TWILIO_AUTH_TOKEN && env.VOICE_PUBLIC_URL)
+  if (!twilio) return 'disabled'
+  return env.TWILIO_FROM_NUMBER ? 'inbound-and-outbound' : 'inbound'
+}

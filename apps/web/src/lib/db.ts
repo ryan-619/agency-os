@@ -29,6 +29,27 @@ function pool(): Pool {
   globalForDb.__agencyPool ??= new Pool({
     connectionString: env().DATABASE_URL,
     max: env().DATABASE_POOL_MAX,
+    /**
+     * pg-pool treats an unset `connectionTimeoutMillis` as "wait forever". On
+     * one long-lived server that is survivable — the wait ends when a client
+     * is returned. On a serverless host it is not: every instance keeps its
+     * own pool, they collectively exhaust the database's connection limit,
+     * and each new request then hangs until the platform kills the function.
+     * The user sees a timeout and the log says nothing at all about why.
+     *
+     * Ten seconds turns that into a real error with a real message, which is
+     * the difference between an incident someone can diagnose and one they
+     * cannot. It does NOT fix the exhaustion — that needs a small
+     * DATABASE_POOL_MAX and a pooled connection string (see .env.example).
+     */
+    connectionTimeoutMillis: 10_000,
+    /**
+     * Release idle connections rather than holding one per instance forever.
+     * Serverless instances are frozen between invocations and may never be
+     * reused, so a connection held open is one the database counts and
+     * nobody uses.
+     */
+    idleTimeoutMillis: 10_000,
   })
   return globalForDb.__agencyPool
 }

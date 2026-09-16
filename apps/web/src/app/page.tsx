@@ -3,6 +3,7 @@ import { sql } from 'drizzle-orm'
 import { auth, signOut } from '@/auth'
 import { getDb, schema } from '@/lib/db'
 import { Shell } from '@/components/shell'
+import { deployment } from '@/lib/deployment'
 
 export const dynamic = 'force-dynamic'
 
@@ -45,6 +46,7 @@ export default async function Dashboard() {
 
   const user = session.user
   const c = await counts(user.orgId)
+  const live = deployment()
 
   const [org] = await getDb()
     .select({ name: schema.orgs.name })
@@ -106,10 +108,21 @@ export default async function Dashboard() {
           </tbody>
         </table>
 
-        <h2>What is not built yet</h2>
-        <div className="note">
-          <strong>Phases 0–5 are built. Two things are deliberately not.</strong>
+        <h2>What this instance can and cannot do</h2>
+        <div className={live.worker ? 'note' : 'note note-warn'}>
+          <strong>
+            {live.worker
+              ? 'Phases 0–5 are built. Three things are deliberately not.'
+              : 'The CRM half of this deployment is live. The half that reaches people is not.'}
+          </strong>
           <ul>
+            {live.worker ? null : (
+              <li>
+                <strong>No agent worker is connected.</strong> Chat, sending, and reply detection all run in a
+                separate long-lived process that is not part of this deployment. Drafts can be written and
+                approved and will sit in the queue; nothing will send them, and no replies are being read.
+              </li>
+            )}
             <li>Voice and SMS (Phase 6) — inbound only, and only after A2P 10DLC registration clears. Nothing here can place a call or send a text.</li>
             <li>Nothing sources new companies on its own; import a CSV, add them by hand, or let the agent search a connector and put what it finds on the board through the gate.</li>
             <li>Calendar invitations are not sent from here — a meeting recorded here moves the deal, and the invite goes from your calendar or the calendar connector.</li>
