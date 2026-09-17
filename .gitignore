@@ -35,3 +35,4 @@ sink.jsonl
 
 # Vercel CLI project link (contains project and org ids)
 .vercel
+.env*

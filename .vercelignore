@@ -1,0 +1,10 @@
+# Defence in depth. `.env` is already gitignored and untracked, and the CLI
+# respects .gitignore — but the file on this machine holds a live API key and
+# a SECRETS_KEY, and "already covered by another rule" is how a credential
+# reaches somebody else's disk. §2.3: no credential leaves the machine.
+.env
+.env.*
+!.env.example
+.pgdata
+.dev-mail
+sink.jsonl

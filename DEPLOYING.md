@@ -79,15 +79,47 @@ will be rejected by the recipient's mail server rather than by Resend.
 
 ### 4. Vercel
 
-```bash
-npx vercel login
-npx vercel link
-```
+Already done: the project `agency-os` exists and this repo is linked to it, and
+a preview deployment has been built and served, so the build pipeline itself is
+proven. **Root Directory stays at the repo root** — do not set it to `apps/web`.
 
-Then in **Project Settings → General**, set **Root Directory** to `apps/web`.
-The build command is already committed in `apps/web/vercel.json` and reaches up
-to compile the workspace packages first — `packages/core` and `packages/db`
-are consumed as compiled `dist/` output, so `next build` alone is not enough.
+That is the opposite of the usual monorepo advice, and it was settled by trying
+both. `vercel.json` at the repo root carries `buildCommand: npm run
+build:vercel` and `outputDirectory: apps/web/.next`, because `packages/core` and
+`packages/db` are consumed as compiled `dist/` output and `next build` alone
+does not produce it.
+
+Deploying from `apps/web` fails. npm workspaces hoist `node_modules` to the
+repo root, the build traces files at repo-root-relative paths, and the CLI then
+resolves them under `apps/web`, where there is no `node_modules`:
+
+    Error: ENOENT ... apps/web/node_modules/@swc/helpers/...
+
+### 4a. A warning about building locally
+
+**A local `vercel build` traces your `.env` into the deployment output.** It was
+caught here by `.vercelignore`, which refuses to upload it — and the deploy then
+fails on the dangling reference rather than shipping the file. Verified: with
+real env files present, the traced set was `['.env', '.env.example',
+'.env.local']`; with them moved aside, `['.env.example']`.
+
+`.env` on this machine holds a live `ANTHROPIC_API_KEY` and `SECRETS_KEY`, so
+this is a credential-exfiltration path, not a build quirk (§2.3). Two
+consequences:
+
+- **never remove `.vercelignore`**, and
+- prefer **git-connected deploys**, where the problem cannot arise: `.env` is
+  gitignored, so Vercel's builder never sees one. Connect the repo in the
+  dashboard and this whole section stops mattering.
+
+If you must deploy from this machine, move the env files aside first:
+
+```bash
+mv .env .env.local apps/web/.env /tmp/  # apps/web/.env is a SYMLINK to ../../.env
+npx vercel build --yes --target production
+npx vercel deploy --prebuilt --prod --archive=tgz
+mv /tmp/.env /tmp/.env.local /tmp/.env .  # put them back
+```
 
 ### 5. Environment variables
 
@@ -121,9 +153,16 @@ which lets a forged header decide where a sign-in link points.
 
 ### 6. Deploy
 
+Once the variables above are set, promote to production:
+
 ```bash
 npx vercel --prod
 ```
+
+A preview deployment already exists and returns 302 to a Vercel login — that is
+Deployment Protection on previews, not an application error. Production is
+public by default; check that in **Settings → Deployment Protection** before you
+share the URL.
 
 ---
 
