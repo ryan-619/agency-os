@@ -7,10 +7,65 @@ import { z } from 'zod'
  *
  * Nothing here is ever logged. Several of these values are credentials (§2.3).
  */
+/** Loopback and in-cluster names, where there is no public network to protect. */
+const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[?::1\]?|db|postgres|host\.docker\.internal)$/i
+
+/**
+ * Does this connection string actually ask for TLS?
+ *
+ * The presence of `sslmode=` is not enough — `sslmode=disable` and an empty
+ * `sslmode=` both parse as "present" while meaning the opposite. Only the
+ * modes that encrypt count.
+ */
+function secureEnough(url: string): boolean {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    // Not a URL we can read. `getDb()` will fail loudly on it anyway, and
+    // this refinement is not the place to invent a second error message.
+    return true
+  }
+  if (LOCAL_HOST.test(parsed.hostname)) return true
+  const mode = parsed.searchParams.get('sslmode')?.trim().toLowerCase()
+  return mode === 'require' || mode === 'verify-ca' || mode === 'verify-full'
+}
+
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
 
-  DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
+  /**
+   * The connection string, which is also the ONLY thing deciding whether the
+   * wire is encrypted.
+   *
+   * node-postgres sends no SSLRequest unless something sets `ssl`: pg's
+   * defaults are `ssl: false`, it otherwise consults only `PGSSLMODE`, and
+   * Vercel sets neither. Measured against the installed pg 8.16.3: with no
+   * `sslmode` in the URL the client sends a plaintext StartupMessage carrying
+   * the username and database in the clear, and the connection SUCCEEDS — so
+   * a missing parameter is not an error anybody would notice. With
+   * `sslmode=require` it sends the SSLRequest first and this pg version
+   * treats `require` as `verify-full`.
+   *
+   * §2.3 is about credentials never being exposed, and a password negotiated
+   * over a plaintext socket to a managed database on the public internet is
+   * exposed. So the requirement is expressed here rather than left to
+   * whoever pasted the URL, the way every other §2 rule is expressed in a
+   * constraint instead of a convention.
+   *
+   * Keyed on the HOST, not on NODE_ENV: a loopback database (the PGlite
+   * bridge, a local container) has no TLS and needs none, and refusing it
+   * would just mean everyone develops with the check disabled.
+   */
+  DATABASE_URL: z
+    .string()
+    .min(1, 'DATABASE_URL is required')
+    .refine(
+      (url) => secureEnough(url),
+      'DATABASE_URL points at a remote host with no TLS. Append ?sslmode=require ' +
+        '(or sslmode=verify-full) — without it the driver negotiates the password over a ' +
+        'plaintext socket and still connects, so nothing would tell you.',
+    ),
   /** Connection pool ceiling. Lower it when Postgres is shared or constrained. */
   DATABASE_POOL_MAX: z.coerce.number().int().positive().max(100).default(10),
 

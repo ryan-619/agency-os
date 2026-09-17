@@ -6,6 +6,15 @@ summary a session should read first.
 
 **Current state: Phases 0, 1, 2, 3, 4 and 5 are built.** Phase 6 (voice/SMS) is next.
 
+**The web half is LIVE on Vercel** at `agency-os-tau-murex.vercel.app`, against
+a Neon Postgres (18.6) with Resend for magic links. Proved live: `/api/health`
+reports `database: ok`, `/signin` renders, and a sign-in request logged
+`magic link sent`. See [DEPLOYING.md](DEPLOYING.md) — including the two things
+a LOCAL `vercel build` gets wrong (it traces `.env` into the upload; deploying
+from `apps/web` cannot resolve the hoisted `node_modules`). The agent worker is
+NOT deployed and cannot be on serverless, so chat, sending and reply detection
+are absent there and every screen that would promise them says so instead.
+
 **Phases 2 and 3's Definitions of Done are not fully proved, both blocked on
 the same thing: the Anthropic account has no credit, so no turn has ever
 reached the model. Phase 4's is proved against a local SMTP sink, not a real

@@ -51,6 +51,46 @@ function pool(): Pool {
      */
     idleTimeoutMillis: 10_000,
   })
+
+  /**
+   * An idle connection dying is NORMAL against a managed database, and
+   * without this line it arrives as an uncaught exception.
+   *
+   * pg-pool re-attaches an idle listener to every client it checks back in
+   * (`_release` → `makeIdleListener`), and that listener ends in
+   * `pool.emit('error', …)`. A managed Postgres closes idle connections on
+   * its own schedule — Neon suspends the compute, PgBouncer reaps idle
+   * servers — and pg turns the peer's clean FIN into `Connection terminated
+   * unexpectedly`. Emitting `'error'` on an EventEmitter with no listener
+   * THROWS, out of a socket callback, where no request can catch it.
+   *
+   * Review reproduced exactly that against a real Postgres wire connection
+   * closed mid-idle, and then established that it does not kill this
+   * deployment: Next installs a process-level `uncaughtException` handler
+   * whose own comment is "we definitely shouldn't crash the entire process",
+   * and the pool has already removed the dead client by the time it emits,
+   * so the next request gets a fresh connection.
+   *
+   * This is here anyway. Relying on a framework's catch-all to swallow an
+   * exception the code could simply handle means the log fills with
+   * unexplained stack traces for an event that is not an error in the first
+   * place — and it would become a real outage the day that handler changes.
+   */
+  globalForDb.__agencyPool.on('error', (err) => {
+    // Not `console.error`: this is expected, and logging it as an error
+    // trains people to ignore real ones. The pool has already dropped the
+    // client; there is nothing to do but say so.
+    console.warn(
+      JSON.stringify({
+        level: 'warn',
+        msg: 'idle database connection closed by the server',
+        service: 'web',
+        // The class only. A driver error can carry the DSN (§2.3).
+        error: err instanceof Error ? err.name : 'UnknownError',
+      }),
+    )
+  })
+
   return globalForDb.__agencyPool
 }
 

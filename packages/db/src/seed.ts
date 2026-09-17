@@ -47,6 +47,27 @@ interface AgentSeed {
   enabled: boolean
 }
 
+/**
+ * A URL-safe booking slug from the org's name, or null when nothing usable
+ * survives. Must satisfy 0012's `orgs_booking_slug_is_url_safe`:
+ * `^[a-z0-9][a-z0-9-]{2,62}$` — so at least three characters, starting
+ * alphanumeric, and at most sixty-three.
+ */
+export function bookingSlugFrom(orgName: string): string | null {
+  const slug = orgName
+    .toLowerCase()
+    .normalize('NFKD')
+    // Drop the combining marks NFKD just split off, so "Björk" becomes
+    // "bjork" rather than "bjo-rk" — the mark is not a word boundary.
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 63)
+    .replace(/-$/, '')
+  return /^[a-z0-9][a-z0-9-]{2,62}$/.test(slug) ? slug : null
+}
+
 export async function seed(
   driver: MigrationDriver,
   opts: SeedOptions,
@@ -84,6 +105,32 @@ async function seedInTransaction(
     orgId = rows[0]!.id
     createdOrg = true
     log(`created org "${opts.orgName}"`)
+  }
+
+  /**
+   * The public booking link (§8.6).
+   *
+   * Set here, when absent, because otherwise a freshly seeded deployment
+   * answers `/book/<anything>` with a 404 and the only way to fix it is a
+   * hand-written UPDATE against production — which is exactly the kind of
+   * step that does not happen and then gets reported as a bug.
+   *
+   * Only ever FILLS IN a missing value: a slug already chosen is a published
+   * URL, and a seed re-run must not move somebody's booking link. The
+   * `NOT EXISTS` guard keeps the UNIQUE constraint from turning a second
+   * org with a similar name into a failed seed.
+   */
+  const slug = bookingSlugFrom(opts.orgName)
+  if (slug) {
+    const claimed = await driver.select<{ booking_slug: string }>(
+      `UPDATE orgs SET booking_slug = $1
+        WHERE id = $2
+          AND booking_slug IS NULL
+          AND NOT EXISTS (SELECT 1 FROM orgs WHERE booking_slug = $1)
+        RETURNING booking_slug`,
+      [slug, orgId],
+    )
+    if (claimed[0]) log(`booking link: /book/${claimed[0].booking_slug}`)
   }
 
   // --- owner --------------------------------------------------------------
