@@ -33,9 +33,10 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { Pool } from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import { WebSocketServer, type WebSocket } from 'ws'
-import { aiDisclosure, normalisePhone, suppressedGreeting } from '@agency/core'
+import { aiDisclosure, normalisePhone, spokenOptOut, suppressedGreeting } from '@agency/core'
 import {
-  callByProviderSid, endCall, phoneIsSuppressed, schema, startCall, type AgencyDb,
+  addSuppression, callByProviderSid, endCall, markAnswered, phoneIsSuppressed, schema, startCall,
+  type AgencyDb,
 } from '@agency/db'
 import { loadEnv, voiceMode, type Env } from './env.js'
 import { createLogger, type Logger } from './logger.js'
@@ -131,12 +132,16 @@ async function main(): Promise<void> {
    * one the socket saw — so it is rebuilt from VOICE_PUBLIC_URL and never
    * from the Host header, which the caller controls.
    */
-  const verified = (req: IncomingMessage, path: string, params: Record<string, string>): boolean => {
+  const verified = (req: IncomingMessage, target: string, params: Record<string, string>): boolean => {
     if (!env.VOICE_PUBLIC_URL) {
       log.error('refusing a webhook: VOICE_PUBLIC_URL is not set, so the signature cannot be checked')
       return false
     }
-    const url = new URL(path, env.VOICE_PUBLIC_URL).toString()
+    // The WHOLE target, query string included. Twilio signs the URL it
+    // requested; stripping the query before verifying refused every
+    // webhook configured with one — which is a normal configuration, and
+    // the failure looked like a bad auth token. Found by review.
+    const url = new URL(target, env.VOICE_PUBLIC_URL).toString()
     const header = req.headers['x-twilio-signature']
     return verifyTwilioSignature(env.TWILIO_AUTH_TOKEN, url, params, Array.isArray(header) ? header[0] : header)
   }
@@ -168,7 +173,7 @@ async function main(): Promise<void> {
       } catch {
         return send(res, 413, 'text/plain', 'too large')
       }
-      if (!verified(req, path, form)) {
+      if (!verified(req, req.url ?? path, form)) {
         log.warn('refused an unsigned or badly signed webhook', { path })
         return send(res, 403, 'text/plain', 'forbidden')
       }
@@ -194,6 +199,10 @@ async function main(): Promise<void> {
         const call = await startCall(db, {
           orgId: org.id, direction: 'in', fromNumber: from, toNumber: to, providerCallSid: sid,
         })
+        // Answered — distinct from disclosed, which happens when the relay
+        // session starts. Keeping them separate is what makes
+        // `callsThatDidNotDisclose()` able to report anything at all.
+        await markAnswered(db, call.id)
         pending.set(sid, {
           callId: call.id, orgId: org.id, orgName: org.name,
           theirNumber: from, mayQualify: !suppressed, at: Date.now(),
@@ -266,13 +275,21 @@ async function main(): Promise<void> {
         if (!org) return xml(res, emptyTwiml())
         // Carriers already honour STOP, but the carrier does not tell the
         // CRM. Recording it here is what stops the next campaign.
-        if (/^\s*(stop|stopall|unsubscribe|cancel|end|quit)\b/i.test(text)) {
+        // ONE opt-out detector for the whole product. This used to be its
+        // own narrower regex, which caught exactly the keywords the carrier
+        // already handles and dropped "take me off your list" — recorded
+        // nowhere, so the next campaign mailed them. Found by review.
+        if (spokenOptOut(text)) {
           const e164 = normalisePhone(from)
-          log.info('inbound STOP', { readable: e164 !== null })
-          const { addSuppression } = await import('@agency/db')
-          const added = await addSuppression(db, {
-            orgId: org.id, kind: 'phone', value: from, reason: 'replied STOP to an SMS',
-          })
+          log.info('inbound opt-out by SMS', { readable: e164 !== null })
+          let added: { ok: boolean; message?: string }
+          try {
+            added = await addSuppression(db, {
+              orgId: org.id, kind: 'phone', value: from, reason: 'asked to stop by SMS',
+            })
+          } catch (err) {
+            added = { ok: false, message: err instanceof Error ? err.name : 'UnknownError' }
+          }
           if (!added.ok) log.error('STOP NOT RECORDED — follow up by hand', { reason: added.message })
           return xml(res, emptyTwiml())
         }
@@ -290,17 +307,56 @@ async function main(): Promise<void> {
   })
 
   // --- the relay WebSocket -------------------------------------------------
-  const wss = new WebSocketServer({ noServer: true })
+  // 1 MiB is already far more than any relay message; the default allows
+  // 100 MiB per frame from an unauthenticated peer.
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 })
+  const sockets = new Set<WebSocket>()
 
   server.on('upgrade', (req, socket, head) => {
     const path = (req.url ?? '/').split('?')[0]
     if (path !== '/relay') { socket.destroy(); return }
+    // Twilio signs the upgrade request too. Verifying it here means an
+    // unauthenticated peer cannot even open the socket, rather than being
+    // stopped one message later by the pending-map check.
+    if (!verified(req, req.url ?? '/relay', {})) {
+      log.warn('refused an unsigned relay upgrade')
+      socket.destroy()
+      return
+    }
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req))
   })
 
   wss.on('connection', (ws: WebSocket) => {
     let session: VoiceSession | null = null
     let closed = false
+    sockets.add(ws)
+    /**
+     * Turns are handled ONE AT A TIME.
+     *
+     * `ws.on('message')` fires whenever bytes arrive, and each handler was
+     * an independent fire-and-forget promise — so a second utterance could
+     * be processed while the first was still awaiting the database, and the
+     * script carried on talking after an opt-out had already ended the
+     * call. Chaining them also gives `done()` something to wait for, so a
+     * hang-up no longer closes the record a turn early. Found by review.
+     */
+    let turn: Promise<void> = Promise.resolve()
+    const serialise = (work: () => Promise<void>): void => {
+      turn = turn.then(work).catch((err: unknown) => {
+        log.error('relay turn failed', { error: err instanceof Error ? err.name : 'UnknownError' })
+      })
+    }
+    // §8.5's ceiling, which was declared, documented, wired through compose
+    // and enforced nowhere. A stuck session otherwise holds a socket and a
+    // database connection for as long as the process lives.
+    const ceiling = setTimeout(() => {
+      log.warn('call hit VOICE_MAX_CALL_SECONDS — ending it', { seconds: env.VOICE_MAX_CALL_SECONDS })
+      if (ws.readyState === ws.OPEN) {
+        ws.send(JSON.stringify({ type: 'text', token: 'I have to end the call here. Someone will follow up. Goodbye.', last: true }))
+        ws.send(JSON.stringify({ type: 'end', handoffData: JSON.stringify({ reason: 'done', detail: 'max call duration' }) }))
+      }
+      ws.close(1000, 'max duration')
+    }, env.VOICE_MAX_CALL_SECONDS * 1000)
 
     const speak = (text: string, last: boolean): void => {
       if (!text || ws.readyState !== ws.OPEN) return
@@ -317,7 +373,7 @@ async function main(): Promise<void> {
     }
 
     ws.on('message', (raw) => {
-      void (async () => {
+      serialise(async () => {
         let msg: Record<string, unknown>
         try {
           msg = JSON.parse(raw.toString()) as Record<string, unknown>
@@ -341,6 +397,7 @@ async function main(): Promise<void> {
           session = new VoiceSession({
             db, log, orgId: p.orgId, orgName: p.orgName, callId: p.callId,
             theirNumber: p.theirNumber, mayQualify: p.mayQualify,
+            canHandOff: Boolean(env.TASKROUTER_WORKFLOW_SID || env.VOICE_HANDOFF_NUMBER),
           })
           await act(await session.onSetup())
           return
@@ -356,19 +413,29 @@ async function main(): Promise<void> {
         if (type === 'dtmf') { await act(await session.onDtmf(String(msg['digit'] ?? ''))); return }
         if (type === 'interrupt') return
         if (type === 'error') {
-          log.warn('relay reported an error', { description: String(msg['description'] ?? '').slice(0, 200) })
+          const description = String(msg['description'] ?? '')
+          log.warn('relay reported an error', { description: description.slice(0, 200) })
+          // Not merely logged: a TTS failure before the caller has spoken
+          // means the DISCLOSURE went unheard, and the record must not go
+          // on claiming otherwise.
+          await act(await session.onRelayError(description))
           return
         }
-      })().catch((err: unknown) => {
-        log.error('relay message failed', { error: err instanceof Error ? err.name : 'UnknownError' })
       })
     })
 
     const done = async (): Promise<void> => {
       if (closed) return
       closed = true
-      // The status callback also closes the record; endCall is safe twice
-      // and whichever arrives first wins.
+      clearTimeout(ceiling)
+      sockets.delete(ws)
+      // Wait for the turn in flight before closing the record, or a caller
+      // who hangs up mid-sentence has their last utterance — which may be
+      // the opt-out — land after the record was already closed.
+      await turn.catch(() => {})
+      // The status callback also closes the record. `endCall` only writes
+      // an outcome when `ended_at IS NULL`, so whichever arrives first wins
+      // and the other cannot downgrade it.
       await session?.finish('completed')
     }
     ws.on('close', () => void done())
@@ -382,9 +449,15 @@ async function main(): Promise<void> {
   })
 
   const stop = (signal: string): void => {
-    log.info('shutting down', { signal })
+    log.info('shutting down', { signal, liveCalls: sockets.size })
+    // Close live sockets explicitly. `server.close()` waits for existing
+    // connections, and a WebSocket never ends on its own — so a single call
+    // in progress meant the process never exited and was eventually killed,
+    // leaving its row `in_progress` with no outcome.
+    for (const ws of sockets) ws.close(1001, 'server shutting down')
     wss.close()
     server.close(() => void pool.end().finally(() => process.exit(0)))
+    setTimeout(() => process.exit(0), 10_000).unref()
   }
   process.on('SIGINT', () => stop('SIGINT'))
   process.on('SIGTERM', () => stop('SIGTERM'))

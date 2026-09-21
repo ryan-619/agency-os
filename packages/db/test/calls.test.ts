@@ -12,8 +12,8 @@ import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import {
   appendTranscript, callByProviderSid, callsThatDidNotDisclose, contactByPhone, endCall,
-  listCalls, phoneIsSuppressed, recordDisclosure, recordHandoff, recordOptOut, schema, startCall,
-  type AgencyDb,
+  listCalls, markAnswered, phoneIsSuppressed, recordDisclosure, recordHandoff, recordOptOut, schema,
+  startCall, type AgencyDb,
 } from '../src/index.js'
 import { freshDb, migrations, type TestDb } from './helpers.js'
 import { migrateUp } from '../src/migrator.js'
@@ -76,12 +76,12 @@ describe('calls', () => {
   })
 
   describe('the AI disclosure (§2.1)', () => {
-    it('is recorded once, and stamps the call as answered', async () => {
+    it('is recorded once, and does NOT stamp answered_at', async () => {
       const call = await answer()
+      await markAnswered(db, call.id, NOW)
       await recordDisclosure(db, call.id, NOW)
       const [row] = await db.select().from(schema.calls).where(eq(schema.calls.id, call.id))
       expect(row!.disclosedAiAt).toEqual(NOW)
-      expect(row!.answeredAt).toEqual(NOW)
       expect(row!.status).toBe('in_progress')
     })
 
@@ -93,14 +93,35 @@ describe('calls', () => {
       expect(row!.disclosedAiAt).toEqual(NOW)
     })
 
-    /** Should always be empty. It is a query because its absence is invisible. */
-    it('can be audited for after the fact', async () => {
+    /**
+     * THE regression. This test used to force `answered_at` by hand, which
+     * made it pass while the audit was structurally incapable of firing:
+     * `answered_at` was only ever written by the same statement that wrote
+     * `disclosed_ai_at`, so "answered but not disclosed" could not exist.
+     * It now drives the REAL production sequence — answer, then disclose —
+     * so the query is exercised against a state the service can reach.
+     */
+    it('reports a call that was answered and never disclosed, using the real sequence', async () => {
       const call = await answer()
       expect(await callsThatDidNotDisclose(db, orgId)).toEqual([])
-      await db.update(schema.calls).set({ answeredAt: NOW }).where(eq(schema.calls.id, call.id))
+
+      // What the service does on a signed inbound webhook, and nothing more:
+      // the relay never opened, so the disclosure never happened.
+      await markAnswered(db, call.id, NOW)
       expect((await callsThatDidNotDisclose(db, orgId)).map((c) => c.id)).toEqual([call.id])
+
       await recordDisclosure(db, call.id, NOW)
       expect(await callsThatDidNotDisclose(db, orgId)).toEqual([])
+    })
+
+    it('marks answered without touching the disclosure, and only once', async () => {
+      const call = await answer()
+      await markAnswered(db, call.id, NOW)
+      const later = new Date('2026-09-21T12:09:00.000Z')
+      await markAnswered(db, call.id, later)
+      const [row] = await db.select().from(schema.calls).where(eq(schema.calls.id, call.id))
+      expect(row!.answeredAt).toEqual(NOW)
+      expect(row!.disclosedAiAt).toBeNull()
     })
   })
 
@@ -118,6 +139,30 @@ describe('calls', () => {
       expect(sup).toHaveLength(1)
       expect(sup[0]).toMatchObject({ kind: 'phone', value: THEIR })
       expect(await phoneIsSuppressed(db, orgId, THEIR)).toBe(true)
+    })
+
+    /**
+     * §2.1's obligation is that a failed opt-out fails LOUDLY. It used to
+     * fail silently for the case that actually happens — a database fault,
+     * which THROWS rather than returning a sentence — and the exception
+     * escaped the session and left the caller listening to nothing.
+     */
+    it('survives the suppression write throwing, and still reports it', async () => {
+      const call = await answer()
+      const flaky = new Proxy(db as object, {
+        get(target, prop, receiver) {
+          if (prop === 'insert') return () => { throw new Error('Connection terminated unexpectedly') }
+          return Reflect.get(target, prop, receiver)
+        },
+      }) as AgencyDb
+
+      const out = await recordOptOut(flaky, { orgId, callId: call.id, phone: THEIR, now: NOW })
+      expect(out.suppressed).toBe(false)
+      expect(out.message).toMatch(/could not be written/)
+      // The column is still stamped: the caller DID ask, and that is a fact
+      // worth keeping even when the list write failed.
+      const [row] = await db.select().from(schema.calls).where(eq(schema.calls.id, call.id))
+      expect(row!.optedOutAt).toEqual(NOW)
     })
 
     it('reports failure rather than swallowing it when the number cannot be stored', async () => {
@@ -175,6 +220,32 @@ describe('calls', () => {
       expect(ended!.durationS).toBe(200)
       expect(ended!.summary).toMatch(/^Outcome: qualified\./)
       expect(ended!.sentiment).toBeTruthy()
+    })
+
+    /**
+     * Two things legitimately close a call — the socket and Twilio's status
+     * callback — and they race. The second must not rewrite the first's
+     * outcome from a state it does not have.
+     */
+    it('does not let a second close overwrite the first outcome', async () => {
+      const call = await answer()
+      await appendTranscript(db, call.id, { role: 'caller', text: 'stop calling me', at: NOW.toISOString() })
+      const first = await endCall(db, {
+        orgId, callId: call.id, status: 'completed',
+        state: { step: 'done', answers: { what: 'a platform' }, ending: 'opted_out' }, now: NOW,
+      })
+      expect(first!.outcome).toBe('opted_out')
+
+      // The status callback, arriving later with no knowledge of the state.
+      const second = await endCall(db, {
+        orgId, callId: call.id, status: 'completed', durationS: 95,
+        recordingUrl: 'https://api.twilio.com/rec/abc', now: new Date('2026-09-21T12:10:00.000Z'),
+      })
+      expect(second!.outcome).toBe('opted_out')
+      expect(second!.summary).toBe(first!.summary)
+      // ...but Twilio's numbers ARE better than ours, so they land.
+      expect(second!.durationS).toBe(95)
+      expect(second!.recordingUrl).toBe('https://api.twilio.com/rec/abc')
     })
 
     it('records a call nobody answered as no_answer, not as a failure to qualify', async () => {

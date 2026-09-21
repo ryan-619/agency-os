@@ -162,17 +162,50 @@ export async function readCall(db: AgencyDb, orgId: string, id: string): Promise
 }
 
 /**
+ * The call was answered — we returned TwiML and the carrier connected it.
+ *
+ * Separate from `recordDisclosure` below, and that separation is the whole
+ * point. They used to be one statement, which made
+ * `callsThatDidNotDisclose()` STRUCTURALLY VACUOUS: it asks for rows where
+ * `answered_at IS NOT NULL AND disclosed_ai_at IS NULL`, and if only one
+ * statement ever wrote `answered_at` — the same one that wrote
+ * `disclosed_ai_at` — no such row could exist. The audit that was supposed
+ * to prove a §2.1 obligation had been met could never report it being
+ * missed, and the test only passed because it forced the impossible state
+ * by hand. Found by review.
+ */
+export async function markAnswered(db: AgencyDb, callId: string, at: Date = new Date()): Promise<void> {
+  await db
+    .update(schema.calls)
+    .set({ answeredAt: at, status: 'in_progress' })
+    .where(and(eq(schema.calls.id, callId), isNull(schema.calls.answeredAt)))
+}
+
+/**
  * The AI said it was an AI.
  *
- * Written once, before anything else is said. `answered_at` is stamped with
- * it because in practice they are the same instant — the disclosure IS the
- * first thing the caller hears (`aiDisclosure` in packages/core).
+ * Written once, when the relay session starts and the carrier is about to
+ * speak the greeting. Never stamps `answered_at` — see above.
  */
 export async function recordDisclosure(db: AgencyDb, callId: string, at: Date = new Date()): Promise<void> {
   await db
     .update(schema.calls)
-    .set({ disclosedAiAt: at, answeredAt: at, status: 'in_progress' })
+    .set({ disclosedAiAt: at })
     .where(and(eq(schema.calls.id, callId), isNull(schema.calls.disclosedAiAt)))
+}
+
+/**
+ * Take the disclosure back.
+ *
+ * Twilio documents TTS provider and conversion failures (64111, 64112) as
+ * NON-fatal: the session continues, and the caller simply never heard the
+ * text. If that text was the AI disclosure, the row is claiming a §2.1
+ * obligation was met that nobody heard — a false compliance record, which
+ * is worse than a missing one because it silences the audit. So it is
+ * cleared, and `callsThatDidNotDisclose()` reports the call.
+ */
+export async function clearDisclosure(db: AgencyDb, callId: string): Promise<void> {
+  await db.update(schema.calls).set({ disclosedAiAt: null }).where(eq(schema.calls.id, callId))
 }
 
 /**
@@ -207,12 +240,26 @@ export async function recordOptOut(
   const now = args.now ?? new Date()
   await db.update(schema.calls).set({ optedOutAt: now }).where(eq(schema.calls.id, args.callId))
 
-  const added = await addSuppression(db, {
-    orgId: args.orgId,
-    kind: 'phone',
-    value: args.phone,
-    reason: 'asked to be removed during a call',
-  })
+  // A THROW, not just a returned {ok:false}. `addSuppression` returns a
+  // sentence for a value it cannot normalise, but a transient database
+  // fault raises — and an uncaught raise here propagated out through the
+  // session and left the caller listening to silence for the rest of the
+  // call, with no suppression and no log saying so. The one rule this
+  // service exists to enforce, lost to an exception. Found by review.
+  let added: { ok: true; value: string; alreadyPresent: boolean } | { ok: false; message: string }
+  try {
+    added = await addSuppression(db, {
+      orgId: args.orgId,
+      kind: 'phone',
+      value: args.phone,
+      reason: 'asked to be removed during a call',
+    })
+  } catch (err) {
+    added = {
+      ok: false,
+      message: `the suppression could not be written (${err instanceof Error ? err.name : 'UnknownError'})`,
+    }
+  }
   await appendAudit(db, {
     orgId: args.orgId,
     actor: 'voice',
@@ -294,6 +341,17 @@ export async function endCall(db: AgencyDb, input: EndCallInput): Promise<CallRo
     input.durationS ??
     (call.startedAt ? Math.max(0, Math.round((now.getTime() - call.startedAt.getTime()) / 1000)) : null)
 
+  /**
+   * Only the FIRST close writes the outcome, and the predicate does the
+   * arbitrating rather than a read beforehand.
+   *
+   * Two things legitimately close a call — the socket going away and
+   * Twilio's status callback — and they race. Without `ended_at IS NULL` in
+   * the WHERE, the second one recomputed the outcome from a state it did
+   * not have and rewrote a record that said `opted_out`, with the caller's
+   * answers in its summary, into `incomplete` with a summary that had lost
+   * them. Found by review, reproduced against a real engine.
+   */
   const rows = await db
     .update(schema.calls)
     .set({
@@ -305,8 +363,28 @@ export async function endCall(db: AgencyDb, input: EndCallInput): Promise<CallRo
       summary: input.summary ?? summariseCall(transcript, outcome, input.state),
       ...(input.recordingUrl ? { recordingUrl: input.recordingUrl } : {}),
     })
-    .where(and(eq(schema.calls.orgId, input.orgId), eq(schema.calls.id, input.callId)))
+    .where(and(
+      eq(schema.calls.orgId, input.orgId),
+      eq(schema.calls.id, input.callId),
+      isNull(schema.calls.endedAt),
+    ))
     .returning()
+
+  if (rows.length === 0) {
+    // Somebody closed it first. Their outcome stands — but Twilio's numbers
+    // are better than ours, so a duration or a recording URL that only the
+    // status callback knows is still worth filling in.
+    if (input.durationS != null || input.recordingUrl) {
+      await db
+        .update(schema.calls)
+        .set({
+          ...(input.durationS != null ? { durationS: input.durationS } : {}),
+          ...(input.recordingUrl ? { recordingUrl: input.recordingUrl } : {}),
+        })
+        .where(and(eq(schema.calls.orgId, input.orgId), eq(schema.calls.id, input.callId)))
+    }
+    return readCall(db, input.orgId, input.callId)
+  }
 
   await appendAudit(db, {
     orgId: input.orgId,

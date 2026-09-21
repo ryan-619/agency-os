@@ -86,6 +86,17 @@ export function relayTwiml(input: RelayTwimlInput): string {
     welcomeGreetingInterruptible: 'none',
     interruptible: 'true',
     dtmfDetection: 'true',
+    /**
+     * Deliver what the caller says WHILE the agent is talking.
+     *
+     * This defaults to `none`, and with the default the disclosure's
+     * promise — "say stop at any time and I'll end the call" — is false for
+     * every second the agent is speaking: the speech is used to stop the
+     * TTS and then thrown away, never reaching the socket, so the one
+     * utterance §2.1 requires us to act on is the one we never hear. The
+     * interactive opt-out failing silently. Found by review.
+     */
+    reportInputDuringAgentSpeech: 'any',
     ...(input.language ? { language: input.language } : {}),
     ...(input.ttsProvider ? { ttsProvider: input.ttsProvider } : {}),
     ...(input.voice ? { voice: input.voice } : {}),

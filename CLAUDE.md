@@ -494,6 +494,50 @@ the one the socket saw. The relay WebSocket additionally refuses any
 `setup` naming a callSid that did not arrive through a verified TwiML
 webhook.
 
+**Six findings from the Phase 6 review, all fixed, listed so nobody
+re-derives them.** Two were the kind that look fine and are not:
+
+- **The disclosure audit could never fire.** `callsThatDidNotDisclose()`
+  asks for `answered_at IS NOT NULL AND disclosed_ai_at IS NULL`, and
+  `answered_at` was written by exactly ONE statement — the same `.set()`
+  that wrote `disclosed_ai_at`. The state it looks for was unreachable, so
+  the query written to prove a §2.1 obligation could never report it being
+  missed. Its test passed only because it forced the impossible state by
+  hand. `markAnswered()` is now a separate write from a separate event, and
+  the test drives the real sequence.
+- **An opt-out lost to an exception.** `recordOptOut` handled
+  `addSuppression` RETURNING `{ok:false}` but not THROWING, which is what a
+  database fault actually does. The exception escaped the session, so the
+  caller who asked to be left alone got no suppression, no
+  `OPT-OUT NOT RECORDED` log, and silence for the rest of the call.
+- **`reportInputDuringAgentSpeech` defaults to `none`**, so speech during an
+  agent utterance was used to stop the TTS and then discarded — never
+  reaching the socket. The disclosure promises "say stop at any time", and
+  that promise was false for every second the agent was talking. Set to
+  `any`.
+- **Relay turns were not serialised.** Each `message` was an independent
+  fire-and-forget promise, so the script kept talking after an opt-out had
+  ended the call. They are chained now, which also gives the hang-up path
+  something to await so it stops closing the record a turn early.
+- **`endCall` was not idempotent.** The socket and the status callback race,
+  and the loser rewrote an `opted_out` record with its answers into
+  `incomplete` without them. The predicate now carries `ended_at IS NULL`,
+  so the first close wins — while Twilio's duration and recording URL,
+  which only the callback knows, still land.
+- **A greeting that never played was recorded as a disclosure.** Twilio
+  documents TTS failures (64111, 64112) as non-fatal: the session continues
+  and the caller heard nothing. If what went unheard was the disclosure,
+  the row claimed an obligation nobody met. `onRelayError` now takes the
+  disclosure back and ends the call.
+
+Two more the review raised and the refuters killed, worth recording so they
+are not re-fixed: discarding the `interrupt` message loses no transcript
+(with `reportInputDuringAgentSpeech` set, the speech arrives as a normal
+prompt), and the handoff copy was already honest. The handoff was changed
+anyway, because a caller told "connecting you now" by a deployment with
+nowhere to connect them is misled by this service rather than by its
+configuration.
+
 **The scripted policy is the whole conversation.** `scriptedTurn` qualifies a
 caller in three questions with no model involved, which is what runs when no
 model is configured, what the tests drive, and the shape a model-backed

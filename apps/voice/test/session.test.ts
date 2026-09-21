@@ -10,7 +10,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
-import { schema, startCall, type AgencyDb } from '@agency/db'
+import { callsThatDidNotDisclose, markAnswered, schema, startCall, type AgencyDb } from '@agency/db'
 import { freshDb, migrations, type TestDb } from '../../../packages/db/test/helpers.js'
 import { migrateUp } from '../../../packages/db/src/migrator.js'
 import { VoiceSession } from '../src/session.js'
@@ -25,15 +25,20 @@ describe('a voice session', () => {
   let orgId: string
   let callId: string
 
-  const open = async (mayQualify = true): Promise<VoiceSession> => {
+  const open = async (mayQualify = true, canHandOff = true): Promise<VoiceSession> => {
     const call = await startCall(db, {
       orgId, direction: 'in', fromNumber: THEIR, toNumber: '+14155550199',
       providerCallSid: `CA-${Math.round(NOW.getTime())}`, now: NOW,
     })
     callId = call.id
+    // What the signed inbound webhook does before the socket opens. Kept
+    // here so the test drives the same sequence production does — the
+    // previous version skipped it, which is how a structurally vacuous
+    // disclosure audit passed its own test.
+    await markAnswered(db, call.id, NOW)
     return new VoiceSession({
       db, log: silent, orgId, orgName: 'Agency', callId,
-      theirNumber: THEIR, mayQualify, now: () => NOW,
+      theirNumber: THEIR, mayQualify, canHandOff, now: () => NOW,
     })
   }
 
@@ -56,6 +61,7 @@ describe('a voice session', () => {
       const action = await s.onSetup()
       const row = await callRow()
       expect(row.disclosedAiAt).toEqual(NOW)
+      expect(row.answeredAt).toEqual(NOW)
       expect(row.status).toBe('in_progress')
       expect(action.say).toMatch(/what does your company build/i)
       expect(action.end).toBe(false)
@@ -126,12 +132,66 @@ describe('a voice session', () => {
       expect((await callRow()).handoffReason).toMatch(/pressed 0/)
     })
 
+    /**
+     * A caller must never be told they are being connected to somebody who
+     * does not exist. With no TaskRouter workflow and no on-call number,
+     * the call still ends as a handoff so a person picks it up — but the
+     * promise changes.
+     */
+    it('does not promise a transfer a deployment cannot perform', async () => {
+      const s = await open(true, false)
+      await s.onSetup()
+      const action = await s.onPrompt('can I speak to a real person')
+      expect(action.handoff?.reason).toBe('live-agent-handoff')
+      expect(action.say).not.toMatch(/connect you to a person now/i)
+      expect(action.say).toMatch(/somebody calls you back/i)
+    })
+
     it('is offered when the caller is plainly unhappy, without being asked for', async () => {
       const s = await open()
       await s.onSetup()
       const action = await s.onPrompt('this is ridiculous and a complete waste of my time')
       expect(action.end).toBe(true)
       expect(action.handoff?.reason).toBe('live-agent-handoff')
+    })
+  })
+
+  /**
+   * Twilio documents TTS failures as non-fatal — the session carries on and
+   * the caller heard nothing. If what went unheard was the disclosure, the
+   * record must stop claiming it happened.
+   */
+  describe('a greeting that never played is not a disclosure', () => {
+    it('takes the disclosure back and ends the call', async () => {
+      const s = await open()
+      await s.onSetup()
+      expect((await callRow()).disclosedAiAt).toEqual(NOW)
+
+      const action = await s.onRelayError('64111 TTS Provider Service Error')
+      expect(action.end).toBe(true)
+      expect(action.say).toMatch(/I am an AI assistant/i)
+
+      const row = await callRow()
+      expect(row.disclosedAiAt).toBeNull()
+      // ...and the audit can now see it, which is the whole point.
+      expect((await callsThatDidNotDisclose(db, orgId)).map((c) => c.id)).toEqual([callId])
+    })
+
+    it('leaves the record alone once the caller has already been talking', async () => {
+      const s = await open()
+      await s.onSetup()
+      await s.onPrompt('We build a platform')
+      const action = await s.onRelayError('64112 TTS Conversion Error')
+      expect(action.end).toBe(false)
+      expect((await callRow()).disclosedAiAt).toEqual(NOW)
+    })
+
+    it('does not treat an unrelated relay error as a failed disclosure', async () => {
+      const s = await open()
+      await s.onSetup()
+      const action = await s.onRelayError('64107 Invalid Message Received')
+      expect(action.end).toBe(false)
+      expect((await callRow()).disclosedAiAt).toEqual(NOW)
     })
   })
 

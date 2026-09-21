@@ -38,7 +38,7 @@ import {
   type QualificationState, type TranscriptEntry,
 } from '@agency/core'
 import {
-  appendTranscript, endCall, recordDisclosure, recordHandoff, recordOptOut,
+  appendTranscript, clearDisclosure, endCall, recordDisclosure, recordHandoff, recordOptOut,
   type AgencyDb,
 } from '@agency/db'
 import type { Logger } from './logger.js'
@@ -63,6 +63,13 @@ export interface SessionDeps {
   readonly theirNumber: string
   /** False when the number is already on the do-not-contact list. */
   readonly mayQualify: boolean
+  /**
+   * Whether there is anywhere to transfer a caller to. False when neither a
+   * TaskRouter workflow nor an on-call number is configured — and a caller
+   * who is told "connecting you now" and then hears "nobody is available"
+   * was misled by this service, not by the configuration.
+   */
+  readonly canHandOff?: boolean
   readonly now?: () => Date
 }
 
@@ -106,9 +113,13 @@ export class VoiceSession {
       // pure statement of that rule.
       const mode = decideInboundCall({ suppressed: true })
       this.deps.log.info('call answered in service-only mode', { callId: this.deps.callId, mode: mode.mode })
+      // The opt-out offer is repeated even here. §2.1 wants an INTERACTIVE
+      // opt-out on every AI call, and a caller who is already suppressed is
+      // exactly the one most likely to want to say it again and be sure.
       const say =
         'Before we go on — your number is on our do-not-contact list, so I will not ask you anything. ' +
-        'If you would like to speak to a person, say so; otherwise I will end the call.'
+        'Say "stop" at any time and I will end the call. If you would like to speak to a person, say so; ' +
+        'otherwise I will end the call.'
       await this.remember('agent', say)
       return { say, end: false }
     }
@@ -164,6 +175,39 @@ export class VoiceSession {
   }
 
   /**
+   * The relay reported an error.
+   *
+   * Twilio documents the TTS failures (64111 provider error, 64112
+   * conversion error) as NON-fatal — the session carries on and the caller
+   * simply heard nothing. If that happens before the caller has said a
+   * word, the text that went unheard was the AI disclosure, and continuing
+   * would be running an AI conversation with somebody who was never told.
+   * So the record is corrected and the call ends: §2.1 is not negotiable,
+   * and a call nobody can legally continue is one to hand to a person.
+   */
+  async onRelayError(description: string): Promise<SessionAction> {
+    const tts = /\b(64111|64112)\b/.test(description) || /tts|text.to.speech|synthes/i.test(description)
+    const heardNothingYet = !this.transcript.some((e) => e.role === 'caller')
+    if (!tts || !heardNothingYet || this.finished) {
+      await this.remember('system', `[relay error: ${description.slice(0, 200)}]`)
+      return { say: '', end: false }
+    }
+
+    this.finished = true
+    await clearDisclosure(this.deps.db, this.deps.callId)
+    await this.remember('system', `[the AI disclosure was not spoken — ${description.slice(0, 160)}]`)
+    this.deps.log.error('DISCLOSURE NOT HEARD — ending the call', { callId: this.deps.callId })
+    return {
+      // Said, not synthesised by the provider that just failed — but if this
+      // does not reach them either, the call still ends, which is the
+      // outcome §2.1 requires.
+      say: 'Sorry, there is a fault on this line. I am an AI assistant and I will end the call here. Somebody will call you back.',
+      end: true,
+      handoff: { reason: 'live-agent-handoff', detail: 'AI disclosure could not be spoken' },
+    }
+  }
+
+  /**
    * A keypress. Zero is the convention for "give me a person", and honouring
    * it costs nothing; anything else is left alone rather than guessed at.
    */
@@ -176,12 +220,20 @@ export class VoiceSession {
 
   private async optOut(alreadySaid?: string): Promise<SessionAction> {
     this.finished = true
-    const out = await recordOptOut(this.deps.db, {
-      orgId: this.deps.orgId,
-      callId: this.deps.callId,
-      phone: this.deps.theirNumber,
-      now: this.deps.now?.(),
-    })
+    // Belt and braces over `recordOptOut`'s own try/catch: nothing in this
+    // method may throw, because the caller has asked to be left alone and
+    // an exception here is the request being dropped in silence.
+    let out: { suppressed: boolean; message?: string }
+    try {
+      out = await recordOptOut(this.deps.db, {
+        orgId: this.deps.orgId,
+        callId: this.deps.callId,
+        phone: this.deps.theirNumber,
+        now: this.deps.now?.(),
+      })
+    } catch (err) {
+      out = { suppressed: false, message: err instanceof Error ? err.name : 'UnknownError' }
+    }
     if (!out.suppressed) {
       // §2.1's obligation: an opt-out that could not be stored must fail
       // loudly to a human, never be swallowed. The caller still gets the
@@ -202,7 +254,15 @@ export class VoiceSession {
   private async handOff(reason: string, alreadySaid?: string): Promise<SessionAction> {
     this.finished = true
     await recordHandoff(this.deps.db, { orgId: this.deps.orgId, callId: this.deps.callId, reason })
-    const say = alreadySaid ?? 'Of course. I will connect you to a person now — one moment.'
+    // Only promise a transfer that can actually happen. With nowhere to
+    // send them, say so — the call still ends as a handoff so a person
+    // picks it up from the board, but the caller is not told they are being
+    // connected to somebody who does not exist.
+    const say =
+      alreadySaid ??
+      (this.deps.canHandOff === false
+        ? 'There is nobody on the line to take this right now, so I will make sure somebody calls you back today. Sorry about that.'
+        : 'Of course. I will connect you to a person now — one moment.')
     if (!alreadySaid) await this.remember('agent', say)
     this.state = { ...this.state, ending: 'handoff' }
     return { say, end: true, handoff: { reason: 'live-agent-handoff', detail: reason } }

@@ -56,7 +56,8 @@ export function suppressedGreeting(orgName: string): string {
 }
 
 /** Qualified opt-outs. Unambiguous wherever they appear in a sentence. */
-const OPT_OUT = /\b(stop (?:calling|contacting|texting|messaging)|remove me|take me off|do not (?:call|contact|text)|don'?t (?:call|contact|text)|unsubscribe|opt(?: |-)?out|leave me alone|no more calls)\b/i
+const OPT_OUT =
+  /\b(stop (?:calling|contacting|texting|messaging|ringing|phoning)|remove me|remove my (?:number|details)|take me off|delete my (?:number|details|data)|do not (?:call|contact|text|ring|phone)|don'?t (?:call|contact|text|ring|phone)|never (?:call|contact|ring|phone) (?:me|again)|unsubscribe|opt(?: |-)?out|leave me alone|lose my number|no more calls)\b/i
 
 /**
  * Bare "stop". The disclosure tells the caller this exact word ends the call,
@@ -78,9 +79,15 @@ export function spokenOptOut(text: string | null | undefined): boolean {
   if (!text) return false
   const t = text.trim()
   if (OPT_OUT.test(t)) return true
-  // A short utterance is the caller answering, not narrating. Long sentences
-  // containing the word are left to the qualified patterns above.
-  return t.length <= 60 && BARE_STOP.test(t)
+  // Bare "stop" is honoured wherever it appears, because the disclosure
+  // told the caller that word ends the call and they are entitled to take
+  // that literally. There used to be a 60-character ceiling here, on the
+  // theory that a short utterance is an answer and a long one is narration.
+  // Review found the cliff: "I've asked you people before, please stop" is
+  // 41 characters and honoured, the same sentence with one more clause is
+  // not. A caller does not get to know where the line is, so there is no
+  // line — BARE_STOP's determiner guard is what keeps "the bus stop" out.
+  return BARE_STOP.test(t)
 }
 
 const HUMAN = /\b(real person|human|a person|someone|somebody|an? (?:agent|representative|rep|manager|colleague)|transfer me|speak to|talk to|put me through|is this a (?:robot|bot|machine|recording)|not a (?:robot|bot))\b/i
