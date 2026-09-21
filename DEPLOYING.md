@@ -183,6 +183,35 @@ share the URL.
 
 ---
 
+## Every deploy after the first: migrate FIRST
+
+The app and the database ship separately here, so the order matters and it is
+always the same one: **apply the migrations, then deploy the app.** A schema
+that is ahead of the code is harmless — nothing reads the new column. Code
+that is ahead of the schema is a live error page.
+
+0016 is the concrete example. It adds `linkedin` to `suppressions.kind`, and
+the suppressions form now offers it; deploying that against a database still
+holding the old CHECK gives an operator an error the moment they try to record
+an opt-out — the worst possible place for one.
+
+```bash
+./tools/remote-setup.sh
+```
+
+The same prompt-based script as the first-time setup. It asks for the DIRECT
+(unpooled) connection string, applies whatever is pending, re-runs the
+idempotent seed, and prints what the database now holds. Then deploy.
+
+Check what is pending before and after, if you want to see it:
+
+```bash
+npm run db:migrate -- status
+```
+
+(that one needs `DATABASE_URL` in your environment, so for the remote database
+prefer the script.)
+
 ## After the first deploy
 
 1. Sign in at `https://<your-url>/signin` with the seeded owner address and
