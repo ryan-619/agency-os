@@ -24,10 +24,27 @@ cd "$(dirname "$0")/.."
 
 export PATH=/usr/local/bin:$PATH
 
-printf 'Neon DIRECT (unpooled) connection string: '
+# Both prompts read from /dev/tty rather than stdin, and write to it rather
+# than stdout. Run through a tool, a pipe or a non-interactive shell there is
+# no terminal to read from: `read` then fails instantly, `set -e` exits, and
+# all anybody sees is the prompt and a dead shell — which is what happened the
+# first time this was run from the app's command box. Say so instead.
+# Opening it is the test. `[ -r /dev/tty ]` only reads the permission bits
+# and passes in places where the open then fails with "Device not configured".
+if ! { exec 3<>/dev/tty; } 2>/dev/null; then
+  echo "This script needs a terminal." >&2
+  echo >&2
+  echo "It asks for the connection string at a HIDDEN prompt, so the credential" >&2
+  echo "never reaches a file, a log, an argument list or shell history (§2.3)." >&2
+  echo "That needs a real terminal to read from — run it in a Terminal tab, not" >&2
+  echo "through a tool, a pipe, or CI." >&2
+  exit 1
+fi
+
+printf 'Neon DIRECT (unpooled) connection string: ' >&3
 # -s: no echo. Nothing is printed, so nothing lands in a screenshot either.
-read -r -s DB
-printf '\n'
+read -r -s DB <&3
+printf '\n' >&3
 
 if [ -z "${DB:-}" ]; then
   echo "Nothing entered. Stopping." >&2
@@ -49,8 +66,8 @@ esac
 
 OWNER="${SEED_OWNER_EMAIL:-}"
 if [ -z "$OWNER" ]; then
-  printf 'Owner email (the only account that will be able to sign in): '
-  read -r OWNER
+  printf 'Owner email (the only account that will be able to sign in): ' >&3
+  read -r OWNER <&3
 fi
 
 echo
@@ -91,5 +108,6 @@ const { Client } = require("pg");
 })().catch(e => { console.error("  FAILED:", e.message); process.exit(1) })'
 
 unset DB
+exec 3>&-
 echo
 echo "Done. Tell the assistant, and it will redeploy and verify sign-in."
