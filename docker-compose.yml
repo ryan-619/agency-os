@@ -162,6 +162,49 @@ services:
       # that starts agent turns on the host interface.
       - '127.0.0.1:3001:3001'
 
+  # The voice service (§8.5). Behind a PROFILE, so `docker compose up` does
+  # NOT start it: §12 says not to switch Phase 6 on before A2P 10DLC
+  # registration clears, and a service that answers the phone should not
+  # start because somebody brought the stack up.
+  #
+  #   docker compose --profile voice up -d voice
+  #
+  # It needs a PUBLIC https origin (Twilio has to reach it, and the request
+  # signature is computed over the URL Twilio used, not the one the socket
+  # saw), so behind a reverse proxy set VOICE_PUBLIC_URL to the outside
+  # address. With it unset every webhook is refused, which is the correct
+  # failure: these endpoints can write a suppression.
+  voice:
+    build:
+      context: .
+      dockerfile: apps/voice/Dockerfile
+    profiles: ['voice']
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER:-agency}:${POSTGRES_PASSWORD:-agency}@db:5432/${POSTGRES_DB:-agency}
+      DATABASE_POOL_MAX: ${VOICE_POOL_MAX:-4}
+      VOICE_PORT: 3003
+      # Loopback is wrong under compose for the same reason it is wrong for
+      # the agent worker: each service has its own network namespace.
+      VOICE_BIND: 0.0.0.0
+      VOICE_PUBLIC_URL: ${VOICE_PUBLIC_URL:-}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
+      VOICE_ORG_ID: ${VOICE_ORG_ID:-}
+      TASKROUTER_WORKFLOW_SID: ${TASKROUTER_WORKFLOW_SID:-}
+      VOICE_HANDOFF_NUMBER: ${VOICE_HANDOFF_NUMBER:-}
+      VOICE_LANGUAGE: ${VOICE_LANGUAGE:-en-US}
+      VOICE_TTS_PROVIDER: ${VOICE_TTS_PROVIDER:-}
+      VOICE_TTS_VOICE: ${VOICE_TTS_VOICE:-}
+      VOICE_MAX_CALL_SECONDS: ${VOICE_MAX_CALL_SECONDS:-900}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - '127.0.0.1:3003:3003'
+
   # --- one-off tasks --------------------------------------------------------
   # Run with `docker compose run --rm migrate`. They exit when done, so they
   # carry `profiles` and never start as part of `docker compose up`.

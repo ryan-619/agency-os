@@ -17,7 +17,7 @@ export function Shell({
 }: {
   user: ShellUser
   orgName: string
-  current: 'dashboard' | 'companies' | 'chat' | 'approvals' | 'campaigns' | 'suppressions' | 'connectors' | 'agents' | 'pipeline'
+  current: 'dashboard' | 'companies' | 'chat' | 'approvals' | 'campaigns' | 'suppressions' | 'connectors' | 'agents' | 'pipeline' | 'calls'
   children: React.ReactNode
   signOut: () => Promise<void>
   /**
@@ -43,6 +43,7 @@ export function Shell({
           </a>
           <a href="/pipeline" className={current === 'pipeline' ? 'on' : undefined}>Pipeline</a>
           <a href="/campaigns" className={current === 'campaigns' ? 'on' : undefined}>Campaigns</a>
+          <a href="/calls" className={current === 'calls' ? 'on' : undefined}>Calls</a>
           <a href="/suppressions" className={current === 'suppressions' ? 'on' : undefined}>
             Suppressions
           </a>

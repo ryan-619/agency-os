@@ -1,0 +1,236 @@
+/**
+ * One call's conversation (PROMPT.md §8.5).
+ *
+ * ConversationRelay hands us a WebSocket and a stream of `prompt` messages —
+ * what the caller said — and we answer with `text` tokens it speaks back.
+ * Everything in between is this file, and it is deliberately thin: the
+ * RULES live in `packages/core/src/voice.ts`, pure and unit-tested, because
+ * a rule that only exists inside a socket handler cannot be tested without
+ * a phone line and therefore will not be.
+ *
+ * ## The order of precedence is §2.1's, not the conversation's
+ *
+ * On every single turn, before anything else is considered:
+ *
+ *   1. did they ask to be left alone?  → suppress, say so, hang up;
+ *   2. did they ask for a person?      → hand off;
+ *   3. is the conversation going badly? → hand off anyway;
+ *   4. only then, the script.
+ *
+ * A model-backed policy would sit at step 4 and NOTHING else: the first
+ * three are detected on the caller's own words by pure functions, never
+ * left to a model to notice. That is the whole point of the ordering — a
+ * model that is having a nice conversation is exactly the one that misses
+ * "stop calling me".
+ *
+ * ## Why the disclosure is not sent from here
+ *
+ * §2.1 requires the AI to disclose itself in the FIRST utterance, and the
+ * safest way to guarantee something is first is to make it impossible for
+ * anything to precede it. It is passed as `welcomeGreeting` on the
+ * `<ConversationRelay>` noun, so Twilio speaks it at connect time, before
+ * this socket has said a word, and `welcomeGreetingInterruptible="none"`
+ * means the caller cannot talk over it either.
+ */
+import {
+  INITIAL_STATE, decideInboundCall, scriptedOpening, scriptedTurn, shouldHandOffForSentiment,
+  spokenOptOut, wantsHuman,
+  type QualificationState, type TranscriptEntry,
+} from '@agency/core'
+import {
+  appendTranscript, endCall, recordDisclosure, recordHandoff, recordOptOut,
+  type AgencyDb,
+} from '@agency/db'
+import type { Logger } from './logger.js'
+
+/** What the socket should do after a turn. */
+export interface SessionAction {
+  /** Spoken to the caller. Empty means say nothing. */
+  readonly say: string
+  /** End the ConversationRelay session after speaking. */
+  readonly end: boolean
+  /** Why it ended, passed to the `<Connect action>` webhook as handoffData. */
+  readonly handoff?: { readonly reason: 'live-agent-handoff' | 'opted-out' | 'done'; readonly detail: string }
+}
+
+export interface SessionDeps {
+  readonly db: AgencyDb
+  readonly log: Logger
+  readonly orgId: string
+  readonly orgName: string
+  readonly callId: string
+  /** The caller's number, for the suppression row if they opt out. */
+  readonly theirNumber: string
+  /** False when the number is already on the do-not-contact list. */
+  readonly mayQualify: boolean
+  readonly now?: () => Date
+}
+
+export class VoiceSession {
+  private state: QualificationState = INITIAL_STATE
+  private readonly transcript: TranscriptEntry[] = []
+  private finished = false
+
+  constructor(private readonly deps: SessionDeps) {}
+
+  private at(): string {
+    return (this.deps.now?.() ?? new Date()).toISOString()
+  }
+
+  /** Record a line both in memory (for the outcome) and in the database. */
+  private async remember(role: TranscriptEntry['role'], text: string): Promise<void> {
+    const entry: TranscriptEntry = { role, text, at: this.at() }
+    this.transcript.push(entry)
+    // Never let a transcript write break a live call: the caller is on the
+    // line, and a failed append is a lost line, not a lost conversation.
+    await appendTranscript(this.deps.db, this.deps.callId, entry).catch((err: unknown) => {
+      this.deps.log.warn('transcript append failed', { error: err instanceof Error ? err.name : 'UnknownError' })
+    })
+  }
+
+  /**
+   * The session is live and the greeting is about to play.
+   *
+   * This is where the disclosure is recorded, not where it is spoken —
+   * Twilio speaks it. Recording it at TwiML time instead would mark calls
+   * that never connected as disclosed.
+   */
+  async onSetup(): Promise<SessionAction> {
+    await recordDisclosure(this.deps.db, this.deps.callId, this.deps.now?.() ?? new Date())
+    const disclosure = `[welcome greeting: AI disclosure and opt-out, spoken by the carrier]`
+    await this.remember('system', disclosure)
+
+    if (!this.deps.mayQualify) {
+      // §2.1: a suppressed number is answered — they called US — but nothing
+      // is asked of them and nothing is pitched. `decideInboundCall` is the
+      // pure statement of that rule.
+      const mode = decideInboundCall({ suppressed: true })
+      this.deps.log.info('call answered in service-only mode', { callId: this.deps.callId, mode: mode.mode })
+      const say =
+        'Before we go on — your number is on our do-not-contact list, so I will not ask you anything. ' +
+        'If you would like to speak to a person, say so; otherwise I will end the call.'
+      await this.remember('agent', say)
+      return { say, end: false }
+    }
+
+    const opening = scriptedOpening()
+    await this.remember('agent', opening)
+    return { say: opening, end: false }
+  }
+
+  /** The caller said something. */
+  async onPrompt(text: string): Promise<SessionAction> {
+    if (this.finished) return { say: '', end: false }
+    const said = text.trim()
+    if (!said) return { say: '', end: false }
+    await this.remember('caller', said)
+
+    // ---- 1. an opt-out beats everything, including the script ------------
+    if (spokenOptOut(said)) return this.optOut()
+
+    // ---- 2. they asked for a person --------------------------------------
+    if (wantsHuman(said)) {
+      return this.handOff('they asked to speak to a person')
+    }
+
+    // A suppressed caller is never qualified; the only thing on offer is a
+    // person or a goodbye.
+    if (!this.deps.mayQualify) {
+      const say = 'Understood. I will end the call here. Thanks for ringing.'
+      await this.remember('agent', say)
+      this.finished = true
+      return { say, end: true, handoff: { reason: 'done', detail: 'suppressed caller, no handoff requested' } }
+    }
+
+    // ---- 3. going badly enough that a person should take over ------------
+    if (shouldHandOffForSentiment(this.transcript)) {
+      return this.handOff('the caller sounded unhappy')
+    }
+
+    // ---- 4. the script ---------------------------------------------------
+    const turn = scriptedTurn(this.state, said, this.deps.orgName)
+    this.state = turn.next
+    await this.remember('agent', turn.reply)
+
+    if (turn.action === 'opted_out') return this.optOut(turn.reply)
+    if (turn.action === 'handoff') {
+      return this.handOff('the caller asked for a person at the close', turn.reply)
+    }
+    if (turn.action === 'end') {
+      this.finished = true
+      return { say: turn.reply, end: true, handoff: { reason: 'done', detail: 'qualified, follow-up by email' } }
+    }
+    return { say: turn.reply, end: false }
+  }
+
+  /**
+   * A keypress. Zero is the convention for "give me a person", and honouring
+   * it costs nothing; anything else is left alone rather than guessed at.
+   */
+  async onDtmf(digit: string): Promise<SessionAction> {
+    if (this.finished) return { say: '', end: false }
+    await this.remember('caller', `[pressed ${digit}]`)
+    if (digit === '0') return this.handOff('the caller pressed 0')
+    return { say: '', end: false }
+  }
+
+  private async optOut(alreadySaid?: string): Promise<SessionAction> {
+    this.finished = true
+    const out = await recordOptOut(this.deps.db, {
+      orgId: this.deps.orgId,
+      callId: this.deps.callId,
+      phone: this.deps.theirNumber,
+      now: this.deps.now?.(),
+    })
+    if (!out.suppressed) {
+      // §2.1's obligation: an opt-out that could not be stored must fail
+      // loudly to a human, never be swallowed. The caller still gets the
+      // promise; the team gets an error they cannot miss.
+      this.deps.log.error('OPT-OUT NOT RECORDED — follow up by hand', {
+        callId: this.deps.callId,
+        reason: out.message ?? 'unknown',
+      })
+    }
+    const say =
+      alreadySaid ??
+      `Understood. I have ended this and made sure nobody from ${this.deps.orgName} contacts you again. Goodbye.`
+    if (!alreadySaid) await this.remember('agent', say)
+    this.state = { ...this.state, ending: 'opted_out' }
+    return { say, end: true, handoff: { reason: 'opted-out', detail: 'caller asked to be removed' } }
+  }
+
+  private async handOff(reason: string, alreadySaid?: string): Promise<SessionAction> {
+    this.finished = true
+    await recordHandoff(this.deps.db, { orgId: this.deps.orgId, callId: this.deps.callId, reason })
+    const say = alreadySaid ?? 'Of course. I will connect you to a person now — one moment.'
+    if (!alreadySaid) await this.remember('agent', say)
+    this.state = { ...this.state, ending: 'handoff' }
+    return { say, end: true, handoff: { reason: 'live-agent-handoff', detail: reason } }
+  }
+
+  /**
+   * The call is over, however it ended.
+   *
+   * Safe to call twice — a hang-up and the status callback race, and both
+   * legitimately want to close the record.
+   */
+  async finish(status: 'completed' | 'failed' | 'no_answer' | 'busy' | 'cancelled' = 'completed'): Promise<void> {
+    await endCall(this.deps.db, {
+      orgId: this.deps.orgId,
+      callId: this.deps.callId,
+      status,
+      state: this.state,
+      now: this.deps.now?.(),
+    }).catch((err: unknown) => {
+      this.deps.log.error('could not close the call record', {
+        callId: this.deps.callId,
+        error: err instanceof Error ? err.name : 'UnknownError',
+      })
+    })
+  }
+
+  /** For the tests and the handoff TwiML. */
+  get qualification(): QualificationState {
+    return this.state
+  }
+}

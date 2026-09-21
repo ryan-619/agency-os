@@ -4,7 +4,7 @@ Internal operating system for a small application-security agency. Read
 [PROMPT.md](PROMPT.md) for the full build spec; this file is the working
 summary a session should read first.
 
-**Current state: Phases 0, 1, 2, 3, 4 and 5 are built.** Phase 6 (voice/SMS) is next.
+**Current state: Phases 0–6 are built.** Phase 6 is built but deliberately NOT switched on: §12 says not to before A2P 10DLC registration clears, so the compose service sits behind a `voice` profile and `docker compose up` does not start it.
 
 **The web half is LIVE on Vercel** at `agency-os-tau-murex.vercel.app`, against
 a Neon Postgres (18.6) with Resend for magic links. Proved live: `/api/health`
@@ -450,13 +450,65 @@ is the JSON; sending anything is Phase 4's single path), and deal ownership
 (`deals.owner_user_id` exists and nothing sets it yet — a two-person agency
 did not need it to close).
 
+### Voice (Phase 6, §8.5)
+
+**The disclosure is not sent by our code, and that is the point.** §2.1 wants
+the AI to say it is an AI in the FIRST utterance, and the only way to
+guarantee something is first is to make it impossible for anything to
+precede it. It rides as `welcomeGreeting` on the `<ConversationRelay>` noun,
+so Twilio speaks it at connect before the socket exists, with
+`welcomeGreetingInterruptible="none"` — the attribute defaults to `any`, so
+leaving it out would let a caller talk over the disclosure. `aiDisclosure()`
+in `packages/core` is its only source, so it cannot be paraphrased away.
+
+**`calls.disclosed_ai_at` is evidence, not telemetry.** An answered call with
+a NULL there did not disclose, and `callsThatDidNotDisclose()` exists so that
+is a query somebody can run rather than a claim nobody can check. The /calls
+page leads with it going wrong.
+
+**Order of precedence on every turn is §2.1's, not the conversation's:**
+opt-out, then a request for a person, then sentiment, and only then the
+script. The first three are pure functions over the caller's own words —
+never left to a model to notice, because a model having a pleasant
+conversation is exactly the one that misses "stop calling me".
+
+**An opt-out writes the suppression row, not just the column.**
+`recordOptOut` does both in one call, and when the number cannot be
+normalised it returns `{suppressed: false, message}` and the service logs
+`OPT-OUT NOT RECORDED` at error — §2.1's Phase 4 obligation restated for
+voice: an opt-out that failed to store must fail loudly to a human and never
+fall through. `phoneIsSuppressed` treats an unreadable number as suppressed,
+because "we could not parse it" is not "they never asked us to stop".
+
+**There is no code path that places a call.** Not "it is disabled" — the
+dialling code does not exist, which is what §2.1's "structurally impossible"
+asks for. When outbound voice is built it goes through `decideSend` with
+channel `voice` like every other message, and `calls_outbound_names_its_touch`
+(0014) makes a row that skipped the approval unstorable.
+
+**Every webhook fails closed.** No `TWILIO_AUTH_TOKEN` or no
+`VOICE_PUBLIC_URL` means every request is refused, like
+`/api/inbound/email`. The signed URL is rebuilt from `VOICE_PUBLIC_URL`,
+never the Host header, because behind a proxy the URL Twilio signed is not
+the one the socket saw. The relay WebSocket additionally refuses any
+`setup` naming a callSid that did not arrive through a verified TwiML
+webhook.
+
+**The scripted policy is the whole conversation.** `scriptedTurn` qualifies a
+caller in three questions with no model involved, which is what runs when no
+model is configured, what the tests drive, and the shape a model-backed
+policy would have to match. A model would sit at step 4 of the precedence
+above and nowhere else. Flagged rather than hidden (§13): §8.5 says "you run
+the conversation loop against the model", and this ships the deterministic
+half of that.
+
 ## 3. Commands
 
 ```bash
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 1291 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline
+npm test                 # 1383 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline
 npm run build            # packages, then the Next app
 
 # database (needs DATABASE_URL)

@@ -37,6 +37,7 @@
     "packages/*/src/**/*.ts",
     "apps/*/test/**/*.ts",
     "apps/agent/src/**/*.ts",
+    "apps/voice/src/**/*.ts",
     "packages/scanner/src/**/*.ts",
     "tools/**/*.ts",
     "vitest.config.ts"
