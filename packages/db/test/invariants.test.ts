@@ -411,6 +411,45 @@ describe('§2 invariants are enforced by the schema', () => {
       }
     })
 
+    /**
+     * 0016. LinkedIn is one of the two cold channels §2.1 permits, so before
+     * this it was the one channel where somebody could ask to be left alone
+     * and have nowhere to record it. The CHECK is the shape
+     * `normaliseLinkedIn()` produces, so a value that did not come through
+     * it cannot be stored.
+     */
+    it('REFUSES a LinkedIn value that is not a bare namespace and slug', async () => {
+      const bad = [
+        'https://www.linkedin.com/in/priya',  // a URL, not the stored form
+        'linkedin.com/in/priya',
+        'in/PRIYA',                            // not folded
+        'priya',                               // no namespace
+        'in/',                                 // no slug
+        'school/imperial',                     // a namespace this product does not message
+        'in/priya/detail/recent-activity',     // a sub-page
+      ]
+      for (const value of bad) {
+        const msg = await expectRejection(() =>
+          db.driver.select(
+            `INSERT INTO suppressions (org_id, kind, value, reason) VALUES ($1, 'linkedin', $2, 'opt-out')`,
+            [orgId, value],
+          ),
+        )
+        expect(msg, `"${value}" should be rejected`).toMatch(/suppressions_(value_is_normalised|kind_check)/)
+      }
+    })
+
+    it('accepts a LinkedIn profile and a company page as different rows', async () => {
+      for (const value of ['in/priya', 'company/rentman']) {
+        const ok = await db.driver.select(
+          `INSERT INTO suppressions (org_id, kind, value, reason)
+           VALUES ($1, 'linkedin', $2, 'asked to stop on LinkedIn') RETURNING id`,
+          [orgId, value],
+        )
+        expect(ok, value).toHaveLength(1)
+      }
+    })
+
     it('accepts the normalised forms', async () => {
       // A number not used by the per-geo test above, which shares this org.
       const ok = await db.driver.select(

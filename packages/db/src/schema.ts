@@ -283,7 +283,7 @@ export const suppressions = pgTable(
   {
     id: id(),
     orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
-    /** 'email' | 'domain' | 'phone' */
+    /** 'email' | 'domain' | 'phone' | 'linkedin' (0016) */
     kind: text('kind').notNull(),
     /** Stored already normalised by packages/core. */
     value: text('value').notNull(),

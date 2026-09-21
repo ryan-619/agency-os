@@ -41,7 +41,13 @@ export function SuppressionsPanel({
   canWrite: boolean
   canRemove: boolean
 }) {
-  const [kind, setKind] = useState<'email' | 'domain' | 'phone'>('email')
+  const PLACEHOLDER = {
+    email: 'someone@example.com',
+    domain: 'example.com',
+    phone: '+1 415 555 0100',
+    linkedin: 'linkedin.com/in/jane-doe',
+  } as const
+  const [kind, setKind] = useState<'email' | 'domain' | 'phone' | 'linkedin'>('email')
   const [value, setValue] = useState('')
   const [reason, setReason] = useState('')
   const [error, setError] = useState('')
@@ -133,6 +139,7 @@ export function SuppressionsPanel({
                 <option value="email">Email address</option>
                 <option value="domain">Whole domain</option>
                 <option value="phone">Phone number</option>
+                <option value="linkedin">LinkedIn profile</option>
               </select>
             </label>
             <label>
@@ -140,7 +147,7 @@ export function SuppressionsPanel({
               <input
                 value={value}
                 onChange={(e) => setValue(e.target.value)}
-                placeholder={kind === 'email' ? 'someone@example.com' : kind === 'domain' ? 'example.com' : '+1 415 555 0100'}
+                placeholder={PLACEHOLDER[kind]}
                 autoComplete="off"
               />
             </label>

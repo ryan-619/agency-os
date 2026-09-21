@@ -150,6 +150,7 @@ describe('normaliseSuppressionValue', () => {
     expect(normaliseSuppressionValue('email', 'Stop@Example.com')).toBe('stop@example.com')
     expect(normaliseSuppressionValue('domain', 'WWW.Example.com')).toBe('example.com')
     expect(normaliseSuppressionValue('phone', '+1 415 555 0100')).toBe('+14155550100')
+    expect(normaliseSuppressionValue('linkedin', 'https://LinkedIn.com/in/Priya/')).toBe('in/priya')
   })
 
   /**
@@ -158,7 +159,11 @@ describe('normaliseSuppressionValue', () => {
    * rejects, which is an opt-out that was never recorded.
    */
   it('refuses a kind it does not know, rather than passing the value through', () => {
-    expect(normaliseSuppressionValue('linkedin' as never, 'https://linkedin.com/in/x')).toBeNull()
+    // `linkedin` was this test's example until 0016 made it a real kind. The
+    // rule is about the DEFAULT branch, so the example has to be a kind that
+    // is genuinely not handled — whatever channel is added next.
+    expect(normaliseSuppressionValue('whatsapp' as never, '+1 415 555 0100')).toBeNull()
+    expect(normaliseSuppressionValue('' as never, 'anything')).toBeNull()
   })
 
   /**

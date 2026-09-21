@@ -53,7 +53,10 @@ describe('the happy path', () => {
   })
 
   it('allows LinkedIn on the same terms', () => {
-    expect(decideSend(facts({ channel: 'linkedin', recipient: 'priya@rentman.io' })).allowed).toBe(true)
+    // The recipient is the profile, which is what `recipientFor` passes —
+    // since 0016 an email address in that field is a data error rather than
+    // something that sails through because the channel had no keys.
+    expect(decideSend(facts({ channel: 'linkedin', recipient: 'linkedin.com/in/priya' })).allowed).toBe(true)
   })
 })
 
@@ -104,13 +107,43 @@ describe('§2.1 rule 1 — suppression wins over everything', () => {
   })
 
   /**
-   * A gap, recorded rather than papered over: `suppressions.kind` has no
-   * LinkedIn value, so a profile cannot be suppressed. An empty list says
-   * "nothing to check" honestly. Refusing every LinkedIn touch would be wrong,
-   * and inventing a key that never matches would be worse.
+   * LinkedIn, since 0016. This used to return an empty list — "nothing to
+   * check" — which was honest about the schema and wrong about the product:
+   * LinkedIn is one of the two channels §2.1 lets us contact a stranger on,
+   * so it was the ONE channel where somebody could ask to be left alone and
+   * have nowhere to record it.
    */
-  it('has no key for LinkedIn, and says so by returning nothing to check', () => {
-    expect(suppressionKeysFor('https://linkedin.com/in/priya', 'linkedin')).toEqual([])
+  it('reads a LinkedIn profile however it was pasted', () => {
+    for (const form of [
+      'https://www.linkedin.com/in/priya',
+      'https://linkedin.com/in/priya/',
+      'http://uk.linkedin.com/in/priya?trk=nav',
+      'linkedin.com/in/PRIYA',
+      '/in/priya',
+      'in/priya',
+    ]) {
+      expect(suppressionKeysFor(form, 'linkedin'), form).toEqual([{ kind: 'linkedin', value: 'in/priya' }])
+    }
+  })
+
+  /** `in/acme` and `company/acme` are different pages. */
+  it('keeps the namespace, so a person and a company are not the same key', () => {
+    expect(suppressionKeysFor('linkedin.com/company/acme', 'linkedin'))
+      .toEqual([{ kind: 'linkedin', value: 'company/acme' }])
+    expect(suppressionKeysFor('linkedin.com/in/acme', 'linkedin'))
+      .toEqual([{ kind: 'linkedin', value: 'in/acme' }])
+  })
+
+  /**
+   * A bare handle is refused rather than guessed at. Guessing picks a
+   * namespace, and the wrong one stores a key that never matches the person
+   * who asked — which is worse than a visible refusal.
+   */
+  it('refuses a bare handle, and the send path refuses with it', () => {
+    expect(suppressionKeysFor('priya', 'linkedin')).toBeNull()
+    const d = decideSend(facts({ channel: 'linkedin', recipient: 'priya' }))
+    expect(d.allowed).toBe(false)
+    expect(d.allowed === false && d.code).toBe('unparseable_recipient')
   })
 })
 

@@ -36,8 +36,8 @@ export async function POST(request: Request): Promise<NextResponse> {
     return NextResponse.json({ error: 'invalid_json' }, { status: 400 })
   }
   const { kind, value, reason } = (body ?? {}) as { kind?: unknown; value?: unknown; reason?: unknown }
-  if (kind !== 'email' && kind !== 'domain' && kind !== 'phone') {
-    return NextResponse.json({ error: 'kind must be email, domain or phone' }, { status: 400 })
+  if (kind !== 'email' && kind !== 'domain' && kind !== 'phone' && kind !== 'linkedin') {
+    return NextResponse.json({ error: 'kind must be email, domain, phone or linkedin' }, { status: 400 })
   }
   if (typeof value !== 'string' || typeof reason !== 'string') {
     return NextResponse.json({ error: 'value and reason are required' }, { status: 400 })

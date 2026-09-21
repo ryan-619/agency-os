@@ -383,11 +383,31 @@ secrets. The inbound webhook (`/api/inbound/email`) is exempt from the
 cookie gate — a provider cannot carry a session — and refuses everything
 when `INBOUND_WEBHOOK_SECRET` is unset.
 
+**LinkedIn is suppressible (0016).** It was not, and that was the worst place
+for the gap to be: LinkedIn is one of the TWO cold channels §2.1 permits, so
+it was the one channel where somebody could ask to be left alone and the
+product had nowhere to record it. `suppressionKeysFor` returned an empty list
+— "nothing to check" — which was honest about the schema and wrong about the
+product. The stored value is the namespace and the slug, `in/jane-doe` or
+`company/acme`, folded and with no scheme, host, query or trailing slash; the
+CHECK is that exact shape, so a value that did not come through
+`normaliseLinkedIn()` cannot be stored. The namespace is kept because
+`in/acme` and `company/acme` are different pages, and a BARE handle is refused
+rather than assigned to one of them — guessing stores a key that silently
+never matches the person who asked, which is worse than a refusal the operator
+can see and fix. 0016's down DELETEs LinkedIn rows, because the narrower CHECK
+cannot be added while they exist; that cost is stated in the file.
+
+One consequence worth knowing: a LinkedIn touch whose contact has no
+`linkedin_url` is now refused as `unparseable_recipient` instead of passing
+the suppression step and being stopped later by the provider. That is the
+right direction — it is a refusal a human can act on — but it is a behaviour
+change, not just a new column.
+
 **Not built:** SendGrid behind the provider interface (the interface is the
-point; the second implementation is a few lines when it is needed) and
-LinkedIn suppression — `suppressions.kind` has no LinkedIn value, so
-`suppressionKeysFor` returns "nothing to check" for that channel honestly,
-and closing it needs a fourth kind and a migration.
+point; the second implementation is a few lines when it is needed) and a
+LinkedIn *provider* — nothing can send on that channel, so the suppression
+above is a rule waiting for its sender rather than one in use.
 
 ### The pipeline (Phase 5, §8.6)
 
@@ -621,7 +641,7 @@ exists, never in place of it.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 1446 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice
+npm test                 # 1450 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice
 npm run build            # packages, then the Next app
 
 # database (needs DATABASE_URL)

@@ -31,7 +31,7 @@
  * that by reading this file.
  */
 
-export type SuppressionKind = 'email' | 'domain' | 'phone'
+export type SuppressionKind = 'email' | 'domain' | 'phone' | 'linkedin'
 
 /**
  * An email address, folded to the form the table stores.
@@ -112,6 +112,41 @@ export function normalisePhone(raw: string): string | null {
 }
 
 /**
+ * A LinkedIn profile, folded to the form the table stores.
+ *
+ * LinkedIn is one of the two cold channels §2.1 permits, which makes it the
+ * one channel where somebody could ask to be left alone and have nowhere to
+ * record it. The stored value is the namespace and the slug — `in/jane-doe`
+ * or `company/acme` — because `in/acme` and `company/acme` are different
+ * pages and collapsing them would suppress the wrong one.
+ *
+ * A BARE handle is refused on purpose. `jane-doe` could be either namespace,
+ * and picking one would store a key that silently never matches the person
+ * who asked — the exact failure this module exists to prevent. A refusal is
+ * visible: the operator is told to paste the profile URL.
+ */
+export function normaliseLinkedIn(raw: string): string | null {
+  let text = raw.trim().toLowerCase()
+  if (!text) return null
+  // A URL, with or without a scheme, with or without the host.
+  text = text.replace(/^https?:\/\//, '')
+  text = text.replace(/^([a-z]{2,3}\.)?linkedin\.com\//, '')
+  text = text.replace(/^\/+/, '')
+  // Everything after the slug is tracking, a sub-page or a locale switch.
+  text = text.split(/[?#]/)[0] ?? ''
+  text = text.replace(/\/+$/, '')
+
+  const match = /^(in|company|school|showcase)\/([a-z0-9._%~-]+)/.exec(text)
+  if (!match) return null
+  // school and showcase are real LinkedIn namespaces but not ones this
+  // product messages, and the CHECK constraint does not accept them — so
+  // they are refused here rather than stored and rejected by the database.
+  const namespace = match[1]!
+  if (namespace !== 'in' && namespace !== 'company') return null
+  return `${namespace}/${match[2]!}`
+}
+
+/**
  * Normalise a value for the suppression table.
  *
  * The one entry point the send path and the suppression writer both use, so
@@ -126,6 +161,8 @@ export function normaliseSuppressionValue(kind: SuppressionKind, raw: string): s
       return normaliseDomainValue(raw)
     case 'phone':
       return normalisePhone(raw)
+    case 'linkedin':
+      return normaliseLinkedIn(raw)
     default:
       // An unknown kind is not a value we can normalise, and guessing is how a
       // new channel silently stops being suppressible.
@@ -164,11 +201,12 @@ export function suppressionKeysFor(
     return phone ? [{ kind: 'phone', value: phone }] : null
   }
 
-  // LinkedIn. A profile URL is not an email, a domain or a phone number, so
-  // there is no key for it and `suppressions` cannot hold one. Returning an
-  // empty list says "nothing to check" honestly; returning null would refuse
-  // every LinkedIn touch, and returning a made-up key would silently never
-  // match. Recorded here because it is a real gap: suppressing a LinkedIn
-  // profile needs a fourth `kind` and a migration.
-  return []
+  // LinkedIn, since 0016. This used to return an empty list — "nothing to
+  // check" — which was honest about the schema and wrong about the product:
+  // LinkedIn is one of the two channels §2.1 lets us contact a stranger on,
+  // so it was the one channel where an opt-out could be asked for and not
+  // recorded. A profile that cannot be read is null, and the send path
+  // refuses, because no row could ever have matched it.
+  const profile = normaliseLinkedIn(recipient)
+  return profile ? [{ kind: 'linkedin', value: profile }] : null
 }

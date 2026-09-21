@@ -14,7 +14,7 @@
  */
 import { and, asc, desc, eq, sql } from 'drizzle-orm'
 import { z } from 'zod'
-import { normaliseSuppressionValue } from '@agency/core'
+import { normaliseSuppressionValue, type SuppressionKind } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 
@@ -210,7 +210,7 @@ export async function addSuppression(
   db: AgencyDb,
   args: {
     readonly orgId: string
-    readonly kind: 'email' | 'domain' | 'phone'
+    readonly kind: SuppressionKind
     readonly value: string
     readonly reason: string
   },
@@ -225,15 +225,22 @@ export async function addSuppression(
 
   const value = normaliseSuppressionValue(args.kind, args.value)
   if (!value) {
-    return {
-      ok: false,
-      message:
-        args.kind === 'phone'
-          ? `"${args.value}" is not a number in international form. Include the country code, ` +
-            'like +1 415 555 0100 — without one it cannot be matched reliably and the opt-out ' +
-            'would not be honoured.'
-          : `"${args.value}" could not be read as ${args.kind === 'email' ? 'an email address' : 'a domain'}.`,
+    // Each message names what to type instead. A suppression that fails to
+    // store is an opt-out nobody recorded, so the operator has to be able to
+    // fix it on the spot rather than be told it was invalid.
+    const why: Record<SuppressionKind, string> = {
+      phone:
+        `"${args.value}" is not a number in international form. Include the country code, ` +
+        'like +1 415 555 0100 — without one it cannot be matched reliably and the opt-out ' +
+        'would not be honoured.',
+      linkedin:
+        `"${args.value}" could not be read as a LinkedIn profile. Paste the full URL, like ` +
+        'linkedin.com/in/jane-doe or linkedin.com/company/acme — a bare handle does not say ' +
+        'whether it is a person or a company, and the wrong one would never match.',
+      email: `"${args.value}" could not be read as an email address.`,
+      domain: `"${args.value}" could not be read as a domain.`,
     }
+    return { ok: false, message: why[args.kind] }
   }
 
   // ON CONFLICT on the unique index, not select-then-insert: two replies
