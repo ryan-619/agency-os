@@ -119,7 +119,7 @@ describe('the container images', () => {
      */
     it('copies the dist/ of everything the entrypoint imports', () => {
       const runner = byStage.at(-1)![1]
-      const entry = /CMD \["node", "(apps\/[^/]+)\/dist\/index\.js"\]/.exec(runner)
+      const entry = /CMD \["node", "(apps\/[^/]+)\/dist\/\w+\.js"\]/.exec(runner)
       if (!entry) {
         expect(runner).toMatch(/\.next\/standalone/)
         return

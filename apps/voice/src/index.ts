@@ -30,8 +30,6 @@
  * unstorable.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { Pool } from 'pg'
-import { drizzle } from 'drizzle-orm/node-postgres'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { aiDisclosure, normalisePhone, spokenOptOut, suppressedGreeting } from '@agency/core'
 import {
@@ -40,8 +38,8 @@ import {
 } from '@agency/db'
 import { anthropicProvider, ollamaProvider, openaiProvider } from '@agency/llm'
 import type { LlmProvider } from '@agency/core'
-import { loadEnv, voiceMode, type Env } from './env.js'
-import { createLogger, type Logger } from './logger.js'
+import { voiceMode, type Env } from './env.js'
+import { type Logger } from './logger.js'
 import { VoiceSession } from './session.js'
 import {
   emptyTwiml, handoffTwiml, parseForm, rejectTwiml, relayTwiml, sayAndHangupTwiml, verifyTwilioSignature,
@@ -57,52 +55,64 @@ interface Pending {
   readonly at: number
 }
 
-async function main(): Promise<void> {
-  const env = loadEnv()
-  const log = createLogger(env.LOG_LEVEL)
+/** What the service needs. Injected so the whole thing can be driven by a test. */
+export interface VoiceDeps {
+  readonly env: Env
+  readonly db: AgencyDb
+  readonly log: Logger
+  /** Liveness of whatever is behind `db`, for /readyz. */
+  readonly ping: () => Promise<unknown>
+  /** The single-shot summary model (§5.5), or null for the deterministic one. */
+  readonly llm: LlmProvider | null
+}
+
+export interface VoiceService {
+  /** The port actually bound — `VOICE_PORT` may be 0. */
+  readonly port: number
+  readonly close: () => Promise<void>
+}
+
+/**
+ * The summary model named by the environment, or null (§5.5).
+ *
+ * Built once, because a model endpoint is not something that changes per
+ * call — unlike the agent worker's connectors, which are read fresh every
+ * turn because §6 promises that. Null is a complete configuration: every
+ * call still gets the deterministic extractive summary.
+ */
+export function llmFromEnv(env: Env, log: Logger): LlmProvider | null {
+  if (env.LLM_PROVIDER === 'ollama') {
+    return ollamaProvider({
+      baseUrl: env.OLLAMA_BASE_URL,
+      model: env.LLM_MODEL ?? 'llama3',
+      local: env.OLLAMA_IS_LOCAL,
+    })
+  }
+  if (env.LLM_PROVIDER === 'openai' && env.OPENAI_API_KEY) {
+    return openaiProvider({ apiKey: env.OPENAI_API_KEY, model: env.LLM_MODEL ?? 'gpt-4o-mini' })
+  }
+  if (env.LLM_PROVIDER === 'anthropic' && env.ANTHROPIC_API_KEY) {
+    return anthropicProvider({ apiKey: env.ANTHROPIC_API_KEY, model: env.LLM_MODEL ?? 'claude-haiku-4-5-20251001' })
+  }
+  if (env.LLM_PROVIDER) {
+    log.warn('a summary model is named but its credential is missing — using the deterministic summary', {
+      provider: env.LLM_PROVIDER,
+    })
+  }
+  return null
+}
+
+/**
+ * Start the service on `env.VOICE_PORT` and return a handle to stop it.
+ *
+ * Everything lives here rather than in `main` so that a test can drive the
+ * REAL server — signing webhooks the way Twilio does, opening the relay
+ * socket, reading the frames back — which is where Phase 6's Definition of
+ * Done actually is. `main` below only builds the pool and the logger.
+ */
+export async function startVoiceService(deps: VoiceDeps): Promise<VoiceService> {
+  const { env, db, log, llm } = deps
   const mode = voiceMode(env)
-
-  const pool = new Pool({
-    connectionString: env.DATABASE_URL,
-    max: env.DATABASE_POOL_MAX,
-    connectionTimeoutMillis: 10_000,
-  })
-  // Same reasoning as the web app's pool: an idle connection closed by a
-  // managed database emits 'error' on the pool, and an emit with no
-  // listener throws out of a socket callback.
-  pool.on('error', (err) => log.warn('idle database connection closed', { error: err.name }))
-  const db = drizzle(pool, { schema }) as unknown as AgencyDb
-
-  /**
-   * The single-shot model for call summaries (§5.5), or null.
-   *
-   * Null is a complete configuration: every call still gets the
-   * deterministic extractive summary. Built once at boot because a model
-   * endpoint is not something that changes per call — unlike the agent
-   * worker's connectors, which are read fresh every turn because §6
-   * promises that.
-   */
-  const llm: LlmProvider | null = (() => {
-    if (env.LLM_PROVIDER === 'ollama') {
-      return ollamaProvider({
-        baseUrl: env.OLLAMA_BASE_URL,
-        model: env.LLM_MODEL ?? 'llama3',
-        local: env.OLLAMA_IS_LOCAL,
-      })
-    }
-    if (env.LLM_PROVIDER === 'openai' && env.OPENAI_API_KEY) {
-      return openaiProvider({ apiKey: env.OPENAI_API_KEY, model: env.LLM_MODEL ?? 'gpt-4o-mini' })
-    }
-    if (env.LLM_PROVIDER === 'anthropic' && env.ANTHROPIC_API_KEY) {
-      return anthropicProvider({ apiKey: env.ANTHROPIC_API_KEY, model: env.LLM_MODEL ?? 'claude-haiku-4-5-20251001' })
-    }
-    if (env.LLM_PROVIDER) {
-      log.warn('a summary model is named but its credential is missing — using the deterministic summary', {
-        provider: env.LLM_PROVIDER,
-      })
-    }
-    return null
-  })()
 
   /**
    * A call answered by a signed TwiML request, waiting for Twilio to open
@@ -186,7 +196,7 @@ async function main(): Promise<void> {
       if (req.method === 'GET' && (path === '/livez' || path === '/readyz')) {
         if (path === '/livez') return send(res, 200, 'application/json', JSON.stringify({ status: 'ok', service: 'voice' }))
         try {
-          await pool.query('SELECT 1')
+          await deps.ping()
         } catch (err) {
           return send(res, 503, 'application/json', JSON.stringify({
             status: 'degraded', service: 'voice', database: 'unreachable',
@@ -283,18 +293,33 @@ async function main(): Promise<void> {
         const sid = form['CallSid'] ?? ''
         const status = form['CallStatus'] ?? 'completed'
         const call = sid ? await callByProviderSid(db, 'twilio', sid) : null
-        if (call && !call.endedAt) {
+        if (call) {
           const mapped =
             status === 'completed' ? 'completed'
               : status === 'no-answer' ? 'no_answer'
                 : status === 'busy' ? 'busy'
                   : status === 'canceled' ? 'cancelled' : 'failed'
+          /**
+           * `endCall` arbitrates, not a read beforehand.
+           *
+           * This used to be guarded by `!call.endedAt`, which looked like
+           * the idempotency the race needs and instead defeated it: the
+           * socket closes before Twilio posts this callback on every call
+           * that ends normally, so the guard was true almost always and
+           * `endCall`'s fallback — the one branch that fills in the
+           * duration and the recording URL that ONLY this callback knows —
+           * was unreachable in production. `ended_at IS NULL` in its own
+           * WHERE is what keeps the first outcome; this just hands it the
+           * numbers. Found by the end-to-end test.
+           */
           await endCall(db, {
             orgId: call.orgId, callId: call.id, status: mapped,
             durationS: form['CallDuration'] ? Number(form['CallDuration']) : null,
             recordingUrl: form['RecordingUrl'] ?? null,
           })
-          log.info('call record closed by the status callback', { callId: call.id, status: mapped })
+          log.info('status callback', {
+            callId: call.id, status: mapped, closedByTheSocketFirst: call.endedAt !== null,
+          })
         }
         pending.delete(sid)
         return send(res, 204, 'text/plain', '')
@@ -478,32 +503,23 @@ async function main(): Promise<void> {
   })
 
   await new Promise<void>((resolve) => server.listen(env.VOICE_PORT, env.VOICE_BIND, resolve))
+  const address = server.address()
+  const port = typeof address === 'object' && address !== null ? address.port : env.VOICE_PORT
   log.info('voice service listening', {
-    port: env.VOICE_PORT, bind: env.VOICE_BIND, mode,
+    port, bind: env.VOICE_BIND, mode,
     summaries: llm ? `${llm.name} (${llm.local ? 'local' : 'REMOTE'})` : 'deterministic',
     public: env.VOICE_PUBLIC_URL ? 'set' : 'UNSET — every webhook will be refused',
   })
 
-  const stop = (signal: string): void => {
-    log.info('shutting down', { signal, liveCalls: sockets.size })
+  const close = async (): Promise<void> => {
     // Close live sockets explicitly. `server.close()` waits for existing
     // connections, and a WebSocket never ends on its own — so a single call
     // in progress meant the process never exited and was eventually killed,
     // leaving its row `in_progress` with no outcome.
     for (const ws of sockets) ws.close(1001, 'server shutting down')
     wss.close()
-    server.close(() => void pool.end().finally(() => process.exit(0)))
-    setTimeout(() => process.exit(0), 10_000).unref()
+    await new Promise<void>((resolve) => server.close(() => resolve()))
   }
-  process.on('SIGINT', () => stop('SIGINT'))
-  process.on('SIGTERM', () => stop('SIGTERM'))
-}
 
-main().catch((err: unknown) => {
-  // Never the message: a driver or config error can carry a credential (§2.3).
-  console.error(JSON.stringify({
-    level: 'error', msg: 'voice service failed to start', service: 'voice',
-    error: err instanceof Error ? `${err.name}: ${err.message.slice(0, 200)}` : 'UnknownError',
-  }))
-  process.exit(1)
-})
+  return { port, close }
+}

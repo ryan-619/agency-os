@@ -4,7 +4,7 @@ Internal operating system for a small application-security agency. Read
 [PROMPT.md](PROMPT.md) for the full build spec; this file is the working
 summary a session should read first.
 
-**Current state: Phases 0–6 are built.** Phase 6 is built but deliberately NOT switched on: §12 says not to before A2P 10DLC registration clears, so the compose service sits behind a `voice` profile and `docker compose up` does not start it.
+**Current state: Phases 0–6 are built, and every Definition of Done except Phase 2's and Phase 3's is proved** — see the table below for exactly what "proved" means for each. Phase 6 is built but deliberately NOT switched on: §12 says not to before A2P 10DLC registration clears, so the compose service sits behind a `voice` profile and `docker compose up` does not start it.
 
 **The web half is LIVE on Vercel** at `agency-os-tau-murex.vercel.app`, against
 a Neon Postgres (18.6) with Resend for magic links. Proved live: `/api/health`
@@ -26,6 +26,7 @@ mailbox.** Everything below those boundaries IS proved, live:
 | Phase 3 | a connector added in the UI reaches a live turn with no restart — the worker logged `connectors: ["deepwiki (http)"]` for a turn on a worker started *before* that connector existed | the agent CALLING one of its tools |
 | Phase 4 | draft → approved in the UI → deferred for quiet hours (live, 21:50 London) → sent in a real SMTP transaction → deal `contacted` → a reply by Message-ID pauses, ties, moves the deal to `replied` → "unsubscribe" suppresses. One test per §2.1 rule. | deliverability through a real mailbox; IMAP IDLE against a live server; a provider webhook with a real secret |
 | Phase 5 | live, in the browser: a `replied` deal dragged to `meeting` (HTML5 drop → `deal.moved` audit row) → meeting recorded from the company page at 15:00 London, stored as 14:00Z → brief generated from the rows → proposal generated from the scan (8 scope items with evidence, 2 workstreams, USD 9,600–15,600 at a 1,200 day rate) → `sent` → `accepted` closes the deal `won`. A stranger on `/book/agency` became a company, a contact with E.164 phone, three consent rows carrying the form's wording, a meeting, and a deal at `meeting`. | the agent's `book_meeting`/`update_deal` in a live turn (same blocker as Phase 2); a calendar invitation (deliberately not sent from here) |
+| Phase 6 | the whole Definition of Done, end to end against the real service: a SIGNED webhook is answered with `<ConversationRelay>` carrying the disclosure, the relay socket opens against the URL that TwiML handed out, four scripted questions qualify the caller, asking for a person produces the `end` frame whose `HandoffData` makes `/twiml/action` return a `<Dial>`, and the row ends with `answered_at`, `disclosed_ai_at`, an outcome, Twilio's duration and recording URL, a transcript containing the caller's own words, and a summary. `apps/voice/test/service.test.ts`. | Twilio itself — the carrier, the STT and the TTS. A2P 10DLC has not cleared and there are no Twilio credentials, so no real telephone call has been placed to this service |
 
 `npm run smoke:agent` gates Phase 2; `npm run smoke:agent -- --connector <name>`
 gates Phase 3. Run both against an account with credit before calling either
@@ -532,6 +533,19 @@ re-derives them.** Two were the kind that look fine and are not:
   the row claimed an obligation nobody met. `onRelayError` now takes the
   disclosure back and ends the call.
 
+**A seventh, found by the end-to-end test rather than by review.** The status
+callback's handler was guarded by `if (call && !call.endedAt)`, which reads
+like the idempotency the socket/callback race needs. `endCall` already does
+that arbitrating itself — `ended_at IS NULL` in its own WHERE — and it has a
+second branch for exactly this case: when somebody closed the record first,
+their outcome stands but Twilio's duration and recording URL, which ONLY the
+callback knows, are still filled in. The route's guard made that branch
+unreachable. And it was unreachable on every call that ends normally, because
+the socket always closes before Twilio posts the callback — so the stored
+duration was always the service's own arithmetic and `recording_url` was
+never written at all. Neither unit test could see it: one drives the session,
+the other the signature, and the bug was in the route between them.
+
 Two more the review raised and the refuters killed, worth recording so they
 are not re-fixed: discarding the `interrupt` message loses no transcript
 (with `reportInputDuringAgentSpeech` set, the speech arrives as a normal
@@ -539,6 +553,15 @@ prompt), and the handoff copy was already honest. The handoff was changed
 anyway, because a caller told "connecting you now" by a deployment with
 nowhere to connect them is misled by this service rather than by its
 configuration.
+
+**`index.ts` exports the service; `main.ts` starts it.** It used to call
+`main()` at module scope, so importing it booted a real server against a real
+pool and, on failure, called `process.exit(1)` out from under whatever
+imported it — which is why the routes had no test for as long as they did.
+`startVoiceService(deps)` takes its database, logger, liveness ping and model
+as arguments and returns the port it actually bound, so the test drives the
+same code a deployment runs. (`apps/agent/src/index.ts` still has the old
+shape; it is not blocking anything and was left alone.)
 
 **The scripted policy is the whole conversation.** `scriptedTurn` qualifies a
 caller in three questions with no model involved, which is what runs when no
@@ -598,7 +621,7 @@ exists, never in place of it.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 1433 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice
+npm test                 # 1446 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice
 npm run build            # packages, then the Next app
 
 # database (needs DATABASE_URL)
