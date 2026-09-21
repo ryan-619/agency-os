@@ -14,6 +14,9 @@
       "path": "./packages/tools"
     },
     {
+      "path": "./packages/llm"
+    },
+    {
       "path": "./apps/agent"
     },
     {

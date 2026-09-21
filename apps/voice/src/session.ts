@@ -41,6 +41,8 @@ import {
   appendTranscript, clearDisclosure, endCall, recordDisclosure, recordHandoff, recordOptOut,
   type AgencyDb,
 } from '@agency/db'
+import { attemptText } from '@agency/llm'
+import type { LlmProvider } from '@agency/core'
 import type { Logger } from './logger.js'
 
 /** What the socket should do after a turn. */
@@ -70,6 +72,14 @@ export interface SessionDeps {
    * was misled by this service, not by the configuration.
    */
   readonly canHandOff?: boolean
+  /**
+   * The single-shot model for the call summary (§5.5), or null for the
+   * deterministic extractive one. Null is a complete configuration, not a
+   * degraded one — see `finish()`.
+   */
+  readonly llm?: LlmProvider | null
+  /** The operator has accepted sending a transcript to a remote model. */
+  readonly allowRemoteForLeadData?: boolean
   readonly now?: () => Date
 }
 
@@ -275,11 +285,18 @@ export class VoiceSession {
    * legitimately want to close the record.
    */
   async finish(status: 'completed' | 'failed' | 'no_answer' | 'busy' | 'cancelled' = 'completed'): Promise<void> {
+    const summary = await this.summarise()
     await endCall(this.deps.db, {
       orgId: this.deps.orgId,
       callId: this.deps.callId,
       status,
       state: this.state,
+      // undefined lets endCall write the deterministic extractive summary,
+      // which is exactly what happens when no model is configured, when the
+      // model is unreachable, or when §5.5 refuses to send a transcript
+      // offsite. A call record is never left without a summary because a
+      // model was down.
+      ...(summary ? { summary } : {}),
       now: this.deps.now?.(),
     }).catch((err: unknown) => {
       this.deps.log.error('could not close the call record', {
@@ -287,6 +304,44 @@ export class VoiceSession {
         error: err instanceof Error ? err.name : 'UnknownError',
       })
     })
+  }
+
+  /**
+   * A better summary than the extractive one, if a model will give us one.
+   *
+   * Returns null rather than a string on every failure path, and the caller
+   * treats null as "let the database write the deterministic summary". The
+   * transcript is a named person's words, so §5.5's rule applies and is
+   * applied by `attemptText` rather than here.
+   */
+  private async summarise(): Promise<string | null> {
+    if (!this.deps.llm || this.transcript.length === 0) return null
+    const said = this.transcript
+      .filter((e) => e.role !== 'system')
+      .map((e) => `${e.role === 'caller' ? 'Caller' : 'Agent'}: ${e.text}`)
+      .join('\n')
+
+    const out = await attemptText({
+      provider: this.deps.llm,
+      allowRemoteForLeadData: this.deps.allowRemoteForLeadData ?? false,
+      request: {
+        task: 'summarise_call',
+        system:
+          'You summarise a sales qualification call for the person who will follow it up. ' +
+          'Three sentences at most. State only what was said — never infer intent, budget or ' +
+          'authority that was not stated. If the caller asked to be left alone, say that first.',
+        prompt: said,
+        maxTokens: 300,
+        temperature: 0,
+      },
+      fallback: '',
+      onRefused: (code, reason) => this.deps.log.info('call summary left to the deterministic one', { code, reason }),
+      onFailed: (error) => this.deps.log.warn('the summary model did not answer', { error }),
+    })
+    // Never the prompt, and never the answer either — the summary is about
+    // a named person and belongs in the record, not the log (§2.3).
+    if (out.usedModel) this.deps.log.info('call summary written by a model', { provider: out.provider })
+    return out.usedModel && out.value.trim() ? out.value.trim() : null
   }
 
   /** For the tests and the handoff TwiML. */

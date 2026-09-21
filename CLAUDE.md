@@ -173,6 +173,7 @@ This is the one architectural rule worth being pedantic about (§3).
 ```
 packages/scanner   the public-surface signal collector (Phase 1)
 packages/tools     the agency's own MCP tools, as plain data (Phase 2)
+packages/llm       the single-shot model clients (§5.5) — the only I/O half
 ```
 
 ### The runtime is assembled from the database, every turn (Phase 3)
@@ -310,6 +311,7 @@ check and should be added if the scanner is ever aimed at untrusted input.
 | 3 ✅ | nothing new — §6 and §7 are assembly, and assembly needs the database |
 | 4 ✅ | consent, suppression, quiet hours, daily caps — the one send path |
 | 5 ✅ | `proposalFromFindings` and `meetingBrief` — the two documents the pipeline writes, pure, refusing stale evidence |
+| 6 ✅ | the AI disclosure, the opt-out/handoff/sentiment readers, the scripted turn, and §5.5's `decideLlmCall` |
 
 ---
 
@@ -546,13 +548,57 @@ above and nowhere else. Flagged rather than hidden (§13): §8.5 says "you run
 the conversation loop against the model", and this ships the deterministic
 half of that.
 
+### Single-shot models (§5.5)
+
+**The seam exists; a model behind it is optional, and that is enforced by the
+signature.** Every single-shot job in this product already has a deterministic
+answer — the extractive call summary, the scored findings, the templated draft.
+So `attemptLlm` takes the fallback as a REQUIRED argument: a caller that cannot
+produce an answer without the model has misunderstood what the seam is for, and
+does not compile. Nothing throws out of it either — a refused call, an
+unreachable Ollama, a model answering in a shape the caller cannot parse all
+return the fallback with a `why`, so the product says what it said before
+anybody configured a model.
+
+**The default is inverted from the usual one: lead data stays local.** §5.5's
+clause "local models keep lead data on their hardware, which is the point" is
+read as a rule, not a rationale. `TASK_CARRIES_LEAD_DATA` marks four of the
+five tasks as carrying somebody's personal data — a transcript, a reply, a
+draft naming a prospect, a company's findings — and one, `polish_copy`, as the
+agency's own wording carrying nobody. A task that carries lead data reaches a
+REMOTE provider only when `LLM_ALLOW_REMOTE_LEAD_DATA` says so. `decideLlmCall`
+is the only thing that decides, for the same reason `decideSend` is: the checks
+run in one order, in one place, and a caller cannot skip one it does not
+perform. `no_provider` and `task_disabled` are not errors and are not logged as
+such; `lead_data_offsite` is a refusal and says which provider it refused.
+
+**Local is DECLARED, never inferred.** `ollamaProvider` takes `local` as a flag
+(default true) rather than reading the hostname, because an Ollama on a rented
+box is not the agency's hardware — and inferring it from `127.0.0.1` would turn
+the rule off silently for exactly the deployment that needs it.
+
+**A provider error carries its status and never its body.** Every one of these
+APIs quotes the offending request back in the error body, and that body is the
+prompt — which is the lead data the rule exists to contain. `LlmProviderError`
+holds `provider` and `status`. `MAX_PROMPT_CHARS` (100k) refuses a prompt far
+larger than any real job before it is sent.
+
+**The first consumer is the call summary.** `apps/voice` builds the provider
+once at boot and logs `summaries: ollama (local)` or `deterministic`; the
+session asks for a summary when the call closes and writes `endCall`'s
+deterministic one on every failure path. Only the caller's and the agent's
+turns are sent — not the system events. `classify_reply`, `draft_outreach` and
+`summarise_findings` have their task keys and no caller yet; wiring them is
+adding an `attemptText` call beside the deterministic answer that already
+exists, never in place of it.
+
 ## 3. Commands
 
 ```bash
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 1383 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline
+npm test                 # 1433 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice
 npm run build            # packages, then the Next app
 
 # database (needs DATABASE_URL)
@@ -606,6 +652,16 @@ will use stale output. TypeScript project references handle the ordering.
 
 Places where this repo departs from a literal reading of PROMPT.md, and why.
 Flagged rather than hidden, per §13.
+
+**§5.5's `packages/core/llm/provider.ts` is split in two.** That file exists
+and holds what its name says — the `LlmProvider` interface, the task
+vocabulary, and `decideLlmCall`. It does not hold the Anthropic, OpenAI and
+Ollama clients, because `packages/core` may perform no I/O and
+`packages/core/test/no-io.test.ts` reads the source to prove it. The three HTTP
+clients and `attemptLlm` live in `packages/llm` instead. The alternative was an
+injected fetch-shaped function, which moves the import out of core without
+moving the I/O out of it — the rule in §3 is about what the package DOES, not
+about which line declares the dependency.
 
 **`companies.domain` and `agent_defs.slug` are unique per org, not globally.**
 §4 says `domain unique`. A global unique domain would force exactly the
@@ -666,6 +722,17 @@ does not fail on either mistake**: it exits 0 and the image dies later with
 `ERR_MODULE_NOT_FOUND`, with nothing red in the build. `packages/scanner` was
 missing from both images this way — `apps/web` already declares it — and Phase
 2's `scan_company` is what would have made it fatal.
+
+**`packages/db/test/images.test.ts` now asserts both halves**, because the
+mistake kept happening: `packages/llm` was missing from all three images the
+moment it was created, and writing the test immediately turned up a second
+instance nobody had noticed — neither `apps/web` nor `apps/agent` copied
+`apps/voice/package.json`, which Phase 6 added after those images were written,
+so both were one `docker compose up` away from the same silent break. The test
+reads the workspaces off the filesystem rather than listing them, so a package
+added next year is covered without anybody remembering this entry exists. It
+does not build an image (there is no Docker on the dev machine); it checks the
+thing that was wrong every time.
 
 **The Dockerfiles copy the ROOT `node_modules` only.** npm workspaces hoist
 every dependency to the root and symlink the workspaces as

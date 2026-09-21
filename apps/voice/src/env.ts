@@ -62,6 +62,37 @@ const schema = z.object({
   VOICE_TTS_PROVIDER: z.string().optional(),
   VOICE_TTS_VOICE: z.string().optional(),
 
+  /**
+   * The single-shot model for call summaries (§5.5).
+   *
+   * Unset means the deterministic extractive summary, which is what every
+   * call gets today and is never worse than nothing. `ollama` keeps the
+   * transcript on the agency's hardware, which §5.5 says is the point; the
+   * remote ones additionally need LLM_ALLOW_REMOTE_LEAD_DATA, because a
+   * call transcript is a named person's words.
+   */
+  LLM_PROVIDER: z.enum(['ollama', 'openai', 'anthropic']).optional(),
+  LLM_MODEL: z.string().optional(),
+  OLLAMA_BASE_URL: z.string().url().default('http://127.0.0.1:11434'),
+  /**
+   * Declared, never inferred from the URL: an Ollama on a rented box is not
+   * the agency's hardware, and guessing would turn §5.5's rule off for the
+   * deployment that needs it most.
+   */
+  OLLAMA_IS_LOCAL: z
+    .string()
+    .optional()
+    .transform((v) => v === undefined || !['false', '0', 'no'].includes(v.toLowerCase())),
+  OPENAI_API_KEY: z.string().optional(),
+  /**
+   * Accepts that a call transcript may be sent to a third-party model.
+   * Off unless somebody turned it on (§5.5).
+   */
+  LLM_ALLOW_REMOTE_LEAD_DATA: z
+    .string()
+    .optional()
+    .transform((v) => v !== undefined && ['true', '1', 'yes'].includes(v.toLowerCase())),
+
   /** Hard ceiling on one call, in seconds. A stuck session ends. */
   VOICE_MAX_CALL_SECONDS: z.coerce.number().int().positive().default(900),
 })

@@ -11,8 +11,10 @@ COPY packages/core/package.json    packages/core/
 COPY packages/db/package.json      packages/db/
 COPY packages/scanner/package.json packages/scanner/
 COPY packages/tools/package.json   packages/tools/
+COPY packages/llm/package.json     packages/llm/
 COPY apps/web/package.json         apps/web/
 COPY apps/agent/package.json       apps/agent/
+COPY apps/voice/package.json       apps/voice/
 RUN npm ci
 
 FROM node:22-alpine AS build
@@ -40,8 +42,10 @@ COPY packages/core/package.json    packages/core/
 COPY packages/db/package.json      packages/db/
 COPY packages/scanner/package.json packages/scanner/
 COPY packages/tools/package.json   packages/tools/
+COPY packages/llm/package.json     packages/llm/
 COPY apps/web/package.json         apps/web/
 COPY apps/agent/package.json       apps/agent/
+COPY apps/voice/package.json       apps/voice/
 RUN npm ci --omit=dev --workspace @agency/agent --include-workspace-root
 
 COPY --from=build --chown=agent:nodejs /app/packages/core/dist    ./packages/core/dist

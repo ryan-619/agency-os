@@ -38,6 +38,8 @@ import {
   addSuppression, callByProviderSid, endCall, markAnswered, phoneIsSuppressed, schema, startCall,
   type AgencyDb,
 } from '@agency/db'
+import { anthropicProvider, ollamaProvider, openaiProvider } from '@agency/llm'
+import type { LlmProvider } from '@agency/core'
 import { loadEnv, voiceMode, type Env } from './env.js'
 import { createLogger, type Logger } from './logger.js'
 import { VoiceSession } from './session.js'
@@ -70,6 +72,37 @@ async function main(): Promise<void> {
   // listener throws out of a socket callback.
   pool.on('error', (err) => log.warn('idle database connection closed', { error: err.name }))
   const db = drizzle(pool, { schema }) as unknown as AgencyDb
+
+  /**
+   * The single-shot model for call summaries (§5.5), or null.
+   *
+   * Null is a complete configuration: every call still gets the
+   * deterministic extractive summary. Built once at boot because a model
+   * endpoint is not something that changes per call — unlike the agent
+   * worker's connectors, which are read fresh every turn because §6
+   * promises that.
+   */
+  const llm: LlmProvider | null = (() => {
+    if (env.LLM_PROVIDER === 'ollama') {
+      return ollamaProvider({
+        baseUrl: env.OLLAMA_BASE_URL,
+        model: env.LLM_MODEL ?? 'llama3',
+        local: env.OLLAMA_IS_LOCAL,
+      })
+    }
+    if (env.LLM_PROVIDER === 'openai' && env.OPENAI_API_KEY) {
+      return openaiProvider({ apiKey: env.OPENAI_API_KEY, model: env.LLM_MODEL ?? 'gpt-4o-mini' })
+    }
+    if (env.LLM_PROVIDER === 'anthropic' && env.ANTHROPIC_API_KEY) {
+      return anthropicProvider({ apiKey: env.ANTHROPIC_API_KEY, model: env.LLM_MODEL ?? 'claude-haiku-4-5-20251001' })
+    }
+    if (env.LLM_PROVIDER) {
+      log.warn('a summary model is named but its credential is missing — using the deterministic summary', {
+        provider: env.LLM_PROVIDER,
+      })
+    }
+    return null
+  })()
 
   /**
    * A call answered by a signed TwiML request, waiting for Twilio to open
@@ -398,6 +431,8 @@ async function main(): Promise<void> {
             db, log, orgId: p.orgId, orgName: p.orgName, callId: p.callId,
             theirNumber: p.theirNumber, mayQualify: p.mayQualify,
             canHandOff: Boolean(env.TASKROUTER_WORKFLOW_SID || env.VOICE_HANDOFF_NUMBER),
+            llm,
+            allowRemoteForLeadData: env.LLM_ALLOW_REMOTE_LEAD_DATA,
           })
           await act(await session.onSetup())
           return
@@ -445,6 +480,7 @@ async function main(): Promise<void> {
   await new Promise<void>((resolve) => server.listen(env.VOICE_PORT, env.VOICE_BIND, resolve))
   log.info('voice service listening', {
     port: env.VOICE_PORT, bind: env.VOICE_BIND, mode,
+    summaries: llm ? `${llm.name} (${llm.local ? 'local' : 'REMOTE'})` : 'deterministic',
     public: env.VOICE_PUBLIC_URL ? 'set' : 'UNSET — every webhook will be refused',
   })
 

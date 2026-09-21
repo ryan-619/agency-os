@@ -13,6 +13,7 @@
  *   Phase 2  risk classification for the agent's approval gate (§5.4)
  *   Phase 4  consent, suppression, quiet hours, daily caps — the send path (§8.4)
  *   Phase 6  the voice rules — AI disclosure, spoken opt-out, handoff (§2.1, §8.5)
+ *   §5.5     the model seam — who may see a lead's words (llm/provider.ts)
  */
 export * from './authz.js'
 export * from './redact.js'
@@ -26,3 +27,4 @@ export * from './send.js'
 export * from './proposal.js'
 export * from './brief.js'
 export * from './voice.js'
+export * from './llm/provider.js'

@@ -13,6 +13,7 @@ import { eq } from 'drizzle-orm'
 import { callsThatDidNotDisclose, markAnswered, schema, startCall, type AgencyDb } from '@agency/db'
 import { freshDb, migrations, type TestDb } from '../../../packages/db/test/helpers.js'
 import { migrateUp } from '../../../packages/db/src/migrator.js'
+import { fakeProvider } from '@agency/llm'
 import { VoiceSession } from '../src/session.js'
 
 const silent = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} }
@@ -24,6 +25,19 @@ describe('a voice session', () => {
   let db: AgencyDb
   let orgId: string
   let callId: string
+
+  const openWith = async (deps: Partial<ConstructorParameters<typeof VoiceSession>[0]>): Promise<VoiceSession> => {
+    const call = await startCall(db, {
+      orgId, direction: 'in', fromNumber: THEIR, toNumber: '+14155550199',
+      providerCallSid: `CA-${Math.round(NOW.getTime())}`, now: NOW,
+    })
+    callId = call.id
+    await markAnswered(db, call.id, NOW)
+    return new VoiceSession({
+      db, log: silent, orgId, orgName: 'Agency', callId,
+      theirNumber: THEIR, mayQualify: true, canHandOff: true, now: () => NOW, ...deps,
+    })
+  }
 
   const open = async (mayQualify = true, canHandOff = true): Promise<VoiceSession> => {
     const call = await startCall(db, {
@@ -237,6 +251,65 @@ describe('a voice session', () => {
       await s.onPrompt('stop')
       const action = await s.onPrompt('hello? are you there?')
       expect(action).toEqual({ say: '', end: false })
+    })
+  })
+
+  /**
+   * §5.5's seam, in its first real consumer. The deterministic extractive
+   * summary is what the product has always written; a model is allowed to
+   * improve on it and never to be required for it.
+   */
+  describe('the call summary (§5.5)', () => {
+    it('uses a local model when one is configured', async () => {
+      const llm = fakeProvider('They have a login-bearing product and failed a questionnaire.')
+      const s = await openWith({ llm })
+      await s.onSetup()
+      await s.onPrompt('We build a B2B SaaS platform')
+      await s.finish('completed')
+
+      expect((await callRow()).summary).toBe('They have a login-bearing product and failed a questionnaire.')
+      // The transcript went to the model — and only the caller/agent turns.
+      expect(llm.seen[0]!.prompt).toMatch(/Caller: We build a B2B SaaS platform/)
+      expect(llm.seen[0]!.prompt).not.toMatch(/welcome greeting/)
+    })
+
+    /**
+     * THE rule. A transcript is a named person's words, so a remote model
+     * nobody approved never sees it — and the record still gets a summary.
+     */
+    it('refuses to send the transcript to an unapproved remote model, and still writes a summary', async () => {
+      const llm = fakeProvider('never asked', { name: 'openai', local: false })
+      const s = await openWith({ llm })
+      await s.onSetup()
+      await s.onPrompt('We build a platform')
+      await s.finish('completed')
+
+      expect(llm.seen).toEqual([])
+      const row = await callRow()
+      // The deterministic one, written by endCall exactly as before.
+      expect(row.summary).toMatch(/^Outcome: /)
+    })
+
+    it('sends it once the operator has accepted that', async () => {
+      const llm = fakeProvider('a remote summary', { name: 'openai', local: false })
+      const s = await openWith({ llm, allowRemoteForLeadData: true })
+      await s.onSetup()
+      await s.onPrompt('We build a platform')
+      await s.finish('completed')
+      expect((await callRow()).summary).toBe('a remote summary')
+    })
+
+    it('falls back to the deterministic summary when the model is down', async () => {
+      const s = await openWith({
+        llm: {
+          name: 'ollama', model: 'llama3', local: true,
+          complete: () => Promise.reject(new Error('ECONNREFUSED')),
+        },
+      })
+      await s.onSetup()
+      await s.onPrompt('We build a platform')
+      await s.finish('completed')
+      expect((await callRow()).summary).toMatch(/^Outcome: /)
     })
   })
 
