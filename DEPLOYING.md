@@ -115,10 +115,27 @@ consequences:
 If you must deploy from this machine, move the env files aside first:
 
 ```bash
-mv .env .env.local apps/web/.env /tmp/  # apps/web/.env is a SYMLINK to ../../.env
+# apps/web/.env is a SYMLINK to ../../.env, so do NOT mv all three into one
+# directory: the link's basename collides with the real file and clobbers it.
+BAK=$(mktemp -d)
+mv .env "$BAK/root.env"
+mv .env.local "$BAK/root.env.local"
+[ -L apps/web/.env ] && rm apps/web/.env   # -L, not -e: -e follows a link that
+                                           # now dangles and answers false
+
 npx vercel build --yes --target production
 npx vercel deploy --prebuilt --prod --archive=tgz
-mv /tmp/.env /tmp/.env.local /tmp/.env .  # put them back
+
+mv "$BAK/root.env" .env
+mv "$BAK/root.env.local" .env.local
+ln -s ../../.env apps/web/.env
+```
+
+Check the trace before deploying, rather than trusting `.vercelignore` to have
+caught it:
+
+```bash
+grep -ro '"\.env[^"]*"' .vercel/output/functions | sort -u   # .env.example only
 ```
 
 ### 5. Environment variables
