@@ -136,14 +136,48 @@ export function normaliseLinkedIn(raw: string): string | null {
   text = text.split(/[?#]/)[0] ?? ''
   text = text.replace(/\/+$/, '')
 
-  const match = /^(in|company|school|showcase)\/([a-z0-9._%~-]+)/.exec(text)
-  if (!match) return null
+  const segments = text.split('/')
+  const namespace = segments[0] ?? ''
   // school and showcase are real LinkedIn namespaces but not ones this
   // product messages, and the CHECK constraint does not accept them — so
   // they are refused here rather than stored and rejected by the database.
-  const namespace = match[1]!
+  // `pub/` is the legacy public-profile URL and is refused for the same
+  // reason: mapping one to a modern slug would be a guess.
   if (namespace !== 'in' && namespace !== 'company') return null
-  return `${namespace}/${match[2]!}`
+  // Only the first segment after the namespace. Anything further is a
+  // sub-page — /detail/recent-activity — and belongs to the same profile.
+  const raw_slug = segments[1] ?? ''
+  if (!raw_slug) return null
+
+  /**
+   * The slug is canonicalised through percent-encoding, and validated
+   * WHOLE.
+   *
+   * The first version matched the slug with an unanchored character class
+   * and returned whatever prefix matched, which silently truncated: a
+   * profile pasted as `linkedin.com/in/josé-garcía` became `in/jos`. That
+   * is the exact failure this module exists to prevent, twice over — the
+   * key matches nobody, so an opt-out is recorded against nothing; and if
+   * some other real profile IS `in/jos`, it suppresses the wrong person
+   * while the one who asked keeps being contacted. It also meant the two
+   * ways of writing one profile — the address bar's percent-encoded form
+   * and the rendered unicode — produced different keys for one person.
+   *
+   * Decoding first and re-encoding after makes both forms land on the same
+   * value. Anything still outside the stored class after that is REFUSED
+   * rather than trimmed away, so the JS and the SQL CHECK accept exactly
+   * the same set.
+   */
+  let slug = raw_slug
+  try {
+    slug = decodeURIComponent(slug)
+  } catch {
+    // A stray `%` is not an escape sequence. Keep it; encoding below will
+    // turn it into %25, which is lossless.
+  }
+  slug = encodeURIComponent(slug.toLowerCase()).toLowerCase()
+  if (!/^[a-z0-9._%~-]+$/.test(slug)) return null
+  return `${namespace}/${slug}`
 }
 
 /**

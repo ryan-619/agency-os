@@ -126,6 +126,48 @@ describe('§2.1 rule 1 — suppression wins over everything', () => {
     }
   })
 
+  /**
+   * The first version matched the slug with an UNANCHORED character class
+   * and returned whatever prefix matched. A profile pasted as
+   * `linkedin.com/in/josé-garcía` became `in/jos` — which matches nobody, so
+   * an opt-out was recorded against nothing; and if some other real profile
+   * IS `in/jos`, it suppressed the wrong person while the one who asked kept
+   * being contacted. Found by probing inputs no test covered.
+   */
+  it('does not truncate a slug at the first character it does not recognise', () => {
+    const key = suppressionKeysFor('https://www.linkedin.com/in/josé-garcía', 'linkedin')
+    expect(key).toEqual([{ kind: 'linkedin', value: 'in/jos%c3%a9-garc%c3%ada' }])
+    expect(key![0]!.value).not.toBe('in/jos')
+  })
+
+  /**
+   * One person, one key. The address bar gives the percent-encoded form and a
+   * rendered page gives the unicode; both are the same profile, so both have
+   * to reach the same row or the second one silently creates a duplicate that
+   * the first suppression never matches.
+   */
+  it('gives the encoded and the unicode spelling of one profile the same key', () => {
+    const encoded = suppressionKeysFor('linkedin.com/in/jos%C3%A9-garc%C3%ADa', 'linkedin')
+    const unicode = suppressionKeysFor('linkedin.com/in/josé-garcía', 'linkedin')
+    expect(encoded).toEqual(unicode)
+    expect(suppressionKeysFor('linkedin.com/in/андрей', 'linkedin'))
+      .toEqual([{ kind: 'linkedin', value: 'in/%d0%b0%d0%bd%d0%b4%d1%80%d0%b5%d0%b9' }])
+  })
+
+  /** A sub-page belongs to the profile it hangs off. */
+  it('drops a sub-page without dropping any of the slug', () => {
+    expect(suppressionKeysFor('linkedin.com/in/priya/detail/recent-activity', 'linkedin'))
+      .toEqual([{ kind: 'linkedin', value: 'in/priya' }])
+  })
+
+  /**
+   * The legacy public-profile URL. Mapping `pub/priya/1/2/3` to a modern
+   * slug would be a guess, and a guessed key never matches.
+   */
+  it('refuses a legacy /pub/ URL rather than guessing the modern slug', () => {
+    expect(suppressionKeysFor('linkedin.com/pub/priya/1/2/3', 'linkedin')).toBeNull()
+  })
+
   /** `in/acme` and `company/acme` are different pages. */
   it('keeps the namespace, so a person and a company are not the same key', () => {
     expect(suppressionKeysFor('linkedin.com/company/acme', 'linkedin'))

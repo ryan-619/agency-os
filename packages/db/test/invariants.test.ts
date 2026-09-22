@@ -440,7 +440,10 @@ describe('§2 invariants are enforced by the schema', () => {
     })
 
     it('accepts a LinkedIn profile and a company page as different rows', async () => {
-      for (const value of ['in/priya', 'company/rentman']) {
+      // The percent-encoded form is what normaliseLinkedIn() produces for a
+      // non-ASCII slug, so the CHECK has to accept exactly that — the JS and
+      // the SQL must agree on the same set or one of them is unreachable.
+      for (const value of ['in/priya', 'company/rentman', 'in/jos%c3%a9-garc%c3%ada']) {
         const ok = await db.driver.select(
           `INSERT INTO suppressions (org_id, kind, value, reason)
            VALUES ($1, 'linkedin', $2, 'asked to stop on LinkedIn') RETURNING id`,

@@ -129,11 +129,26 @@ class Relay {
     return relay
   }
 
-  /** Say something and wait for the service to answer. */
+  /**
+   * Say something and wait for the service to finish answering.
+   *
+   * Not "wait for one frame": a turn is a `text` frame and then, when the
+   * call is ending, a separate `end` frame carrying the HandoffData. Those
+   * are two `ws.send` calls, and returning after the first would make every
+   * assertion about the second depend on them landing in the same tick —
+   * true today, and a flake rather than a failure the day it stops being
+   * true. So it waits for the frames to STOP arriving.
+   */
   async say(message: Record<string, unknown>): Promise<Record<string, unknown>[]> {
     const before = this.frames.length
     this.ws.send(JSON.stringify(message))
     await this.until(() => this.frames.length > before || this.closedWith !== null)
+    let settled = this.frames.length
+    for (;;) {
+      await new Promise((r) => setTimeout(r, 60))
+      if (this.frames.length === settled) break
+      settled = this.frames.length
+    }
     return this.frames.slice(before)
   }
 

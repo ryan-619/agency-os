@@ -395,7 +395,21 @@ CHECK is that exact shape, so a value that did not come through
 `in/acme` and `company/acme` are different pages, and a BARE handle is refused
 rather than assigned to one of them — guessing stores a key that silently
 never matches the person who asked, which is worse than a refusal the operator
-can see and fix. 0016's down DELETEs LinkedIn rows, because the narrower CHECK
+can see and fix.
+
+**The slug is canonicalised through percent-encoding and validated WHOLE**, and
+the first version was not. It matched with an unanchored character class and
+returned whatever prefix matched, so `linkedin.com/in/josé-garcía` became
+`in/jos` — the same failure the paragraph above says the design refuses to
+make, twice over: that key matches nobody, so the opt-out is recorded against
+nothing, and if some other real profile IS `in/jos` it suppresses the wrong
+person while the one who asked keeps being contacted. It also gave one person
+two keys, because the address bar's percent-encoded spelling and the rendered
+unicode normalised differently. Now the value is decoded, folded, re-encoded
+and then checked against the stored class in full; anything still outside it is
+refused rather than trimmed away, so `normaliseLinkedIn()` and the SQL CHECK
+accept exactly the same set. Found by probing inputs no test covered — the
+tests written alongside the feature all used ASCII slugs. 0016's down DELETEs LinkedIn rows, because the narrower CHECK
 cannot be added while they exist; that cost is stated in the file.
 
 One consequence worth knowing: a LinkedIn touch whose contact has no
