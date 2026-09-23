@@ -588,6 +588,20 @@ anyway, because a caller told "connecting you now" by a deployment with
 nowhere to connect them is misled by this service rather than by its
 configuration.
 
+**Shutting down waits for the writes that shutting down STARTED.** Closing a
+live socket fires its close event, which begins writing that call's outcome —
+and nothing awaited it, so the caller closed the pool and called
+`process.exit(0)` with the write in flight. A call in progress at SIGTERM
+could therefore be cut off and left `in_progress` with no outcome: precisely
+the state that closing the sockets was added to prevent, so that fix was only
+half of one. `done()` is now MEMOISED rather than guarded by a boolean — a
+guard makes the second caller return instantly while the first is still
+writing, so awaiting it would wait for nothing — and `close()` calls it on
+every live call explicitly, which is deterministic rather than hoping the
+close event beats the exit. The test drives it with a deliberately SLOW model:
+`finish()` awaits the summary, so without the fix `close()` returns before the
+model answers and the row cannot carry its text.
+
 **`index.ts` exports the service; `main.ts` starts it.** It used to call
 `main()` at module scope, so importing it booted a real server against a real
 pool and, on failure, called `process.exit(1)` out from under whatever
@@ -655,7 +669,8 @@ exists, never in place of it.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 1450 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice
+npm test                 # 1455 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice
+npx vitest run --maxWorkers=1 --minWorkers=1   # the same suite on a machine short of memory
 npm run build            # packages, then the Next app
 
 # database (needs DATABASE_URL)
@@ -698,6 +713,22 @@ docker compose run --rm seed
 # app        http://localhost:3000
 # magic links http://localhost:8025   (Mailpit — dev only, relays nothing)
 ```
+
+**The suite's memory cost is per WORKER, and that is what falls over first.**
+vitest forks a worker per CPU and `freshDb()` builds an embedded Postgres in
+each one — and it does that in `beforeEach`, so every individual test gets a
+new PGlite instance and replays all sixteen migrations. On a machine under
+memory pressure the workers fight rather than share, and the first thing to
+give is `freshDb()` blowing the 30-second `hookTimeout`, which reads like a
+broken test and is not one. Measured here: `apps/voice` took **945 seconds and
+failed two hooks** with the default workers, and **12.9 seconds passing all 14**
+with `--maxWorkers=1`, at the same 11.5 GB of swap in use. Reach for the flag
+before believing a hook timeout.
+
+Worth fixing properly one day: migrate once and restore a snapshot per test
+rather than replaying the migrations 1,400 times. It is not done here because
+changing the harness that verifies everything, at a moment when the suite
+cannot be run to confirm the change, is how a suite starts passing vacuously.
 
 `packages/core` and `packages/db` compile to `dist/` and are consumed as
 JavaScript, so **run `npx tsc --build` after changing them** or the web app

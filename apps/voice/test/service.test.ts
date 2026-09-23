@@ -296,6 +296,47 @@ describe('the voice service, end to end', () => {
     expect(row!.summary).toBe('They stalled on a security questionnaire and want a call.')
   }, 30_000)
 
+  /**
+   * A call still in progress when the process is asked to stop.
+   *
+   * Closing the socket STARTS the write that closes the record, and nothing
+   * waited for it — so the caller closed the pool and exited while the write
+   * was in flight, leaving the row `in_progress` with no outcome: exactly the
+   * state that closing the sockets was added to prevent. Found by reading the
+   * shutdown path.
+   *
+   * The model here is deliberately SLOW, and that is what makes this test
+   * discriminating rather than a coin flip. `finish()` awaits the summary, so
+   * without the fix `close()` returns long before the model answers and the
+   * row cannot carry its text; with it, `close()` waits for the write it
+   * started.
+   */
+  it('finishes the record of a call that was live when the service stopped', async () => {
+    const slow: LlmProvider = {
+      name: 'ollama',
+      model: 'llama3',
+      local: true,
+      complete: async () => {
+        await new Promise((r) => setTimeout(r, 400))
+        return { text: 'a summary that arrived late', provider: 'ollama', model: 'llama3' }
+      },
+    }
+    await start({}, slow)
+    const sid = 'CA-shutdown'
+    await answer(sid)
+    const relay = await Relay.open(service.port)
+    await relay.say({ type: 'setup', callSid: sid })
+    await relay.say({ type: 'prompt', voicePrompt: 'We run a SaaS platform', last: true })
+
+    // No hang-up. The caller is still on the line when the process stops.
+    await service.close()
+
+    const [row] = await db.select().from(schema.calls).where(eq(schema.calls.providerCallSid, sid))
+    expect(row!.endedAt).not.toBeNull()
+    expect(row!.outcome).not.toBeNull()
+    expect(row!.summary).toBe('a summary that arrived late')
+  }, 30_000)
+
   describe('the boundary', () => {
     it('refuses an unsigned webhook', async () => {
       await start()

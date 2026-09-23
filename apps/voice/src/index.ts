@@ -368,7 +368,14 @@ export async function startVoiceService(deps: VoiceDeps): Promise<VoiceService> 
   // 1 MiB is already far more than any relay message; the default allows
   // 100 MiB per frame from an unauthenticated peer.
   const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 })
+  /**
+   * Every live call, with the function that closes its RECORD.
+   *
+   * The socket alone is not enough at shutdown: closing it starts a write
+   * and nothing waited for the write. See `close()` below.
+   */
   const sockets = new Set<WebSocket>()
+  const live = new Set<{ readonly ws: WebSocket; readonly done: () => Promise<void> }>()
 
   server.on('upgrade', (req, socket, head) => {
     const path = (req.url ?? '/').split('?')[0]
@@ -484,20 +491,34 @@ export async function startVoiceService(deps: VoiceDeps): Promise<VoiceService> 
       })
     })
 
-    const done = async (): Promise<void> => {
-      if (closed) return
-      closed = true
-      clearTimeout(ceiling)
-      sockets.delete(ws)
-      // Wait for the turn in flight before closing the record, or a caller
-      // who hangs up mid-sentence has their last utterance — which may be
-      // the opt-out — land after the record was already closed.
-      await turn.catch(() => {})
-      // The status callback also closes the record. `endCall` only writes
-      // an outcome when `ended_at IS NULL`, so whichever arrives first wins
-      // and the other cannot downgrade it.
-      await session?.finish('completed')
+    /**
+     * Idempotent, and MEMOISED rather than merely guarded.
+     *
+     * A boolean guard makes the second caller return immediately while the
+     * first call is still writing, so `close()` awaiting it would wait for
+     * nothing. Returning the same promise means whoever asks — the socket's
+     * own close event, or the shutdown path — waits for the one write.
+     */
+    let finishing: Promise<void> | null = null
+    const done = (): Promise<void> => {
+      if (finishing) return finishing
+      finishing = (async () => {
+        clearTimeout(ceiling)
+        sockets.delete(ws)
+        live.delete(entry)
+        // Wait for the turn in flight before closing the record, or a caller
+        // who hangs up mid-sentence has their last utterance — which may be
+        // the opt-out — land after the record was already closed.
+        await turn.catch(() => {})
+        // The status callback also closes the record. `endCall` only writes
+        // an outcome when `ended_at IS NULL`, so whichever arrives first wins
+        // and the other cannot downgrade it.
+        await session?.finish('completed')
+      })()
+      return finishing
     }
+    const entry = { ws, done }
+    live.add(entry)
     ws.on('close', () => void done())
     ws.on('error', () => void done())
   })
@@ -512,6 +533,8 @@ export async function startVoiceService(deps: VoiceDeps): Promise<VoiceService> 
   })
 
   const close = async (): Promise<void> => {
+    const ending = [...live]
+    log.info('shutting down', { liveCalls: ending.length })
     // Close live sockets explicitly. `server.close()` waits for existing
     // connections, and a WebSocket never ends on its own — so a single call
     // in progress meant the process never exited and was eventually killed,
@@ -519,6 +542,19 @@ export async function startVoiceService(deps: VoiceDeps): Promise<VoiceService> 
     for (const ws of sockets) ws.close(1001, 'server shutting down')
     wss.close()
     await new Promise<void>((resolve) => server.close(() => resolve()))
+    /**
+     * And then wait for what closing them STARTED.
+     *
+     * Closing a socket fires its close event, which begins writing that
+     * call's outcome — and nothing awaited it. The caller then closed the
+     * pool and exited, so a call in progress at SIGTERM could be cut off
+     * mid-write and left `in_progress` with no outcome: the very state
+     * closing the sockets was added to prevent. Calling `done()` here is
+     * deterministic rather than hoping the close event won the race
+     * against `process.exit` — it is memoised, so this awaits the same
+     * write the event started.
+     */
+    await Promise.allSettled(ending.map((e) => e.done()))
   }
 
   return { port, close }
