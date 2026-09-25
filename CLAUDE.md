@@ -694,7 +694,7 @@ exists, never in place of it.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 1458 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice
+npm test                 # 1460 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice
 npx vitest run --maxWorkers=1 --minWorkers=1   # the same suite on a machine short of memory
 npm run build            # packages, then the Next app
 
@@ -1364,6 +1364,18 @@ list) — so a real turn recorded EIGHT input tokens against 2,485 out.
 mis-billed; but anyone reading `tokens_in` to attribute spend per person was
 reading close to zero. It now sums `input_tokens`, `cache_read_input_tokens`
 and `cache_creation_input_tokens`. Found while pricing the API for a team.
+
+**An organisation-scoped key looks broken and is not.** It authenticates, and
+then every request — `/v1/messages` included — comes back
+`400 invalid_request_error`: *"This API key is not scoped to a workspace, so
+this request must include the anthropic-workspace-id header"*. A 400 rather
+than a 401 means it does not read as a credential problem at all. Either use a
+WORKSPACE-SCOPED key (preferred: no extra configuration, and the workspace can
+carry its own spend limit, which is worth having on a small balance) or set
+`ANTHROPIC_WORKSPACE_ID`. The SDK knows that variable, but `childEnv` builds
+the child's environment from scratch, so it has to be named there or it is
+stripped — the `USER` bug's shape exactly, and with the same misleading
+symptom.
 
 **What this is and is not.** It is how a developer proves the Definitions of
 Done on their own machine without buying credit. It is not a deployment

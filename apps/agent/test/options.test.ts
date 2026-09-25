@@ -220,6 +220,26 @@ describe('the child environment', () => {
    * that then fails to authenticate — surfacing as a bad key rather than as a
    * variable that should not have been set at all.
    */
+  /**
+   * An ORGANISATION-scoped key authenticates and is then refused on every
+   * request — `/v1/messages` included — with "This API key is not scoped to a
+   * workspace". It comes back as a 400, not a 401, so it does not read as a
+   * credential problem: the key looks broken when it is only unscoped. The
+   * child env is built from scratch, so the header's variable has to be named
+   * here or it is stripped, which is the USER bug's shape exactly.
+   */
+  it('passes the workspace id when the key is organisation-scoped', () => {
+    const env = childEnv({ kind: 'api_key', apiKey: 'sk-ant-x', workspaceId: 'wrkspc_1' })
+    expect(env['ANTHROPIC_WORKSPACE_ID']).toBe('wrkspc_1')
+    expect(env['ANTHROPIC_API_KEY']).toBe('sk-ant-x')
+  })
+
+  /** A workspace-scoped key needs none of this, so the variable stays absent. */
+  it('sets no workspace id when none was given', () => {
+    const env = childEnv({ kind: 'api_key', apiKey: 'sk-ant-x' })
+    expect(Object.keys(env)).not.toContain('ANTHROPIC_WORKSPACE_ID')
+  })
+
   it('sets no API key at all under a local login, rather than an empty one', () => {
     const env = childEnv({ kind: 'local_login' })
     expect(Object.keys(env)).not.toContain('ANTHROPIC_API_KEY')

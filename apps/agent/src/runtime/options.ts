@@ -230,7 +230,21 @@ export function buildQueryOptions(input: BuildOptionsInput): Options {
  * credential standing behind a shared service is what §2.3 is about.
  */
 export type AgentCredential =
-  | { readonly kind: 'api_key'; readonly apiKey: string }
+  | {
+      readonly kind: 'api_key'
+      readonly apiKey: string
+      /**
+       * Required when the key is ORGANISATION-scoped rather than workspace-
+       * scoped. Such a key authenticates fine and then refuses every request
+       * — `/v1/messages` included — with "This API key is not scoped to a
+       * workspace, so this request must include the anthropic-workspace-id
+       * header". That is a 400, not a 401, so it does not read as a
+       * credential problem and the key looks broken when it is merely
+       * unscoped. A workspace-scoped key needs none of this and can carry
+       * its own spend limit, which is the better answer on a small balance.
+       */
+      readonly workspaceId?: string | undefined
+    }
   | { readonly kind: 'local_login' }
 
 /**
@@ -249,7 +263,16 @@ export function childEnv(credential: AgentCredential): Record<string, string | u
     // empty ANTHROPIC_API_KEY is a match that then fails to authenticate —
     // and it fails as an auth error, which reads like a bad key rather than
     // like a variable that should not have been set.
-    ...(credential.kind === 'api_key' ? { ANTHROPIC_API_KEY: credential.apiKey } : {}),
+    ...(credential.kind === 'api_key'
+      ? {
+          ANTHROPIC_API_KEY: credential.apiKey,
+          // Stripped along with everything else unless it is named here —
+          // the same shape of failure as USER above, and with the same
+          // misleading symptom: the turn dies on something that is not a
+          // credential problem while looking exactly like one.
+          ...(credential.workspaceId ? { ANTHROPIC_WORKSPACE_ID: credential.workspaceId } : {}),
+        }
+      : {}),
     PATH: process.env['PATH'],
     HOME: process.env['HOME'],
     // Not decoration, and not a credential — a username is public. The CLI

@@ -77,7 +77,11 @@ async function main(): Promise<void> {
   const credential: AgentCredential | null = env.AGENT_USE_LOCAL_LOGIN
     ? { kind: 'local_login' }
     : env.ANTHROPIC_API_KEY
-      ? { kind: 'api_key', apiKey: env.ANTHROPIC_API_KEY }
+      ? {
+          kind: 'api_key',
+          apiKey: env.ANTHROPIC_API_KEY,
+          ...(env.ANTHROPIC_WORKSPACE_ID ? { workspaceId: env.ANTHROPIC_WORKSPACE_ID } : {}),
+        }
       : null
 
   const outreachMode = outreachModeFrom(env)

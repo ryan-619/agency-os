@@ -32,6 +32,20 @@ const schema = z.object({
   ANTHROPIC_API_KEY: z.string().optional(),
 
   /**
+   * Needed only when ANTHROPIC_API_KEY is ORGANISATION-scoped.
+   *
+   * Such a key passes authentication and is then refused on every request,
+   * `/v1/messages` included, with "This API key is not scoped to a workspace".
+   * It arrives as a 400 rather than a 401, so it does not read as a
+   * credential problem — the key looks broken when it is only unscoped.
+   *
+   * Prefer a WORKSPACE-SCOPED key and leave this unset: it needs no extra
+   * configuration and the workspace can carry its own spend limit, which is
+   * worth having when the balance is small.
+   */
+  ANTHROPIC_WORKSPACE_ID: z.string().optional(),
+
+  /**
    * Authenticate as the DEVELOPER, using their own Claude Code login (§13).
    *
    * The Agent SDK does not require an API key. Its own types name the other
