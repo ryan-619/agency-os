@@ -694,7 +694,7 @@ exists, never in place of it.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 1456 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice
+npm test                 # 1458 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice
 npx vitest run --maxWorkers=1 --minWorkers=1   # the same suite on a machine short of memory
 npm run build            # packages, then the Next app
 
@@ -714,11 +714,20 @@ npm run scan -- --import f.csv  # import a domain,name CSV, then scan
 # a local Postgres on a machine with neither Postgres nor Docker
 npm run db:local              # PGlite behind a TCP socket; data in .pgdata/
 
-# the agent (Phase 2) — needs ANTHROPIC_API_KEY with credit, and a worker
-npx tsx --env-file=.env apps/agent/src/index.ts   # the worker: health 3001, api 3002
-npm run smoke:agent              # the Phase 2 Definition-of-Done gate. Costs money.
+# the agent (Phase 2). The API key is NOT the default path — see the credit
+# note below. AGENT_USE_LOCAL_LOGIN authenticates against the Claude Code
+# login and costs no credit, which is how the gates below were passed.
+AGENT_USE_LOCAL_LOGIN=true npx tsx --env-file=.env apps/agent/src/index.ts
+npm run smoke:agent              # the Phase 2 gate. SPENDS whatever the worker authenticates with.
 npm run smoke:agent -- --draft   # ...and make it park a draft on a human
 npm run smoke:agent -- --connector deepwiki   # the Phase 3 gate (§6's "no restart")
+
+# production operations, all prompt-based so no connection string touches a
+# file, an argument list or shell history (§2.3)
+./tools/remote-setup.sh       # migrate + seed a remote database
+./tools/run-worker.sh         # run the worker here, against production, nothing exposed
+./tools/add-teammate.sh       # grant somebody access — there is no signup flow
+./tools/spend.sh              # what the API has actually cost: per day, per person, run rate
 
 # the parity harness — regenerate only when re-recording on purpose
 npm run fixtures:capture      # re-record the seed domains' public surface
@@ -1330,6 +1339,31 @@ and nothing on PATH, and the resulting failure also reads like an auth
 problem. Note the desktop app's own login is NOT the CLI's: they are separate
 keychain identities, so `claude auth login` has to be run for the binary the
 SDK will actually spawn.
+
+**Credits are limited, so the local login is the DEFAULT for development, not
+a fallback.** The API balance is prepaid. One heavy agentic turn measured
+$0.124 here — 22 tool calls, 284 events — so a handful of casual verification
+runs is a real fraction of it. Never reach for the API key to check that
+something works: run the worker with `AGENT_USE_LOCAL_LOGIN=true`, which costs
+nothing and is the path both Definition-of-Done gates were passed on. The key
+is for the DEPLOYED worker, where teammates' turns run and a personal
+subscription cannot legitimately stand behind a shared service.
+
+`AGENT_MODEL` defaults to `claude-haiku-4-5` in `.env.example` for the same
+reason: Haiku is $1/$5 per MTok against Opus-tier's $5/$25, and "score the
+pipeline, draft an opener" sits well inside what it does. `./tools/spend.sh`
+reports what has actually been spent — per day, per person, and a run rate —
+from `chat_messages.cost_usd`, which is the SDK's own figure rather than an
+estimate.
+
+**`tokens_in` counted only the UNCACHED input, which is not a small number but
+a wrong one.** `usage.input_tokens` excludes what the cache served, and this
+product caches hard on purpose (a frozen system prompt, a deterministic tool
+list) — so a real turn recorded EIGHT input tokens against 2,485 out.
+`cost_usd` was right throughout because the SDK computes it, so nothing was
+mis-billed; but anyone reading `tokens_in` to attribute spend per person was
+reading close to zero. It now sums `input_tokens`, `cache_read_input_tokens`
+and `cache_creation_input_tokens`. Found while pricing the API for a team.
 
 **What this is and is not.** It is how a developer proves the Definitions of
 Done on their own machine without buying credit. It is not a deployment

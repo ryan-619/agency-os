@@ -252,7 +252,12 @@ export function mapSdkMessage(msg: SDKMessage, ctx: MapContext): ChatEventBody[]
         session_id: string
         total_cost_usd?: number
         num_turns?: number
-        usage?: { input_tokens?: number; output_tokens?: number }
+        usage?: {
+          input_tokens?: number
+          output_tokens?: number
+          cache_read_input_tokens?: number
+          cache_creation_input_tokens?: number
+        }
       }
       // A DELTA, not the raw value. Phase 2 runs one query() per turn so the
       // two are usually the same, but the documented shape is cumulative and
@@ -264,7 +269,23 @@ export function mapSdkMessage(msg: SDKMessage, ctx: MapContext): ChatEventBody[]
           turnCostUsd: ctx.usd(turnUsd),
           sessionCostUsd: ctx.sessionCostUsd(turnUsd),
           numTurns: result.num_turns ?? 0,
-          tokensIn: result.usage?.input_tokens ?? 0,
+          /**
+           * EVERY input token, not just the uncached ones.
+           *
+           * `input_tokens` counts only what was not served from cache, and
+           * this product caches aggressively — a frozen system prompt and a
+           * deterministic tool list, which is the whole point of §prompt
+           * caching. So a real turn recorded EIGHT input tokens against 2,485
+           * out: not a small number, a wrong one, off by whatever the cache
+           * served. `cost_usd` was right all along because the SDK computes
+           * it, so nothing was mis-billed — but anyone reading `tokens_in`
+           * for per-user attribution or a burn-rate chart would have been
+           * reading close to zero. Found while pricing the API for a team.
+           */
+          tokensIn:
+            (result.usage?.input_tokens ?? 0) +
+            (result.usage?.cache_read_input_tokens ?? 0) +
+            (result.usage?.cache_creation_input_tokens ?? 0),
           tokensOut: result.usage?.output_tokens ?? 0,
         },
         {

@@ -141,6 +141,38 @@ describe('mapping SDK messages to wire events', () => {
   })
 
   /**
+   * `input_tokens` counts only what was NOT served from cache, and this
+   * product caches aggressively on purpose — a frozen system prompt and a
+   * deterministic tool list. So the uncached figure alone is not a small
+   * number, it is a wrong one: a real turn against the live database recorded
+   * EIGHT input tokens against 2,485 out, because the cache served the rest.
+   * `cost_usd` was always right (the SDK computes it), so nothing was
+   * mis-billed — but `tokens_in` read near zero for anyone using it to
+   * attribute spend per person. Found while pricing the API for a team.
+   */
+  it('counts cached input tokens, not just the uncached remainder', () => {
+    const events = mapSdkMessage(
+      result({
+        usage: {
+          input_tokens: 8,
+          output_tokens: 2485,
+          cache_read_input_tokens: 31_000,
+          cache_creation_input_tokens: 1_400,
+        },
+      }),
+      ctx,
+    )
+    expect(events[0]).toMatchObject({ tokensIn: 8 + 31_000 + 1_400, tokensOut: 2485 })
+    // The shape of the bug, asserted so a regression reads as one.
+    expect(events[0]).not.toMatchObject({ tokensIn: 8 })
+  })
+
+  it('still works when the SDK reports no cache fields at all', () => {
+    const events = mapSdkMessage(result({ usage: { input_tokens: 900, output_tokens: 10 } }), ctx)
+    expect(events[0]).toMatchObject({ tokensIn: 900, tokensOut: 10 })
+  })
+
+  /**
    * total_cost_usd is documented as cumulative: "each result carries the
    * running total so far". Treating it as a per-turn figure bills a long
    * conversation several times over.
