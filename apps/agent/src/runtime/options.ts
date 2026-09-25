@@ -242,6 +242,15 @@ export type AgentCredential =
        * credential problem and the key looks broken when it is merely
        * unscoped. A workspace-scoped key needs none of this and can carry
        * its own spend limit, which is the better answer on a small balance.
+       *
+       * It travels as ANTHROPIC_CUSTOM_HEADERS, NOT as ANTHROPIC_WORKSPACE_ID.
+       * The SDK does read the latter, which is exactly why it is the wrong
+       * lever: it belongs to the Workload Identity Federation path, alongside
+       * ANTHROPIC_FEDERATION_RULE_ID and ANTHROPIC_SERVICE_ACCOUNT_ID, and an
+       * `x-api-key` request ignores it entirely. Setting it looks like a fix
+       * and changes nothing. Measured: the CLI answers a prompt with the key
+       * plus the custom header, and fails with the key plus
+       * ANTHROPIC_WORKSPACE_ID.
        */
       readonly workspaceId?: string | undefined
     }
@@ -270,7 +279,9 @@ export function childEnv(credential: AgentCredential): Record<string, string | u
           // the same shape of failure as USER above, and with the same
           // misleading symptom: the turn dies on something that is not a
           // credential problem while looking exactly like one.
-          ...(credential.workspaceId ? { ANTHROPIC_WORKSPACE_ID: credential.workspaceId } : {}),
+          ...(credential.workspaceId
+            ? { ANTHROPIC_CUSTOM_HEADERS: `anthropic-workspace-id: ${credential.workspaceId}` }
+            : {}),
         }
       : {}),
     PATH: process.env['PATH'],

@@ -1372,10 +1372,23 @@ this request must include the anthropic-workspace-id header"*. A 400 rather
 than a 401 means it does not read as a credential problem at all. Either use a
 WORKSPACE-SCOPED key (preferred: no extra configuration, and the workspace can
 carry its own spend limit, which is worth having on a small balance) or set
-`ANTHROPIC_WORKSPACE_ID`. The SDK knows that variable, but `childEnv` builds
-the child's environment from scratch, so it has to be named there or it is
-stripped — the `USER` bug's shape exactly, and with the same misleading
-symptom.
+`ANTHROPIC_WORKSPACE_ID` in this repo's env, which the worker converts into
+the header.
+
+**Do not reach for the SDK's own `ANTHROPIC_WORKSPACE_ID` to do that.** It
+reads that variable — which is precisely the trap — but only on the Workload
+Identity Federation path, beside `ANTHROPIC_FEDERATION_RULE_ID` and
+`ANTHROPIC_SERVICE_ACCOUNT_ID`. An `x-api-key` request ignores it, so setting
+it looks like a fix and changes nothing. What works is
+`ANTHROPIC_CUSTOM_HEADERS: 'anthropic-workspace-id: <id>'`, measured by
+running the CLI both ways: it answers a prompt with the header and fails
+without it. `childEnv` builds the child's environment from scratch, so that
+variable has to be named there or it is stripped — the `USER` bug's shape
+exactly, and with the same misleading symptom.
+
+**Measured on Haiku, through the worker, on the API key:** the Phase 2 gate
+passed for **$0.0148** — 4 tool calls, 133 events. The same gate on the SDK's
+default model cost $0.124. That is the `AGENT_MODEL` lever, worth roughly 8×.
 
 **What this is and is not.** It is how a developer proves the Definitions of
 Done on their own machine without buying credit. It is not a deployment

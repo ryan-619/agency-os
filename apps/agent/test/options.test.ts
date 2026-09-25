@@ -228,16 +228,24 @@ describe('the child environment', () => {
    * child env is built from scratch, so the header's variable has to be named
    * here or it is stripped, which is the USER bug's shape exactly.
    */
-  it('passes the workspace id when the key is organisation-scoped', () => {
+  it('passes the workspace id as a custom HEADER, not as ANTHROPIC_WORKSPACE_ID', () => {
     const env = childEnv({ kind: 'api_key', apiKey: 'sk-ant-x', workspaceId: 'wrkspc_1' })
-    expect(env['ANTHROPIC_WORKSPACE_ID']).toBe('wrkspc_1')
+    expect(env['ANTHROPIC_CUSTOM_HEADERS']).toBe('anthropic-workspace-id: wrkspc_1')
     expect(env['ANTHROPIC_API_KEY']).toBe('sk-ant-x')
+    /**
+     * The SDK DOES read ANTHROPIC_WORKSPACE_ID, which is exactly the trap:
+     * it belongs to the Workload Identity Federation path, beside
+     * ANTHROPIC_FEDERATION_RULE_ID, and an `x-api-key` request ignores it.
+     * Setting it looks like a fix and changes nothing — measured, by running
+     * the CLI both ways.
+     */
+    expect(Object.keys(env)).not.toContain('ANTHROPIC_WORKSPACE_ID')
   })
 
   /** A workspace-scoped key needs none of this, so the variable stays absent. */
-  it('sets no workspace id when none was given', () => {
+  it('sends no custom header when the key is workspace-scoped already', () => {
     const env = childEnv({ kind: 'api_key', apiKey: 'sk-ant-x' })
-    expect(Object.keys(env)).not.toContain('ANTHROPIC_WORKSPACE_ID')
+    expect(Object.keys(env)).not.toContain('ANTHROPIC_CUSTOM_HEADERS')
   })
 
   it('sets no API key at all under a local login, rather than an empty one', () => {
