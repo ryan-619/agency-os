@@ -18,9 +18,10 @@ detection, stuck-send recovery, the restart reconciler and the sign-in-token
 sweep all run with no model, and only chat reports `chat_disabled`.
 
 **The web half is LIVE on Vercel** at `agency-os-tau-murex.vercel.app`, against
-a Neon Postgres (18.6) with Resend for magic links. Proved live: `/api/health`
-reports `database: ok`, `/signin` renders, and a sign-in request logged
-`magic link sent`. See [DEPLOYING.md](DEPLOYING.md) — including the two things
+a Neon Postgres (18.6) with Resend for magic links, migrated through **0016**
+and seeded. Proved live: `/api/health` reports `database: ok`, `/signin`
+renders, `/book/agency` serves the public booking page (it 404'd until the
+seed claimed the slug), and a sign-in request logged `magic link sent`. See [DEPLOYING.md](DEPLOYING.md) — including the two things
 a LOCAL `vercel build` gets wrong (it traces `.env` into the upload; deploying
 from `apps/web` cannot resolve the hoisted `node_modules`). The agent worker is
 NOT deployed and cannot be on serverless, so chat, sending and reply detection

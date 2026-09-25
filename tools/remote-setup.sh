@@ -97,7 +97,21 @@ const { Client } = require("pg");
   const v = await c.query("select version()");
   console.log("  server:", v.rows[0].version.split(" on ")[0]);
   const ssl = await c.query("select ssl from pg_stat_ssl where pid = pg_backend_pid()");
-  console.log("  TLS in use:", ssl.rows[0] ? ssl.rows[0].ssl : "unknown");
+  // Reads FALSE on Neon and that is not a finding. Neon terminates TLS at its
+  // proxy, so pg_stat_ssl describes the hop from that proxy to the Postgres
+  // backend, INSIDE their network — not the connection from here, which
+  // sslmode=require already refused to make without TLS. Printed with the
+  // explanation attached because a bare "TLS in use: false" at the end of a
+  // migration run reads like a security problem and sends people looking for
+  // one that is not there.
+  const backendSsl = ssl.rows[0] ? ssl.rows[0].ssl : "unknown";
+  console.log(
+    "  client TLS:   required by the connection string (sslmode)",
+  );
+  console.log(
+    "  backend TLS: ", backendSsl,
+    backendSsl === false ? "(expected on Neon — TLS ends at their proxy, not a finding)" : "",
+  );
   const t = await c.query("select count(*)::int n from information_schema.tables where table_schema = current_schema()");
   console.log("  tables:", t.rows[0].n);
   const u = await c.query("select email, role from users");
