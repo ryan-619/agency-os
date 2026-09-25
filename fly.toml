@@ -21,7 +21,13 @@
 # lockfile (CLAUDE.md §4).
 
 app = "agency-os-agent"
-primary_region = "lhr"
+# Ashburn, because the database is in AWS us-east-1
+# (ep-…-c-10.us-east-1.aws.neon.tech). This worker is chatty with Postgres —
+# a tick every fifteen seconds, plus the advisory lock and every send path
+# query — so a region chosen for where the team sits instead of where the
+# data sits pays a transatlantic round trip on all of it. Move this only
+# together with the database.
+primary_region = "iad"
 
 [build]
   dockerfile = "apps/agent/Dockerfile"

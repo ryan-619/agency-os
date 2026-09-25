@@ -11,5 +11,15 @@ node_modules
 !.env.example
 coverage
 .dev-mail
-pgdata
+# `.pgdata`, with the dot. It was written `pgdata` and Docker matched
+# nothing: the pattern is compared against path components literally, so a
+# 61 MB local Postgres was being uploaded to the remote builder on every
+# `fly deploy`. Not a secret — a seeded dev database — but pointless, slow,
+# and the kind of near-miss worth naming: `.vercelignore` had it right and
+# this file did not.
+.pgdata
 **/*.tsbuildinfo
+
+# Build output from a local `vercel build`; nothing the image needs.
+.vercel
+sink.jsonl
