@@ -6,6 +6,17 @@ summary a session should read first.
 
 **Current state: Phases 0–6 are built, and every Definition of Done except Phase 2's and Phase 3's is proved** — see the table below for exactly what "proved" means for each. Phase 6 is built but deliberately NOT switched on: §12 says not to before A2P 10DLC registration clears, so the compose service sits behind a `voice` profile and `docker compose up` does not start it.
 
+**The worker deploys to Fly.io** (`fly.toml` at the repo root), and its
+defaults are the dangerous part: Fly scales a machine to zero between
+requests, which is Vercel's problem wearing a different hat — the advisory
+lock drops, the fifteen-second tick stops, and nothing looks broken because
+`/readyz` answers fine on a machine that was just woken. `auto_stop_machines`
+off and a floor of one machine are load-bearing. Only `DATABASE_URL` (direct,
+unpooled) and `AGENT_INTERNAL_TOKEN` are required; **`ANTHROPIC_API_KEY` is
+optional and the worker is worth deploying without one** — sending, reply
+detection, stuck-send recovery, the restart reconciler and the sign-in-token
+sweep all run with no model, and only chat reports `chat_disabled`.
+
 **The web half is LIVE on Vercel** at `agency-os-tau-murex.vercel.app`, against
 a Neon Postgres (18.6) with Resend for magic links. Proved live: `/api/health`
 reports `database: ok`, `/signin` renders, and a sign-in request logged

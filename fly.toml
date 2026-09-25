@@ -1,0 +1,72 @@
+# The agent worker on Fly.io.
+#
+# This file exists because `apps/agent` CANNOT run on Vercel, and the reasons
+# are the same ones that make most of Fly's defaults wrong for it: it holds a
+# Postgres session advisory lock for its whole lifetime, ticks every fifteen
+# seconds looking for due messages, and keeps an IMAP IDLE socket open. A
+# process that is frozen, stopped or replicated breaks all three.
+#
+# So read `auto_stop_machines` and `min_machines_running` below as load-bearing
+# rather than as tuning. Fly's defaults scale to zero between requests, which
+# is Vercel's problem wearing a different hat: the lock would drop, the tick
+# would stop, queued mail would sit unsent, and nothing would look broken —
+# /readyz answers fine on a machine that has just been woken up.
+#
+#   fly launch --no-deploy --copy-config    (once)
+#   fly secrets set ...                     (see DEPLOYING.md)
+#   fly deploy
+#
+# Build context is the REPO ROOT, which is why this file lives here and not in
+# apps/agent: the Dockerfile copies every workspace package.json to satisfy the
+# lockfile (CLAUDE.md §4).
+
+app = "agency-os-agent"
+primary_region = "lhr"
+
+[build]
+  dockerfile = "apps/agent/Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  # Loopback is wrong here for the same reason it is wrong under compose: the
+  # machine has its own network namespace, so a worker bound to 127.0.0.1 is
+  # reachable from nothing but itself, and the web app's request is refused
+  # while the worker's own logs say it started fine.
+  AGENT_BIND = "0.0.0.0"
+  # Health listens on this; the internal API the web app calls is this + 1,
+  # and answers /livez and /readyz as well.
+  AGENT_PORT = "3001"
+  LOG_LEVEL = "info"
+
+[http_service]
+  internal_port = 3002
+  force_https = true
+
+  # NOT the defaults. `auto_stop_machines = "off"` and a floor of one machine
+  # are what make this a worker rather than a request handler — see the note
+  # at the top of this file.
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+
+  # And exactly one. A second worker is excluded by the advisory lock rather
+  # than by this number, so a scale-up does not corrupt anything — it just
+  # pays for a machine that sits there losing the lock race forever.
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 50
+    hard_limit = 100
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "4s"
+    grace_period = "20s"
+    method = "GET"
+    path = "/readyz"
+    # /readyz reports 503 when the database is unreachable or the runtime has
+    # halted on an ungranted tool call — both states where this machine should
+    # be taken out of rotation rather than left answering.
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

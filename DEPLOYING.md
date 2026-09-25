@@ -183,6 +183,76 @@ share the URL.
 
 ---
 
+## The worker, on Fly.io
+
+`fly.toml` at the repo root deploys `apps/agent`. Read its header before
+changing anything in it: Fly's defaults scale a machine to zero between
+requests, which is Vercel's problem wearing a different hat — the advisory
+lock drops, the fifteen-second tick stops, queued mail sits unsent, and
+nothing looks broken because `/readyz` answers fine on a machine that was
+just woken up. `auto_stop_machines = "off"` and `min_machines_running = 1`
+are the load-bearing lines.
+
+```bash
+fly launch --no-deploy --copy-config     # once; keeps this fly.toml
+fly secrets set DATABASE_URL='...'       # the DIRECT, unpooled string
+fly secrets set AGENT_INTERNAL_TOKEN='...'
+fly deploy
+```
+
+**Only two secrets are required**: `DATABASE_URL` and `AGENT_INTERNAL_TOKEN`.
+Everything else turns a feature on, and the worker says which at boot.
+
+| secret | what it turns on | without it |
+|---|---|---|
+| `DATABASE_URL` | everything | refuses to boot |
+| `AGENT_INTERNAL_TOKEN` | the web app may call it | refuses to boot |
+| `ANTHROPIC_API_KEY` | chat | `chat_disabled`; **everything else still runs** |
+| `SECRETS_KEY` | connectors with credentials | those connectors are skipped, with a reason |
+| `SMTP_HOST`, `MAIL_FROM`, `SMTP_*` | sending | `outreach: disabled` |
+| `IMAP_HOST`, `IMAP_USER`, `IMAP_PASSWORD` | reply detection | `outreach: send-only` — replies never pause a sequence |
+
+**`DATABASE_URL` must be the DIRECT, non-pooled string.** The worker's
+single-instance lock is session-scoped and does not survive transaction-mode
+pooling — under the pooler two workers both believe they hold it.
+
+Then point the web app at it, in Vercel:
+
+```bash
+vercel env add AGENT_URL production          # https://agency-os-agent.fly.dev
+vercel env add AGENT_INTERNAL_TOKEN production   # the SAME value as above
+```
+
+and redeploy the web app. Until both are set, every screen that would promise
+a send says no worker is connected, which is the honest state. **Do not set
+`AGENT_URL` to something unreachable** — the UI then says "unreachable"
+instead of "not configured", which is a worse lie.
+
+### A worker with no model is still worth deploying
+
+`ANTHROPIC_API_KEY` is optional, and the half of the worker that needs no
+model is the half that does the irreversible work: the outreach tick and the
+single send path, reply detection, `recoverStuckSends`, the restart
+reconciler, the approval sweeper, and the expired sign-in token sweep §4 asks
+for. Deploy it without a key and the product gains everything except the chat
+panel, which reports `chat_disabled` until one exists.
+
+### What a Claude subscription cannot do here
+
+`AGENT_USE_LOCAL_LOGIN` is refused when `NODE_ENV=production`, and that is
+not an oversight to work around. It authenticates as a PERSON: the credential
+is one human's, created by an interactive browser flow no container has, and
+metered against a window meant for one person working at a keyboard. A shared
+service standing behind it cannot be billed, rate-limited, audited or revoked
+apart from them (§2.3).
+
+`claude setup-token` does mint a long-lived token from a subscription, so the
+mechanism exists. It is still the wrong thing to put in a server's
+environment, for every reason above, and the guard stays. The supported split
+is: **the worker on Fly does the deterministic work with no model, and chat
+runs locally against a developer's own login** — which is what a personal
+subscription is for.
+
 ## Every deploy after the first: migrate FIRST
 
 The app and the database ship separately here, so the order matters and it is
