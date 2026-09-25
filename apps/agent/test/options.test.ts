@@ -32,7 +32,7 @@ describe('the option keyset is frozen', () => {
   it('sets exactly the keys on the allow-list, and nothing else', () => {
     const keys = Object.keys(fixture()).sort()
     const allowed = [...ALLOWED_OPTION_KEYS]
-      .filter((k) => k !== 'resume' && k !== 'model' && k !== 'skills')
+      .filter((k) => !['resume', 'model', 'skills', 'pathToClaudeCodeExecutable'].includes(k))
       .sort()
     expect(keys).toEqual(allowed)
   })
@@ -196,7 +196,7 @@ describe('the child environment', () => {
    * Bash('env') away if a future change re-enabled a shell.
    */
   it('carries the API key and not the database credentials', () => {
-    const env = childEnv('sk-ant-test')
+    const env = childEnv({ kind: 'api_key', apiKey: 'sk-ant-test' })
     expect(env['ANTHROPIC_API_KEY']).toBe('sk-ant-test')
     expect(Object.keys(env)).not.toContain('DATABASE_URL')
     expect(Object.keys(env)).not.toContain('AUTH_SECRET')
@@ -204,13 +204,34 @@ describe('the child environment', () => {
   })
 
   it('bounds a subagent fan-out', () => {
-    const env = childEnv('k')
+    const env = childEnv({ kind: 'api_key', apiKey: 'k' })
     expect(env['CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS']).toBeDefined()
     expect(env['CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH']).toBeDefined()
   })
 
   it('is passed to the query, so the subprocess inherits nothing by default', () => {
-    expect(fixture().env).toEqual({ ANTHROPIC_API_KEY: 'k' })
+    expect(fixture().env).toEqual({ ANTHROPIC_API_KEY: 'k' })  // the fixture passes this env verbatim
+  })
+
+  /**
+   * The developer's own Claude Code login (§13). The variable is ABSENT, not
+   * empty, and that distinction decides the outcome: the SDK takes the first
+   * credential source that MATCHES, so an empty ANTHROPIC_API_KEY is a match
+   * that then fails to authenticate — surfacing as a bad key rather than as a
+   * variable that should not have been set at all.
+   */
+  it('sets no API key at all under a local login, rather than an empty one', () => {
+    const env = childEnv({ kind: 'local_login' })
+    expect(Object.keys(env)).not.toContain('ANTHROPIC_API_KEY')
+    expect(env['ANTHROPIC_API_KEY']).toBeUndefined()
+    // Still everything the CLI needs to find its own session, and no more.
+    expect(env['HOME']).toBeDefined()
+    // The keychain lookup is BY USERNAME, so a child without USER reports
+    // itself logged out — and the turn then fails with "Anthropic rejected
+    // the API key", about a key it never sent. A username is not a
+    // credential; omitting it cost an afternoon.
+    expect(env['USER']).toBeDefined()
+    expect(Object.keys(env)).not.toContain('DATABASE_URL')
   })
 })
 

@@ -158,16 +158,31 @@ async function main(): Promise<void> {
     ],
     ['reported a cost', cost !== undefined, 'no cost event — §8.1 requires the cost be visible'],
     [
-      'used the agency tools',
-      toolCalls.length > 0,
-      'the agent answered with NO tool calls. It is guessing rather than reading the CRM.',
-    ],
-    [
       'answered in words',
       answer.trim().length > 0,
       'the turn produced no text for the user to read',
     ],
   ]
+
+  /**
+   * Only where the question ASKS for work.
+   *
+   * This check used to be unconditional, which made Phase 3's gate impossible
+   * to pass: `--connector` asks the agent to LIST its tool names and nothing
+   * else, so an agent doing exactly what it was told made no tool calls and
+   * failed "used the agency tools" every single time. A gate that cannot
+   * report success is the same defect as a query that cannot report failure —
+   * it looks like evidence and is not. The connector run has its own,
+   * narrower check below; this one belongs to the prompts that ask the agent
+   * to go and read the CRM.
+   */
+  if (!CONNECTOR) {
+    checks.push([
+      'used the agency tools',
+      toolCalls.length > 0,
+      'the agent answered with NO tool calls. It is guessing rather than reading the CRM.',
+    ])
+  }
 
   if (DRAFT) {
     checks.push([

@@ -15,22 +15,35 @@ from `apps/web` cannot resolve the hoisted `node_modules`). The agent worker is
 NOT deployed and cannot be on serverless, so chat, sending and reply detection
 are absent there and every screen that would promise them says so instead.
 
-**Phases 2 and 3's Definitions of Done are not fully proved, both blocked on
-the same thing: the Anthropic account has no credit, so no turn has ever
-reached the model. Phase 4's is proved against a local SMTP sink, not a real
-mailbox.** Everything below those boundaries IS proved, live:
+**Phases 2 and 3's Definitions of Done now PASS.** They were blocked for the
+whole build on "the Anthropic account has no credit", and the diagnosis was
+wrong: the Agent SDK never needed an API key. Its own types say so —
+`apiKeySource: 'none'` is documented as *"no API key in use - e.g. claude.ai
+OAuth login"* and `apiProvider: 'firstParty'` as the case where *"Anthropic
+OAuth login"* applies. A machine logged into Claude Code can run real turns.
+What stood in the way was this repo's own gate asking *"is ANTHROPIC_API_KEY
+set?"* when it meant *"can I reach a model?"* — see `AGENT_USE_LOCAL_LOGIN`
+below. **Phase 4's is proved against a local SMTP sink, not a real mailbox.**
 
 | | proved | not proved |
 |---|---|---|
-| Phase 2 | browser → route → worker → gate → SDK → API, authenticated; refused at billing | one live turn with tool cards |
-| Phase 3 | a connector added in the UI reaches a live turn with no restart — the worker logged `connectors: ["deepwiki (http)"]` for a turn on a worker started *before* that connector existed | the agent CALLING one of its tools |
+| Phase 2 | **the whole thing, live.** `npm run smoke:agent` PASSED on 2026-09-25: one turn, 22 tool calls, 284 events, a cost reported, and an evidence-backed ranking of the pipeline's top three built from `scan_company`/`score_company`/`get_company` against the real database | nothing outstanding |
+| Phase 3 | **PASSED.** The agent named `mcp__deepwiki__ask_wiki_question`, `read_wiki_contents` and `read_wiki_structure` alongside its own nine, on a worker that had been running since BEFORE the connector row was written — §6's "no restart" promise, in the sequence that actually tests it | the agent *calling* a connector's tool in anger (it enumerates them; the gate asks it to enumerate) |
 | Phase 4 | draft → approved in the UI → deferred for quiet hours (live, 21:50 London) → sent in a real SMTP transaction → deal `contacted` → a reply by Message-ID pauses, ties, moves the deal to `replied` → "unsubscribe" suppresses. One test per §2.1 rule. | deliverability through a real mailbox; IMAP IDLE against a live server; a provider webhook with a real secret |
 | Phase 5 | live, in the browser: a `replied` deal dragged to `meeting` (HTML5 drop → `deal.moved` audit row) → meeting recorded from the company page at 15:00 London, stored as 14:00Z → brief generated from the rows → proposal generated from the scan (8 scope items with evidence, 2 workstreams, USD 9,600–15,600 at a 1,200 day rate) → `sent` → `accepted` closes the deal `won`. A stranger on `/book/agency` became a company, a contact with E.164 phone, three consent rows carrying the form's wording, a meeting, and a deal at `meeting`. | the agent's `book_meeting`/`update_deal` in a live turn (same blocker as Phase 2); a calendar invitation (deliberately not sent from here) |
 | Phase 6 | the whole Definition of Done, end to end against the real service: a SIGNED webhook is answered with `<ConversationRelay>` carrying the disclosure, the relay socket opens against the URL that TwiML handed out, four scripted questions qualify the caller, asking for a person produces the `end` frame whose `HandoffData` makes `/twiml/action` return a `<Dial>`, and the row ends with `answered_at`, `disclosed_ai_at`, an outcome, Twilio's duration and recording URL, a transcript containing the caller's own words, and a summary. `apps/voice/test/service.test.ts`. | Twilio itself — the carrier, the STT and the TTS. A2P 10DLC has not cleared and there are no Twilio credentials, so no real telephone call has been placed to this service |
 
 `npm run smoke:agent` gates Phase 2; `npm run smoke:agent -- --connector <name>`
-gates Phase 3. Run both against an account with credit before calling either
-phase finished.
+gates Phase 3.
+
+**The Phase 3 gate could never pass, and that is why it had never been seen
+to.** `--connector` asks the agent to LIST its tool names and nothing else, and
+the check list then required `toolCalls.length > 0` unconditionally — so an
+agent doing exactly what it was told made no tool calls and failed "used the
+agency tools" every single time. A gate that cannot report success is the same
+defect as a query that cannot report failure (cf. the disclosure audit in §
+Voice): it reads as evidence and is not. The check is now pushed only for the
+prompts that ask the agent to go and read the CRM.
 
 ---
 
@@ -669,7 +682,7 @@ exists, never in place of it.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 1455 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice
+npm test                 # 1456 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice
 npx vitest run --maxWorkers=1 --minWorkers=1   # the same suite on a machine short of memory
 npm run build            # packages, then the Next app
 
@@ -1263,6 +1276,54 @@ the one above it can be turned off:
 
 `ALLOWED_OPTION_KEYS` is frozen and asserted key-by-key, so an SDK upgrade that
 introduces a new permission knob cannot be adopted silently.
+
+### Authenticating without an API key (§13)
+
+**The SDK does not require one, and the gate that assumed it did is what kept
+Phases 2 and 3 unproven for the whole build.** `chat_disabled` was keyed on
+`ANTHROPIC_API_KEY` being set — a narrower question than the one it meant.
+The SDK's own types list the alternatives: `apiKeySource: 'none'` is
+*"no API key in use - e.g. claude.ai OAuth login"*, `apiProvider: 'firstParty'`
+is where *"Anthropic OAuth login"* applies, and `oauth_org_not_allowed` is one
+of its error variants. The worker now resolves an `AgentCredential` once at
+boot and every gate reads that instead.
+
+**`AGENT_USE_LOCAL_LOGIN` authenticates as a PERSON, and is refused in
+production by `loadEnv` rather than by a comment.** The credential is one
+human's, it lives in their OS keychain, and it is created by an interactive
+flow no server has. A shared service standing behind it cannot be billed,
+rate-limited, audited or revoked separately from them — §2.3's concern exactly
+— so the schema makes it impossible rather than inadvisable. It also WINS over
+an `ANTHROPIC_API_KEY` that happens to be in the environment: a developer's
+`.env` nearly always holds a stale or revoked one, and letting the ambient
+value beat the explicit instruction means the operator asks for their own
+login and debugs somebody else's 401. Declared, not inferred — the same rule
+as `OLLAMA_IS_LOCAL`.
+
+**`childEnv` passes `USER`, and that line cost an afternoon.** The child's
+environment is built from scratch (§2.3), and the CLI looks its stored session
+up in the keychain BY USERNAME — so with `USER` absent it finds nothing and
+reports itself logged out. What that surfaces as is the reason it is
+commented in the source: the turn dies with *"Anthropic rejected the API
+key"*, a sentence about a key that was never sent, which sends whoever reads
+it to check a credential instead of an environment. Measured rather than
+reasoned: `auth status` answers `loggedIn: false` under `env -i PATH HOME` and
+`true` the moment `USER` is added back, and it is `USER` specifically —
+`LOGNAME`, `SHELL` and `TMPDIR` all leave it logged out.
+
+**`pathToClaudeCodeExecutable` is in `ALLOWED_OPTION_KEYS` deliberately.** The
+SDK ships no CLI — it drives one — and resolves `claude` from PATH. A machine
+whose only copy arrived with the desktop app has it under Application Support
+and nothing on PATH, and the resulting failure also reads like an auth
+problem. Note the desktop app's own login is NOT the CLI's: they are separate
+keychain identities, so `claude auth login` has to be run for the binary the
+SDK will actually spawn.
+
+**What this is and is not.** It is how a developer proves the Definitions of
+Done on their own machine without buying credit. It is not a deployment
+story: production sets `ANTHROPIC_API_KEY`, and the Vercel half has no worker
+at all (a long-running process cannot live on serverless), so chat there is
+absent rather than differently-authenticated.
 
 ### The approval wait polls, and that is deliberate
 

@@ -29,7 +29,7 @@ import { abortableSleep, createApprovalWaiter } from '../gate/waiter.js'
 import { createAgencyMcpServer, makeInputParser } from '../mcp/agency.js'
 import { buildAgents } from './agents.js'
 import { buildMcpServers, describeServers } from './connectors.js'
-import { buildQueryOptions, childEnv, systemPrompt } from './options.js'
+import { buildQueryOptions, childEnv, type AgentCredential, systemPrompt } from './options.js'
 import type { Logger } from '../logger.js'
 
 export interface RuntimeHalt {
@@ -57,7 +57,10 @@ export interface SessionDeps {
   readonly db: AgencyDb
   readonly log: Logger
   readonly halt: RuntimeHalt
-  readonly apiKey: string
+  /** How the SDK subprocess authenticates — a key we hold, or the developer's own login. */
+  readonly credential: AgentCredential
+  /** Where the Claude Code binary is, when it is not on PATH. */
+  readonly claudeCodePath?: string | undefined
   readonly model?: string | undefined
   readonly maxTurns: number
   readonly maxBudgetUsd: number
@@ -254,9 +257,10 @@ export async function buildTurnRuntime(
     abortController: abort,
     maxTurns: deps.maxTurns,
     maxBudgetUsd: deps.maxBudgetUsd,
-    env: childEnv(deps.apiKey),
+    env: childEnv(deps.credential),
     ...(args.resume ? { resume: args.resume } : {}),
     ...(deps.model ? { model: deps.model } : {}),
+    ...(deps.claudeCodePath ? { pathToClaudeCodeExecutable: deps.claudeCodePath } : {}),
   })
 
   return { turnId, options, abort }

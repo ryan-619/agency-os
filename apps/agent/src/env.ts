@@ -32,6 +32,40 @@ const schema = z.object({
   ANTHROPIC_API_KEY: z.string().optional(),
 
   /**
+   * Authenticate as the DEVELOPER, using their own Claude Code login (§13).
+   *
+   * The Agent SDK does not require an API key. Its own types name the other
+   * sources — `apiKeySource: 'none'` is documented as "no API key in use -
+   * e.g. claude.ai OAuth login", and `apiProvider: 'firstParty'` as the case
+   * where "Anthropic OAuth login" applies. So a machine already logged into
+   * Claude Code can run a real turn, and the gate that asked "is
+   * ANTHROPIC_API_KEY set?" was answering a narrower question than the one it
+   * meant: it conflated HAVING A KEY with BEING ABLE TO REACH A MODEL, which
+   * were the same thing when it was written and are not.
+   *
+   * This is a DEVELOPMENT path and the schema says so rather than the docs:
+   * `loadEnv` refuses it outright when NODE_ENV is production. The credential
+   * belongs to a person, it lives in their OS keychain, there is no
+   * interactive login on a server to create one, and a shared service
+   * standing behind one human's account is what §2.3 exists to prevent.
+   * Production authenticates with a key the deployment owns.
+   */
+  AGENT_USE_LOCAL_LOGIN: z
+    .string()
+    .optional()
+    .transform((v) => v !== undefined && ['true', '1', 'yes'].includes(v.toLowerCase())),
+
+  /**
+   * Where the Claude Code binary is, when it is not on PATH.
+   *
+   * The SDK ships no CLI — it drives one — and looks for `claude` on PATH.
+   * A machine whose only copy arrived with the desktop app has it under
+   * Application Support and nothing on PATH, and the resulting failure reads
+   * like an auth problem rather than a missing file.
+   */
+  CLAUDE_CODE_PATH: z.string().optional(),
+
+  /**
    * Encrypts third-party connector credentials at rest (§2.3).
    *
    * Optional, because a deployment with no connectors configured needs no key
@@ -157,6 +191,26 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
       `AGENT_TURN_TIMEOUT_MINUTES (${env.AGENT_TURN_TIMEOUT_MINUTES}) must be greater than ` +
         `APPROVAL_TTL_MINUTES (${env.APPROVAL_TTL_MINUTES}), or a turn is killed while its own ` +
         'approval is still live and the decision has nothing left to resume.',
+    )
+  }
+
+  /**
+   * The development-only credential, refused structurally rather than by
+   * documentation (§2.1's habit applied to §2.3).
+   *
+   * A local login is one person's, held in their OS keychain, created by an
+   * interactive flow no server has. A deployment authenticating as a human
+   * means every turn the agency runs is billed to, rate-limited by, and
+   * revocable with that person's account — and that no audit can tell the
+   * service apart from them. Saying so in a comment invites somebody to set
+   * it in production anyway; refusing to boot means they cannot.
+   */
+  if (env.AGENT_USE_LOCAL_LOGIN && env.NODE_ENV === 'production') {
+    throw new Error(
+      'AGENT_USE_LOCAL_LOGIN is a development path and must not be set in production. It ' +
+        "authenticates as a PERSON, using their own Claude Code session: the credential is theirs, " +
+        'it lives in their keychain, and a shared service standing behind it cannot be audited, ' +
+        'billed or revoked separately from them (§2.3). Set ANTHROPIC_API_KEY instead.',
     )
   }
 

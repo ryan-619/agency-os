@@ -6,6 +6,7 @@ import {
   createSmtpProvider, ensureChatSessionTitle, markTurnRunning, masterKey, readConnector, schema,
   sessionCostUsd, setSdkSessionId, usd, type AgencyDb,
 } from '@agency/db'
+import type { AgentCredential } from './runtime/options.js'
 import { loadEnv } from './env.js'
 import { createLogger, type Logger } from './logger.js'
 import { answerHealth, startHealthServer, type HealthInputs } from './health.js'
@@ -48,11 +49,42 @@ async function main(): Promise<void> {
   // and /readyz reports "starting" rather than refusing the connection.
   let halt: RuntimeHalt | null = null
   let lock: WorkerLock | null = null
+  /**
+   * How this worker authenticates, decided ONCE (§5).
+   *
+   * The question every gate below should have been asking is "can I reach a
+   * model?", and what they asked was "is ANTHROPIC_API_KEY set?". Those were
+   * the same thing when they were written; the SDK's own types say they are
+   * not — `apiKeySource: 'none'` is documented as "no API key in use - e.g.
+   * claude.ai OAuth login". So a machine already logged into Claude Code was
+   * told `chat_disabled` while holding a perfectly good credential.
+   *
+   * `null` is still a complete configuration: the reconciler, the approval
+   * sweeper, the outreach tick and health all run, and chat says why.
+   */
+  /**
+   * AGENT_USE_LOCAL_LOGIN WINS over a key that happens to be in the
+   * environment, and that ordering is the point.
+   *
+   * The other way round looks more cautious and is worse in practice: a `.env`
+   * on a developer's machine nearly always has an ANTHROPIC_API_KEY in it —
+   * stale, revoked, belonging to a different account — and letting it beat an
+   * explicit instruction means the operator asks for their own login, gets a
+   * 401 from a key they had forgotten about, and debugs the wrong thing.
+   * Explicit intent beats an ambient variable, the same way OLLAMA_IS_LOCAL is
+   * declared rather than inferred.
+   */
+  const credential: AgentCredential | null = env.AGENT_USE_LOCAL_LOGIN
+    ? { kind: 'local_login' }
+    : env.ANTHROPIC_API_KEY
+      ? { kind: 'api_key', apiKey: env.ANTHROPIC_API_KEY }
+      : null
+
   const outreachMode = outreachModeFrom(env)
   const healthInputs = (): HealthInputs => ({
     pool,
     halted: halt?.halted() ?? false,
-    chatEnabled: Boolean(env.ANTHROPIC_API_KEY),
+    chatEnabled: credential !== null,
     lockHeld: lock?.held ?? null,
     outreach: outreachMode,
   })
@@ -123,8 +155,20 @@ async function main(): Promise<void> {
     }
   }
 
-  if (!env.ANTHROPIC_API_KEY) {
-    log.warn('ANTHROPIC_API_KEY is not set — chat refuses turns; everything else still runs')
+  if (!credential) {
+    log.warn('no model credential — chat refuses turns; everything else still runs')
+  } else if (credential.kind === 'local_login') {
+    if (env.ANTHROPIC_API_KEY) {
+      log.warn('ANTHROPIC_API_KEY is set and is being IGNORED — AGENT_USE_LOCAL_LOGIN was asked for explicitly')
+    }
+    // Loud on purpose. Every turn this worker runs is billed to, rate-limited
+    // by and revocable with ONE PERSON's account, and nothing downstream can
+    // tell the service apart from them. `loadEnv` refuses this outright in
+    // production; here it is a line somebody reads in a log and questions.
+    log.warn(
+      'authenticating as a PERSON — the developer’s own Claude Code login, not a deployment ' +
+        'credential. Development only; production must set ANTHROPIC_API_KEY (§2.3).',
+    )
   }
 
   const server = createAgentHttpServer({
@@ -135,11 +179,11 @@ async function main(): Promise<void> {
     // disagree about whether the runtime is halted.
     health: (url) => answerHealth(url, healthInputs()),
     probeConnector: async (orgId, connectorId) => {
-      if (!env.ANTHROPIC_API_KEY) {
+      if (!credential) {
         return {
           ok: false,
           tools: [],
-          message: 'The worker has no API key, so it cannot start a session to test with.',
+          message: 'The worker has no model credential, so it cannot start a session to test with.',
         }
       }
       const row = await readConnector(db, orgId, connectorId)
@@ -147,7 +191,7 @@ async function main(): Promise<void> {
       // only thing that crosses the boundary, so this is not a way to learn
       // that one belongs to somebody else.
       if (!row) return { ok: false, tools: [], message: 'That connector no longer exists.' }
-      return probeConnector(db, row, secretsKey, env.ANTHROPIC_API_KEY, process.cwd(), log)
+      return probeConnector(db, row, secretsKey, credential, process.cwd(), log)
     },
     interrupt: (turnId) => {
       const turn = running.get(turnId)
@@ -156,7 +200,7 @@ async function main(): Promise<void> {
       return true
     },
     startTurn: (req) =>
-      beginTurn({ req, db, env, log, halt, running, secretsKey, skills }),
+      beginTurn({ req, db, env, log, halt, running, secretsKey, skills, credential }),
   })
 
   const apiPort = env.AGENT_PORT + 1
@@ -203,7 +247,7 @@ async function main(): Promise<void> {
     healthPort: env.AGENT_PORT,
     apiPort,
     apiBind: env.AGENT_BIND,
-    chat: env.ANTHROPIC_API_KEY ? 'enabled' : 'disabled',
+    chat: credential ? `enabled (${credential.kind})` : 'disabled',
     outreach: outreachMode,
   })
 
@@ -261,10 +305,12 @@ async function beginTurn(args: {
   secretsKey: Buffer | null
   /** Decided once at boot from what is on the skills volume (§6). */
   skills: { settingSources: readonly 'project'[]; skills?: 'all' }
+  /** Decided once at boot; null when nothing can reach a model. */
+  credential: AgentCredential | null
 }): Promise<{ ok: true; turn: TurnHandle } | { ok: false; status: number; message: string }> {
-  const { req, db, env, log, halt, running, secretsKey, skills } = args
+  const { req, db, env, log, halt, running, secretsKey, skills, credential } = args
 
-  if (!env.ANTHROPIC_API_KEY) return { ok: false, status: 503, message: 'chat_disabled' }
+  if (!credential) return { ok: false, status: 503, message: 'chat_disabled' }
   if (halt.halted()) return { ok: false, status: 503, message: 'runtime_halted' }
 
   // The user named in the body is a CLAIM. This checks the conversation
@@ -280,7 +326,8 @@ async function beginTurn(args: {
       db,
       log,
       halt,
-      apiKey: env.ANTHROPIC_API_KEY,
+      credential,
+      ...(env.CLAUDE_CODE_PATH ? { claudeCodePath: env.CLAUDE_CODE_PATH } : {}),
       model: env.AGENT_MODEL,
       maxTurns: env.AGENT_MAX_TURNS,
       maxBudgetUsd: env.AGENT_MAX_BUDGET_USD,

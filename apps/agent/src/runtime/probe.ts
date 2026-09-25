@@ -33,7 +33,7 @@ import type { AgencyDb, ConnectorRow } from '@agency/db'
 import { recordConnectorProbe } from '@agency/db'
 import type { Logger } from '../logger.js'
 import { buildConnector } from './connectors.js'
-import { childEnv } from './options.js'
+import { childEnv, type AgentCredential } from './options.js'
 
 export interface ProbeResult {
   readonly ok: boolean
@@ -105,7 +105,7 @@ export async function probeConnector(
   db: AgencyDb,
   row: ConnectorRow,
   masterKey: Buffer | null,
-  apiKey: string,
+  credential: AgentCredential,
   cwd: string,
   log: Logger,
 ): Promise<ProbeResult> {
@@ -170,7 +170,7 @@ export async function probeConnector(
         mcpServers: { [row.name]: server } as never,
         abortController: abort,
         cwd,
-        env: childEnv(apiKey),
+        env: childEnv(credential),
         maxTurns: 1,
       },
     })

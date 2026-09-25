@@ -50,6 +50,7 @@ export const ALLOWED_OPTION_KEYS = Object.freeze([
   'mcpServers',
   'model',
   'permissionMode',
+  'pathToClaudeCodeExecutable',
   'permissionPrompts',
   'resume',
   'settingSources',
@@ -106,6 +107,15 @@ export interface BuildOptionsInput {
   /** The SDK session to continue, if this thread has one (§5.3). */
   readonly resume?: string | undefined
   readonly model?: string | undefined
+  /**
+   * Where the Claude Code binary is, when it is not on PATH.
+   *
+   * The SDK bundles no CLI — it drives one — and resolves `claude` from PATH
+   * by default. A machine whose only copy came with the desktop app has it
+   * under Application Support and nothing on PATH, so the SDK finds nothing
+   * and the failure reads like an auth problem rather than a missing file.
+   */
+  readonly pathToClaudeCodeExecutable?: string | undefined
   /** Passed explicitly so nothing else in the process environment leaks in. */
   readonly env: Record<string, string | undefined>
 }
@@ -201,22 +211,57 @@ export function buildQueryOptions(input: BuildOptionsInput): Options {
   if (input.skills.skills !== undefined) options.skills = input.skills.skills
   if (input.resume !== undefined) options.resume = input.resume
   if (input.model !== undefined) options.model = input.model
+  if (input.pathToClaudeCodeExecutable !== undefined) {
+    options.pathToClaudeCodeExecutable = input.pathToClaudeCodeExecutable
+  }
   return options
 }
 
 /**
+ * How the SDK subprocess authenticates.
+ *
+ * Two shapes, and the difference is not cosmetic. `api_key` is the deployable
+ * one: a credential THIS process holds and hands to the child. `local_login`
+ * is a developer's own Claude Code session, which the CLI resolves for itself
+ * out of the OS keychain — this process never reads it, never holds it, and
+ * never puts it in an environment. It exists so Phase 2 and Phase 3's
+ * Definitions of Done can be proved on a machine with no API key, and
+ * `index.ts` REFUSES TO BOOT with it when NODE_ENV is production: a personal
+ * credential standing behind a shared service is what §2.3 is about.
+ */
+export type AgentCredential =
+  | { readonly kind: 'api_key'; readonly apiKey: string }
+  | { readonly kind: 'local_login' }
+
+/**
  * The environment the SDK subprocess gets.
  *
- * §2.3: no credential in an agent's context window. The subprocess needs the
- * API key to authenticate and nothing else — in particular not DATABASE_URL,
- * which would be one `Bash('env')` away from the model if a future change ever
- * re-enabled a shell.
+ * §2.3: no credential in an agent's context window. The subprocess needs to
+ * authenticate and nothing else — in particular not DATABASE_URL, which would
+ * be one `Bash('env')` away from the model if a future change ever re-enabled
+ * a shell.
  */
-export function childEnv(apiKey: string): Record<string, string | undefined> {
+export function childEnv(credential: AgentCredential): Record<string, string | undefined> {
   return {
-    ANTHROPIC_API_KEY: apiKey,
+    // Present ONLY when this process owns a key. Under `local_login` the
+    // variable is absent rather than empty, and that distinction decides the
+    // outcome: the SDK takes the FIRST credential source that matches, so an
+    // empty ANTHROPIC_API_KEY is a match that then fails to authenticate —
+    // and it fails as an auth error, which reads like a bad key rather than
+    // like a variable that should not have been set.
+    ...(credential.kind === 'api_key' ? { ANTHROPIC_API_KEY: credential.apiKey } : {}),
     PATH: process.env['PATH'],
     HOME: process.env['HOME'],
+    // Not decoration, and not a credential — a username is public. The CLI
+    // looks its stored session up in the OS keychain BY USERNAME, so with
+    // USER absent it finds nothing and reports itself logged out. What that
+    // surfaces as downstream is the reason this is commented: the turn fails
+    // with "Anthropic rejected the API key", which is a sentence about a key
+    // that was never sent, and sends whoever reads it to check a credential
+    // instead of an environment. Measured: `auth status` answers
+    // `loggedIn: false` under `env -i PATH HOME` and `true` the moment USER
+    // is added back.
+    USER: process.env['USER'],
     // The SDK writes transcripts under the config dir; without a writable one
     // in the container, `resume` has nowhere to read from.
     CLAUDE_CONFIG_DIR: process.env['CLAUDE_CONFIG_DIR'],
