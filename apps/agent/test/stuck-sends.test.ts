@@ -12,8 +12,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import { schema, type AgencyDb } from '@agency/db'
-import { freshDb, migrations, type TestDb } from '../../../packages/db/test/helpers.js'
-import { migrateUp } from '../../../packages/db/src/migrator.js'
+import { migratedDb,type TestDb } from '../../../packages/db/test/helpers.js'
 import { recoverStuckSends } from '../src/boot/reconcile.js'
 
 const silent = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} }
@@ -25,8 +24,7 @@ describe('recoverStuckSends', () => {
   let companyId: string
 
   beforeEach(async () => {
-    test = await freshDb()
-    await migrateUp(test.driver, migrations())
+    test = await migratedDb()
     db = drizzle(test.pg, { schema }) as unknown as AgencyDb
     const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
     orgId = org!.id

@@ -13,8 +13,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
-import { expectRejection, freshDb, migrations, type TestDb } from './helpers.js'
-import { migrateUp } from '../src/migrator.js'
+import { migratedDb,expectRejection, type TestDb } from './helpers.js'
 import * as schema from '../src/schema.js'
 import {
   appendAudit, approvalsForSession, cancelPendingApprovals, canonicalJson, decideApproval,
@@ -34,8 +33,7 @@ describe('the approval queue', () => {
   let seq = 0
 
   beforeAll(async () => {
-    test = await freshDb()
-    await migrateUp(test.driver, migrations())
+    test = await migratedDb()
     db = drizzle(test.pg, { schema }) as unknown as AgencyDb
 
     const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })

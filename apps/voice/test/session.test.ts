@@ -11,8 +11,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import { callsThatDidNotDisclose, markAnswered, schema, startCall, type AgencyDb } from '@agency/db'
-import { freshDb, migrations, type TestDb } from '../../../packages/db/test/helpers.js'
-import { migrateUp } from '../../../packages/db/src/migrator.js'
+import { migratedDb,type TestDb } from '../../../packages/db/test/helpers.js'
 import { fakeProvider } from '@agency/llm'
 import { VoiceSession } from '../src/session.js'
 
@@ -59,8 +58,7 @@ describe('a voice session', () => {
   const callRow = async () => (await db.select().from(schema.calls).where(eq(schema.calls.id, callId)))[0]!
 
   beforeEach(async () => {
-    test = await freshDb()
-    await migrateUp(test.driver, migrations())
+    test = await migratedDb()
     db = drizzle(test.pg, { schema }) as unknown as AgencyDb
     const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
     orgId = org!.id

@@ -15,8 +15,7 @@ import {
   parseConnectorConfig, putSecret, readConnector, recordConnectorProbe, schema,
   setConnectorEnabled, updateConnector, type AgencyDb,
 } from '../src/index.js'
-import { expectRejection, freshDb, migrations, type TestDb } from './helpers.js'
-import { migrateUp } from '../src/migrator.js'
+import { migratedDb,expectRejection, type TestDb } from './helpers.js'
 
 describe('parseConnectorConfig', () => {
   it('accepts a well-formed http server', () => {
@@ -107,8 +106,7 @@ describe('connector rows', () => {
   let seq = 0
 
   beforeAll(async () => {
-    test = await freshDb()
-    await migrateUp(test.driver, migrations())
+    test = await migratedDb()
     db = drizzle(test.pg, { schema }) as unknown as AgencyDb
     const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
     orgId = org!.id

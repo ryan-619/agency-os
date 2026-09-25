@@ -23,8 +23,7 @@ import {
   orderedSignals, parseIcpDefinition, scoreCompany,
   type IcpDefinition, type Observation, type SiteProfile,
 } from '@agency/core'
-import { freshDb, migrations, type TestDb } from './helpers.js'
-import { migrateUp } from '../src/migrator.js'
+import { migratedDb,type TestDb } from './helpers.js'
 import { SEED_DIR } from '../src/paths.js'
 
 const source = readFileSync(join(SEED_DIR, 'icp-security-gap-saas.json'), 'utf8')
@@ -48,8 +47,7 @@ describe('the ICP definition survives the round trip through jsonb', () => {
   let fromRow: IcpDefinition
 
   beforeAll(async () => {
-    db = await freshDb()
-    await migrateUp(db.driver, migrations())
+    db = await migratedDb()
     await db.driver.exec(
       `INSERT INTO orgs (id, name) VALUES ('00000000-0000-4000-8000-000000000001', 'Round Trip')`,
     )

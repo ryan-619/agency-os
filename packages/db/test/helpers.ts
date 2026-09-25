@@ -1,6 +1,6 @@
 import { PGlite } from '@electric-sql/pglite'
 import { pgliteDriver } from '../src/driver.js'
-import { readMigrations, type MigrationDriver, type Migration } from '../src/migrator.js'
+import { migrateUp, readMigrations, type MigrationDriver, type Migration } from '../src/migrator.js'
 import { MIGRATIONS_DIR } from '../src/paths.js'
 
 /**
@@ -30,6 +30,44 @@ export async function freshDb(): Promise<TestDb> {
     pg,
     driver: pgliteDriver(pg),
     close: () => pg.close(),
+  }
+}
+
+/**
+ * A throwaway Postgres with the migrations ALREADY APPLIED.
+ *
+ * `freshDb()` + `migrateUp()` in a `beforeEach` means every one of ~1,500
+ * tests builds an embedded Postgres and replays every migration into it.
+ * That is most of the suite's runtime and all of its memory pressure: the
+ * work is identical every time and the result is always the same bytes.
+ *
+ * So it is done ONCE per process and the finished data directory is kept.
+ * Each test then loads a COPY of it, which is a fresh database with its own
+ * storage — the isolation is the same as before, because `loadDataDir`
+ * hydrates a new instance rather than sharing one. What is shared is the
+ * work, not the state.
+ *
+ * `freshDb()` remains, and migrations.test.ts still uses it: a test about
+ * applying migrations cannot start from a database that already has them.
+ */
+export async function migratedDb(): Promise<TestDb> {
+  snapshot ??= await buildSnapshot()
+  const pg = await PGlite.create({
+    loadDataDir: snapshot,
+    postgresqlconf: ["timezone = 'UTC'"],
+  })
+  return { pg, driver: pgliteDriver(pg), close: () => pg.close() }
+}
+
+let snapshot: Blob | File | null = null
+
+async function buildSnapshot(): Promise<Blob | File> {
+  const seed = await freshDb()
+  try {
+    await migrateUp(seed.driver, migrations())
+    return await seed.pg.dumpDataDir()
+  } finally {
+    await seed.close()
   }
 }
 

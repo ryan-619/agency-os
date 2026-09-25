@@ -15,8 +15,7 @@ import {
   CURRENT_KEY_VERSION, SecretsUnavailableError, decrypt, deleteSecret, encrypt, listSecrets,
   masterKey, putSecret, revealSecret, schema, secretsMatch, type AgencyDb,
 } from '../src/index.js'
-import { expectRejection, freshDb, migrations, type TestDb } from './helpers.js'
-import { migrateUp } from '../src/migrator.js'
+import { migratedDb,expectRejection, type TestDb } from './helpers.js'
 
 const KEY = randomBytes(32)
 const TOKEN = 'sk-apollo-live-9f3a2b7c1d4e'
@@ -119,8 +118,7 @@ describe('storing a credential', () => {
   let userId: string
 
   beforeEach(async () => {
-    test = await freshDb()
-    await migrateUp(test.driver, migrations())
+    test = await migratedDb()
     db = drizzle(test.pg, { schema }) as unknown as AgencyDb
     const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
     orgId = org!.id

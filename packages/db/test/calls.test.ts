@@ -15,8 +15,7 @@ import {
   listCalls, markAnswered, phoneIsSuppressed, recordDisclosure, recordHandoff, recordOptOut, schema,
   startCall, type AgencyDb,
 } from '../src/index.js'
-import { freshDb, migrations, type TestDb } from './helpers.js'
-import { migrateUp } from '../src/migrator.js'
+import { migratedDb,type TestDb } from './helpers.js'
 
 const NOW = new Date('2026-09-21T12:00:00.000Z')
 const THEIR = '+14155550100'
@@ -29,8 +28,7 @@ describe('calls', () => {
   let contactId: string
 
   beforeEach(async () => {
-    test = await freshDb()
-    await migrateUp(test.driver, migrations())
+    test = await migratedDb()
     db = drizzle(test.pg, { schema }) as unknown as AgencyDb
     const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
     orgId = org!.id

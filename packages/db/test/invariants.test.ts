@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { freshDb, migrations, expectRejection, type TestDb } from './helpers.js'
-import { migrateUp } from '../src/migrator.js'
+import { migratedDb,expectRejection, type TestDb } from './helpers.js'
 
 /**
  * PROMPT.md §2 calls its constraints "not preferences" — violating them
@@ -22,8 +21,7 @@ describe('§2 invariants are enforced by the schema', () => {
   let scanId: string
 
   beforeAll(async () => {
-    db = await freshDb()
-    await migrateUp(db.driver, migrations())
+    db = await migratedDb()
     ;[{ id: orgId }] = await db.driver.select<{ id: string }>(
       `INSERT INTO orgs (name) VALUES ('Test Agency') RETURNING id`,
     )

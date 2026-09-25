@@ -18,8 +18,7 @@
  * and that cannot be proved from here at all. Everything on this side of
  * the wire is exercised.
  *
- * The database is a real Postgres engine (PGlite) with the real migrations,
- * so the rows asserted at the end are the rows a deployment would have.
+ * The database is a real Postgres engine (PGlite) with the real * so the rows asserted at the end are the rows a deployment would have.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
@@ -30,8 +29,7 @@ import { WebSocket } from 'ws'
 import { schema, type AgencyDb } from '@agency/db'
 import { fakeProvider } from '@agency/llm'
 import type { LlmProvider } from '@agency/core'
-import { freshDb, migrations, type TestDb } from '../../../packages/db/test/helpers.js'
-import { migrateUp } from '../../../packages/db/src/migrator.js'
+import { migratedDb,type TestDb } from '../../../packages/db/test/helpers.js'
 import { twilioSignature } from '../src/twilio.js'
 import { loadEnv } from '../src/env.js'
 import { startVoiceService, type VoiceService } from '../src/index.js'
@@ -197,8 +195,7 @@ describe('the voice service, end to end', () => {
   }
 
   beforeEach(async () => {
-    test = await freshDb()
-    await migrateUp(test.driver, migrations())
+    test = await migratedDb()
     db = drizzle(test.pg, { schema }) as unknown as AgencyDb
     const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
     orgId = org!.id

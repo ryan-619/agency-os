@@ -13,8 +13,7 @@ import {
   createContact, isKnownTimeZone, listContactsForCompany, recordConsent, schema,
   updateContactTimeZone, type AgencyDb,
 } from '../src/index.js'
-import { freshDb, migrations, type TestDb } from './helpers.js'
-import { migrateUp } from '../src/migrator.js'
+import { migratedDb,type TestDb } from './helpers.js'
 
 describe('isKnownTimeZone', () => {
   it.each(['Europe/London', 'America/New_York', 'Asia/Kolkata', 'UTC', 'Japan', 'GMT', 'EST5EDT'])(
@@ -35,8 +34,7 @@ describe('contacts', () => {
   let companyId: string
 
   beforeEach(async () => {
-    test = await freshDb()
-    await migrateUp(test.driver, migrations())
+    test = await migratedDb()
     db = drizzle(test.pg, { schema }) as unknown as AgencyDb
     const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
     orgId = org!.id

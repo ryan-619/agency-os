@@ -694,7 +694,7 @@ exists, never in place of it.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 1496 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice
+npm test                 # 1500 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice
 npx vitest run --maxWorkers=1 --minWorkers=1   # the same suite on a machine short of memory
 npm run build            # packages, then the Next app
 
@@ -759,10 +759,25 @@ failed two hooks** with the default workers, and **12.9 seconds passing all 14**
 with `--maxWorkers=1`, at the same 11.5 GB of swap in use. Reach for the flag
 before believing a hook timeout.
 
-Worth fixing properly one day: migrate once and restore a snapshot per test
-rather than replaying the migrations 1,400 times. It is not done here because
-changing the harness that verifies everything, at a moment when the suite
-cannot be run to confirm the change, is how a suite starts passing vacuously.
+**Done, and it halved the wall clock.** `migratedDb()` migrates ONCE per
+process, keeps the finished data directory, and hands each test a COPY via
+`loadDataDir`. The work is shared; the state is not — `loadDataDir` hydrates
+a new instance rather than attaching to one. Measured: the whole suite went
+from **290s to 97s** single-worker, with the same tests passing, and
+`apps/voice` alone from 9.8s to 4.4s.
+
+`freshDb()` remains and `migrations.test.ts` and `schema-parity.test.ts`
+still use it — a test about applying migrations cannot start from a database
+that already has them.
+
+The obvious risk is that shared state would leak between tests and the
+failure would not look like a harness bug: it would look like the product
+behaving strangely, intermittently, depending on file order. That is exactly
+how a suite starts passing vacuously, so it has its own test rather than an
+argument in a comment. `packages/db/test/harness.test.ts` writes a row named
+`LEAKED FROM THE PREVIOUS TEST` in one test and asserts the next cannot see
+it, checks the migrations really are applied (down to 0017's `reply_kind`),
+and re-checks the UTC pin the snapshot could have lost.
 
 `packages/core` and `packages/db` compile to `dist/` and are consumed as
 JavaScript, so **run `npx tsc --build` after changing them** or the web app

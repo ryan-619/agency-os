@@ -14,8 +14,7 @@ import {
   listSuppressions, pausedContacts, removeSuppression, schema, updateCampaign,
   type AgencyDb,
 } from '../src/index.js'
-import { freshDb, migrations, type TestDb } from './helpers.js'
-import { migrateUp } from '../src/migrator.js'
+import { migratedDb,type TestDb } from './helpers.js'
 
 describe('campaignInput', () => {
   const valid = {
@@ -76,8 +75,7 @@ describe('against a real engine', () => {
   let companyId: string
 
   beforeEach(async () => {
-    test = await freshDb()
-    await migrateUp(test.driver, migrations())
+    test = await migratedDb()
     db = drizzle(test.pg, { schema }) as unknown as AgencyDb
     const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
     orgId = org!.id

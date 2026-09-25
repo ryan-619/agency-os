@@ -14,8 +14,7 @@ import { z } from 'zod'
 import { AGENCY_TOOL_NAMES } from '@agency/core'
 import { openDealFor, type AgencyDb } from '@agency/db'
 import * as schema from '@agency/db/schema'
-import { freshDb, migrations, type TestDb } from '../../db/test/helpers.js'
-import { migrateUp } from '../../db/src/migrator.js'
+import { migratedDb,type TestDb } from '../../db/test/helpers.js'
 import {
   AGENCY_TOOLS, bookMeeting, getPipeline, updateDeal, type AgencyToolSpec, type ToolContext,
 } from '../src/index.js'
@@ -29,8 +28,7 @@ describe('the pipeline tools', () => {
   const audited: Array<{ action: string; detail: Record<string, unknown> }> = []
 
   beforeEach(async () => {
-    test = await freshDb()
-    await migrateUp(test.driver, migrations())
+    test = await migratedDb()
     db = drizzle(test.pg, { schema }) as unknown as AgencyDb
     audited.length = 0
     const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })

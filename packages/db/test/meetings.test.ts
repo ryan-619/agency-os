@@ -14,8 +14,7 @@ import {
   briefForMeeting, cancelMeeting, createMeeting, meetingsForCompany, openDealFor, schema,
   upcomingMeetings, type AgencyDb,
 } from '../src/index.js'
-import { expectRejection, freshDb, migrations, type TestDb } from './helpers.js'
-import { migrateUp } from '../src/migrator.js'
+import { migratedDb,expectRejection, type TestDb } from './helpers.js'
 
 const ICP = JSON.parse(readFileSync(fileURLToPath(new URL('../seed/icp-security-gap-saas.json', import.meta.url)), 'utf8'))
 const NOW = new Date('2026-09-15T12:00:00.000Z')
@@ -29,8 +28,7 @@ describe('meetings', () => {
   let contactId: string
 
   beforeEach(async () => {
-    test = await freshDb()
-    await migrateUp(test.driver, migrations())
+    test = await migratedDb()
     db = drizzle(test.pg, { schema }) as unknown as AgencyDb
     const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
     orgId = org!.id

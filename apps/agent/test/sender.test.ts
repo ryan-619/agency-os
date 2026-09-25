@@ -14,8 +14,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import { createDryRunProvider, schema, type AgencyDb } from '@agency/db'
-import { freshDb, migrations, type TestDb } from '../../../packages/db/test/helpers.js'
-import { migrateUp } from '../../../packages/db/src/migrator.js'
+import { migratedDb,type TestDb } from '../../../packages/db/test/helpers.js'
 import { runSenderTick } from '../src/outreach/sender.js'
 
 const silent = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} }
@@ -35,8 +34,7 @@ describe('the sender tick', () => {
   let provider: ReturnType<typeof createDryRunProvider>
 
   beforeEach(async () => {
-    test = await freshDb()
-    await migrateUp(test.driver, migrations())
+    test = await migratedDb()
     db = drizzle(test.pg, { schema }) as unknown as AgencyDb
     provider = createDryRunProvider()
 

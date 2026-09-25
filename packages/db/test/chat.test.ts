@@ -10,8 +10,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
-import { freshDb, migrations, type TestDb } from './helpers.js'
-import { migrateUp } from '../src/migrator.js'
+import { migratedDb,type TestDb } from './helpers.js'
 import * as schema from '../src/schema.js'
 import {
   appendChatMessage, chatMessages, clearInterruptedTurns, clearTurnRunning, createChatSession,
@@ -29,8 +28,7 @@ describe('chat sessions', () => {
   const turn = () => `33333333-3333-4333-8333-${String(++seq).padStart(12, '0')}`
 
   beforeAll(async () => {
-    test = await freshDb()
-    await migrateUp(test.driver, migrations())
+    test = await migratedDb()
     db = drizzle(test.pg, { schema }) as unknown as AgencyDb
     const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
     orgId = org!.id

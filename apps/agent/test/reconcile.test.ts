@@ -13,8 +13,7 @@ import {
   createChatSession, ensureApproval, markTurnRunning, readChatSession, schema,
   type AgencyDb,
 } from '@agency/db'
-import { freshDb, migrations, type TestDb } from '../../../packages/db/test/helpers.js'
-import { migrateUp } from '../../../packages/db/src/migrator.js'
+import { migratedDb,type TestDb } from '../../../packages/db/test/helpers.js'
 import { reconcileAfterRestart, sweepExpired } from '../src/boot/reconcile.js'
 import { WORKER_LOCK_KEY } from '../src/boot/singleton.js'
 
@@ -33,8 +32,7 @@ describe('recovering from an interrupted worker', () => {
   const turn = () => `55555555-5555-4555-8555-${String(++seq).padStart(12, '0')}`
 
   beforeEach(async () => {
-    test = await freshDb()
-    await migrateUp(test.driver, migrations())
+    test = await migratedDb()
     db = drizzle(test.pg, { schema }) as unknown as AgencyDb
     const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
     orgId = org!.id
@@ -172,8 +170,7 @@ describe('the periodic sweep', () => {
   let sessionId: string
 
   beforeEach(async () => {
-    test = await freshDb()
-    await migrateUp(test.driver, migrations())
+    test = await migratedDb()
     db = drizzle(test.pg, { schema }) as unknown as AgencyDb
     const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
     orgId = org!.id

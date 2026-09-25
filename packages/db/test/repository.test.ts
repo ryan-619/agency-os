@@ -4,8 +4,7 @@ import { join } from 'node:path'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import { scoreCompany, parseIcpDefinition, type IcpDefinition, type Observation, type SiteProfile } from '@agency/core'
-import { freshDb, migrations, expectRejection, type TestDb } from './helpers.js'
-import { migrateUp } from '../src/migrator.js'
+import { migratedDb,expectRejection, type TestDb } from './helpers.js'
 import * as schema from '../src/schema.js'
 import { SEED_DIR } from '../src/paths.js'
 import {
@@ -40,8 +39,7 @@ describe('the qualification data core', () => {
   let icpProfile: { id: string; definition: typeof icp }
 
   beforeAll(async () => {
-    test = await freshDb()
-    await migrateUp(test.driver, migrations())
+    test = await migratedDb()
     db = drizzle(test.pg, { schema }) as unknown as AgencyDb
     const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
     orgId = org!.id

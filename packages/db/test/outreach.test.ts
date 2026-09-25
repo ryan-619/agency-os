@@ -22,8 +22,7 @@ import {
   pauseContact, pendingDrafts, recordInboundReply, resumeContact, schema, sendOne,
   type AgencyDb, type MessageProvider,
 } from '../src/index.js'
-import { freshDb, migrations, type TestDb } from './helpers.js'
-import { migrateUp } from '../src/migrator.js'
+import { migratedDb,type TestDb } from './helpers.js'
 
 /** Counts, never sends. A test that could deliver is a test nobody dares run. */
 function countingProvider(): MessageProvider & { sent: { to: string; subject: string }[] } {
@@ -54,8 +53,7 @@ describe('the single send path', () => {
   let provider: ReturnType<typeof countingProvider>
 
   beforeEach(async () => {
-    test = await freshDb()
-    await migrateUp(test.driver, migrations())
+    test = await migratedDb()
     db = drizzle(test.pg, { schema }) as unknown as AgencyDb
     provider = countingProvider()
 

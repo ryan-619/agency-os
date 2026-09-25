@@ -16,8 +16,7 @@ import {
   bookInbound, listContactsForCompany, openDealFor, orgByBookingSlug, schema,
   type AgencyDb, type BookingRequest,
 } from '../src/index.js'
-import { freshDb, migrations, type TestDb } from './helpers.js'
-import { migrateUp } from '../src/migrator.js'
+import { migratedDb,type TestDb } from './helpers.js'
 
 const NOW = new Date('2026-09-15T12:00:00.000Z')
 const SLOT = new Date('2026-09-18T14:00:00.000Z')
@@ -29,8 +28,7 @@ describe('the booking page', () => {
   let orgId: string
 
   beforeEach(async () => {
-    test = await freshDb()
-    await migrateUp(test.driver, migrations())
+    test = await migratedDb()
     db = drizzle(test.pg, { schema }) as unknown as AgencyDb
     const [org] = await db
       .insert(schema.orgs)

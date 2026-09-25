@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { freshDb, migrations, type TestDb } from './helpers.js'
-import { migrateUp } from '../src/migrator.js'
+import { migratedDb,type TestDb } from './helpers.js'
 import { seed, parseCompanySeeds } from '../src/seed.js'
 import { PERMITTED_TOOLS } from '@agency/core'
 
@@ -58,8 +57,7 @@ describe('parseCompanySeeds', () => {
 describe('seeding a fresh database', () => {
   let db: TestDb
   beforeAll(async () => {
-    db = await freshDb()
-    await migrateUp(db.driver, migrations())
+    db = await migratedDb()
   })
   afterAll(async () => { await db.close() })
 

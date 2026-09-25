@@ -26,8 +26,7 @@ import {
   SEED_DIR, importCompanies, recordScan, type AgencyDb,
 } from '@agency/db'
 import * as schema from '@agency/db/schema'
-import { freshDb, migrations, type TestDb } from '../../db/test/helpers.js'
-import { migrateUp } from '../../db/src/migrator.js'
+import { migratedDb,type TestDb } from '../../db/test/helpers.js'
 import {
   AGENCY_TOOLS, bounded, getCompany, getIcp, queueTouch, scoreCompanyTool, searchCompanies,
   type AgencyToolSpec, type ToolContext,
@@ -91,8 +90,7 @@ describe('the agency tools', () => {
   const AGENCY_SIGNALS = Object.keys(icp.signals)
 
   beforeAll(async () => {
-    test = await freshDb()
-    await migrateUp(test.driver, migrations())
+    test = await migratedDb()
     db = drizzle(test.pg, { schema }) as unknown as AgencyDb
 
     const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
