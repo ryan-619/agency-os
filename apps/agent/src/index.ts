@@ -13,6 +13,7 @@ import { answerHealth, startHealthServer, type HealthInputs } from './health.js'
 import { acquireWorkerLock, type WorkerLock } from './boot/singleton.js'
 import { reconcileAfterRestart, recoverStuckSends, sweepExpired } from './boot/reconcile.js'
 import { startSender } from './outreach/sender.js'
+import { providerFrom } from '@agency/llm'
 import { startInbox } from './outreach/inbox.js'
 import { createAgentHttpServer, type StartTurnRequest, type TurnHandle } from './http/server.js'
 import { createDeferredEmitter, startTurn } from './chat/turn.js'
@@ -83,6 +84,22 @@ async function main(): Promise<void> {
           ...(env.ANTHROPIC_WORKSPACE_ID ? { workspaceId: env.ANTHROPIC_WORKSPACE_ID } : {}),
         }
       : null
+
+  /**
+   * §5.5's triage model, or null — built once, like the voice service's.
+   * Null is complete: the deterministic reply kind stands.
+   */
+  const triage = providerFrom(
+    {
+      provider: env.LLM_PROVIDER,
+      model: env.LLM_MODEL,
+      ollamaBaseUrl: env.OLLAMA_BASE_URL,
+      ollamaIsLocal: env.OLLAMA_IS_LOCAL,
+      openaiApiKey: env.OPENAI_API_KEY,
+      anthropicApiKey: env.ANTHROPIC_API_KEY,
+    },
+    (provider) => log.warn('a triage model is named but its credential is missing', { provider }),
+  )
 
   const outreachMode = outreachModeFrom(env)
   const healthInputs = (): HealthInputs => ({
@@ -234,6 +251,8 @@ async function main(): Promise<void> {
       startInbox({
         db,
         log,
+        llm: triage,
+        allowRemoteForLeadData: env.LLM_ALLOW_REMOTE_LEAD_DATA,
         config: {
           host: env.IMAP_HOST,
           port: env.IMAP_PORT,
@@ -253,6 +272,7 @@ async function main(): Promise<void> {
     apiBind: env.AGENT_BIND,
     chat: credential ? `enabled (${credential.kind})` : 'disabled',
     outreach: outreachMode,
+    triage: triage ? `${triage.name} (${triage.local ? 'local' : 'REMOTE'})` : 'deterministic',
   })
 
   let shuttingDown = false

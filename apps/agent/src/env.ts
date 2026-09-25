@@ -104,6 +104,29 @@ const schema = z.object({
   AGENT_MODEL: z.string().optional(),
 
   /**
+   * §5.5's single-shot seam, used here for reply triage (`classify_reply`).
+   *
+   * Unset means the deterministic kind `recordInboundReply` already stored,
+   * which is a complete answer and never worse than nothing. `ollama` keeps
+   * the reply on the agency's own hardware; the remote ones additionally
+   * need LLM_ALLOW_REMOTE_LEAD_DATA, because a reply is a named person's
+   * words.
+   */
+  LLM_PROVIDER: z.enum(['ollama', 'openai', 'anthropic']).optional(),
+  LLM_MODEL: z.string().optional(),
+  OLLAMA_BASE_URL: z.string().url().default('http://127.0.0.1:11434'),
+  /** Declared, never inferred from the URL — see packages/llm. */
+  OLLAMA_IS_LOCAL: z
+    .string()
+    .optional()
+    .transform((v) => v === undefined || !['false', '0', 'no'].includes(v.toLowerCase())),
+  OPENAI_API_KEY: z.string().optional(),
+  LLM_ALLOW_REMOTE_LEAD_DATA: z
+    .string()
+    .optional()
+    .transform((v) => v !== undefined && ['true', '1', 'yes'].includes(v.toLowerCase())),
+
+  /**
    * Proves the caller is the web app. Defence in depth, not the trust anchor:
    * the worker re-derives the principal from the database on every turn, so a
    * forged body can only address a conversation that already exists and

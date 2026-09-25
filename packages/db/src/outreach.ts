@@ -31,7 +31,7 @@
 import { and, asc, count, desc, eq, gte, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm'
 import {
   decideSend, normaliseEmail, suppressionKeysFor,
-  type Channel, type SendDecision, type SendFacts,
+  type Channel, type SendDecision, type SendFacts, classifyReply, type ReplyKind,
 } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
@@ -861,7 +861,15 @@ export async function recordInboundReply(
     readonly inReplyTo?: string | null
     readonly now?: Date
   },
-): Promise<{ touchId: string; paused: boolean; cancelled: number; suppressed: boolean; deal: string | null }> {
+): Promise<{
+  touchId: string
+  paused: boolean
+  cancelled: number
+  suppressed: boolean
+  deal: string | null
+  /** The deterministic kind stored on the inbound touch (§5.5). */
+  replyKind: ReplyKind
+}> {
   const now = args.now ?? new Date()
 
   const contactRows = await db
@@ -909,8 +917,26 @@ export async function recordInboundReply(
     )
     .returning({ id: schema.touches.id })
 
+  /**
+   * Classified from the SAME opt-out reading that decides the suppression
+   * below, rather than a second look at the text. One reading, one answer:
+   * a row that says `opted_out` and a suppression that was never written
+   * would be two different claims about one reply.
+   *
+   * The deterministic kind is always stored. A model may improve on it
+   * afterwards (§5.5) and can only ever move it AMONG the non-opt-out
+   * kinds — `opted_out` is settled here, by a pure function, before any
+   * model is consulted (§2.1).
+   */
+  const optedOut = looksLikeOptOut(args.body)
+  const replyKind = classifyReply(args.body, optedOut)
+  await db
+    .update(schema.touches)
+    .set({ replyKind })
+    .where(eq(schema.touches.id, touchId))
+
   let suppressed = false
-  if (args.channel === 'email' && looksLikeOptOut(args.body)) {
+  if (args.channel === 'email' && optedOut) {
     const added = await addSuppression(db, {
       orgId: args.orgId,
       kind: 'email',
@@ -941,7 +967,7 @@ export async function recordInboundReply(
     detail: { channel: args.channel, paused, cancelledQueued: cancelled.length, suppressed, deal },
   }).catch(() => {})
 
-  return { touchId, paused, cancelled: cancelled.length, suppressed, deal }
+  return { touchId, paused, cancelled: cancelled.length, suppressed, deal, replyKind }
 }
 
 export type InboundOutcome =
@@ -952,6 +978,7 @@ export type InboundOutcome =
       readonly touchId: string
       readonly paused: boolean
       readonly suppressed: boolean
+      readonly replyKind: ReplyKind
     }
   | { readonly matched: 'none'; readonly why: string }
 
@@ -993,12 +1020,27 @@ export async function handleInboundEmail(
   //    Message-ID is the same each time, so the reply is recorded once.
   if (mail.messageId) {
     const dup = await db
-      .select({ id: schema.touches.id, orgId: schema.touches.orgId, contactId: schema.touches.contactId })
+      .select({
+        id: schema.touches.id,
+        orgId: schema.touches.orgId,
+        contactId: schema.touches.contactId,
+        replyKind: schema.touches.replyKind,
+      })
       .from(schema.touches)
       .where(and(eq(schema.touches.direction, 'in'), eq(schema.touches.providerId, mail.messageId)))
       .limit(1)
     if (dup[0]?.contactId) {
-      return { matched: 'message', contactId: dup[0].contactId, orgId: dup[0].orgId, touchId: dup[0].id, paused: false, suppressed: false }
+      // The kind comes off the stored row, not from re-reading the text: a
+      // redelivery must answer exactly what the first delivery decided.
+      return {
+        matched: 'message',
+        contactId: dup[0].contactId,
+        orgId: dup[0].orgId,
+        touchId: dup[0].id,
+        paused: false,
+        suppressed: false,
+        replyKind: (dup[0].replyKind as ReplyKind | null) ?? 'other',
+      }
     }
   }
 
@@ -1031,6 +1073,7 @@ export async function handleInboundEmail(
       })
       return {
         matched: 'message',
+        replyKind: r.replyKind,
         contactId: hit.contactId,
         orgId: hit.orgId,
         touchId: r.touchId,
@@ -1061,7 +1104,10 @@ export async function handleInboundEmail(
     providerId: mail.messageId ?? null,
     ...(mail.now ? { now: mail.now } : {}),
   })
-  return { matched: 'contact', contactId: only.id, orgId: only.orgId, touchId: r.touchId, paused: r.paused, suppressed: r.suppressed }
+  return {
+    matched: 'contact', contactId: only.id, orgId: only.orgId,
+    touchId: r.touchId, paused: r.paused, suppressed: r.suppressed, replyKind: r.replyKind,
+  }
 }
 
 /** The most recent outbound and inbound touches for a company — the thread. */

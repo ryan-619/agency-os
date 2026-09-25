@@ -694,7 +694,7 @@ exists, never in place of it.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 1460 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice
+npm test                 # 1480 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice
 npx vitest run --maxWorkers=1 --minWorkers=1   # the same suite on a machine short of memory
 npm run build            # packages, then the Next app
 

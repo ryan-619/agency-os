@@ -13,7 +13,8 @@
  */
 import { describe, it, expect } from 'vitest'
 import {
-  COLD_CHANNELS, OPT_IN_ONLY_CHANNELS, decideSend, isQuiet, localMinutes, suppressionKeysFor,
+  COLD_CHANNELS, OPT_IN_ONLY_CHANNELS, classifyReply, decideSend, isQuiet, localMinutes,
+  suppressionKeysFor,
   type Channel, type SendFacts,
 } from '../src/index.js'
 
@@ -580,5 +581,62 @@ describe('what a refusal says', () => {
       expect(noOverride).toContain(d.code)
       expect(d.humanCanResolve).toBe(false)
     }
+  })
+})
+
+/**
+ * §5.5's `classify_reply`, deterministic half. This is the fallback a model
+ * improves on, and the thing that runs when no model is configured.
+ */
+describe('classifying a reply', () => {
+  /**
+   * THE rule. Opt-out is decided by the detector in the send path, passed in
+   * as a fact — never re-read here, and never left to a model. Being wrong
+   * about the others costs somebody a reading order; being wrong about this
+   * one means contacting a person who asked not to be.
+   */
+  it('takes the opt-out decision as given and stops there', () => {
+    expect(classifyReply('Anything at all', true)).toBe('opted_out')
+    // Even text that reads enthusiastic — the fact wins over the words.
+    expect(classifyReply('Sounds great, very interested!', true)).toBe('opted_out')
+  })
+
+  it('reads an out-of-office as an auto-reply', () => {
+    for (const t of [
+      'I am out of the office until Monday',
+      'Automatic reply: on annual leave',
+      'Away from my desk this week',
+    ]) {
+      expect(classifyReply(t, false), t).toBe('auto_reply')
+    }
+  })
+
+  /**
+   * Checked BEFORE interest, because "I've left, talk to Sam" reads as
+   * enthusiastic to a keyword matcher and is the opposite of a lead.
+   */
+  it('reads a handover as the wrong person, not as interest', () => {
+    expect(classifyReply('I no longer work at the company — speak to Sam instead', false)).toBe('wrong_person')
+  })
+
+  it('separates not-now from interested', () => {
+    expect(classifyReply('Not right now, maybe next quarter', false)).toBe('not_now')
+    expect(classifyReply('Interested — can you send me more detail?', false)).toBe('interested')
+    expect(classifyReply('Happy to book a call', false)).toBe('interested')
+  })
+
+  /**
+   * An out-of-office carrying boilerplate about not being interested is
+   * still an out-of-office. The order is the meaning.
+   */
+  it('lets the earlier rule win when a reply matches two', () => {
+    expect(classifyReply('Out of the office. Not interested in vendor mail.', false)).toBe('auto_reply')
+  })
+
+  /** Anything it cannot place is `other`, never a guess. */
+  it('refuses to guess', () => {
+    expect(classifyReply('ok', false)).toBe('other')
+    expect(classifyReply('', false)).toBe('other')
+    expect(classifyReply(null, false)).toBe('other')
   })
 })

@@ -426,6 +426,12 @@ export const touches = pgTable(
     /** The address or number actually used, kept so the log outlives the contact. */
     recipient: text('recipient'),
     providerId: text('provider_id'),
+    /**
+     * What kind of reply it was, for triage (0017). NULL means not
+     * classified — different from 'other', which means classified and none
+     * of these. Inbound only, and 'opted_out' is never a model's decision.
+     */
+    replyKind: text('reply_kind'),
     scheduledFor: timestamp('scheduled_for', { withTimezone: true }),
     sentAt: timestamp('sent_at', { withTimezone: true }),
     error: text('error'),

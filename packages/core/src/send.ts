@@ -355,3 +355,68 @@ function parseClock(value: string): number | null {
  */
 export { suppressionKeysFor, normalisePhone }
 export type { SuppressionKind }
+
+/**
+ * What a reply was, for triage (§5.5's `classify_reply`).
+ *
+ * `opted_out` is in this list and is the one a model NEVER decides. §2.1
+ * puts the opt-out reader here, in `packages/core`, as a pure function over
+ * the person's own words — because a model having a pleasant conversation
+ * is exactly the one that misses "take me off your list". Everything below
+ * it is triage: useful, and safe to be wrong about, because being wrong
+ * means somebody reads a reply in a different order rather than being
+ * contacted after asking not to be.
+ */
+export type ReplyKind = 'opted_out' | 'interested' | 'not_now' | 'wrong_person' | 'auto_reply' | 'other'
+
+export const REPLY_KINDS: readonly ReplyKind[] = [
+  'opted_out', 'interested', 'not_now', 'wrong_person', 'auto_reply', 'other',
+]
+
+/**
+ * The deterministic classifier, and the fallback a model improves on.
+ *
+ * Deliberately conservative. Every branch below is a phrase people actually
+ * write, and anything it cannot place is `other` rather than a guess — the
+ * cost of a wrong `interested` is somebody opening a dead thread first, and
+ * the cost of a wrong `auto_reply` is a real buyer's answer sorted to the
+ * bottom. `other` costs nothing but the reading order it started with.
+ *
+ * The ORDER is the meaning. Opt-out wins outright; an out-of-office that
+ * happens to contain "not interested" boilerplate is still an out-of-office;
+ * and "wrong person" is checked before interest because "I've left, talk to
+ * Sam" often reads as enthusiastic.
+ */
+export function classifyReply(
+  text: string | null | undefined,
+  /**
+   * Whether the opt-out reader already said yes — a REQUIRED argument, not a
+   * lookup this function does.
+   *
+   * The detector lives in `packages/db` beside the send path that acts on it,
+   * and duplicating it here would create a second opinion about the most
+   * consequential question this product asks. Taking it as a fact means a
+   * caller that has not run it cannot call this at all, which is the same
+   * reason `decideSend` demands its facts rather than gathering them.
+   */
+  alreadyOptedOut: boolean,
+): ReplyKind {
+  if (alreadyOptedOut) return 'opted_out'
+  const t = (text ?? '').toLowerCase()
+  if (!t.trim()) return 'other'
+
+  if (/\b(out of (the )?office|on (annual )?leave|automatic reply|auto[- ]?reply|away from my desk|on holiday|parental leave|返信|abwesenheit)\b/.test(t)) {
+    return 'auto_reply'
+  }
+  if (/\b(no longer (with|at)|has left|i(?:'| ha)?ve left|not the right person|wrong person|try|speak to|contact) (my colleague|someone else|[a-z]+ instead)\b/.test(t)
+      || /\b(no longer (with|at) (the )?(company|us)|i have left the company|not my (area|remit))\b/.test(t)) {
+    return 'wrong_person'
+  }
+  if (/\b(not (right )?now|next (quarter|year)|circle back|revisit|too early|already have|budget (is )?frozen|maybe later|in a few months)\b/.test(t)) {
+    return 'not_now'
+  }
+  if (/\b(interested|keen|sounds good|happy to|let'?s (talk|chat|book)|book a (call|time)|tell me more|send (me )?(more|details)|what (would|does) (it|this) cost)\b/.test(t)) {
+    return 'interested'
+  }
+  return 'other'
+}

@@ -52,6 +52,7 @@ COPY --from=build --chown=agent:nodejs /app/packages/core/dist    ./packages/cor
 COPY --from=build --chown=agent:nodejs /app/packages/db/dist      ./packages/db/dist
 COPY --from=build --chown=agent:nodejs /app/packages/scanner/dist ./packages/scanner/dist
 COPY --from=build --chown=agent:nodejs /app/packages/tools/dist   ./packages/tools/dist
+COPY --from=build --chown=agent:nodejs /app/packages/llm/dist     ./packages/llm/dist
 COPY --from=build --chown=agent:nodejs /app/apps/agent/dist       ./apps/agent/dist
 # The migration CLI reads these off disk at run time.
 COPY --chown=agent:nodejs packages/db/migrations ./packages/db/migrations

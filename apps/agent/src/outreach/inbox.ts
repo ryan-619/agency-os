@@ -30,6 +30,8 @@
 import { ImapFlow } from 'imapflow'
 import { simpleParser } from 'mailparser'
 import { handleInboundEmail, type AgencyDb } from '@agency/db'
+import type { LlmProvider } from '@agency/core'
+import { refineReplyKind } from './classify.js'
 import type { Logger } from '../logger.js'
 
 export interface InboxConfig {
@@ -45,6 +47,12 @@ export interface InboxDeps {
   readonly db: AgencyDb
   readonly log: Logger
   readonly config: InboxConfig
+  /**
+   * §5.5's reply triage, or null. Null is a complete configuration: the
+   * deterministic kind `recordInboundReply` already wrote stands.
+   */
+  readonly llm?: LlmProvider | null
+  readonly allowRemoteForLeadData?: boolean
   /** For tests. Defaults to the wall clock. */
   readonly now?: () => Date
 }
@@ -187,6 +195,24 @@ export function startInbox(deps: InboxDeps): () => Promise<void> {
               paused: outcome.paused,
               suppressed: outcome.suppressed,
             })
+            // Triage, after the record exists and every §2.1 consequence has
+            // already been applied. Failing here costs a sorting hint and
+            // nothing else, so it never takes the tick down with it.
+            if (deps.llm) {
+              await refineReplyKind({
+                db: deps.db,
+                log: deps.log,
+                llm: deps.llm,
+                allowRemoteForLeadData: deps.allowRemoteForLeadData ?? false,
+                touchId: outcome.touchId,
+                body: mail.text ?? null,
+                deterministic: outcome.suppressed ? 'opted_out' : (outcome.replyKind ?? 'other'),
+              }).catch((err: unknown) => {
+                deps.log.warn('reply triage failed; the deterministic kind stands', {
+                  error: err instanceof Error ? err.name : 'UnknownError',
+                })
+              })
+            }
           }
         }
       } catch (err) {

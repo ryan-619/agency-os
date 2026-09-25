@@ -19,7 +19,8 @@
     "imapflow": "^1.0.196",
     "mailparser": "^3.7.4",
     "pg": "8.16.3",
-    "zod": "4.5.4"
+    "zod": "4.5.4",
+    "@agency/llm": "*"
   },
   "devDependencies": {
     "@types/node": "22.18.1",
