@@ -183,6 +183,86 @@ share the URL.
 
 ---
 
+## Running the worker on your own machine
+
+The deployment for an agency that has not rented a server yet, and less of a
+compromise than it sounds — because of an asymmetry worth understanding
+before choosing anything else:
+
+| what the worker does | direction | needs a public address? |
+|---|---|---|
+| sends queued outreach | out, to SMTP + Postgres | **no** |
+| detects replies (IMAP) | out | **no** |
+| recovers stuck sends, expires approvals | out | **no** |
+| sweeps expired sign-in links | out | **no** |
+| answers the chat panel | **in**, from the web app | yes |
+
+`AGENT_URL` is read by exactly one thing — `apps/web/src/lib/agent.ts`, which
+calls `/internal/turns`, the interrupt route and the connector probe. Every
+other job is this worker reaching out. So:
+
+```bash
+./tools/run-worker.sh
+```
+
+asks for the production connection string at a hidden prompt and runs the
+worker against Neon with **nothing on the machine exposed** — no port open, no
+tunnel, no inbound route. The live site gains sending, reply detection and
+every recovery job; the chat panel keeps saying no worker is connected, which
+is true.
+
+Closing the tab stops it. Queued mail then waits for the next run rather than
+being lost — `touches` rows keep their status, and `recoverStuckSends` settles
+anything caught mid-send on the next boot.
+
+**The laptop sleeping is the real caveat**, and it is a scheduling one rather
+than a correctness one: quiet hours and the daily cap are evaluated at the
+moment of sending, so mail queued for 09:00 while the lid was shut goes out
+when the worker next runs and is re-checked against every §2.1 rule first.
+Nothing is sent that should not be; it is sent later than intended. `caffeinate
+-dis ./tools/run-worker.sh` keeps the machine awake for as long as it runs.
+
+### Giving other people access
+
+There is no signup flow (§1): `users.org_id` is NOT NULL with no default, so
+Auth.js's adapter cannot create a user, and the sign-in callback refuses any
+address without a row *before* any mail is sent. Access is granted in the
+database:
+
+```bash
+./tools/add-teammate.sh
+```
+
+It folds the address to lower case before writing, which is not cosmetic —
+@auth/core folds the sign-in identifier before any lookup and the adapter then
+matches `users.email` exactly, so a row stored as `Priya@Agency.com` is
+invisible to it and the person is locked out with an opaque error. Re-running
+for somebody who already has access says so and changes nothing.
+
+They then sign in at the live site with a magic link. Nothing needs sending by
+hand — tell them the address to type at `/signin`.
+
+### If you do want chat on the live site
+
+That is the one feature needing an inbound route, and it changes the picture
+in two ways worth deciding deliberately rather than discovering:
+
+1. **Your machine becomes internet-reachable.** A tunnel
+   (`cloudflared tunnel --url http://127.0.0.1:3002`) publishes the internal
+   API. It is bearer-token gated, and `/livez` and `/readyz` on that port are
+   not — they would answer anyone. Set `AGENT_URL` and the SAME
+   `AGENT_INTERNAL_TOKEN` in Vercel, and note a quick tunnel's URL changes
+   on every restart, so each restart means updating Vercel and redeploying.
+2. **Every teammate's chat turn runs on whatever credential that worker
+   holds.** With `ANTHROPIC_API_KEY` that is a bill. With
+   `AGENT_USE_LOCAL_LOGIN` it is one person's personal subscription backing a
+   service other people use — which is what `loadEnv`'s production refusal is
+   about, and why `run-worker.sh` sets `NODE_ENV=production` and does not
+   offer the flag.
+
+Chat against your own login, on your own machine, against your own data is a
+different thing from that, and is what the local development path is for.
+
 ## The worker, on Fly.io
 
 `fly.toml` at the repo root deploys `apps/agent`. Read its header before
