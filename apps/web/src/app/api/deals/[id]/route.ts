@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { and, eq } from 'drizzle-orm'
 import { assertCan } from '@agency/core'
-import { DEAL_STAGES, appendAudit, schema, setDealStage, type AgencyDb, type DealStage } from '@agency/db/queries'
+import { DEAL_STAGES, appendAudit, schema, setDealStage, setDealOwner, type AgencyDb, type DealStage } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
 
@@ -46,8 +46,9 @@ export async function PATCH(
   } catch {
     return NextResponse.json({ error: 'invalid_json' }, { status: 400 })
   }
-  const { stage, lostReason, nextAction, valueCents } = (body ?? {}) as {
+  const { stage, lostReason, nextAction, valueCents, ownerUserId } = (body ?? {}) as {
     stage?: unknown; lostReason?: unknown; nextAction?: unknown; valueCents?: unknown
+    ownerUserId?: unknown
   }
 
   const details: { nextAction?: string | null; valueCents?: number | null } = {}
@@ -63,6 +64,13 @@ export async function PATCH(
     }
     details.valueCents = valueCents as number | null
   }
+  // `undefined` means "not mentioned" and `null` means "unassign" — two
+  // different requests, and collapsing them would make it impossible to
+  // clear an owner without also clearing everything else in the body.
+  if (ownerUserId !== undefined && ownerUserId !== null && typeof ownerUserId !== 'string') {
+    return NextResponse.json({ error: 'ownerUserId must be a user id, or null to unassign' }, { status: 400 })
+  }
+
   // Every field is validated BEFORE anything is written. This used to save
   // the details first and validate the stage after, so a request carrying a
   // good nextAction and a bad stage got a 400 with the nextAction already
@@ -78,6 +86,21 @@ export async function PATCH(
 
   if (Object.keys(details).length > 0) {
     await db.update(schema.deals).set(details).where(eq(schema.deals.id, current.id))
+  }
+
+  // Assignment goes through setDealOwner rather than the update above,
+  // because it carries a check the update cannot: `owner_user_id` is a plain
+  // FK to a GLOBAL users table, so any valid uuid is a storable row — and a
+  // guessed one would put a stranger from another agency on this pipeline.
+  let owned = current
+  if (ownerUserId !== undefined) {
+    const result = await setDealOwner(db, {
+      orgId: user.orgId,
+      dealId: current.id,
+      ownerUserId: ownerUserId as string | null,
+    })
+    if (!result.ok) return NextResponse.json({ error: result.message }, { status: 400 })
+    owned = result.deal
   }
 
   let moved = current
@@ -120,6 +143,7 @@ export async function PATCH(
       ...(moved.lostReason ? { lostReason: moved.lostReason } : {}),
       ...(details.nextAction !== undefined ? { nextAction: details.nextAction } : {}),
       ...(details.valueCents !== undefined ? { valueCents: details.valueCents } : {}),
+      ...(ownerUserId !== undefined ? { ownerUserId: owned.ownerUserId } : {}),
     },
   }).catch(() => {})
   return NextResponse.json({
@@ -128,5 +152,6 @@ export async function PATCH(
     closedAt: moved.closedAt ? moved.closedAt.toISOString() : null,
     nextAction: details.nextAction !== undefined ? details.nextAction : moved.nextAction,
     valueCents: details.valueCents !== undefined ? details.valueCents : moved.valueCents,
+    ownerUserId: ownerUserId !== undefined ? owned.ownerUserId : moved.ownerUserId,
   })
 }

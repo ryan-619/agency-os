@@ -37,13 +37,77 @@ export interface DealCard {
   readonly lostReason: string | null
   readonly updatedAt: string
   readonly closedAt: string | null
+  readonly ownerUserId: string | null
+  /** Resolved for display — null when nobody has taken it. */
+  readonly ownerEmail: string | null
+  readonly ownerName: string | null
 }
 
-export function PipelineBoard({ deals: initial, canWrite }: { deals: readonly DealCard[]; canWrite: boolean }) {
+/** Somebody who can own a deal: this org's team, for the assign control. */
+export interface TeamMember {
+  readonly id: string
+  readonly email: string
+  readonly name: string | null
+}
+
+/** The bit before the @, which is what a person recognises on a small card. */
+function shortName(member: { name: string | null; email: string }): string {
+  return member.name?.trim() || (member.email.split('@')[0] ?? member.email)
+}
+
+export function PipelineBoard({
+  deals: initial,
+  canWrite,
+  team = [],
+}: {
+  deals: readonly DealCard[]
+  canWrite: boolean
+  team?: readonly TeamMember[]
+}) {
   const [deals, setDeals] = useState<readonly DealCard[]>(initial)
   const [over, setOver] = useState<Stage | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  /**
+   * Filter by owner. '' is everyone and 'none' is the unassigned pile, which
+   * is the one worth having: a deal nobody has taken is the failure mode
+   * this whole feature exists to make visible.
+   */
+  const [ownerFilter, setOwnerFilter] = useState<string>('')
+
+  const assign = async (deal: DealCard, ownerUserId: string | null): Promise<void> => {
+    setBusy(deal.id)
+    setError(null)
+    try {
+      const res = await fetch(`/api/deals/${deal.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ ownerUserId }),
+      })
+      const body = (await res.json().catch(() => ({}))) as { error?: string; ownerUserId?: string | null }
+      if (!res.ok) {
+        setError(body.error ?? 'That did not save.')
+        return
+      }
+      const member = team.find((m) => m.id === body.ownerUserId)
+      setDeals((ds) =>
+        ds.map((d) =>
+          d.id === deal.id
+            ? {
+                ...d,
+                ownerUserId: body.ownerUserId ?? null,
+                ownerEmail: member?.email ?? null,
+                ownerName: member?.name ?? null,
+              }
+            : d,
+        ),
+      )
+    } catch {
+      setError('The request did not complete.')
+    } finally {
+      setBusy(null)
+    }
+  }
 
   const move = async (deal: DealCard, to: Stage): Promise<void> => {
     if (!canWrite || to === deal.stage) return
@@ -121,9 +185,37 @@ export function PipelineBoard({ deals: initial, canWrite }: { deals: readonly De
   return (
     <>
       {error ? <div className="err-line" role="alert" style={{ marginBottom: 10 }}>{error}</div> : null}
+      {team.length > 0 ? (
+        <div className="board-filter" style={{ marginBottom: 10, display: 'flex', gap: 8, alignItems: 'center' }}>
+          <label htmlFor="owner-filter" className="muted">Owner</label>
+          <select
+            id="owner-filter"
+            value={ownerFilter}
+            onChange={(e) => setOwnerFilter(e.target.value)}
+          >
+            <option value="">everyone</option>
+            {/* The pile worth having: a deal nobody has taken is the failure
+                this feature exists to surface. */}
+            <option value="none">unassigned ({deals.filter((d) => d.ownerUserId === null).length})</option>
+            {team.map((m) => (
+              <option key={m.id} value={m.id}>
+                {shortName(m)} ({deals.filter((d) => d.ownerUserId === m.id).length})
+              </option>
+            ))}
+          </select>
+        </div>
+      ) : null}
       <div className="board" data-testid="board">
         {STAGES.map((stage) => {
-          const cards = deals.filter((d) => d.stage === stage)
+          const cards = deals.filter(
+            (d) =>
+              d.stage === stage &&
+              (ownerFilter === ''
+                ? true
+                : ownerFilter === 'none'
+                  ? d.ownerUserId === null
+                  : d.ownerUserId === ownerFilter),
+          )
           return (
             <section
               key={stage}
@@ -161,6 +253,13 @@ export function PipelineBoard({ deals: initial, canWrite }: { deals: readonly De
                   ) : null}
                   {deal.lostReason ? <div className="kcard-next muted">lost: {deal.lostReason}</div> : null}
                   <div className="kcard-foot">
+                    {deal.ownerEmail ? (
+                      <span className="muted" title={deal.ownerEmail}>
+                        {shortName({ name: deal.ownerName, email: deal.ownerEmail })}
+                      </span>
+                    ) : (
+                      <span className="muted">unassigned</span>
+                    )}
                     {deal.valueCents != null ? (
                       <span className="mono">{deal.currency} {(deal.valueCents / 100).toLocaleString('en-US')}</span>
                     ) : null}
@@ -181,6 +280,19 @@ export function PipelineBoard({ deals: initial, canWrite }: { deals: readonly De
                       <button type="button" className="linkish" disabled={busy === deal.id} onClick={() => void editNext(deal)}>
                         next action
                       </button>
+                      {team.length > 0 ? (
+                        <select
+                          aria-label={`Owner of ${deal.companyName ?? deal.companyDomain}`}
+                          value={deal.ownerUserId ?? ''}
+                          disabled={busy === deal.id}
+                          onChange={(e) => void assign(deal, e.target.value || null)}
+                        >
+                          <option value="">unassigned</option>
+                          {team.map((m) => (
+                            <option key={m.id} value={m.id}>{shortName(m)}</option>
+                          ))}
+                        </select>
+                      ) : null}
                     </div>
                   ) : null}
                 </article>

@@ -9,8 +9,10 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
+import { eq } from 'drizzle-orm'
 import {
-  DEAL_STAGES, advanceDeal, listDeals, openDealFor, schema, setDealStage, type AgencyDb,
+  DEAL_STAGES, advanceDeal, listDeals, listDealsForBoard, openDealFor, schema, setDealOwner,
+  setDealStage, type AgencyDb,
 } from '../src/index.js'
 import { freshDb, migrations, type TestDb } from './helpers.js'
 import { migrateUp } from '../src/migrator.js'
@@ -149,5 +151,84 @@ describe('deals', () => {
 
   it('lists the stages in pipeline order', () => {
     expect(DEAL_STAGES).toEqual(['new', 'contacted', 'replied', 'meeting', 'proposal', 'won', 'lost'])
+  })
+
+  /**
+   * `deals.owner_user_id` existed since 0003 and nothing wrote it — the
+   * column was added and then left, because a two-person agency closes deals
+   * by talking to each other. At three or four that stops being true.
+   */
+  describe('ownership', () => {
+    const member = async (orgFor: string, email: string): Promise<string> => {
+      const [u] = await db
+        .insert(schema.users)
+        .values({ orgId: orgFor, email, role: 'member' })
+        .returning({ id: schema.users.id })
+      return u!.id
+    }
+
+    it('assigns a deal to somebody on the team, and unassigns again', async () => {
+      const { deal } = await advanceDeal(db, { orgId, companyId, to: 'contacted' })
+      const priya = await member(orgId, 'priya@agency.test')
+
+      const assigned = await setDealOwner(db, { orgId, dealId: deal.id, ownerUserId: priya })
+      expect(assigned.ok && assigned.deal.ownerUserId).toBe(priya)
+
+      // Null is a real state — a deal nobody has taken — not a missing one.
+      const cleared = await setDealOwner(db, { orgId, dealId: deal.id, ownerUserId: null })
+      expect(cleared.ok && cleared.deal.ownerUserId).toBeNull()
+    })
+
+    /**
+     * THE check, and the reason it lives in the query rather than the route.
+     * `owner_user_id` is a plain FK to a GLOBAL users table: nothing in the
+     * schema says the assignee belongs to the same agency as the deal, so a
+     * guessed uuid from another org is a perfectly storable row — and that
+     * row puts a stranger's name on a customer's pipeline.
+     */
+    it('refuses somebody from another agency, and writes nothing', async () => {
+      const { deal } = await advanceDeal(db, { orgId, companyId, to: 'contacted' })
+      const [other] = await db
+        .insert(schema.orgs).values({ name: 'Somebody Else' }).returning({ id: schema.orgs.id })
+      const stranger = await member(other!.id, 'stranger@elsewhere.test')
+
+      const result = await setDealOwner(db, { orgId, dealId: deal.id, ownerUserId: stranger })
+      expect(result.ok).toBe(false)
+      expect(result.ok === false && result.message).toMatch(/not on this team/i)
+
+      const [after] = await db.select().from(schema.deals).where(eq(schema.deals.id, deal.id))
+      expect(after!.ownerUserId).toBeNull()
+    })
+
+    it('refuses a deal that belongs to another agency', async () => {
+      const [other] = await db
+        .insert(schema.orgs).values({ name: 'Somebody Else' }).returning({ id: schema.orgs.id })
+      const [theirCompany] = await db
+        .insert(schema.companies).values({ orgId: other!.id, domain: 'theirs.test' })
+        .returning({ id: schema.companies.id })
+      const { deal: theirDeal } = await advanceDeal(db, {
+        orgId: other!.id, companyId: theirCompany!.id, to: 'contacted',
+      })
+      const mine = await member(orgId, 'me@agency.test')
+
+      const result = await setDealOwner(db, { orgId, dealId: theirDeal.id, ownerUserId: mine })
+      expect(result.ok).toBe(false)
+    })
+
+    /**
+     * LEFT joined, not inner. An unowned deal is the common case on a fresh
+     * board, and an inner join would hide every one of them.
+     */
+    it('shows the owner on the board, and still shows unowned deals', async () => {
+      const { deal } = await advanceDeal(db, { orgId, companyId, to: 'contacted' })
+      let board = await listDealsForBoard(db, orgId)
+      expect(board).toHaveLength(1)
+      expect(board[0]!.ownerEmail).toBeNull()
+
+      const priya = await member(orgId, 'priya@agency.test')
+      await setDealOwner(db, { orgId, dealId: deal.id, ownerUserId: priya })
+      board = await listDealsForBoard(db, orgId)
+      expect(board[0]!.ownerEmail).toBe('priya@agency.test')
+    })
   })
 })

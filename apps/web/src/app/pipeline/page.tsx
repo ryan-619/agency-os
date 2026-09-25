@@ -1,6 +1,7 @@
 import { redirect } from 'next/navigation'
 import { can, parseIcpDefinition } from '@agency/core'
-import { listDealsForBoard, listProposals, upcomingMeetings, type AgencyDb } from '@agency/db/queries'
+import { eq } from 'drizzle-orm'
+import { listDealsForBoard, listProposals, schema, upcomingMeetings, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { PipelineBoard, type DealCard, type Stage } from '@/components/pipeline/board'
@@ -31,8 +32,14 @@ export default async function PipelinePage() {
   const db = getDb() as unknown as AgencyDb
   const now = new Date()
   const cutoff = new Date(now.getTime() - CLOSED_SHOWN_FOR_DAYS * 86_400_000)
-  const [deals, meetings, proposals, icpRow] = await Promise.all([
+  const [deals, team, meetings, proposals, icpRow] = await Promise.all([
     listDealsForBoard(db, user.orgId),
+    // The team, for the assign control. Small by definition (§1 calls this a
+    // 2-5 person agency) so there is nothing to paginate.
+    db.select({ id: schema.users.id, email: schema.users.email, name: schema.users.name })
+      .from(schema.users)
+      .where(eq(schema.users.orgId, user.orgId))
+      .orderBy(schema.users.email),
     upcomingMeetings(db, user.orgId, now, 20),
     listProposals(db, user.orgId, 50),
     icpForOrg(user.orgId),
@@ -52,6 +59,9 @@ export default async function PipelinePage() {
       lostReason: d.lostReason,
       updatedAt: (d.updatedAt ?? d.createdAt).toISOString(),
       closedAt: d.closedAt ? d.closedAt.toISOString() : null,
+      ownerUserId: d.ownerUserId,
+      ownerEmail: d.ownerEmail,
+      ownerName: d.ownerName,
     }))
   const hiddenClosed = deals.length - cards.length
 
@@ -78,7 +88,7 @@ export default async function PipelinePage() {
           : 'A person moves cards anywhere, and a lost deal is asked for its reason. Nothing moves them on its own here: no worker is connected to this deployment, so nothing is sending or reading replies.'}
         {hiddenClosed > 0 ? <> {hiddenClosed} closed more than {CLOSED_SHOWN_FOR_DAYS} days ago {hiddenClosed === 1 ? 'is' : 'are'} not shown.</> : null}
       </p>
-      <PipelineBoard deals={cards} canWrite={can(principal, 'deals:write')} />
+      <PipelineBoard deals={cards} canWrite={can(principal, 'deals:write')} team={team} />
 
       <h2>Meetings coming up</h2>
       {meetings.length === 0 ? (

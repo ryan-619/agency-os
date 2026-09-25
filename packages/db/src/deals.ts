@@ -143,6 +143,56 @@ export async function setDealStage(
   return rows[0] ?? null
 }
 
+/**
+ * Assign a deal to somebody, or clear it.
+ *
+ * `deals.owner_user_id` has existed since 0003 and nothing wrote it — the
+ * column was added and then left, because a two-person agency closes deals
+ * by talking to each other. At three or four that stops being true: the
+ * board cannot say whose deal is whose, and "I thought you had it" is how a
+ * replied lead goes cold.
+ *
+ * The org check is the part that matters and it lives HERE rather than in
+ * the route. `owner_user_id` is a plain FK to `users`, which is global —
+ * nothing in the schema says the assignee belongs to the same agency as the
+ * deal. So a guessed uuid from another org would be a perfectly valid row,
+ * and that row would put a stranger's name on a customer's pipeline. One
+ * statement does both: the UPDATE only matches when the deal is this org's,
+ * and the owner is resolved against this org's users first.
+ */
+export async function setDealOwner(
+  db: AgencyDb,
+  args: {
+    readonly orgId: string
+    readonly dealId: string
+    /** null unassigns. A deal nobody owns is a real state, not a missing one. */
+    readonly ownerUserId: string | null
+  },
+): Promise<{ ok: true; deal: DealRow } | { ok: false; message: string }> {
+  if (args.ownerUserId !== null) {
+    const member = await db
+      .select({ id: schema.users.id })
+      .from(schema.users)
+      .where(and(eq(schema.users.id, args.ownerUserId), eq(schema.users.orgId, args.orgId)))
+      .limit(1)
+    if (member.length === 0) {
+      // Answered the same way as a deal that does not exist: the id is the
+      // only thing that crossed the boundary, so this is not a way to learn
+      // that a user belongs to somebody else.
+      return { ok: false, message: 'That person is not on this team.' }
+    }
+  }
+
+  const rows = await db
+    .update(schema.deals)
+    .set({ ownerUserId: args.ownerUserId })
+    .where(and(eq(schema.deals.orgId, args.orgId), eq(schema.deals.id, args.dealId)))
+    .returning()
+  const deal = rows[0]
+  if (!deal) return { ok: false, message: 'No such deal.' }
+  return { ok: true, deal }
+}
+
 /** Every open deal in an org, for the board. */
 export async function listDeals(db: AgencyDb, orgId: string): Promise<DealRow[]> {
   return db
@@ -155,6 +205,9 @@ export async function listDeals(db: AgencyDb, orgId: string): Promise<DealRow[]>
 export interface BoardDeal extends DealRow {
   readonly companyDomain: string
   readonly companyName: string | null
+  /** Who owns it, resolved for display. Null when nobody has taken it. */
+  readonly ownerEmail: string | null
+  readonly ownerName: string | null
 }
 
 /**
@@ -166,10 +219,25 @@ export interface BoardDeal extends DealRow {
  */
 export async function listDealsForBoard(db: AgencyDb, orgId: string): Promise<BoardDeal[]> {
   const rows = await db
-    .select({ deal: schema.deals, companyDomain: schema.companies.domain, companyName: schema.companies.name })
+    .select({
+      deal: schema.deals,
+      companyDomain: schema.companies.domain,
+      companyName: schema.companies.name,
+      ownerEmail: schema.users.email,
+      ownerName: schema.users.name,
+    })
     .from(schema.deals)
     .innerJoin(schema.companies, eq(schema.companies.id, schema.deals.companyId))
+    // LEFT, not inner: an unowned deal is the common case on a fresh board
+    // and an inner join would hide every one of them.
+    .leftJoin(schema.users, eq(schema.users.id, schema.deals.ownerUserId))
     .where(eq(schema.deals.orgId, orgId))
     .orderBy(desc(schema.deals.updatedAt), desc(schema.deals.createdAt))
-  return rows.map((r) => ({ ...r.deal, companyDomain: r.companyDomain, companyName: r.companyName }))
+  return rows.map((r) => ({
+    ...r.deal,
+    companyDomain: r.companyDomain,
+    companyName: r.companyName,
+    ownerEmail: r.ownerEmail,
+    ownerName: r.ownerName,
+  }))
 }
