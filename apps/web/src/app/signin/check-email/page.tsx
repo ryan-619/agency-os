@@ -26,6 +26,11 @@ export default function CheckEmail() {
           If that address belongs to a team member, a sign-in link is on its way. It is valid
           for 15 minutes and can be used once.
         </p>
+        <p style={{ margin: '0 0 20px' }}>
+          {/* The dead end this page used to be: a mistyped address left
+              nowhere to go but the back button. */}
+          <a href="/signin">Use a different address</a>
+        </p>
         <p className="fine">
           You will see this page whether or not the address is on the team, and no account is
           ever created — so this screen reveals nothing about who has access.
@@ -33,8 +38,9 @@ export default function CheckEmail() {
             <>
               <br />
               <br />
-              This instance sends through a local mail sink: the message is waiting at{' '}
-              <a href="http://localhost:8025">localhost:8025</a>.
+              This instance sends through a local mail sink, so nothing was actually
+              delivered: <a href="http://localhost:8025">open the sink at localhost:8025</a>{' '}
+              and follow the link there.
             </>
           ) : null}
         </p>

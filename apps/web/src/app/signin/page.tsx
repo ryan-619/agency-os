@@ -2,6 +2,7 @@ import { redirect } from 'next/navigation'
 import { AuthError } from 'next-auth'
 import { auth, signIn } from '@/auth'
 import { deployment } from '@/lib/deployment'
+import { SignInForm } from '@/components/signin-form'
 
 export const dynamic = 'force-dynamic'
 
@@ -30,7 +31,7 @@ export default async function SignIn({
 
         {error ? <p className="err">Sign-in failed. Try again.</p> : null}
 
-        <form
+        <SignInForm
           action={async (formData: FormData) => {
             'use server'
             const email = String(formData.get('email') ?? '').trim()
@@ -69,14 +70,10 @@ export default async function SignIn({
               throw err
             }
           }}
-        >
-          <label htmlFor="email">Email address</label>
-          <input id="email" name="email" type="email" required autoComplete="email" placeholder="you@agency.com" />
-          <button type="submit">Email me a sign-in link</button>
-        </form>
+        />
 
         <p className="fine">
-          The link is valid for 15 minutes and can be used once.
+          No password. The link is valid for 15 minutes and can be used once.
           {deployment().mailIsLocalSink ? (
             <>
               {' '}This instance sends through a local mail sink, so the message never leaves the
