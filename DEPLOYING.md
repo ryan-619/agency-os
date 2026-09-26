@@ -183,6 +183,50 @@ share the URL.
 
 ---
 
+## A sending domain, and why outreach needs one
+
+Nothing in Phase 4 reaches an inbox without it. SPF, DKIM and DMARC are how
+a receiving server decides that mail claiming to be from you really is, and
+an unauthenticated cold email from a new domain is filtered before anyone
+reads a word of it. This matters more than the model, the host, or anything
+else outstanding.
+
+```bash
+./tools/mail-dns.sh
+```
+
+asks for the domain and prints the `vercel dns add` commands, generates the
+DMARC record, and gives the order to do it in.
+
+**Vercel covers the DNS, not the sending.** Point the domain's nameservers
+at Vercel and the TXT records live there happily. What Vercel cannot be is
+the domain itself: a `*.vercel.app` subdomain has no DNS you control, so
+there is nowhere to publish a DKIM key, and the apex is shared by millions
+of deployments whose reputation is not yours to build. Vercel is also not a
+mail sender — Resend is, on a free tier of 3,000/month.
+
+**Use a SUBDOMAIN for outreach** (`outreach.example.com`, not the apex).
+Cold email that goes badly damages the reputation of whatever domain sent
+it; a subdomain keeps that away from the address the team actually uses.
+
+**The script does not invent your SPF and DKIM values**, and that is
+deliberate. Resend generates a DKIM key per domain and its SPF include
+depends on the sending region, so both are copied from its dashboard
+verbatim. A guessed DKIM key is not a typo — it is a domain that fails
+authentication silently, which is the failure this whole exercise exists to
+avoid.
+
+**`p=none` first, always.** A `p=reject` published on day one with SPF or
+DKIM slightly wrong bounces every message you send, and you learn about it
+from silence rather than from an error. Monitor for a fortnight, confirm
+`spf=pass`, `dkim=pass`, `dmarc=pass` in a real message's headers, then
+tighten.
+
+**And warm it up.** A domain with no history that starts at fifty a day
+looks like a compromised account. 5/day in week one, 40 by week four, using
+the campaign's `dailyCap` — a setting, not a code change, but the difference
+between a domain that works in a month and one burned in a week.
+
 ## Running the worker on your own machine
 
 The deployment for an agency that has not rented a server yet, and less of a
