@@ -16,7 +16,7 @@ and both are called out where they appear.
 |---|---|
 | the app | **live**, at `agency-os-tau-murex.vercel.app` |
 | the database | Neon, migrated through **0016** |
-| `myagencyos.in` | attached to the Vercel project; still on **Hostinger parking nameservers**, so not resolving |
+| `myagencyos.in` | attached to the Vercel project; DNS served by **Hostinger**, nameserver changes locked for ~24h after registration |
 | production code | **11 commits behind** the repo |
 | migration **0017** | in the repo, **not applied** to Neon |
 | the worker | not hosted — so no chat, no sending, no reply detection |
@@ -25,13 +25,48 @@ and both are called out where they appear.
 
 ## Part 1 — point the domain at the app
 
-### Step 0 **YOU** — point the domain at Cloudflare (do this first)
+### Step 0 **YOU** — put the A record wherever DNS is authoritative TODAY
 
-The domain is registered at **Hostinger** and still on Hostinger's parking
-nameservers (`aster.dns-parking.com`, `helios.dns-parking.com`). Cloudflare
-has assigned you two of its own and is waiting for the switch. Until that
-happens Cloudflare answers nothing for this domain, so any record you add
-there has no effect.
+**A newly registered domain is locked against nameserver changes for about 24
+hours.** That lock is at the registry, and it does NOT cover DNS record edits,
+which happen in Hostinger's own zone. So the fast path is to skip Cloudflare
+entirely for now.
+
+The domain currently answers from `aster.dns-parking.com` and
+`helios.dns-parking.com` — Hostinger's own nameservers — so Hostinger's DNS
+editor is authoritative right now.
+
+1. **https://hpanel.hostinger.com** → **Domains** → **myagencyos.in**
+2. **DNS / Nameservers** → **DNS Records** (not the Nameservers tab, which is
+   the locked one)
+3. Add — or EDIT, if one already points at a parking IP:
+
+   | Type | Name | Points to |
+   |---|---|---|
+   | `A` | `@` | `76.76.21.21` |
+
+   Two `A @` records means half your visitors reach a parking page, so edit
+   rather than add.
+
+4. Optional: `CNAME` `www` → `cname.vercel-dns.com`
+
+That is the whole requirement for the site to go live. Steps 1 and 0b below
+are only needed if you decide you want Cloudflare.
+
+### Step 0b **YOU, optional, after the 24-hour lock** — move DNS to Cloudflare
+
+**Only worth doing for one reason: Cloudflare Email Routing is free**, and it
+is the cleanest zero-cost way to receive replies (`replies@myagencyos.in` →
+your Gmail), which is what turns the worker from `send-only` to
+`send-and-receive`. Everything else — SPF, DKIM, DMARC — is just TXT records
+and Hostinger's editor handles them fine.
+
+If you stay on Hostinger DNS, skip this and use Hostinger's own email
+forwarding or another free forwarder instead.
+
+Cloudflare has assigned you two nameservers and is waiting for the switch.
+Until that happens Cloudflare answers nothing for this domain, so any record
+added there has no effect.
 
 1. **https://hpanel.hostinger.com** → **Domains** → **myagencyos.in**
 2. Find **DNS / Nameservers** → **Change nameservers** → choose *custom*
@@ -279,8 +314,8 @@ else is worth fixing before the first campaign rather than after it.
 
 | # | who | what |
 |---|---|---|
-| 0 | YOU | Hostinger → nameservers → Cloudflare's two, DNSSEC off |
-| 1 | YOU | Cloudflare → A `@` → `76.76.21.21`, **grey cloud** |
+| 0 | YOU | **Hostinger → DNS Records → A `@` → `76.76.21.21`** (works today) |
+| 0b | YOU | *optional, after 24h* — nameservers → Cloudflare, DNSSEC off, re-add records |
 | 2 | ME | verify DNS + TLS |
 | 3 | YOU | `./tools/remote-setup.sh` (migration 0017) |
 | 4 | ME | deploy 11 commits, switch `AUTH_URL`, verify |
@@ -289,4 +324,4 @@ else is worth fixing before the first campaign rather than after it.
 | 9–10 | YOU | Cloudflare Email Routing + Gmail app password |
 | — | BOTH | host the worker |
 
-**Start with step 0.** Nothing Cloudflare does counts until the nameservers move.
+**Start with step 0 at Hostinger.** It works today, and nothing about it is wasted if you move to Cloudflare later.
