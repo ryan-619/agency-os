@@ -1,4 +1,4 @@
-# Going live on myagency.in
+# Going live on myagencyos.in
 
 Everything you need to do, in order, with the links. Written 2026-09-26.
 
@@ -16,7 +16,7 @@ and both are called out where they appear.
 |---|---|
 | the app | **live**, at `agency-os-tau-murex.vercel.app` |
 | the database | Neon, migrated through **0016** |
-| `myagency.in` | attached to the Vercel project, **not resolving yet** |
+| `myagencyos.in` | attached to the Vercel project; still on **Hostinger parking nameservers**, so not resolving |
 | production code | **11 commits behind** the repo |
 | migration **0017** | in the repo, **not applied** to Neon |
 | the worker | not hosted — so no chat, no sending, no reply detection |
@@ -25,14 +25,43 @@ and both are called out where they appear.
 
 ## Part 1 — point the domain at the app
 
+### Step 0 **YOU** — point the domain at Cloudflare (do this first)
+
+The domain is registered at **Hostinger** and still on Hostinger's parking
+nameservers (`aster.dns-parking.com`, `helios.dns-parking.com`). Cloudflare
+has assigned you two of its own and is waiting for the switch. Until that
+happens Cloudflare answers nothing for this domain, so any record you add
+there has no effect.
+
+1. **https://hpanel.hostinger.com** → **Domains** → **myagencyos.in**
+2. Find **DNS / Nameservers** → **Change nameservers** → choose *custom*
+3. Replace both with:
+
+   ```
+   gabriella.ns.cloudflare.com
+   miguel.ns.cloudflare.com
+   ```
+
+4. Delete `aster.dns-parking.com` and `helios.dns-parking.com`
+5. Save
+
+**Also turn DNSSEC off at Hostinger** if it is on. Cloudflare's own note says
+this and it matters: DNSSEC signs records against the *old* nameservers, so
+switching with it enabled makes the domain fail to resolve entirely rather
+than just serving stale answers. You can re-enable it from Cloudflare later.
+
+Cloudflare emails you when the domain goes **Active** — usually minutes,
+occasionally a few hours.
+
 ### Step 1 **YOU** — add one DNS record
 
-Your nameservers are Cloudflare's (`javier.ns.cloudflare.com`), so Cloudflare
-is what answers DNS for this domain. A record added at Hostinger or in
-Vercel's DNS would be ignored — nothing queries them for `myagency.in`.
+Once Cloudflare is Active it answers DNS for this domain, and a record added
+at Hostinger or in Vercel's DNS would be ignored — nothing queries them for
+`myagencyos.in` any more. You can add this record before the switch
+completes; it simply takes effect when Cloudflare goes live.
 
 1. Go to **https://dash.cloudflare.com**
-2. Select **myagency.in**
+2. Select **myagencyos.in**
 3. Left sidebar → **DNS** → **Records** → **Add record**
 4. Enter exactly:
 
@@ -63,7 +92,7 @@ Propagation is usually a minute or two on Cloudflare, occasionally longer.
 ### Step 2 **ME** — verify and issue TLS
 
 I check it resolves, confirm Vercel has issued the certificate, and that
-`https://myagency.in` serves the app.
+`https://myagencyos.in` serves the app.
 
 ---
 
@@ -91,7 +120,7 @@ exist`, which breaks approving a draft and the send tick.
 
 Deal ownership, the sign-in improvements, reply classification, draft
 generation, the workspace-header fix. Then I switch `AUTH_URL` to
-`https://myagency.in` and redeploy.
+`https://myagencyos.in` and redeploy.
 
 **Why `AUTH_URL` waits until Part 1 is done:** every magic link is built from
 it. Point it at a domain that does not resolve and sign-in stops working for
@@ -104,18 +133,18 @@ everybody, including you.
 ### Step 5 **YOU** — add the sending domain to Resend
 
 1. **https://resend.com/domains** → **Add Domain**
-2. Enter **`outreach.myagency.in`** — the subdomain, not the apex.
+2. Enter **`outreach.myagencyos.in`** — the subdomain, not the apex.
 
    Cold outreach damages the reputation of whatever domain sends it. Keeping
    it on a subdomain means a bad campaign cannot hurt mail sent from
-   `you@myagency.in`.
+   `you@myagencyos.in`.
 
 3. Resend shows you a **DKIM** record and an **SPF** record. Leave that page
    open.
 
 ### Step 6 **YOU** — put those records into Cloudflare
 
-Same place as Step 1 (**dash.cloudflare.com → myagency.in → DNS → Records**).
+Same place as Step 1 (**dash.cloudflare.com → myagencyos.in → DNS → Records**).
 Add what Resend showed you, copied **exactly** — the DKIM value is a public
 key and one wrong character fails silently.
 
@@ -146,7 +175,7 @@ and set, for **Production**:
 
 | name | value |
 |---|---|
-| `MAIL_FROM` | `Your Name <hello@outreach.myagency.in>` |
+| `MAIL_FROM` | `Your Name <hello@outreach.myagencyos.in>` |
 | `SMTP_HOST` | `smtp.resend.com` |
 | `SMTP_PORT` | `587` |
 | `SMTP_USER` | `resend` |
@@ -165,9 +194,9 @@ than the local sink.
 
 ### Step 9 **YOU** — Cloudflare Email Routing
 
-1. **dash.cloudflare.com** → **myagency.in** → **Email** → **Email Routing**
+1. **dash.cloudflare.com** → **myagencyos.in** → **Email** → **Email Routing**
 2. Enable it. Cloudflare adds its own MX records automatically.
-3. Create a route: **`replies@myagency.in`** → forward to a Gmail you read.
+3. Create a route: **`replies@myagencyos.in`** → forward to a Gmail you read.
 4. Confirm the forwarding address from the email Cloudflare sends you.
 
 ### Step 10 **YOU** — an app password for that Gmail
@@ -194,7 +223,7 @@ triage — actually run.
 
 ## Part 5 — the worker, which is the remaining gap
 
-Everything above gets `myagency.in` live with companies, scans, scoring, the
+Everything above gets `myagencyos.in` live with companies, scans, scoring, the
 pipeline, proposals and the booking page. **It does not give you chat,
 sending or reply detection**, because all three need the long-running worker
 and Vercel cannot run one.
@@ -250,6 +279,7 @@ else is worth fixing before the first campaign rather than after it.
 
 | # | who | what |
 |---|---|---|
+| 0 | YOU | Hostinger → nameservers → Cloudflare's two, DNSSEC off |
 | 1 | YOU | Cloudflare → A `@` → `76.76.21.21`, **grey cloud** |
 | 2 | ME | verify DNS + TLS |
 | 3 | YOU | `./tools/remote-setup.sh` (migration 0017) |
@@ -259,4 +289,4 @@ else is worth fixing before the first campaign rather than after it.
 | 9–10 | YOU | Cloudflare Email Routing + Gmail app password |
 | — | BOTH | host the worker |
 
-**Start with step 1.** Everything else waits on it.
+**Start with step 0.** Nothing Cloudflare does counts until the nameservers move.
