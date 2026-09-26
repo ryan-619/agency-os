@@ -18,6 +18,11 @@
 # internet. Chat is a separate decision with separate consequences; see
 # DEPLOYING.md.
 #
+# "Everything except chat" is conditional on the SMTP and IMAP prompts below.
+# The worker treats those variables as optional and boots happily without
+# them, doing only the recovery jobs — so skipping the prompts gives you a
+# worker that runs, reports itself healthy, and never sends anything.
+#
 #   ./tools/run-worker.sh
 #
 # The connection string is read from a hidden prompt into this process and
@@ -70,13 +75,101 @@ esac
 # Vercel, and this line is what you replace.
 TOKEN="$(openssl rand -base64 32)"
 
+# ── Sending and reply detection ────────────────────────────────────────────
+#
+# These prompts exist because the worker treats every one of these variables as
+# OPTIONAL and boots cleanly without them. apps/agent/src/index.ts gates the
+# sender on `SMTP_HOST && MAIL_FROM` and the inbox on
+# `IMAP_HOST && IMAP_USER && IMAP_PASSWORD`; unset, neither is started,
+# `outreachModeFrom` returns 'disabled', and the worker runs happily doing only
+# the recovery jobs.
+#
+# That is a quiet failure with a loud banner in front of it: this script used
+# to promise "send queued outreach, detect replies" while passing the child
+# exactly four variables, none of them these. Approved messages would sit in
+# the queue forever and replies would never be read, with nothing anywhere
+# saying why.
+#
+# Sourcing the repo's .env would be worse than leaving it out: it points SMTP
+# at the local mailpit sink on port 1025, so production outreach would go to a
+# laptop instead of to a real inbox, and it has no IMAP settings at all.
+#
+# Passwords are read with `read -s` and EXPORTED rather than passed as
+# `env VAR=value cmd`, which would put them in the child's argv where `ps`
+# shows them to every user on the machine (§2.3).
+
+SENDING="no"
+RECEIVING="no"
+
+printf 'Configure SENDING now? Without it, approved mail waits in the queue. [y/N]: ' >&3
+read -r ANSWER <&3
+case "$ANSWER" in
+  [yY]*)
+    printf '  SMTP host (e.g. smtp.resend.com): ' >&3;       read -r V_SMTP_HOST <&3
+    printf '  SMTP port [587]: ' >&3;                        read -r V_SMTP_PORT <&3
+    printf '  SMTP username (Resend uses "resend"): ' >&3;   read -r V_SMTP_USER <&3
+    printf '  SMTP password (hidden): ' >&3;                 read -r -s V_SMTP_PASSWORD <&3; printf '\n' >&3
+    printf '  From address (e.g. You <hello@outreach.example.com>): ' >&3
+    read -r V_MAIL_FROM <&3
+    if [ -n "$V_SMTP_HOST" ] && [ -n "$V_MAIL_FROM" ]; then
+      export SMTP_HOST="$V_SMTP_HOST"
+      export SMTP_PORT="${V_SMTP_PORT:-587}"
+      export SMTP_SECURE="false"     # 587 is STARTTLS; 465 would be true
+      [ -n "${V_SMTP_USER:-}" ]     && export SMTP_USER="$V_SMTP_USER"
+      [ -n "${V_SMTP_PASSWORD:-}" ] && export SMTP_PASSWORD="$V_SMTP_PASSWORD"
+      export MAIL_FROM="$V_MAIL_FROM"
+      SENDING="yes"
+    else
+      echo "  Host and From are both required for sending; leaving it off." >&2
+    fi
+    unset V_SMTP_PASSWORD
+    ;;
+esac
+
+printf 'Configure REPLY DETECTION now? Without it, nobody is marked as having replied. [y/N]: ' >&3
+read -r ANSWER <&3
+case "$ANSWER" in
+  [yY]*)
+    printf '  IMAP host [imap.gmail.com]: ' >&3;   read -r V_IMAP_HOST <&3
+    printf '  IMAP username (the mailbox): ' >&3;  read -r V_IMAP_USER <&3
+    printf '  IMAP password (hidden — a Gmail APP password, not the account one): ' >&3
+    read -r -s V_IMAP_PASSWORD <&3; printf '\n' >&3
+    if [ -n "${V_IMAP_USER:-}" ] && [ -n "${V_IMAP_PASSWORD:-}" ]; then
+      export IMAP_HOST="${V_IMAP_HOST:-imap.gmail.com}"
+      export IMAP_PORT="993"
+      export IMAP_SECURE="true"
+      export IMAP_USER="$V_IMAP_USER"
+      export IMAP_PASSWORD="$V_IMAP_PASSWORD"
+      RECEIVING="yes"
+    else
+      echo "  Username and password are both required; leaving reply detection off." >&2
+    fi
+    unset V_IMAP_PASSWORD
+    ;;
+esac
+
 echo
 echo "── What this worker will and will not do ──────────────────────────"
-echo "  will:  send queued outreach, detect replies, recover stuck sends,"
-echo "         expire approvals, sweep expired sign-in links"
-echo "  will NOT: answer chat — no model credential and no inbound route."
-echo "         The site says 'no worker connected' on the chat panel, which"
-echo "         is true and is better than a spinner that never resolves."
+echo "  always:   recover stuck sends, expire approvals, sweep expired"
+echo "            sign-in links"
+if [ "$SENDING" = "yes" ]; then
+  echo "  sending:  ON  — queued outreach will be sent via $SMTP_HOST"
+else
+  echo "  sending:  OFF — approved mail WAITS in the queue. Nothing is lost,"
+  echo "            and every §2.1 rule is re-checked when it does send."
+fi
+if [ "$RECEIVING" = "yes" ]; then
+  echo "  replies:  ON  — polling $IMAP_USER over IMAP"
+else
+  echo "  replies:  OFF — replies are not read, so no contact is marked as"
+  echo "            having replied and no sequence is paused by one."
+fi
+echo "  chat:     OFF — no model credential and no inbound route. The site"
+echo "            says 'no worker connected' on the chat panel, which is true"
+echo "            and better than a spinner that never resolves."
+echo
+echo "  The worker also logs its own verdict as 'outreach: <mode>' at boot."
+echo "  If that says 'disabled' while this says ON, trust the worker."
 echo
 echo "  Nothing on this machine is exposed. Closing this tab stops the worker;"
 echo "  queued mail simply waits for the next run rather than being lost."

@@ -251,9 +251,18 @@ other job is this worker reaching out. So:
 
 asks for the production connection string at a hidden prompt and runs the
 worker against Neon with **nothing on the machine exposed** — no port open, no
-tunnel, no inbound route. The live site gains sending, reply detection and
-every recovery job; the chat panel keeps saying no worker is connected, which
-is true.
+tunnel, no inbound route. The chat panel keeps saying no worker is connected,
+which is true.
+
+It then asks whether to configure **sending** (SMTP) and **reply detection**
+(IMAP), and this is not optional paperwork. The worker treats all of those
+variables as optional and boots cleanly without them, running only the
+recovery jobs: `apps/agent/src/index.ts` gates the sender on
+`SMTP_HOST && MAIL_FROM` and the inbox on
+`IMAP_HOST && IMAP_USER && IMAP_PASSWORD`. Skip both prompts and you get a
+worker that reports itself healthy while approved mail sits in the queue
+forever and no reply is ever read. The boot log's `outreach: <mode>` line is
+the authority — `disabled`, `send-only` or `send-and-receive`.
 
 Closing the tab stops it. Queued mail then waits for the next run rather than
 being lost — `touches` rows keep their status, and `recoverStuckSends` settles

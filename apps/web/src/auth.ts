@@ -87,23 +87,43 @@ const { handlers, auth, signIn, signOut } = NextAuth(() => {
           }
 
           const { host } = new URL(url)
-          await transport().sendMail({
-            to: identifier,
-            from: provider.from,
-            subject: `Sign in to Agency OS`,
-            text: `Sign in to Agency OS\n\n${url}\n\nThis link is valid for 15 minutes and can be used once.\nIf you did not request it, ignore this message.\n`,
-            html: `
-              <body style="font-family: ui-sans-serif, system-ui, sans-serif; line-height: 1.5; color: #111">
-                <h2 style="margin:0 0 12px">Sign in to Agency OS</h2>
-                <p style="margin:0 0 20px">Use the button below to sign in as <strong>${escapeHtml(identifier)}</strong>.</p>
-                <p style="margin:0 0 24px">
-                  <a href="${url}" style="background:#111;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none;display:inline-block">Sign in</a>
-                </p>
-                <p style="margin:0;color:#666;font-size:13px">
-                  This link is valid for 15 minutes and can be used once. If you did not request it, ignore this message.
-                </p>
-              </body>`,
-          })
+          /**
+           * The send is wrapped because THROWING here re-opens the oracle the
+           * membership check above closes.
+           *
+           * @auth/core turns an exception out of `sendVerificationRequest`
+           * into an error redirect, while the non-member path a few lines up
+           * returns normally and lands on the check-email page. So the moment
+           * SMTP is down, misconfigured, rate-limited or rejecting the
+           * credential, the two paths become visibly different again and a
+           * list of guessed addresses turns back into the exact roster.
+           *
+           * And SMTP being wrong is not a remote possibility — it is the
+           * NORMAL state of a deployment whose sending domain has not been
+           * set up yet, which is every deployment on its first day. The
+           * oracle would be widest open exactly when nobody is looking for it.
+           *
+           * So a failed send produces the same response as a successful one,
+           * and is reported as an error in the log instead. A member who gets
+           * no mail is a worse experience than an error page; a stranger who
+           * can enumerate the team is a worse outcome.
+           */
+          try {
+            await sendMagicLink(url, identifier, provider.from)
+          } catch (err) {
+            // The class and code only. A nodemailer error can quote the
+            // server's response, and `url` is a bearer credential for this
+            // account — neither belongs in a log line (§2.3).
+            log.error('magic link could not be sent; the address was told nothing', {
+              identifier,
+              host,
+              error: err instanceof Error ? err.name : 'UnknownError',
+              code: typeof (err as { code?: unknown })?.code === 'string'
+                ? (err as { code: string }).code
+                : undefined,
+            })
+            return
+          }
           // identifier is an email address belonging to the team, not a
           // prospect, and the token is deliberately absent from this line.
           log.info('magic link sent', { identifier, host })
@@ -199,6 +219,41 @@ const { handlers, auth, signIn, signOut } = NextAuth(() => {
     },
   }
 })
+
+/**
+ * Compose and send the sign-in mail.
+ *
+ * Split out so the caller's try/catch is obviously around the whole send, and
+ * so nothing between the membership check and the send can grow a second early
+ * return that changes the response shape.
+ */
+async function sendMagicLink(
+  url: string,
+  identifier: string,
+  // `string | undefined` because that is what the provider's own type says,
+  // and passing it straight through preserves the previous behaviour exactly.
+  // In practice it is always set: the provider is constructed with
+  // `from: e.MAIL_FROM`, which env() gives a default.
+  from: string | undefined,
+): Promise<void> {
+  await transport().sendMail({
+    to: identifier,
+    from,
+    subject: `Sign in to Agency OS`,
+    text: `Sign in to Agency OS\n\n${url}\n\nThis link is valid for 15 minutes and can be used once.\nIf you did not request it, ignore this message.\n`,
+    html: `
+      <body style="font-family: ui-sans-serif, system-ui, sans-serif; line-height: 1.5; color: #111">
+        <h2 style="margin:0 0 12px">Sign in to Agency OS</h2>
+        <p style="margin:0 0 20px">Use the button below to sign in as <strong>${escapeHtml(identifier)}</strong>.</p>
+        <p style="margin:0 0 24px">
+          <a href="${url}" style="background:#111;color:#fff;padding:10px 18px;border-radius:6px;text-decoration:none;display:inline-block">Sign in</a>
+        </p>
+        <p style="margin:0;color:#666;font-size:13px">
+          This link is valid for 15 minutes and can be used once. If you did not request it, ignore this message.
+        </p>
+      </body>`,
+  })
+}
 
 function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) =>
