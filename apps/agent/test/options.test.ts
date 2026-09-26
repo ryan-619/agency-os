@@ -8,7 +8,7 @@
  * cannot be adopted silently, and a contributor who wants one has to edit the
  * list in the same commit, where a reviewer sees it.
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import {
   ALLOWED_OPTION_KEYS, FORBIDDEN_TOOLS, buildQueryOptions, childEnv, systemPrompt,
 } from '../src/runtime/options.js'
@@ -189,6 +189,10 @@ describe('the agent has no shell, no filesystem and no web', () => {
 })
 
 describe('the child environment', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
   /**
    * §2.3: no credential in an agent's context window. `env` REPLACES the
    * subprocess environment rather than extending it, so the child gets the API
@@ -249,6 +253,9 @@ describe('the child environment', () => {
   })
 
   it('sets no API key at all under a local login, rather than an empty one', () => {
+    // Stubbed rather than read from the runner: a container running as root
+    // often has no USER at all, and the pass-through is what is under test.
+    vi.stubEnv('USER', 'agency-test-user')
     const env = childEnv({ kind: 'local_login' })
     expect(Object.keys(env)).not.toContain('ANTHROPIC_API_KEY')
     expect(env['ANTHROPIC_API_KEY']).toBeUndefined()
@@ -258,7 +265,7 @@ describe('the child environment', () => {
     // itself logged out — and the turn then fails with "Anthropic rejected
     // the API key", about a key it never sent. A username is not a
     // credential; omitting it cost an afternoon.
-    expect(env['USER']).toBeDefined()
+    expect(env['USER']).toBe('agency-test-user')
     expect(Object.keys(env)).not.toContain('DATABASE_URL')
   })
 })
