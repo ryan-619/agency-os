@@ -76,6 +76,14 @@ export interface ScoreResult {
   readonly gaps: readonly ScoredGap[]
   readonly strengths: readonly ScoredStrength[]
   readonly headlineFinding: string
+  /**
+   * INTERNAL pitch guidance. Never prospect-facing.
+   *
+   * Written in the third person about the company and containing instructions
+   * to the seller ("Sell the gap assessment and …"), so it belongs in the UI,
+   * a brief, or an agent's prompt — never in an outbound message. `draftOpener`
+   * deliberately does not quote it and says why at the point it does not.
+   */
   readonly angle: string
   readonly evidence: readonly EvidenceLine[]
   readonly reachable: boolean

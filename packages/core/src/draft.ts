@@ -118,7 +118,32 @@ export function draftOpener(input: DraftInput): DraftResult {
     lines.push(`• ${line.claim} — ${line.observed}`)
   }
   lines.push('')
-  if (score.angle) lines.push(score.angle)
+  /**
+   * `score.angle` is NOT written here, and this comment is load-bearing.
+   *
+   * It reads like a sentence for the email, and it was in the body until
+   * somebody read what `scoreCompany` actually puts in it:
+   *
+   *   "Security page exists but no SOC 2 / ISO claim — they are mid-journey.
+   *    Sell the gap assessment and the DevSecOps pipeline that makes audit
+   *    evidence a build artifact instead of a fire drill."
+   *
+   * That is internal sales guidance, written in the third person ABOUT the
+   * prospect, and it went into the message the prospect reads. Two rules at
+   * once: the "Sell the …" half is a note to a colleague, and the "Security
+   * page exists" half is an assertion §2.2 forbids — that branch is chosen
+   * when `trust_page` is not among the gaps, which is also true when the
+   * scanner could not check for one. A claim about a page nobody observed.
+   *
+   * The suite did not catch it because `draft.test.ts` hand-wrote a
+   * prospect-safe angle into its fixture while `scoring.test.ts` asserted the
+   * real internal wording — each test agreed with itself. The test below now
+   * drafts from real `scoreCompany` output for exactly this reason.
+   *
+   * The angle keeps its place in `ScoreResult`; a human deciding how to pitch
+   * and the agent choosing a template both want it. It just never gets
+   * copied into an outbound body.
+   */
   lines.push('')
   lines.push(
     'If any of that is already handled or looks wrong, say so and I will correct our notes. ' +

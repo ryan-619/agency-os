@@ -82,7 +82,36 @@ const schema = z.object({
    * forged header decide the origin the sign-in link points at. Failing
    * loudly at startup is the only version of this that is honest.
    */
-  AUTH_URL: z.string().min(1, 'AUTH_URL is required — Auth.js builds magic-link URLs from it'),
+  AUTH_URL: z
+    .string()
+    .min(1, 'AUTH_URL is required — Auth.js builds magic-link URLs from it')
+    /**
+     * An ABSOLUTE http(s) origin, checked here even though nothing here uses
+     * the parsed value.
+     *
+     * `.min(1)` alone accepted `myagencyos.in` — no scheme — which starts up
+     * perfectly and then throws on every auth request, because Auth.js builds
+     * the magic-link URL with `new URL()` and that is not a URL. The failure
+     * lands on the sign-in page of a deployment that just passed its own
+     * startup validation, which is the worst possible place to find out.
+     *
+     * Easy to get wrong precisely when it matters: the value changes on the
+     * day a real domain is attached, typed by hand into a dashboard, by
+     * somebody reading a runbook rather than this file.
+     */
+    .refine(
+      (v) => {
+        try {
+          const u = new URL(v)
+          return u.protocol === 'https:' || u.protocol === 'http:'
+        } catch {
+          return false
+        }
+      },
+      'AUTH_URL must be an absolute URL including the scheme, e.g. https://myagencyos.in — ' +
+        'Auth.js builds magic-link URLs from it with new URL(), so a bare hostname ' +
+        'starts up fine and then fails on every sign-in attempt.',
+    ),
 
   /**
    * Tri-state on purpose: `undefined` when unset, so Auth.js can apply its own

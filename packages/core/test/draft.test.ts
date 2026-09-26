@@ -7,8 +7,10 @@
  * in writing. Most of what follows is about REFUSING to write one.
  */
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
 import { draftOpener } from '../src/draft.js'
-import type { ScoreResult } from '../src/scoring.js'
+import { parseIcpDefinition, scoreCompany } from '../src/index.js'
+import type { IcpDefinition, Observation, ScoreResult, SiteProfile } from '../src/index.js'
 
 const score = (over: Partial<ScoreResult> = {}): ScoreResult =>
   ({
@@ -111,5 +113,88 @@ describe('drafting an opener', () => {
   it('invites a correction, because the scan can be wrong', () => {
     const r = draftOpener({ score: score(), agencyName: 'Agency' })
     expect(r.ok && r.draft.body).toMatch(/already handled or looks wrong/i)
+  })
+})
+
+/**
+ * Drafting from REAL `scoreCompany` output rather than a hand-written fixture.
+ *
+ * This exists because of a defect the rest of this file could not catch. The
+ * fixture above supplies a prospect-safe `angle`, and `scoring.test.ts`
+ * asserts the real internal wording — each file agreed with itself while the
+ * email shipped "Sell the gap assessment and the DevSecOps pipeline" to
+ * strangers. Two correct tests, one false conclusion.
+ *
+ * So these drive the real scorer. If somebody puts the angle back in the body,
+ * or a new scoring branch writes seller-facing language into a prospect-facing
+ * field, this fails.
+ */
+describe('§2.2: what the real scorer produces never leaks seller language', () => {
+  const icp: IcpDefinition = parseIcpDefinition(
+    JSON.parse(
+      readFileSync(new URL('../../db/seed/icp-security-gap-saas.json', import.meta.url), 'utf8'),
+    ),
+  )
+
+  /** Everything observed, nothing a gap; then override. Mirrors scoring.test.ts. */
+  function profile(over: { gaps?: string[]; unobserved?: string[] } = {}): SiteProfile {
+    const { gaps = [], unobserved = [] } = over
+    const observations: Record<string, Observation> = {}
+    for (const key of Object.keys(icp.signals)) {
+      observations[key] = { observed: true, gap: false, detail: '' }
+    }
+    for (const key of gaps) observations[key] = { observed: true, gap: true, detail: 'observed detail' }
+    for (const key of unobserved) observations[key] = { observed: false, gap: null, detail: '' }
+    return {
+      domain: 'test.com', company: 'Test', title: 'Test',
+      fetchOk: true, fetchError: '', hasLoginSurface: true,
+      isSecurityVendor: false, mentionsSecurityHiring: false,
+      outdatedLibs: [], observations,
+    }
+  }
+
+  /**
+   * Every branch of the angle in scoring.ts, reached through the real scorer
+   * rather than asserted from a copy of the strings.
+   */
+  const branches: ReadonlyArray<{ readonly name: string; readonly gaps: string[] }> = [
+    { name: 'no trust page and no SOC 2', gaps: ['trust_page', 'compliance_claim'] },
+    { name: 'no SOC 2 only', gaps: ['compliance_claim'] },
+    { name: 'three or more headers missing', gaps: ['csp', 'hsts', 'frame_protection'] },
+    { name: 'the fallback', gaps: ['csp'] },
+  ]
+
+  it.each(branches)('$name: the angle is real, and none of it is in the body', ({ gaps }) => {
+    const scored = scoreCompany(profile({ gaps }), icp)
+
+    // The angle exists and IS seller-facing — that is the premise, so assert it
+    // rather than trusting it. A future scoring change that made the angle
+    // harmless should make this test fail and be re-thought, not pass quietly.
+    expect(scored.angle.length).toBeGreaterThan(0)
+
+    const r = draftOpener({ score: scored, agencyName: 'Agency', senderName: 'Priya' })
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+
+    expect(r.draft.body).not.toContain(scored.angle)
+    // And the give-away fragments individually, so a reformatted or
+    // partially-interpolated angle cannot slip past a whole-string compare.
+    for (const tell of ['Sell ', 'Sell it', 'mid-journey', 'retainer pitch', 'opens the door']) {
+      expect(r.draft.body).not.toContain(tell)
+    }
+    // Nothing in the body may talk about the prospect in the third person.
+    expect(r.draft.body).not.toMatch(/\bthey are\b/i)
+  })
+
+  it('still quotes the observations, so removing the angle did not empty the email', () => {
+    const scored = scoreCompany(profile({ gaps: ['csp', 'trust_page'] }), icp)
+    const r = draftOpener({ score: scored, agencyName: 'Agency', senderName: 'Priya' })
+    expect(r.ok).toBe(true)
+    if (!r.ok) return
+    expect(r.draft.quoted.length).toBeGreaterThan(0)
+    for (const claim of r.draft.quoted) expect(r.draft.body).toContain(claim)
+    // The disclosure and the correction invitation survive.
+    expect(r.draft.body).toContain('no testing of any kind')
+    expect(r.draft.body).toContain('say so and I will correct our notes')
   })
 })
