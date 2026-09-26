@@ -12,6 +12,10 @@
     },
     "./migrations": "./migrations/",
     "./seed": "./seed/",
+    "./schema-version": {
+      "types": "./dist/schema-version.d.ts",
+      "default": "./dist/schema-version.js"
+    },
     "./schema": {
       "types": "./dist/schema.d.ts",
       "default": "./dist/schema.js"

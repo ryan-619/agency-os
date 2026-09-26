@@ -408,12 +408,25 @@ prefer the script.)
 
 ## After the first deploy
 
-1. Sign in at `https://<your-url>/signin` with the seeded owner address and
+1. Confirm the deployment agrees with its database, before anything else:
+
+   ```bash
+   curl -s https://<your-url>/api/health | python3 -m json.tool
+   ```
+
+   `schema.state` must be `ok`. `behind` means the migration has not been
+   applied and features will fail one at a time as people reach them — run
+   `./tools/remote-setup.sh` and check again. `unknown` means the database has
+   never been migrated at all. Note the endpoint returns **200** either way,
+   on purpose (CLAUDE.md §4 has the reason); `?strict=1` turns a disagreement
+   into a 503 if you want to gate a script on it.
+
+2. Sign in at `https://<your-url>/signin` with the seeded owner address and
    check the link arrives. If it does not, the problem is Resend or
    `MAIL_FROM`, not the app — `/api/health` will still be green.
-2. Open `/` and confirm the dashboard's banner says the worker is not
+3. Open `/` and confirm the dashboard's banner says the worker is not
    connected. If it does not, `AGENT_URL` is set and should not be.
-3. Set the org's booking slug if you want the public page:
+4. Set the org's booking slug if you want the public page:
    `UPDATE orgs SET booking_slug = 'agency' WHERE …`, then check
    `/book/agency` loads for a signed-out browser.
 
@@ -446,6 +459,13 @@ was theoretical. On a public URL it is not:
   endpoint, and a bored stranger can fill the meetings table with junk. Every
   such row is flagged `needs_review`.
 - **`/api/health`** is unauthenticated and queries the database on every call.
+  It also reports which migration the database is at, which is a small piece of
+  fingerprinting given away to anyone who asks. That is a deliberate trade: the
+  alternative is that nobody can verify a deploy without holding the production
+  connection string, and a migration number names no column, no table and no
+  software version. If you would rather not publish it, put Vercel's WAF in
+  front of the route — do not gate it on a session, because an orchestrator and
+  a deploy gate both have to reach it unauthenticated.
 - **`/api/auth`** lets an anonymous caller create `verification_tokens` rows for
   any address. They grant nothing and expire in 15 minutes, but nothing prunes
   them and each one attempts to send mail only for real members.

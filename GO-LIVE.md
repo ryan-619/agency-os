@@ -151,6 +151,40 @@ the worker's `dueTouches` — select every column. Against a database without
 that column they fail outright with `column touches.reply_kind does not
 exist`, which breaks approving a draft and the send tick.
 
+### Step 3b **YOU** — show me it worked
+
+```bash
+./tools/remote-status.sh
+```
+
+Read-only, same hidden prompt, and the pooled string is fine for this one.
+Paste the output here. **Every line of it is a fact about the schema** — column
+names, constraint names, counts — and none of it contains the connection
+string, so it is safe to paste. Look for:
+
+```
+  touches.reply_kind: text, nullable=YES   <- 0017 is applied
+```
+
+This step exists because of a real gap rather than politeness. I am not allowed
+to hold the production connection string (§2.3), so I cannot check the database
+myself — and deploying code that assumes a column the database does not have is
+the exact failure this whole ordering is designed to avoid. "Probably applied"
+is not good enough to spend a production deploy on.
+
+From the next deploy onward this is no longer needed: `/api/health` now reports
+the schema state, so anyone who can reach the URL can check it with no
+credential at all.
+
+```bash
+curl -s https://myagencyos.in/api/health | python3 -m json.tool
+```
+
+`schema.state` is `ok`, `behind`, `ahead`, or `unknown`. It returns 200 even
+when it disagrees — deliberately, because the container healthcheck would
+otherwise restart-loop the app rather than serve the 95% of it that works.
+Add `?strict=1` to get a 503 on disagreement instead.
+
 ### Step 4 **ME** — deploy all 11 commits
 
 Deal ownership, the sign-in improvements, reply classification, draft
@@ -318,7 +352,8 @@ else is worth fixing before the first campaign rather than after it.
 | 0b | YOU | *optional, after 24h* — nameservers → Cloudflare, DNSSEC off, re-add records |
 | 2 | ME | verify DNS + TLS |
 | 3 | YOU | `./tools/remote-setup.sh` (migration 0017) |
-| 4 | ME | deploy 11 commits, switch `AUTH_URL`, verify |
+| 3b | YOU | `./tools/remote-status.sh` → paste the output (safe; schema facts only) |
+| 4 | ME | deploy, switch `AUTH_URL`, verify |
 | 5–7 | YOU | Resend domain + records + API key into Vercel |
 | 8 | ME | redeploy, verify real mail |
 | 9–10 | YOU | Cloudflare Email Routing + Gmail app password |

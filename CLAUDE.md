@@ -1038,6 +1038,31 @@ anonymous traffic can occupy connections from the same pool the app uses;
 `DATABASE_POOL_MAX` exists partly so that ceiling is tunable. Rate limiting
 belongs with the reverse proxy in front of the VPS, not in the app.
 
+**`/api/health` reports the schema state, and deliberately does not enforce
+it.** It reads `max(version)` from `schema_migrations` and compares it against
+`EXPECTED_MIGRATION` in `packages/db/src/schema-version.ts`, reporting `ok`,
+`behind`, `ahead` or `unknown`. This exists because migrations are applied by a
+person from a terminal, against a connection string no assistant may hold
+(§2.3) — so without it, nobody deploying could confirm the migration landed,
+and the failure mode is quiet: migrations only ADD, so code one migration ahead
+of its database boots fine, serves every page, and then throws `column … does
+not exist` the first time somebody reaches the feature that needed the column.
+
+A disagreement returns **200**, not 503, and that is not timidity. `apps/web/
+Dockerfile`'s HEALTHCHECK is `fetch(…).then(r => process.exit(r.ok ? 0 : 1))`,
+so a 503 would have Docker kill the container, restart it, find the schema
+still behind, and loop — serving nothing instead of the 95% that works.
+Liveness ("can this process serve?") and readiness ("does this deployment agree
+with its database?") are different questions and only the first may stop the
+process. `?strict=1` asks the second and answers with the status code, for a
+deploy gate or a human; nothing automated points at it.
+
+The constant is hand-written rather than read from the migrations directory,
+because the web bundle must not import the migrator — it resolves files through
+`import.meta.url` (see `apps/web/src/lib/db.ts`). `test/schema-version.test.ts`
+fails if the constant stops matching the directory, so it can only be wrong for
+as long as it takes to run the suite.
+
 **`users.org_id` is NOT NULL with no default**, so the Auth.js adapter's
 `createUser` cannot succeed. That is deliberate: there is no signup flow (§1).
 The `signIn` callback refuses any address without a `users` row *before* mail is
