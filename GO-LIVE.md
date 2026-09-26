@@ -12,16 +12,45 @@ and both are called out where they appear.
 
 ## Where things stand right now
 
+Updated after the deploy on 2026-09-26.
+
 | | state |
 |---|---|
-| the app | **live**, at `agency-os-tau-murex.vercel.app` |
-| the database | Neon, migrated through **0016** |
-| `myagencyos.in` | attached to the Vercel project; DNS served by **Hostinger**, nameserver changes locked for ~24h after registration |
-| production code | **11 commits behind** the repo |
-| migration **0017** | in the repo, **not applied** to Neon |
-| the worker | not hosted — so no chat, no sending, no reply detection |
+| `https://myagencyos.in` | **LIVE**, TLS issued (Let's Encrypt, expires 25 Dec 2026) |
+| the database | Neon, migrated through **0017** — verified live, see below |
+| production code | **current** — everything in the repo is deployed |
+| sign-in | the page works; whether the *mail* arrives depends on SMTP, untested |
+| the worker | **not hosted** — so no chat, no sending, no reply detection |
+| scanning | a CLI you run from your machine; nothing on Vercel runs it |
 
----
+You can check the first three yourself, any time, from anywhere:
+
+```bash
+curl -s https://myagencyos.in/api/health
+```
+
+`schema.state: "ok"` means the deployed code and the database agree. It reads
+`0017` today.
+
+### What is live and what is not
+
+**Working now:** the domain, TLS, the database, the session gate (every page
+redirects to `/signin`), the public booking page at `/book/agency`, and the
+whole CRM surface once you are signed in — companies, scoring, the pipeline
+board, proposals, meetings, suppressions.
+
+**Not working, and none of it is a bug:**
+
+| | needs |
+|---|---|
+| **chat** | the worker hosted somewhere with a public URL, plus `AGENT_URL` set in Vercel. `AGENT_URL` is deliberately unset, so the panel says "no worker connected" |
+| **sending outreach** | a sending domain (Part 3) **and** the worker running with SMTP configured |
+| **reply detection** | a mailbox (Part 4) **and** the worker running with IMAP configured |
+| **scanning** | `npm run scan` from your machine against the production database |
+| **voice** | A2P 10DLC registration, which takes weeks |
+
+All five come down to two things: **the worker is not hosted**, and **mail is
+not set up**. Parts 3 to 5 below are those two things.
 
 ## Part 1 — point the domain at the app
 
