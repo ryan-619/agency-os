@@ -204,13 +204,42 @@ export function ChatPanel({
     }
   }, [])
 
+  /**
+   * No worker: no composer, but the transcript still renders.
+   *
+   * This used to return the note alone, which threw away `initialBlocks` —
+   * the server had already rebuilt every past conversation from the database
+   * at `chat/page.tsx`, and this early return dropped it on the floor. The
+   * effect was that losing the worker also lost READ access to work that was
+   * already done: what the agent found, what it drafted, what a person
+   * approved. All of it still in Postgres, all of it invisible.
+   *
+   * Which is backwards. The worker is needed to START a turn, not to read one
+   * that finished. A deployment without a worker is the normal state of this
+   * product before anybody rents a server, so that is precisely when the
+   * history matters most.
+   *
+   * `canDecide` is passed as false: the approve/deny buttons on a parked tool
+   * call resume the turn by POSTing to the worker, so offering them here
+   * would be offering a button that cannot work.
+   */
   if (!agentAvailable) {
     return (
       <div className="chat">
+        {state.blocks.length > 0 ? (
+          <div className="chat-log">
+            {state.blocks.map((b) => (
+              <BlockView key={b.id} block={b} canDecide={false} onDecide={decide} />
+            ))}
+          </div>
+        ) : null}
         <div className="note">
           <strong>The agent is not configured.</strong> Chat needs the agent worker running and
           reachable at <code>AGENT_URL</code>, with an <code>ANTHROPIC_API_KEY</code> set on it.
           Everything else in Agency OS works without it.
+          {state.blocks.length > 0 ? (
+            <> Earlier conversations are shown above and are read-only until it is back.</>
+          ) : null}
         </div>
       </div>
     )
