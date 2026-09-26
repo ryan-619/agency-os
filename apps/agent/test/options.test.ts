@@ -8,7 +8,7 @@
  * cannot be adopted silently, and a contributor who wants one has to edit the
  * list in the same commit, where a reviewer sees it.
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import {
   ALLOWED_OPTION_KEYS, FORBIDDEN_TOOLS, buildQueryOptions, childEnv, systemPrompt,
 } from '../src/runtime/options.js'
@@ -189,6 +189,12 @@ describe('the agent has no shell, no filesystem and no web', () => {
 })
 
 describe('the child environment', () => {
+  // In a hook rather than at the end of a test body, which an assertion
+  // failure would skip — leaving the stub in place for every later test.
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
   /**
    * §2.3: no credential in an agent's context window. `env` REPLACES the
    * subprocess environment rather than extending it, so the child gets the API
@@ -249,16 +255,21 @@ describe('the child environment', () => {
   })
 
   it('sets no API key at all under a local login, rather than an empty one', () => {
+    // Stubbed, not read from the host: a container with no USER (a CI runner,
+    // a cloud sandbox) would otherwise fail this test, and a host that has one
+    // would pass it on mere presence. A distinctive value proves pass-through.
+    vi.stubEnv('HOME', '/home/agency-worker')
+    vi.stubEnv('USER', 'agency-worker')
     const env = childEnv({ kind: 'local_login' })
     expect(Object.keys(env)).not.toContain('ANTHROPIC_API_KEY')
     expect(env['ANTHROPIC_API_KEY']).toBeUndefined()
     // Still everything the CLI needs to find its own session, and no more.
-    expect(env['HOME']).toBeDefined()
+    expect(env['HOME']).toBe('/home/agency-worker')
     // The keychain lookup is BY USERNAME, so a child without USER reports
     // itself logged out — and the turn then fails with "Anthropic rejected
     // the API key", about a key it never sent. A username is not a
     // credential; omitting it cost an afternoon.
-    expect(env['USER']).toBeDefined()
+    expect(env['USER']).toBe('agency-worker')
     expect(Object.keys(env)).not.toContain('DATABASE_URL')
   })
 })
