@@ -17,11 +17,16 @@ optional and the worker is worth deploying without one** — sending, reply
 detection, stuck-send recovery, the restart reconciler and the sign-in-token
 sweep all run with no model, and only chat reports `chat_disabled`.
 
-**The web half is LIVE on Vercel** at `agency-os-tau-murex.vercel.app`, against
-a Neon Postgres (18.6) with Resend for magic links, migrated through **0016**
-and seeded. Proved live: `/api/health` reports `database: ok`, `/signin`
-renders, `/book/agency` serves the public booking page (it 404'd until the
-seed claimed the slug), and a sign-in request logged `magic link sent`. See [DEPLOYING.md](DEPLOYING.md) — including the two things
+**The web half is LIVE on Vercel** at `https://myagencyos.in`, against a Neon
+Postgres (18.6) with Resend for magic links, migrated through **0017** and
+seeded. It first went live at `agency-os-tau-murex.vercel.app`, migrated
+through 0016; that hostname still answers, but the domain is production now —
+see [GO-LIVE.md](GO-LIVE.md), "Where things stand right now". Anyone can check
+the schema without a credential: `curl -s https://myagencyos.in/api/health`
+reports `schema: {state: ok, expected: 0017, applied: 0017}`, and `expected`
+is `EXPECTED_MIGRATION` in `packages/db/src/schema-version.ts`. Proved live:
+`/api/health` reports `database: ok`, `/signin` renders, `/book/agency` serves
+the public booking page (it 404'd until the seed claimed the slug), and a sign-in request logged `magic link sent`. See [DEPLOYING.md](DEPLOYING.md) — including the two things
 a LOCAL `vercel build` gets wrong (it traces `.env` into the upload; deploying
 from `apps/web` cannot resolve the hoisted `node_modules`). The agent worker is
 NOT deployed and cannot be on serverless, so chat, sending and reply detection
@@ -286,9 +291,11 @@ is capped at a 5s connect timeout and changes how the server's tools load into
 a real turn; a probe should not need a different config from the thing it
 tests.)
 
-Not yet created, because their phase has not arrived (§12 — do not scaffold all
-seven phases at once): `apps/voice` (Phase 6, and only after A2P 10DLC
-registration clears).
+`apps/voice` used to be listed here as not yet created, because its phase had
+not arrived (§12 — do not scaffold all seven phases at once). It exists now:
+Phase 6 is built, and what waits for A2P 10DLC registration is switching it
+on, not writing it — the compose service sits behind the `voice` profile. See
+the Voice section below.
 
 ### packages/tools
 The tools as PLAIN DATA, with **no import of the Agent SDK anywhere in the
@@ -507,10 +514,20 @@ a human to fix. Rate limiting belongs at the reverse proxy, like `/api/health`.
 
 **Not built:** calendar invitations (a meeting recorded here moves the deal;
 the invite goes from a person's calendar or the calendar connector, and
-`book_meeting`'s summary says so), a proposal PDF or e-mail send (the document
-is the JSON; sending anything is Phase 4's single path), and deal ownership
-(`deals.owner_user_id` exists and nothing sets it yet — a two-person agency
-did not need it to close).
+`book_meeting`'s summary says so), and a proposal PDF or e-mail send (the
+document is the JSON; sending anything is Phase 4's single path).
+
+**Deal ownership was on that list, and is built now.** It was left out
+because a two-person agency did not need it to close; past two, the board
+cannot say whose deal is whose. The board assigns an owner per card and
+filters by owner, the unassigned pile included, through the same
+`PATCH /api/deals/:id` — `ownerUserId` names the person and `null` unassigns,
+which is a different request from leaving the field out. It goes through
+`setDealOwner` rather than the plain update, because `owner_user_id` is an FK
+to a GLOBAL `users` table: a guessed id from another agency is a storable
+row, and it would put a stranger's name on this pipeline. The assignee is
+resolved against the deal's org first, and the new owner is recorded in the
+audit row the PATCH already writes.
 
 ### Voice (Phase 6, §8.5)
 
@@ -694,7 +711,7 @@ exists, never in place of it.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 1500 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice
+npm test                 # 1528 tests in 64 files: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice
 npx vitest run --maxWorkers=1 --minWorkers=1   # the same suite on a machine short of memory
 npm run build            # packages, then the Next app
 
