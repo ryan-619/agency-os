@@ -80,6 +80,16 @@ services:
       # The port is the worker's API (AGENT_PORT + 1), not its health port.
       AGENT_URL: ${AGENT_URL:-http://agent:3002}
       AGENT_INTERNAL_TOKEN: "${AGENT_INTERNAL_TOKEN:?required - generate one with openssl rand -base64 32}"
+      # Optional, all of them, and every feature behind one fails closed
+      # without it. Not wired here because none is needed for the stack to
+      # boot: set them in .env when the feature is configured.
+      #   CRON_SECRET, RESCAN_BATCH_SIZE   the daily rescan (a Vercel cron;
+      #                                    under compose the worker scans)
+      #   SLACK_WEBHOOK_URL                notifications — the URL is the credential
+      #   UNSUBSCRIBE_SECRET               one-click unsubscribe; same value as the agent's
+      #   RESEND_WEBHOOK_SECRET, RESEND_API_KEY   replies through Resend's webhook
+      #   INBOUND_WEBHOOK_SECRET           replies through a plain JSON webhook
+      #   SECRETS_KEY                      to store connector credentials from the UI
     ports:
       - '3000:3000'
 
@@ -152,6 +162,12 @@ services:
       # Bound the blast radius of a subagent fan-out (§7).
       CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: ${CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS:-3}
       CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: ${CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH:-2}
+      # Optional. Without BOTH of the first two the worker adds no
+      # List-Unsubscribe header and says so once at boot; the third pauses a
+      # campaign whose bounce rate passes it.
+      #   UNSUBSCRIBE_SECRET          same value as the web app's
+      #   WEB_PUBLIC_URL              where /api/unsubscribe lives, as the worker sees it
+      #   OUTREACH_BOUNCE_PAUSE_PCT   default 5
     volumes:
       # Put a skill at ./skills/.claude/skills/<name>/SKILL.md. The directory
       # may hold NOTHING else under .claude/ — see AGENT_SKILLS_DIR above.

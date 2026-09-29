@@ -4,6 +4,10 @@ import { DEFAULT_STALE_AFTER_DAYS, can, isStale, parseIcpDefinition, type Propos
 import { readProposal, schema, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
+import { ProposalDocument } from '@/components/pipeline/proposal-document'
+import { ProposalLinksSlot } from '@/components/pipeline/proposal-links'
+import { ProposalShareSlot } from '@/components/pipeline/proposal-share'
+import type { ProposalSlotProps } from '@/components/pipeline/proposal-slot'
 import { ProposalStatus } from '@/components/pipeline/proposal-status'
 import { When } from '@/components/when'
 import { getDb } from '@/lib/db'
@@ -12,10 +16,10 @@ import { icpForOrg } from '@/lib/queries'
 /**
  * One proposal, as generated (PROMPT.md §8.6).
  *
- * The document is rendered from the stored JSON, never regenerated: what
- * was sent to a buyer stays what it was, whatever the scan says now. The
- * evidence is under every scope item, so a reader can check the scope
- * against the site rather than take it on trust (§2.2).
+ * The document itself is `<ProposalDocument>`, rendered here for the team;
+ * this page adds what the team needs around it — the status, the link back
+ * to the company, the stale warning, and the slots that hand the document
+ * on (print, download, a buyer's link).
  */
 export const dynamic = 'force-dynamic'
 
@@ -34,6 +38,9 @@ export default async function ProposalPage({ params }: { params: Promise<{ id: s
     .from(schema.companies)
     .where(and(eq(schema.companies.orgId, user.orgId), eq(schema.companies.id, row.companyId)))
     .limit(1)
+  // The FK forbids a proposal without its company; a row that has none
+  // anyway is not a page.
+  if (!company) notFound()
   const doc = row.document as Proposal
 
   let orgLabel = 'Agency'
@@ -63,7 +70,8 @@ export default async function ProposalPage({ params }: { params: Promise<{ id: s
     'use server'
     await signOut({ redirectTo: '/signin' })
   }
-  const money = (n: number) => `${doc.pricing.currency} ${n.toLocaleString('en-US')}`
+  const canWrite = can({ id: user.id, orgId: user.orgId, role: user.role }, 'deals:write')
+  const slot: ProposalSlotProps = { orgId: user.orgId, proposalId: row.id, status: row.status, evidenceStale, canWrite }
 
   return (
     <Shell user={user} orgName={orgLabel} current="pipeline" signOut={signOutAction}>
@@ -72,7 +80,7 @@ export default async function ProposalPage({ params }: { params: Promise<{ id: s
       <p className="lede">
         <span className={`tag${row.status === 'accepted' ? ' on' : row.status === 'declined' || row.status === 'withdrawn' ? ' warn' : ''}`}>{row.status}</span>
         {' · '}
-        {company ? <a href={`/companies/${encodeURIComponent(company.domain)}`}>{company.name ?? company.domain}</a> : null}
+        <a href={`/companies/${encodeURIComponent(company.domain)}`}>{company.name ?? company.domain}</a>
         {' · generated '}<When iso={row.generatedAt.toISOString()} />
         {row.decidedAt ? <> · decided <When iso={row.decidedAt.toISOString()} /></> : null}
       </p>
@@ -81,90 +89,22 @@ export default async function ProposalPage({ params }: { params: Promise<{ id: s
           <strong>The evidence under this proposal has aged out.</strong> It was written from a scan that ran{' '}
           {scan ? <When iso={scan.ranAt.toISOString()} mode="date" /> : 'more than'} — more than {staleAfter} days ago.
           §2.2 says stale findings are re-verified before they appear in anything outbound, so re-scan{' '}
-          {company ? <code>{company.domain}</code> : 'the company'} and generate a fresh proposal rather than sending this one.
+          <code>{company.domain}</code> and generate a fresh proposal rather than sending this one.
         </div>
       ) : null}
-      <ProposalStatus id={row.id} status={row.status} canWrite={can({ id: user.id, orgId: user.orgId, role: user.role }, 'deals:write')} />
+      <ProposalStatus id={row.id} status={row.status} canWrite={canWrite} />
+      <ProposalLinksSlot {...slot} />
+      <ProposalShareSlot {...slot} />
 
-      <article className="proposal">
-        <section>
-          <h2>Summary</h2>
-          <p>{doc.summary}</p>
-          <p className="muted" style={{ fontSize: 12.5 }}>
-            Based on the scan of <When iso={doc.basedOn.scanRanAt} mode="date" />
-            {doc.basedOn.score != null ? <> · score {doc.basedOn.score}/100{doc.basedOn.tier ? `, tier ${doc.basedOn.tier}` : ''}</> : null}
-          </p>
-        </section>
-
-        {doc.workstreams.map((ws) => (
-          <section key={ws.name} className="card" style={{ marginTop: 14 }}>
-            <h2 style={{ marginTop: 0 }}>
-              {ws.name}
-              <span className="muted" style={{ float: 'right', fontWeight: 400, fontSize: 13 }}>
-                {ws.effortDays.low}–{ws.effortDays.high} days
-              </span>
-            </h2>
-            <p className="muted" style={{ fontSize: 13 }}>{ws.summary}</p>
-            <table>
-              <thead><tr><th>Deliverable</th><th>Why</th><th>Evidence observed</th></tr></thead>
-              <tbody>
-                {ws.items.map((item) => (
-                  <tr key={item.signalKey}>
-                    <td><div>{item.deliverable}</div><div className="mono muted" style={{ fontSize: 11.5 }}>{item.signalKey} · weight {item.weight}</div></td>
-                    <td>{item.why}</td>
-                    <td>
-                      <dl className="evidence">
-                        {item.evidence.map((line, i) => <dd key={i} className="mono">{line}</dd>)}
-                      </dl>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </section>
-        ))}
-
-        <section className="card" style={{ marginTop: 14 }}>
-          <h2 style={{ marginTop: 0 }}>Pricing</h2>
-          <table>
-            <tbody>
-              <tr><th>Effort</th><td className="mono">{doc.pricing.effortDays.low}–{doc.pricing.effortDays.high} days</td></tr>
-              <tr><th>Day rate</th><td className="mono">{doc.pricing.dayRate != null ? money(doc.pricing.dayRate) : 'not set — effort only'}</td></tr>
-              <tr><th>Total</th><td className="mono">{doc.pricing.total ? `${money(doc.pricing.total.low)} – ${money(doc.pricing.total.high)}` : '—'}</td></tr>
-            </tbody>
-          </table>
-        </section>
-
-        <section style={{ marginTop: 14 }}>
-          <h2>Assumptions</h2>
-          <ul>{doc.assumptions.map((a) => <li key={a}>{a}</li>)}</ul>
-        </section>
-
-        {doc.alreadyInPlace.length > 0 ? (
-          <section>
-            <h2>Already in place</h2>
-            <p className="muted" style={{ fontSize: 13 }}>
-              Checked from the outside and not found to be a problem. Out of scope. (The wording in brackets is
-              what the scan looks for, not what it found.)
-            </p>
-            <ul>
-              {doc.alreadyInPlace.map((s) => (
-                <li key={s.signalKey}><span className="mono">{s.signalKey}</span> <span className="muted">— not the case here ({s.why})</span></li>
-              ))}
-            </ul>
-          </section>
-        ) : null}
-
-        {doc.notAssessed.length > 0 ? (
-          <section>
-            <h2>Not assessed</h2>
-            <div className="note">
-              <strong>These could not be observed from the outside and are excluded from scope — not assumed to be fine.</strong>
-              <ul>{doc.notAssessed.map((s) => <li key={s.signalKey}><span className="mono">{s.signalKey}</span> — {s.why}</li>)}</ul>
-            </div>
-          </section>
-        ) : null}
-      </article>
+      <ProposalDocument
+        doc={doc}
+        company={{ domain: company.domain, name: company.name }}
+        agency={{ name: orgLabel }}
+        status={row.status}
+        evidenceAsOf={scan ? scan.ranAt.toISOString() : null}
+        evidenceStale={evidenceStale}
+        audience="team"
+      />
     </Shell>
   )
 }
