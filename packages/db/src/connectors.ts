@@ -25,7 +25,7 @@
  */
 import { and, asc, eq } from 'drizzle-orm'
 import { z } from 'zod'
-import { SENSITIVE_KEY } from '@agency/core'
+import { SENSITIVE_KEY, SENSITIVE_VALUE } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 
@@ -69,23 +69,39 @@ export const FORBIDDEN_SECRET_ENV: readonly string[] = Object.freeze([
  * A config KEY that looks like a credential. `SENSITIVE_KEY` from @agency/core
  * matches `api_key` and `apikey` but NOT the hyphenated `x-api-key` the presets
  * use (verified against redact.ts), so this covers the hyphenated spellings.
- * Checked on the key only: the value is whatever the person typed, and the
- * point is that a credential never gets typed here at all.
  */
 const CREDENTIAL_SHAPED_KEY = /api[-_]?key|api[-_]?token/i
 
-/** A bare tool name, as `mcp__<server>__<tool>` carries it after the server. */
+/**
+ * A config VALUE that looks like a credential, whatever its key is called.
+ * The key check above stops `api_key: …`; this stops `x-custom: sk-ant-…`,
+ * which is the same credential under a name the key check cannot see.
+ * `SENSITIVE_VALUE` catches the `scheme://user:password@` form; the rest are
+ * the documented prefixes of the keys this product's presets take, plus an
+ * HTTP auth scheme typed in by hand. A prefix list cannot be complete — it
+ * is a guard against a mistake, and the credential field is the design.
+ */
+const CREDENTIAL_SHAPED_VALUE =
+  /^(bearer|basic|token|sentry-bearer)\s+\S|^(sk|pk|rk|ghp|gho|ghu|ghs|ghr|github_pat|xox[abpe]|hf|tvly|fc|whsec|re|sntrys|glpat|cal_(live|test)|akia|asia)[-_]/i
+
+/**
+ * A bare tool name, as `mcp__<server>__<tool>` carries it after the server.
+ * No double underscore: `disabledToolNames` prefixes `mcp__<name>__`, so a
+ * stored value already carrying that prefix would never match anything and
+ * a person would believe a tool was off that was not.
+ */
 const toolName = z
   .string()
-  .regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/, 'A tool name is letters, digits, underscores and hyphens.')
+  .regex(/^(?!.*__)[A-Za-z0-9][A-Za-z0-9_-]*$/, 'A tool name is letters, digits, underscores and hyphens, with no double underscore.')
   .max(120)
 
 /**
  * Refuse a `headers` or `env` entry whose KEY is credential-shaped, or is the
- * connector's own secret slot. The credential goes through `putSecret` and is
- * injected by the worker at the moment of use; anything typed into these maps
- * is stored in plain `jsonb`, where §2.3 says a credential may never be. A
- * non-secret header a preset needs (`close-scope: mcp.read`) passes.
+ * connector's own secret slot — or whose VALUE is. The credential goes through
+ * `putSecret` and is injected by the worker at the moment of use; anything
+ * typed into these maps is stored in plain `jsonb`, where §2.3 says a
+ * credential may never be. A non-secret header a preset needs
+ * (`close-scope: mcp.read`) passes.
  */
 function refuseCredentialShapedKeys<T extends { readonly [k: string]: unknown }>(
   field: 'headers' | 'env',
@@ -96,9 +112,12 @@ function refuseCredentialShapedKeys<T extends { readonly [k: string]: unknown }>
     const entries = config[field]
     if (!entries || typeof entries !== 'object') return
     const slot = slotOf(config).toLowerCase()
-    for (const key of Object.keys(entries as Record<string, unknown>)) {
+    for (const [key, value] of Object.entries(entries as Record<string, unknown>)) {
       const folded = key.toLowerCase()
-      if (SENSITIVE_KEY.test(folded) || CREDENTIAL_SHAPED_KEY.test(folded) || folded === slot) {
+      const keyLooksSecret = SENSITIVE_KEY.test(folded) || CREDENTIAL_SHAPED_KEY.test(folded) || folded === slot
+      const valueLooksSecret =
+        typeof value === 'string' && (SENSITIVE_VALUE.test(value) || CREDENTIAL_SHAPED_VALUE.test(value.trim()))
+      if (keyLooksSecret || valueLooksSecret) {
         ctx.addIssue({
           code: 'custom',
           path: [field, key],
@@ -135,8 +154,11 @@ const stdioConfig = z
     /**
      * Bare tool names the gate refuses outright for this server, before
      * classification — a DENY, never an allow. Names, never credentials.
+     * Optional rather than defaulted, so a row written before 0018 — and
+     * every caller that builds a config literal — keeps its shape; absent
+     * reads as nothing turned off, in `disabledToolNames`.
      */
-    disabledTools: z.array(toolName).max(64).default([]),
+    disabledTools: z.array(toolName).max(64).optional(),
   })
   .superRefine(refuseCredentialShapedKeys('env', (c) => c.secretEnv ?? 'MCP_SECRET'))
 
@@ -160,7 +182,8 @@ const httpConfig = z
      * and too few for a token.
      */
     secretPrefix: z.string().max(16).optional(),
-    disabledTools: z.array(toolName).max(64).default([]),
+    /** As on the stdio config. */
+    disabledTools: z.array(toolName).max(64).optional(),
   })
   .superRefine(refuseCredentialShapedKeys('headers', (c) => c.secretHeader ?? 'authorization'))
 
@@ -189,9 +212,9 @@ export function disabledToolNames(row: { readonly name: string; readonly config:
   // Read loosely rather than by transport: `disabledTools` has the same
   // shape on both configs, and this is called from places that hold a row
   // and not its parsed kind.
-  const parsed = z.object({ disabledTools: z.array(toolName).max(64).default([]) }).safeParse(row.config ?? {})
+  const parsed = z.object({ disabledTools: z.array(toolName).max(64).optional() }).safeParse(row.config ?? {})
   if (!parsed.success) return new Set()
-  return new Set(parsed.data.disabledTools.map((tool) => `mcp__${row.name}__${tool}`))
+  return new Set((parsed.data.disabledTools ?? []).map((tool) => `mcp__${row.name}__${tool}`))
 }
 
 /**

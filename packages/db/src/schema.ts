@@ -479,8 +479,11 @@ export const touches = pgTable(
      *  "nobody has". Inbound only, by CHECK. */
     handledAt: timestamp('handled_at', { withTimezone: true }),
     /** Who. RESTRICT, like `approvedBy`: the person stays identifiable as
-     *  long as the record does — users are revoked, never deleted. */
-    handledBy: uuid('handled_by').references(() => users.id, { onDelete: 'restrict' }),
+     *  long as the record does — users are revoked, never deleted. The key
+     *  is the composite (handled_by, org_id) → users (id, org_id), owned by
+     *  the migration as `scanId`'s is: a reply cannot be handled by another
+     *  org's user. */
+    handledBy: uuid('handled_by'),
     /**
      * For an OUTBOUND draft: the inbound touch it answers, so the worker can
      * thread it (In-Reply-To/References from that row's `provider_id`) and
@@ -729,9 +732,11 @@ export const notes = pgTable(
     id: id(),
     orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
     companyId: uuid('company_id').notNull().references(() => companies.id, { onDelete: 'cascade' }),
-    contactId: uuid('contact_id').references(() => contacts.id, { onDelete: 'cascade' }),
-    /** RESTRICT: whoever wrote it stays identifiable as long as the note does. */
-    authorUserId: uuid('author_user_id').notNull().references(() => users.id, { onDelete: 'restrict' }),
+    /** Same-org composite FK to contacts (id, org_id), CASCADE — owned by 0018. */
+    contactId: uuid('contact_id'),
+    /** RESTRICT: whoever wrote it stays identifiable as long as the note does.
+     *  Same-org composite FK to users (id, org_id), owned by 0018. */
+    authorUserId: uuid('author_user_id').notNull(),
     body: text('body').notNull(),
     pinned: boolean('pinned').notNull().default(false),
     ...timestamps,
@@ -756,16 +761,17 @@ export const tasks = pgTable(
     kind: text('kind').notNull().default('todo'),
     title: text('title').notNull(),
     detail: text('detail'),
-    /** SET NULL: an unassigned task is a normal state. */
-    assigneeUserId: uuid('assignee_user_id').references(() => users.id, { onDelete: 'set null' }),
+    /** SET NULL: an unassigned task is a normal state. Same-org composite FK
+     *  to users (id, org_id), owned by 0018 — as are the two below. */
+    assigneeUserId: uuid('assignee_user_id'),
     /** Nullable: the agent creates tasks and has no users row; the audit row
      *  names the actor. */
-    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdBy: uuid('created_by'),
     dueAt: timestamp('due_at', { withTimezone: true }),
     doneAt: timestamp('done_at', { withTimezone: true }),
     /** RESTRICT: a done task names a person who stays identifiable. NOT NULL
      *  exactly when `doneAt` is. */
-    doneBy: uuid('done_by').references(() => users.id, { onDelete: 'restrict' }),
+    doneBy: uuid('done_by'),
     ...timestamps,
   },
   (t) => [
@@ -791,7 +797,8 @@ export const proposalShares = pgTable(
     proposalId: uuid('proposal_id').notNull().references(() => proposals.id, { onDelete: 'cascade' }),
     /** sha256 of the token, lower-case hex. Never the token. */
     tokenHash: text('token_hash').notNull(),
-    createdBy: uuid('created_by').notNull().references(() => users.id, { onDelete: 'restrict' }),
+    /** RESTRICT; same-org composite FK to users (id, org_id), owned by 0018. */
+    createdBy: uuid('created_by').notNull(),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
     viewCount: integer('view_count').notNull().default(0),

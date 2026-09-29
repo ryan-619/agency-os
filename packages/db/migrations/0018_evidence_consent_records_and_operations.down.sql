@@ -22,15 +22,22 @@ ALTER TABLE connectors DROP CONSTRAINT IF EXISTS connectors_name_is_not_agency;
 ALTER TABLE users DROP COLUMN IF EXISTS revoked_at;
 ALTER TABLE suppressions DROP CONSTRAINT IF EXISTS suppressions_source_is_known;
 ALTER TABLE suppressions DROP COLUMN IF EXISTS source;
+DROP TRIGGER IF EXISTS touches_answer_names_an_inbound_row_in_the_same_org ON touches;
+DROP FUNCTION IF EXISTS touches_refuse_an_answer_outside_its_conversation();
 DROP INDEX IF EXISTS touches_answers_idx;
 ALTER TABLE touches DROP CONSTRAINT IF EXISTS touches_answer_is_outbound;
 ALTER TABLE touches DROP COLUMN IF EXISTS answers_touch_id;
 DROP INDEX IF EXISTS touches_org_inbox_idx;
 ALTER TABLE touches DROP CONSTRAINT IF EXISTS touches_handled_has_who;
 ALTER TABLE touches DROP CONSTRAINT IF EXISTS touches_handled_is_inbound_only;
+ALTER TABLE touches DROP CONSTRAINT IF EXISTS touches_handled_by_is_in_the_same_org;
 ALTER TABLE touches DROP COLUMN IF EXISTS handled_by;
 ALTER TABLE touches DROP COLUMN IF EXISTS handled_at;
 DROP INDEX IF EXISTS findings_company_informational_idx;
 DELETE FROM findings WHERE NOT scored;
 ALTER TABLE findings DROP CONSTRAINT IF EXISTS findings_informational_carries_no_weight;
 ALTER TABLE findings DROP COLUMN IF EXISTS scored;
+-- Last: nothing references the (id, org_id) pairs once the tables and the
+-- handled_by key above are gone.
+ALTER TABLE contacts DROP CONSTRAINT IF EXISTS contacts_id_org_key;
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_id_org_key;

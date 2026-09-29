@@ -4,6 +4,17 @@
 -- feature and by a §2 rule. Every enumerated column is text + CHECK (an enum
 -- migration is not reversible — CLAUDE.md §4).
 
+-- (0) The (id, org_id) keys the same-org foreign keys below hang off. A
+--     plain FK to users(id) or contacts(id) lets a row in one org name a
+--     person in another: a reply "handled by" a stranger, a note about
+--     somebody else's contact, a task done by a user who was never in the
+--     org. 0006 gave scans this shape for findings and scores; users and
+--     contacts get it here, and every user- or contact-valued column this
+--     migration adds references the PAIR, so the database refuses the
+--     cross-org row instead of a route remembering to check.
+ALTER TABLE users ADD CONSTRAINT users_id_org_key UNIQUE (id, org_id);
+ALTER TABLE contacts ADD CONSTRAINT contacts_id_org_key UNIQUE (id, org_id);
+
 -- (1) findings.scored — §2.2. The scanner now records observations that are
 --     NOT in the ICP (informational signals). A row that is not scored carries
 --     no weight, by CHECK, so no reader can mistake "also observed" for "a gap
@@ -20,7 +31,9 @@ CREATE INDEX findings_company_informational_idx ON findings (company_id) WHERE N
 --     stays identifiable as long as the record does — users are revoked,
 --     never deleted).
 ALTER TABLE touches ADD COLUMN handled_at timestamptz;
-ALTER TABLE touches ADD COLUMN handled_by uuid REFERENCES users(id) ON DELETE RESTRICT;
+ALTER TABLE touches ADD COLUMN handled_by uuid;
+ALTER TABLE touches ADD CONSTRAINT touches_handled_by_is_in_the_same_org
+  FOREIGN KEY (handled_by, org_id) REFERENCES users (id, org_id) ON DELETE RESTRICT;
 ALTER TABLE touches ADD CONSTRAINT touches_handled_is_inbound_only
   CHECK (handled_at IS NULL OR direction = 'in');
 ALTER TABLE touches ADD CONSTRAINT touches_handled_has_who
@@ -37,6 +50,34 @@ ALTER TABLE touches ADD COLUMN answers_touch_id uuid REFERENCES touches(id) ON D
 ALTER TABLE touches ADD CONSTRAINT touches_answer_is_outbound
   CHECK (answers_touch_id IS NULL OR direction = 'out');
 CREATE INDEX touches_answers_idx ON touches (answers_touch_id) WHERE answers_touch_id IS NOT NULL;
+
+-- The FK above only says the parent EXISTS. `dispatchTouch` reads the
+-- parent's provider_id into In-Reply-To, so a parent in another org, or
+-- an outbound row, would thread this org's message into a conversation
+-- that is not its own. The trigger closes both — a CHECK cannot see
+-- another row — and fires on UPDATE too, so an honest row cannot be
+-- re-pointed afterwards.
+CREATE FUNCTION touches_refuse_an_answer_outside_its_conversation() RETURNS trigger AS $$
+DECLARE
+  parent_direction text;
+  parent_org uuid;
+BEGIN
+  SELECT direction, org_id INTO parent_direction, parent_org
+    FROM touches WHERE id = NEW.answers_touch_id;
+  IF parent_direction IS DISTINCT FROM 'in' OR parent_org IS DISTINCT FROM NEW.org_id THEN
+    RAISE EXCEPTION
+      'touches_answer_names_an_inbound_row_in_the_same_org: touch % answers %, which is not an inbound row in its org',
+      NEW.id, NEW.answers_touch_id
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER touches_answer_names_an_inbound_row_in_the_same_org
+  BEFORE INSERT OR UPDATE ON touches
+  FOR EACH ROW WHEN (NEW.answers_touch_id IS NOT NULL)
+  EXECUTE FUNCTION touches_refuse_an_answer_outside_its_conversation();
 
 -- (4) suppressions.source — §2.1. WHICH path recorded the opt-out is a fact an
 --     auditor asks for. NULLABLE like 0017's reply_kind: rows written before
@@ -85,12 +126,18 @@ CREATE TABLE notes (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id         uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
   company_id     uuid NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
-  contact_id     uuid REFERENCES contacts(id) ON DELETE CASCADE,
-  author_user_id uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  contact_id     uuid,
+  author_user_id uuid NOT NULL,
   body           text NOT NULL,
   pinned         boolean NOT NULL DEFAULT false,
   created_at     timestamptz NOT NULL DEFAULT now(),
   updated_at     timestamptz,
+  -- Same-org foreign keys (see (0)): a note about another org's contact, or
+  -- by another org's user, is unstorable.
+  CONSTRAINT notes_contact_is_in_the_same_org
+    FOREIGN KEY (contact_id, org_id) REFERENCES contacts (id, org_id) ON DELETE CASCADE,
+  CONSTRAINT notes_author_is_in_the_same_org
+    FOREIGN KEY (author_user_id, org_id) REFERENCES users (id, org_id) ON DELETE RESTRICT,
   CONSTRAINT notes_body_is_not_blank CHECK (btrim(body) <> ''),
   CONSTRAINT notes_body_is_bounded  CHECK (length(body) <= 8000)
 );
@@ -114,13 +161,22 @@ CREATE TABLE tasks (
   kind             text NOT NULL DEFAULT 'todo',
   title            text NOT NULL,
   detail           text,
-  assignee_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
-  created_by       uuid REFERENCES users(id) ON DELETE SET NULL,
+  assignee_user_id uuid,
+  created_by       uuid,
   due_at           timestamptz,
   done_at          timestamptz,
-  done_by          uuid REFERENCES users(id) ON DELETE RESTRICT,
+  done_by          uuid,
   created_at       timestamptz NOT NULL DEFAULT now(),
   updated_at       timestamptz,
+  -- Same-org foreign keys (see (0)). SET NULL names its column: a two-column
+  -- key would otherwise null org_id too, which is NOT NULL and would turn a
+  -- user's offboarding into a failed delete.
+  CONSTRAINT tasks_assignee_is_in_the_same_org
+    FOREIGN KEY (assignee_user_id, org_id) REFERENCES users (id, org_id) ON DELETE SET NULL (assignee_user_id),
+  CONSTRAINT tasks_creator_is_in_the_same_org
+    FOREIGN KEY (created_by, org_id) REFERENCES users (id, org_id) ON DELETE SET NULL (created_by),
+  CONSTRAINT tasks_done_by_is_in_the_same_org
+    FOREIGN KEY (done_by, org_id) REFERENCES users (id, org_id) ON DELETE RESTRICT,
   CONSTRAINT tasks_kind_known CHECK (kind IN ('todo', 'linkedin_send', 'kickoff', 'renewal')),
   CONSTRAINT tasks_title_is_not_blank CHECK (btrim(title) <> ''),
   CONSTRAINT tasks_title_is_bounded CHECK (length(title) <= 200),
@@ -144,7 +200,7 @@ CREATE TABLE proposal_shares (
   org_id           uuid NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
   proposal_id      uuid NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
   token_hash       text NOT NULL,
-  created_by       uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+  created_by       uuid NOT NULL,
   expires_at       timestamptz NOT NULL,
   revoked_at       timestamptz,
   view_count       integer NOT NULL DEFAULT 0,
@@ -154,6 +210,8 @@ CREATE TABLE proposal_shares (
   accepted_by_name text,
   created_at       timestamptz NOT NULL DEFAULT now(),
   updated_at       timestamptz,
+  CONSTRAINT proposal_shares_creator_is_in_the_same_org
+    FOREIGN KEY (created_by, org_id) REFERENCES users (id, org_id) ON DELETE RESTRICT,
   CONSTRAINT proposal_shares_token_hash_key UNIQUE (token_hash),
   CONSTRAINT proposal_shares_token_hash_shape CHECK (token_hash ~ '^[0-9a-f]{64}$'),
   CONSTRAINT proposal_shares_accepted_has_name CHECK ((accepted_at IS NULL) = (accepted_by_name IS NULL)),

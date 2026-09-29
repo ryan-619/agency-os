@@ -42,6 +42,22 @@ import { advanceDeal } from './deals.js'
 export type TouchRow = typeof schema.touches.$inferSelect
 
 /**
+ * Where an inbound path shouts when §2.1's obligation is not met. The worker
+ * and the web route each have a logger; a caller that passes none gets a
+ * structured line on stderr, because the one thing this must never be is
+ * silent. Ids only — never an address, never a body.
+ */
+export interface InboundLog {
+  error(message: string, fields?: Readonly<Record<string, unknown>>): void
+}
+
+const stderrLog: InboundLog = {
+  error: (message, fields) => {
+    console.error(JSON.stringify({ level: 'error', message, ...fields, at: new Date().toISOString() }))
+  },
+}
+
+/**
  * What actually puts a message on the wire.
  *
  * An interface so SMTP and SendGrid sit behind the same shape (§8.4), and so
@@ -944,12 +960,17 @@ export async function recordInboundReply(
     readonly providerId?: string | null
     readonly inReplyTo?: string | null
     /**
-     * Whether the mail's HEADERS said it was automatic. Accepted and IGNORED
-     * until `mail-signals-and-bounce-pause` gives it meaning: the reader
-     * that decides it is that feature's, and a caller passing it early
-     * changes nothing. Stated so nobody reads the parameter as a promise.
+     * Whether the mail's HEADERS said it was automatic (Auto-Submitted,
+     * Precedence: bulk). The reader that decides it from headers is
+     * `mail-signals-and-bounce-pause`'s (wave 3), so nothing passes it yet;
+     * the PRECEDENCE is stated here, now, so that feature cannot get it
+     * wrong: the opt-out reader runs first on every inbound, and only a body
+     * that did not ask to be left alone may be filed as an auto-reply. See
+     * the comment at the classification below.
      */
     readonly autoReply?: boolean
+    /** See `InboundLog`. Defaults to a structured line on stderr. */
+    readonly log?: InboundLog
     readonly now?: Date
   },
 ): Promise<{
@@ -957,6 +978,13 @@ export async function recordInboundReply(
   paused: boolean
   cancelled: number
   suppressed: boolean
+  /**
+   * §2.1's Phase 4 obligation: true when the reply asked to be left alone
+   * and the suppression row could NOT be written. Already audited and
+   * logged by the time the caller sees it; the caller's job is to get a
+   * person to record the opt-out by hand.
+   */
+  optOutNotRecorded: boolean
   deal: string | null
   /** The deterministic kind stored on the inbound touch (§5.5). */
   replyKind: ReplyKind
@@ -995,29 +1023,20 @@ export async function recordInboundReply(
   const touchId = inserted[0]?.id
   if (!touchId) throw new Error('inbound touch insert returned no row')
 
-  const paused = await pauseContact(db, args.orgId, args.contactId, `replied ${now.toISOString()}`, now)
-
-  // Anything already queued for them is now wrong. Marked refused rather than
-  // deleted: the record that it was ABOUT to go, and did not, is the useful
-  // one.
-  const cancelled = await db
-    .update(schema.touches)
-    .set({ status: 'refused', refusalCode: 'consent_revoked' })
-    .where(
-      and(
-        eq(schema.touches.orgId, args.orgId),
-        eq(schema.touches.contactId, args.contactId),
-        eq(schema.touches.direction, 'out'),
-        inArray(schema.touches.status, ['queued', 'awaiting_approval', 'approved']),
-      ),
-    )
-    .returning({ id: schema.touches.id })
-
   /**
    * Classified from the SAME opt-out reading that decides the suppression
    * below, rather than a second look at the text. One reading, one answer:
    * a row that says `opted_out` and a suppression that was never written
    * would be two different claims about one reply.
+   *
+   * The ORDER is §2.1's, not the mail's. The opt-out reader runs FIRST on
+   * every inbound; an auto-reply flag from the headers is consulted only
+   * for a body that did not ask to be left alone. An out-of-office that
+   * says "I have left — remove me from your list" is an opt-out that
+   * happens to be automatic, and filing it as `auto_reply` would store no
+   * suppression for a person who asked for one. Only a genuine automatic
+   * answer skips the pause, the cancel and the deal move: nobody read
+   * anything, so nothing about the conversation changed.
    *
    * The deterministic kind is always stored. A model may improve on it
    * afterwards (§5.5) and can only ever move it AMONG the non-opt-out
@@ -1025,26 +1044,86 @@ export async function recordInboundReply(
    * model is consulted (§2.1).
    */
   const optedOut = looksLikeOptOut(args.body)
-  const replyKind = classifyReply(args.body, optedOut)
+  const automatic = !optedOut && args.autoReply === true
+  const replyKind: ReplyKind = automatic ? 'auto_reply' : classifyReply(args.body, optedOut)
   await db
     .update(schema.touches)
     .set({ replyKind })
     .where(eq(schema.touches.id, touchId))
 
+  const paused = automatic
+    ? false
+    : await pauseContact(db, args.orgId, args.contactId, `replied ${now.toISOString()}`, now)
+
+  // Anything already queued for them is now wrong. Marked refused rather than
+  // deleted: the record that it was ABOUT to go, and did not, is the useful
+  // one.
+  const cancelled = automatic
+    ? []
+    : await db
+        .update(schema.touches)
+        .set({ status: 'refused', refusalCode: 'consent_revoked' })
+        .where(
+          and(
+            eq(schema.touches.orgId, args.orgId),
+            eq(schema.touches.contactId, args.contactId),
+            eq(schema.touches.direction, 'out'),
+            inArray(schema.touches.status, ['queued', 'awaiting_approval', 'approved']),
+          ),
+        )
+        .returning({ id: schema.touches.id })
+
   let suppressed = false
+  let optOutNotRecorded = false
   if (args.channel === 'email' && optedOut) {
-    const added = await addSuppression(db, {
-      orgId: args.orgId,
-      kind: 'email',
-      value: args.from,
-      reason: `replied asking to stop, ${now.toISOString().slice(0, 10)}`,
-      source: 'reply',
-    })
+    // A THROW is what a database fault actually does, and `{ ok: false }` is
+    // what an unreadable address does; both are the same failure to the
+    // person who asked to be left alone. (The same lesson recordOptOut in
+    // calls.ts learned.)
+    let added: Awaited<ReturnType<typeof addSuppression>>
+    let why: string
+    try {
+      added = await addSuppression(db, {
+        orgId: args.orgId,
+        kind: 'email',
+        value: args.from,
+        reason: `replied asking to stop, ${now.toISOString().slice(0, 10)}`,
+        source: 'reply',
+      })
+      // `added.message` quotes the address back; the audit row and the log
+      // carry a reason CLASS instead (§2.3).
+      why = 'unparseable_address'
+    } catch (err) {
+      added = { ok: false, message: 'The suppression could not be written.' }
+      why = err instanceof Error ? err.name : 'UnknownError'
+    }
     suppressed = added.ok
+    if (!added.ok) {
+      // §2.1's Phase 4 obligation: a suppression insert that fails is an
+      // opt-out that was never recorded — worse than any bug the constraint
+      // replaced. The row still says `opted_out`, so the state is queryable;
+      // the audit row is what the digest and the compliance page count; the
+      // log line is what a person sees today. Never silently.
+      optOutNotRecorded = true
+      await appendAudit(db, {
+        orgId: args.orgId,
+        actor: 'system',
+        action: 'contact.opt_out_not_recorded',
+        subjectType: 'contact',
+        subjectId: args.contactId,
+        detail: { touchId, channel: args.channel, why },
+      }).catch(() => {})
+      ;(args.log ?? stderrLog).error('OPT-OUT NOT RECORDED — follow up by hand', {
+        touchId,
+        contactId: args.contactId,
+        orgId: args.orgId,
+        why,
+      })
+    }
   }
 
   let deal: string | null = null
-  if (companyId) {
+  if (companyId && !automatic) {
     const moved = await advanceDeal(db, {
       orgId: args.orgId,
       companyId,
@@ -1061,10 +1140,12 @@ export async function recordInboundReply(
     subjectType: 'contact',
     subjectId: args.contactId,
     // §2.3: the facts and the counts, never the reply's text.
-    detail: { channel: args.channel, paused, cancelledQueued: cancelled.length, suppressed, deal },
+    detail: { channel: args.channel, paused, cancelledQueued: cancelled.length, suppressed, deal, replyKind },
   }).catch(() => {})
 
-  return { touchId, paused, cancelled: cancelled.length, suppressed, deal, replyKind, companyId, companyDomain }
+  return {
+    touchId, paused, cancelled: cancelled.length, suppressed, optOutNotRecorded, deal, replyKind, companyId, companyDomain,
+  }
 }
 
 export type InboundOutcome =
@@ -1123,6 +1204,8 @@ export async function handleInboundEmail(
      */
     readonly headers?: Readonly<Record<string, string>>
     readonly dsn?: string | null
+    /** Forwarded to `recordInboundReply`; see `InboundLog`. */
+    readonly log?: InboundLog
     readonly now?: Date
   },
 ): Promise<InboundOutcome> {
@@ -1190,6 +1273,7 @@ export async function handleInboundEmail(
         providerId: mail.messageId ?? null,
         inReplyTo: hit.id,
         ...(mail.now ? { now: mail.now } : {}),
+        ...(mail.log ? { log: mail.log } : {}),
       })
       return {
         matched: 'message',
@@ -1226,6 +1310,7 @@ export async function handleInboundEmail(
     body: mail.text,
     providerId: mail.messageId ?? null,
     ...(mail.now ? { now: mail.now } : {}),
+    ...(mail.log ? { log: mail.log } : {}),
   })
   return {
     matched: 'contact', contactId: only.id, orgId: only.orgId,
