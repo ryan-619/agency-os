@@ -14,7 +14,7 @@
  */
 import { and, asc, desc, eq, sql } from 'drizzle-orm'
 import { z } from 'zod'
-import { normaliseSuppressionValue, type SuppressionKind } from '@agency/core'
+import { normaliseSuppressionValue, type SuppressionKind, type SuppressionSource } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 
@@ -213,6 +213,13 @@ export async function addSuppression(
     readonly kind: SuppressionKind
     readonly value: string
     readonly reason: string
+    /**
+     * WHICH path recorded the opt-out (0018): a person on the suppressions
+     * page, a reply, a spoken opt-out, the one-click link, an erasure. A fact
+     * an auditor asks for, so it is a column and not a prefix on the reason.
+     * Null when the caller predates the column; never invented.
+     */
+    readonly source?: SuppressionSource | null
   },
 ): Promise<{ ok: true; value: string; alreadyPresent: boolean } | { ok: false; message: string }> {
   const reason = args.reason.trim()
@@ -249,7 +256,7 @@ export async function addSuppression(
   // audit row. A duplicate is the outcome the caller wanted.
   const inserted = await db
     .insert(schema.suppressions)
-    .values({ orgId: args.orgId, kind: args.kind, value, reason })
+    .values({ orgId: args.orgId, kind: args.kind, value, reason, source: args.source ?? null })
     .onConflictDoNothing({
       target: [schema.suppressions.orgId, schema.suppressions.kind, schema.suppressions.value],
     })

@@ -116,6 +116,37 @@ export const AGENCY_TOOL_RISK = {
     'writes_internal_state',
     'Records a meeting with a company and moves its deal to the meeting stage. Does not send an invitation.',
   ],
+  // --- the fourteen tools of the enhancement, each named after the feature
+  //     that implements it. Reads are low; internal writes are medium; nothing
+  //     new leaves the building — `queue_touch` stays the only one that does.
+  // consent-ledger-and-check-send
+  check_send: ['low', 'read_only', 'Runs the send rules for one person and campaign, and reports the answer. Queues nothing.'],
+  // consent-ledger-and-check-send
+  get_consent: ['low', 'read_only', 'Reads the consent recorded per channel for one person, and any suppression that matches them.'],
+  // evidence-and-reply-tools
+  get_replies: ['low', 'read_only', 'Reads inbound replies with their kind, whether a teammate handled them, and the message each answered.'],
+  // evidence-and-reply-tools
+  classify_reply: ['medium', 'writes_internal_state', 'Records what kind of reply a message was, or that a person dealt with it. Never records an opt-out and sends nothing.'],
+  // evidence-and-reply-tools
+  get_scan_history: ['low', 'read_only', 'Reads every scan of a company with the score computed from each one.'],
+  // evidence-and-reply-tools
+  get_evidence_changes: ['low', 'read_only', 'Compares the two most recent successful scans of a company signal by signal.'],
+  // evidence-and-reply-tools
+  get_stale_companies: ['low', 'read_only', 'Lists companies whose evidence is stale, unreachable or missing, and why.'],
+  // reporting-and-task-tools
+  get_pipeline_metrics: ['low', 'read_only', 'Reads stage conversion, time in stage and win rate from the pipeline’s own history.'],
+  // reporting-and-task-tools
+  get_company_timeline: ['low', 'read_only', 'Reads everything that happened to one company, newest first, from the records that hold it.'],
+  // reporting-and-task-tools
+  get_compliance_summary: ['low', 'read_only', 'Reads the consent, suppression, refusal, disclosure and freshness counts the compliance page shows.'],
+  // reporting-and-task-tools
+  search_crm: ['low', 'read_only', 'Searches companies, people, deals, meetings and proposals by text, within what the caller may see.'],
+  // reporting-and-task-tools
+  add_note: ['medium', 'writes_internal_state', 'Writes a teammate-style note on a company. It is never evidence and nothing leaves the building.'],
+  // reporting-and-task-tools
+  create_task: ['medium', 'writes_internal_state', 'Creates a task for a teammate with an optional due date. Nothing is sent.'],
+  // reporting-and-task-tools
+  list_tasks: ['low', 'read_only', 'Reads open tasks, optionally one person’s or one company’s.'],
 } as const satisfies Readonly<Record<string, readonly [Risk, RiskRule, string]>>
 
 export type AgencyToolName = keyof typeof AGENCY_TOOL_RISK

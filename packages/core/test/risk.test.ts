@@ -178,6 +178,30 @@ describe('the registry cannot drift from what is reachable', () => {
     expect(AGENCY_TOOL_RISK.queue_touch[0]).toBe('high')
   })
 
+  /**
+   * The fourteen tools of the enhancement. Every read is low; every internal
+   * write is medium; none of them leaves the building, which the test above
+   * pins to `queue_touch` alone.
+   */
+  it('classifies every new read as low and every new internal write as medium', () => {
+    const reads = [
+      'check_send', 'get_consent', 'get_replies', 'get_scan_history', 'get_evidence_changes',
+      'get_stale_companies', 'get_pipeline_metrics', 'get_company_timeline', 'get_compliance_summary',
+      'search_crm', 'list_tasks',
+    ] as const
+    const writes = ['classify_reply', 'add_note', 'create_task'] as const
+    for (const name of reads) {
+      expect(AGENCY_TOOL_RISK[name][0], name).toBe('low')
+      expect(AGENCY_TOOL_RISK[name][1], name).toBe('read_only')
+    }
+    for (const name of writes) {
+      expect(AGENCY_TOOL_RISK[name][0], name).toBe('medium')
+      expect(AGENCY_TOOL_RISK[name][1], name).toBe('writes_internal_state')
+    }
+    expect(reads.length + writes.length).toBe(14)
+    expect(AGENCY_TOOL_NAMES).toHaveLength(23)
+  })
+
   it('gives every registered tool an explanation a human could act on', () => {
     for (const name of AGENCY_TOOL_NAMES) {
       const [, , explain] = AGENCY_TOOL_RISK[name] as readonly [Risk, RiskRule, string]

@@ -1174,3 +1174,423 @@ describe('§2 invariants are enforced by the schema', () => {
     })
   })
 })
+
+/**
+ * 0018 — evidence, consent records and operations. One reject and one accept
+ * per CHECK, unique index, trigger and same-org key, with the constraint's
+ * name asserted in the message: the name is what somebody reads in a log six
+ * months later, and a rule that fails under a different name is a rule
+ * nobody can find.
+ */
+describe('0018 — evidence, consent records and operations', () => {
+  let db: TestDb
+  let orgId: string
+  let userId: string
+  let companyId: string
+  let contactId: string
+  let scanId: string
+  let proposalId: string
+  let inbound: string
+  let outbound: string
+  // A second org, its user and its contact: every same-org key is proved by
+  // a row that names the RIGHT kind of thing in the WRONG org.
+  let rivalOrg: string
+  let rivalUser: string
+  let rivalContact: string
+  let rivalInbound: string
+
+  beforeAll(async () => {
+    db = await migratedDb()
+    ;[{ id: orgId }] = await db.driver.select<{ id: string }>(`INSERT INTO orgs (name) VALUES ('Agency') RETURNING id`)
+    ;[{ id: userId }] = await db.driver.select<{ id: string }>(
+      `INSERT INTO users (org_id, email, role) VALUES ($1, 'owner@agency.test', 'owner') RETURNING id`, [orgId],
+    )
+    ;[{ id: companyId }] = await db.driver.select<{ id: string }>(
+      `INSERT INTO companies (org_id, domain, name) VALUES ($1, 'rentman.io', 'Rentman') RETURNING id`, [orgId],
+    )
+    ;[{ id: contactId }] = await db.driver.select<{ id: string }>(
+      `INSERT INTO contacts (org_id, company_id, email) VALUES ($1, $2, 'priya@rentman.io') RETURNING id`, [orgId, companyId],
+    )
+    ;[{ id: scanId }] = await db.driver.select<{ id: string }>(
+      `INSERT INTO scans (org_id, company_id, ok) VALUES ($1, $2, true) RETURNING id`, [orgId, companyId],
+    )
+    ;[{ id: proposalId }] = await db.driver.select<{ id: string }>(
+      `INSERT INTO proposals (org_id, company_id, scan_id, title, document) VALUES ($1, $2, $3, 'Posture review', '{}'::jsonb) RETURNING id`,
+      [orgId, companyId, scanId],
+    )
+    ;[{ id: inbound }] = await db.driver.select<{ id: string }>(
+      `INSERT INTO touches (org_id, company_id, contact_id, channel, direction, status, provider_id)
+       VALUES ($1, $2, $3, 'email', 'in', 'replied', '<abc@rentman.io>') RETURNING id`,
+      [orgId, companyId, contactId],
+    )
+    ;[{ id: outbound }] = await db.driver.select<{ id: string }>(
+      `INSERT INTO touches (org_id, company_id, contact_id, channel, direction, status, sent_at)
+       VALUES ($1, $2, $3, 'email', 'out', 'sent', now()) RETURNING id`,
+      [orgId, companyId, contactId],
+    )
+    ;[{ id: rivalOrg }] = await db.driver.select<{ id: string }>(`INSERT INTO orgs (name) VALUES ('Rival') RETURNING id`)
+    ;[{ id: rivalUser }] = await db.driver.select<{ id: string }>(
+      `INSERT INTO users (org_id, email, role) VALUES ($1, 'owner@rival.test', 'owner') RETURNING id`, [rivalOrg],
+    )
+    const [{ id: rivalCompany }] = await db.driver.select<{ id: string }>(
+      `INSERT INTO companies (org_id, domain) VALUES ($1, 'rival.test') RETURNING id`, [rivalOrg],
+    )
+    ;[{ id: rivalContact }] = await db.driver.select<{ id: string }>(
+      `INSERT INTO contacts (org_id, company_id, email) VALUES ($1, $2, 'x@rival.test') RETURNING id`, [rivalOrg, rivalCompany],
+    )
+    ;[{ id: rivalInbound }] = await db.driver.select<{ id: string }>(
+      `INSERT INTO touches (org_id, company_id, contact_id, channel, direction, status, provider_id)
+       VALUES ($1, $2, $3, 'email', 'in', 'replied', '<theirs@rival.test>') RETURNING id`,
+      [rivalOrg, rivalCompany, rivalContact],
+    )
+  })
+  afterAll(async () => { await db.close() })
+
+  const reject = async (sql: string, params: unknown[]) =>
+    expectRejection(() => db.driver.select(sql, params))
+
+  describe('§2.2 findings.scored — an informational signal carries no weight', () => {
+    it('REFUSES an unscored finding that claims weight', async () => {
+      const msg = await reject(
+        `INSERT INTO findings (org_id, scan_id, company_id, signal_key, observed, gap, weight, scored, evidence)
+         VALUES ($1, $2, $3, 'csp_quality', true, true, 5, false, '{"url":"https://rentman.io/"}'::jsonb)`,
+        [orgId, scanId, companyId],
+      )
+      expect(msg).toContain('findings_informational_carries_no_weight')
+    })
+
+    it('accepts an unscored finding at weight 0', async () => {
+      const rows = await db.driver.select<{ id: string }>(
+        `INSERT INTO findings (org_id, scan_id, company_id, signal_key, observed, gap, weight, scored, evidence)
+         VALUES ($1, $2, $3, 'csp_quality', true, true, 0, false, '{"url":"https://rentman.io/"}'::jsonb) RETURNING id`,
+        [orgId, scanId, companyId],
+      )
+      expect(rows).toHaveLength(1)
+    })
+
+    it('defaults every existing row to scored — everything stored before 0018 was an ICP key', async () => {
+      const [row] = await db.driver.select<{ scored: boolean }>(
+        `INSERT INTO findings (org_id, scan_id, company_id, signal_key, observed, gap, weight)
+         VALUES ($1, $2, $3, 'hsts', true, false, 10) RETURNING scored`,
+        [orgId, scanId, companyId],
+      )
+      expect(row.scored).toBe(true)
+    })
+  })
+
+  describe('touches.handled_* — a person dealt with a reply', () => {
+    it('REFUSES handling an OUTBOUND row', async () => {
+      const msg = await reject(
+        `UPDATE touches SET handled_at = now(), handled_by = $2 WHERE id = $1`, [outbound, userId],
+      )
+      expect(msg).toContain('touches_handled_is_inbound_only')
+    })
+
+    it('REFUSES a handled_at with nobody named, and a name with no time', async () => {
+      const a = await reject(`UPDATE touches SET handled_at = now() WHERE id = $1`, [inbound])
+      expect(a).toContain('touches_handled_has_who')
+      const b = await reject(`UPDATE touches SET handled_by = $2 WHERE id = $1`, [inbound, userId])
+      expect(b).toContain('touches_handled_has_who')
+    })
+
+    it('REFUSES a handler from another org', async () => {
+      const msg = await reject(
+        `UPDATE touches SET handled_at = now(), handled_by = $2 WHERE id = $1`, [inbound, rivalUser],
+      )
+      expect(msg).toContain('touches_handled_by_is_in_the_same_org')
+    })
+
+    it('accepts an inbound row handled by one of its own org’s users', async () => {
+      const rows = await db.driver.select<{ id: string }>(
+        `UPDATE touches SET handled_at = now(), handled_by = $2 WHERE id = $1 RETURNING id`, [inbound, userId],
+      )
+      expect(rows).toHaveLength(1)
+    })
+
+    it('will not delete a user who handled a reply — they are revoked, never deleted', async () => {
+      const msg = await reject(`DELETE FROM users WHERE id = $1`, [userId])
+      expect(msg).toMatch(/touches_handled_by_is_in_the_same_org|violates foreign key/)
+    })
+  })
+
+  describe('touches.answers_touch_id — an outbound draft that answers a reply', () => {
+    it('REFUSES an INBOUND row that claims to answer something', async () => {
+      const msg = await reject(
+        `INSERT INTO touches (org_id, company_id, channel, direction, status, answers_touch_id)
+         VALUES ($1, $2, 'email', 'in', 'replied', $3)`,
+        [orgId, companyId, inbound],
+      )
+      expect(msg).toContain('touches_answer_is_outbound')
+    })
+
+    /**
+     * The FK only says the parent exists. `dispatchTouch` reads the parent's
+     * provider_id into In-Reply-To, so answering an OUTBOUND row, or a row
+     * in another org, would thread this message into a conversation that is
+     * not its own.
+     */
+    it('REFUSES an answer to an OUTBOUND row', async () => {
+      const msg = await reject(
+        `INSERT INTO touches (org_id, company_id, channel, direction, status, answers_touch_id)
+         VALUES ($1, $2, 'email', 'out', 'awaiting_approval', $3)`,
+        [orgId, companyId, outbound],
+      )
+      expect(msg).toContain('touches_answer_names_an_inbound_row_in_the_same_org')
+    })
+
+    it('REFUSES an answer to another org’s reply', async () => {
+      const msg = await reject(
+        `INSERT INTO touches (org_id, company_id, channel, direction, status, answers_touch_id)
+         VALUES ($1, $2, 'email', 'out', 'awaiting_approval', $3)`,
+        [orgId, companyId, rivalInbound],
+      )
+      expect(msg).toContain('touches_answer_names_an_inbound_row_in_the_same_org')
+    })
+
+    it('accepts an answer to an inbound row in the same org, and refuses re-pointing it afterwards', async () => {
+      const [{ id }] = await db.driver.select<{ id: string }>(
+        `INSERT INTO touches (org_id, company_id, contact_id, channel, direction, status, answers_touch_id)
+         VALUES ($1, $2, $3, 'email', 'out', 'awaiting_approval', $4) RETURNING id`,
+        [orgId, companyId, contactId, inbound],
+      )
+      expect(id).toBeTruthy()
+      // Fires on UPDATE too: an honest row cannot be edited into a dishonest one.
+      const msg = await reject(`UPDATE touches SET answers_touch_id = $2 WHERE id = $1`, [id, rivalInbound])
+      expect(msg).toContain('touches_answer_names_an_inbound_row_in_the_same_org')
+    })
+
+    it('keeps the answer when the reply it answered is deleted (SET NULL)', async () => {
+      const [{ id: reply }] = await db.driver.select<{ id: string }>(
+        `INSERT INTO touches (org_id, company_id, channel, direction, status) VALUES ($1, $2, 'email', 'in', 'replied') RETURNING id`,
+        [orgId, companyId],
+      )
+      const [{ id: answer }] = await db.driver.select<{ id: string }>(
+        `INSERT INTO touches (org_id, company_id, channel, direction, status, answers_touch_id)
+         VALUES ($1, $2, 'email', 'out', 'awaiting_approval', $3) RETURNING id`,
+        [orgId, companyId, reply],
+      )
+      await db.driver.select(`DELETE FROM touches WHERE id = $1`, [reply])
+      const [row] = await db.driver.select<{ answers_touch_id: string | null }>(
+        `SELECT answers_touch_id FROM touches WHERE id = $1`, [answer],
+      )
+      expect(row.answers_touch_id).toBeNull()
+    })
+  })
+
+  describe('§2.1 suppressions.source — which path recorded the opt-out', () => {
+    it.each(['imported', 'agent', 'MANUAL', ''])('REFUSES the source %j', async (source) => {
+      const msg = await reject(
+        `INSERT INTO suppressions (org_id, kind, value, reason, source) VALUES ($1, 'email', $2, 'r', $3)`,
+        [orgId, `${source.toLowerCase() || 'blank'}-source@example.com`, source],
+      )
+      expect(msg).toContain('suppressions_source_is_known')
+    })
+
+    it.each(['manual', 'reply', 'voice', 'unsubscribe', 'erasure', null])('accepts the source %j', async (source) => {
+      const rows = await db.driver.select<{ id: string }>(
+        `INSERT INTO suppressions (org_id, kind, value, reason, source) VALUES ($1, 'email', $2, 'r', $3) RETURNING id`,
+        [orgId, `${source ?? 'untracked'}@example.com`, source],
+      )
+      expect(rows).toHaveLength(1)
+    })
+  })
+
+  describe('§6 connectors.name is never agency', () => {
+    it('REFUSES a connector named agency — it would displace the in-process server', async () => {
+      const msg = await reject(
+        `INSERT INTO connectors (org_id, name, kind, config) VALUES ($1, 'agency', 'http', '{}'::jsonb)`, [orgId],
+      )
+      expect(msg).toContain('connectors_name_is_not_agency')
+    })
+  })
+
+  describe('contacts.email_bounce* — a bounce is evidence about an address', () => {
+    it('REFUSES a bounce mark without its DSN code, and a code without a mark', async () => {
+      const a = await reject(`UPDATE contacts SET email_bounced_at = now() WHERE id = $1`, [contactId])
+      expect(a).toContain('contacts_bounce_has_code')
+      const b = await reject(`UPDATE contacts SET email_bounce_code = '5.1.1' WHERE id = $1`, [contactId])
+      expect(b).toContain('contacts_bounce_has_code')
+    })
+
+    it('accepts the mark with its code', async () => {
+      const rows = await db.driver.select<{ id: string }>(
+        `UPDATE contacts SET email_bounced_at = now(), email_bounce_code = '5.1.1' WHERE id = $1 RETURNING id`, [contactId],
+      )
+      expect(rows).toHaveLength(1)
+    })
+  })
+
+  describe('meetings.outcome', () => {
+    it('REFUSES an outcome nobody defined', async () => {
+      const msg = await reject(
+        `INSERT INTO meetings (org_id, company_id, starts_at, time_zone, outcome)
+         VALUES ($1, $2, '2026-09-18T14:00:00Z', 'Europe/London', 'maybe')`,
+        [orgId, companyId],
+      )
+      expect(msg).toContain('meetings_outcome_known')
+    })
+
+    it.each(['held', 'no_show', 'rescheduled', null])('accepts %j', async (outcome) => {
+      const rows = await db.driver.select<{ id: string }>(
+        `INSERT INTO meetings (org_id, company_id, starts_at, time_zone, outcome)
+         VALUES ($1, $2, '2026-09-18T14:00:00Z', 'Europe/London', $3) RETURNING id`,
+        [orgId, companyId, outcome],
+      )
+      expect(rows).toHaveLength(1)
+    })
+  })
+
+  describe('notes', () => {
+    const note = (over: { body?: string; contact?: string | null; author?: string } = {}) =>
+      db.driver.select<{ id: string }>(
+        `INSERT INTO notes (org_id, company_id, contact_id, author_user_id, body) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        [orgId, companyId, over.contact ?? null, over.author ?? userId, over.body ?? 'Spoke to Priya; wants the CSP finding first.'],
+      )
+
+    it('REFUSES a blank body and one over 8000 characters', async () => {
+      expect(await expectRejection(() => note({ body: '   ' }))).toContain('notes_body_is_not_blank')
+      expect(await expectRejection(() => note({ body: 'x'.repeat(8001) }))).toContain('notes_body_is_bounded')
+    })
+
+    it('REFUSES a note about another org’s contact, or by another org’s user', async () => {
+      expect(await expectRejection(() => note({ contact: rivalContact }))).toContain('notes_contact_is_in_the_same_org')
+      expect(await expectRejection(() => note({ author: rivalUser }))).toContain('notes_author_is_in_the_same_org')
+    })
+
+    it('accepts a note, with or without a contact', async () => {
+      expect(await note()).toHaveLength(1)
+      expect(await note({ contact: contactId })).toHaveLength(1)
+    })
+  })
+
+  describe('tasks', () => {
+    const task = (over: Record<string, unknown> = {}) => {
+      const t = {
+        kind: 'todo', title: 'Send the proposal', touch: null, assignee: null, creator: userId,
+        doneAt: null, doneBy: null, ...over,
+      }
+      return db.driver.select<{ id: string }>(
+        `INSERT INTO tasks (org_id, company_id, touch_id, kind, title, assignee_user_id, created_by, done_at, done_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+        [orgId, companyId, t.touch, t.kind, t.title, t.assignee, t.creator, t.doneAt, t.doneBy],
+      )
+    }
+
+    it('REFUSES a kind nobody defined, and a blank or over-long title', async () => {
+      expect(await expectRejection(() => task({ kind: 'chore' }))).toContain('tasks_kind_known')
+      expect(await expectRejection(() => task({ title: '  ' }))).toContain('tasks_title_is_not_blank')
+      expect(await expectRejection(() => task({ title: 't'.repeat(201) }))).toContain('tasks_title_is_bounded')
+    })
+
+    it('REFUSES a done task with nobody named, and a name with no done time', async () => {
+      expect(await expectRejection(() => task({ doneAt: new Date().toISOString() }))).toContain('tasks_done_has_who')
+      expect(await expectRejection(() => task({ doneBy: userId }))).toContain('tasks_done_has_who')
+    })
+
+    it('REFUSES a linkedin_send task that names no touch', async () => {
+      expect(await expectRejection(() => task({ kind: 'linkedin_send' }))).toContain('tasks_linkedin_send_names_touch')
+    })
+
+    it('REFUSES an assignee, creator or finisher from another org', async () => {
+      expect(await expectRejection(() => task({ assignee: rivalUser }))).toContain('tasks_assignee_is_in_the_same_org')
+      expect(await expectRejection(() => task({ creator: rivalUser }))).toContain('tasks_creator_is_in_the_same_org')
+      expect(await expectRejection(() => task({ doneAt: new Date().toISOString(), doneBy: rivalUser })))
+        .toContain('tasks_done_by_is_in_the_same_org')
+    })
+
+    /**
+     * Two callers materialising one LinkedIn draft produce one task and the
+     * loser re-reads. A DONE task does not block a new open one: the step
+     * can legitimately be asked again.
+     */
+    it('allows one OPEN task per touch: a second is refused, a done one then an open one is fine', async () => {
+      expect(await task({ kind: 'linkedin_send', touch: outbound })).toHaveLength(1)
+      const msg = await expectRejection(() => task({ kind: 'linkedin_send', touch: outbound }))
+      expect(msg).toMatch(/tasks_one_open_per_touch|duplicate key/)
+      await db.driver.select(`UPDATE tasks SET done_at = now(), done_by = $2 WHERE touch_id = $1`, [outbound, userId])
+      expect(await task({ kind: 'linkedin_send', touch: outbound })).toHaveLength(1)
+    })
+
+    it('accepts a plain to-do with an assignee, and unassigns it when that user is deleted (SET NULL names its column)', async () => {
+      const [{ id: temp }] = await db.driver.select<{ id: string }>(
+        `INSERT INTO users (org_id, email, role) VALUES ($1, 'temp@agency.test', 'member') RETURNING id`, [orgId],
+      )
+      const [{ id }] = await task({ assignee: temp, creator: temp })
+      await db.driver.select(`DELETE FROM users WHERE id = $1`, [temp])
+      const [row] = await db.driver.select<{ assignee_user_id: string | null; created_by: string | null; org_id: string }>(
+        `SELECT assignee_user_id, created_by, org_id FROM tasks WHERE id = $1`, [id],
+      )
+      expect(row.assignee_user_id).toBeNull()
+      expect(row.created_by).toBeNull()
+      expect(row.org_id).toBe(orgId)
+    })
+  })
+
+  describe('proposal_shares — a buyer link stores only the hash of its token', () => {
+    const HASH = 'a'.repeat(64)
+    const share = (over: Record<string, unknown> = {}) => {
+      const s = { hash: HASH, creator: userId, expires: `now() + interval '30 days'`, acceptedAt: null, acceptedBy: null, ...over }
+      return db.driver.select<{ id: string }>(
+        `INSERT INTO proposal_shares (org_id, proposal_id, token_hash, created_by, expires_at, accepted_at, accepted_by_name)
+         VALUES ($1, $2, $3, $4, ${s.expires}, $5, $6) RETURNING id`,
+        [orgId, proposalId, s.hash, s.creator, s.acceptedAt, s.acceptedBy],
+      )
+    }
+
+    it('REFUSES a raw token, a short hash and upper-case hex', async () => {
+      expect(await expectRejection(() => share({ hash: 'b'.repeat(32) }))).toContain('proposal_shares_token_hash_shape')
+      expect(await expectRejection(() => share({ hash: 'A'.repeat(64) }))).toContain('proposal_shares_token_hash_shape')
+      expect(await expectRejection(() => share({ hash: `${'c'.repeat(60)}.tok` }))).toContain('proposal_shares_token_hash_shape')
+    })
+
+    it('REFUSES an acceptance with no name, a name with no acceptance, and a blank name', async () => {
+      expect(await expectRejection(() => share({ hash: 'd'.repeat(64), acceptedAt: new Date().toISOString() })))
+        .toContain('proposal_shares_accepted_has_name')
+      expect(await expectRejection(() => share({ hash: 'd'.repeat(64), acceptedBy: 'Sam' })))
+        .toContain('proposal_shares_accepted_has_name')
+      expect(await expectRejection(() => share({ hash: 'd'.repeat(64), acceptedAt: new Date().toISOString(), acceptedBy: '  ' })))
+        .toContain('proposal_shares_accepted_name_not_blank')
+    })
+
+    it('REFUSES a link that expires before it was created', async () => {
+      expect(await expectRejection(() => share({ hash: 'e'.repeat(64), expires: `now() - interval '1 hour'` })))
+        .toContain('proposal_shares_expires_after_created')
+    })
+
+    it('REFUSES a creator from another org', async () => {
+      expect(await expectRejection(() => share({ hash: 'f'.repeat(64), creator: rivalUser })))
+        .toContain('proposal_shares_creator_is_in_the_same_org')
+    })
+
+    it('accepts a link, and refuses the same hash twice', async () => {
+      expect(await share()).toHaveLength(1)
+      expect(await expectRejection(() => share())).toMatch(/proposal_shares_token_hash_key|duplicate key/)
+    })
+  })
+
+  describe('worker_heartbeats — a system table', () => {
+    const beat = (over: Record<string, unknown> = {}) => {
+      const b = { worker: 'w-1', booted: `now() - interval '1 minute'`, tick: 'now()', outreach: 'disabled', chat: 'disabled', ...over }
+      return db.driver.select<{ id: string }>(
+        `INSERT INTO worker_heartbeats (worker_id, booted_at, last_tick_at, outreach, chat)
+         VALUES ($1, ${b.booted}, ${b.tick}, $2, $3) RETURNING id`,
+        [b.worker, b.outreach, b.chat],
+      )
+    }
+
+    it('accepts a heartbeat, and refuses a second row for the same worker', async () => {
+      expect(await beat()).toHaveLength(1)
+      expect(await expectRejection(() => beat())).toMatch(/worker_heartbeats_worker_key|duplicate key/)
+    })
+
+    it('REFUSES an outreach or chat state nobody defined', async () => {
+      expect(await expectRejection(() => beat({ worker: 'w-2', outreach: 'maybe' }))).toContain('worker_heartbeats_outreach_known')
+      expect(await expectRejection(() => beat({ worker: 'w-3', chat: 'sometimes' }))).toContain('worker_heartbeats_chat_known')
+    })
+
+    it('REFUSES a tick from before the boot', async () => {
+      expect(await expectRejection(() => beat({ worker: 'w-4', booted: 'now()', tick: `now() - interval '1 hour'` })))
+        .toContain('worker_heartbeats_beat_after_boot')
+    })
+  })
+})

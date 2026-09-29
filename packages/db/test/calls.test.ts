@@ -135,6 +135,8 @@ describe('calls', () => {
       // is only the record of when.
       const sup = await db.select().from(schema.suppressions)
       expect(sup).toHaveLength(1)
+      // 0018: the path that recorded it is a fact on the row.
+      expect(sup[0]!.source).toBe('voice')
       expect(sup[0]).toMatchObject({ kind: 'phone', value: THEIR })
       expect(await phoneIsSuppressed(db, orgId, THEIR)).toBe(true)
     })

@@ -197,6 +197,19 @@ describe('against a real engine', () => {
     })
 
     /**
+     * 0018: WHICH path recorded the opt-out is a column, stamped by the
+     * writer. A caller that says nothing writes null — never an invented
+     * 'manual'.
+     */
+    it('stores the source the writer names, and null when none is named', async () => {
+      await addSuppression(db, { orgId, kind: 'email', value: 'a@example.com', reason: 'asked', source: 'manual' })
+      await addSuppression(db, { orgId, kind: 'email', value: 'b@example.com', reason: 'asked' })
+      const rows = await listSuppressions(db, orgId)
+      expect(rows.find((r) => r.value === 'a@example.com')!.source).toBe('manual')
+      expect(rows.find((r) => r.value === 'b@example.com')!.source).toBeNull()
+    })
+
+    /**
      * THE refusal. Somebody pasting a list of opt-outs must be told which line
      * did not go in, because a silently dropped one is a person who gets
      * contacted again. The message has to say what to do about it.

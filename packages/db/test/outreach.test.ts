@@ -17,22 +17,30 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
+import { decideSend } from '@agency/core'
 import {
   approveDraft, denyDraft, dispatchTouch, dueTouches, handleInboundEmail, looksLikeOptOut,
-  pauseContact, pendingDrafts, recordInboundReply, resumeContact, schema, sendOne,
-  type AgencyDb, type MessageProvider,
+  pauseContact, pendingDrafts, recordInboundReply, resumeContact, schema, sendFactsFor, sendOne,
+  type AgencyDb, type InboundLog, type MessageProvider,
 } from '../src/index.js'
 import { migratedDb,type TestDb } from './helpers.js'
 
 /** Counts, never sends. A test that could deliver is a test nobody dares run. */
-function countingProvider(): MessageProvider & { sent: { to: string; subject: string }[] } {
+function countingProvider(): MessageProvider & {
+  sent: { to: string; subject: string }[]
+  /** The headers each send carried, in order — kept apart so `sent` keeps its shape. */
+  headersSeen: (Readonly<Record<string, string>> | undefined)[]
+} {
   const sent: { to: string; subject: string }[] = []
+  const headersSeen: (Readonly<Record<string, string>> | undefined)[] = []
   return {
     name: 'test',
     channels: ['email', 'linkedin', 'sms', 'voice', 'whatsapp'],
     sent,
+    headersSeen,
     async send(m) {
       sent.push({ to: m.to, subject: m.subject })
+      headersSeen.push(m.headers)
       return { providerId: `test-${sent.length}` }
     },
   }
@@ -771,4 +779,314 @@ describe('the single send path', () => {
     })
   })
 
+})
+
+/**
+ * The wave-1 contract changes (0018): the exported fact-gatherer, threading
+ * an answer, the duplicate flag, the company on a reply, and §2.1's two
+ * precedence rules for an inbound message — the opt-out reader runs first,
+ * and an opt-out that cannot be stored fails loudly.
+ */
+describe('the send-path contract', () => {
+  let test: TestDb
+  let db: AgencyDb
+  let orgId: string
+  let companyId: string
+  let contactId: string
+  let campaignId: string
+  let userId: string
+  let provider: ReturnType<typeof countingProvider>
+
+  beforeEach(async () => {
+    test = await migratedDb()
+    db = drizzle(test.pg, { schema }) as unknown as AgencyDb
+    provider = countingProvider()
+    const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
+    orgId = org!.id
+    const [user] = await db.insert(schema.users).values({ orgId, email: 'owner@agency.test', role: 'owner' }).returning({ id: schema.users.id })
+    userId = user!.id
+    const [company] = await db.insert(schema.companies).values({ orgId, domain: 'rentman.io', timeZone: 'Europe/London' }).returning({ id: schema.companies.id })
+    companyId = company!.id
+    const [contact] = await db.insert(schema.contacts).values({ orgId, companyId, email: 'priya@rentman.io', timeZone: 'Europe/London' }).returning({ id: schema.contacts.id })
+    contactId = contact!.id
+    const [campaign] = await db
+      .insert(schema.campaigns)
+      .values({ orgId, name: 'Q4 security gaps', channel: 'email', autoSend: true, dailyCap: 25, status: 'active' })
+      .returning({ id: schema.campaigns.id })
+    campaignId = campaign!.id
+  }, 30_000)
+
+  afterEach(async () => {
+    await test?.close()
+  })
+
+  const touch = async (id: string | null) =>
+    (await db.select().from(schema.touches).where(eq(schema.touches.id, id!)))[0]!
+
+  describe('sendFactsFor — the sender’s own facts, exported', () => {
+    const facts = (over: Record<string, unknown> = {}) =>
+      sendFactsFor(db, { orgId, campaignId, contactId, approvedByHuman: false, now: NOON, ...over })
+
+    it('gathers the facts the decision needs, and says whose zone', async () => {
+      const out = await facts()
+      expect('missing' in out).toBe(false)
+      if ('missing' in out) return
+      expect(out.recipient).toBe('priya@rentman.io')
+      expect(out.zoneFrom).toBe('contact')
+      expect(out.paused).toBe(false)
+      expect(out.facts.suppressed).toBe(false)
+      expect(out.facts.consent).toBeNull()
+      expect(out.facts.recipientTimeZone).toBe('Europe/London')
+      expect(out.facts.sentToday).toBe(0)
+      expect(decideSend(out.facts).code).toBe('send_now')
+    })
+
+    it('sees a suppression, by domain as well as by address', async () => {
+      await db.insert(schema.suppressions).values({ orgId, kind: 'domain', value: 'rentman.io', reason: 'asked' })
+      const out = await facts()
+      if ('missing' in out) throw new Error(out.missing)
+      expect(out.facts.suppressed).toBe(true)
+    })
+
+    it('reports a paused contact as paused, and the facts refuse as consent_revoked', async () => {
+      await pauseContact(db, orgId, contactId, 'replied', NOON)
+      const out = await facts()
+      if ('missing' in out) throw new Error(out.missing)
+      expect(out.paused).toBe(true)
+      expect(decideSend(out.facts).code).toBe('consent_revoked')
+    })
+
+    it('falls back to the company zone and says so; with neither, the zone is null', async () => {
+      await db.update(schema.contacts).set({ timeZone: null }).where(eq(schema.contacts.id, contactId))
+      const company = await facts()
+      if ('missing' in company) throw new Error(company.missing)
+      expect(company.zoneFrom).toBe('company')
+      await db.update(schema.companies).set({ timeZone: null }).where(eq(schema.companies.id, companyId))
+      const none = await facts()
+      if ('missing' in none) throw new Error(none.missing)
+      expect(none.zoneFrom).toBeNull()
+      expect(none.facts.recipientTimeZone).toBeNull()
+      expect(decideSend(none.facts).code).toBe('unknown_timezone')
+    })
+
+    it('is missing for a campaign or contact that is not in this org', async () => {
+      const [other] = await db.insert(schema.orgs).values({ name: 'Rival' }).returning({ id: schema.orgs.id })
+      expect('missing' in (await facts({ orgId: other!.id }))).toBe(true)
+      expect('missing' in (await facts({ campaignId: '00000000-0000-0000-0000-000000000000' }))).toBe(true)
+    })
+
+    it('passes approvedByHuman through untouched — the caller says what the row says', async () => {
+      await db.update(schema.campaigns).set({ autoSend: false }).where(eq(schema.campaigns.id, campaignId))
+      const a = await facts({ approvedByHuman: false })
+      const b = await facts({ approvedByHuman: true })
+      if ('missing' in a || 'missing' in b) throw new Error('missing')
+      expect(decideSend(a.facts).code).toBe('needs_approval')
+      expect(decideSend(b.facts).code).toBe('send_now')
+    })
+  })
+
+  describe('threading an answer', () => {
+    const inboundWith = async (providerId: string, org = orgId, direction: 'in' | 'out' = 'in') => {
+      // A touch names a subject (`touches_names_a_subject`), so a row in
+      // another org needs that org's own company.
+      const subject =
+        org === orgId
+          ? { companyId, contactId }
+          : { companyId: (await db.insert(schema.companies).values({ orgId: org, domain: `${providerId.length}.rival.test` }).returning({ id: schema.companies.id }))[0]!.id }
+      return (await db
+        .insert(schema.touches)
+        .values({ orgId: org, ...subject, channel: 'email', direction, status: direction === 'in' ? 'replied' : 'sent', providerId, ...(direction === 'out' ? { sentAt: NOON } : {}) })
+        .returning())[0]!
+    }
+
+    const outbound = async (answersTouchId: string | null = null) =>
+      (await db
+        .insert(schema.touches)
+        .values({ orgId, companyId, contactId, campaignId, channel: 'email', direction: 'out', status: 'queued', subject: 'Re: your reply', body: 'Thanks.', answersTouchId })
+        .returning())[0]!
+
+    it('carries In-Reply-To and References from the inbound row’s Message-ID', async () => {
+      const parent = await inboundWith('<abc@x>')
+      const row = await outbound(parent.id)
+      const r = await dispatchTouch(db, provider, row, { now: NOON })
+      expect(r.sent).toBe(true)
+      expect(provider.headersSeen[0]!['In-Reply-To']).toBe('<abc@x>')
+      expect(provider.headersSeen[0]!['References']).toBe('<abc@x>')
+    })
+
+    /**
+     * The database refuses a cross-org or outbound parent at insert (0018's
+     * trigger), so these hand dispatchTouch an in-memory row that names one:
+     * the lookup itself carries org and direction, and adds nothing.
+     */
+    it('adds no header for a parent in another org, or an outbound parent', async () => {
+      const [other] = await db.insert(schema.orgs).values({ name: 'Rival' }).returning({ id: schema.orgs.id })
+      const theirs = await inboundWith('<theirs@rival>', other!.id)
+      const ours = await inboundWith('<sent@x>', orgId, 'out')
+      const a = await dispatchTouch(db, provider, { ...(await outbound()), answersTouchId: theirs.id }, { now: NOON })
+      const b = await dispatchTouch(db, provider, { ...(await outbound()), answersTouchId: ours.id }, { now: NOON })
+      expect(a.sent && b.sent).toBe(true)
+      expect(provider.headersSeen[0]).toEqual({})
+      expect(provider.headersSeen[1]).toEqual({})
+    })
+
+    it('merges the caller’s headers over its own, and a null return adds nothing', async () => {
+      const parent = await inboundWith('<abc@x>')
+      const row = await outbound(parent.id)
+      await dispatchTouch(db, provider, row, {
+        now: NOON,
+        headersFor: (t) => (t.id === row.id ? { 'List-Unsubscribe': '<https://x.example/u/1>' } : null),
+      })
+      expect(provider.headersSeen[0]).toEqual({
+        'In-Reply-To': '<abc@x>',
+        References: '<abc@x>',
+        'List-Unsubscribe': '<https://x.example/u/1>',
+      })
+      await dispatchTouch(db, provider, await outbound(), { now: NOON, headersFor: () => null })
+      expect(provider.headersSeen[1]).toEqual({})
+    })
+
+    it('still works with a provider that ignores headers', async () => {
+      const blind: MessageProvider = {
+        name: 'blind',
+        channels: ['email'],
+        async send(m) {
+          return { providerId: `blind-${m.to}` }
+        },
+      }
+      const parent = await inboundWith('<abc@x>')
+      const r = await dispatchTouch(db, blind, await outbound(parent.id), { now: NOON })
+      expect(r.sent).toBe(true)
+      expect((await touch(r.touchId)).providerId).toBe('blind-priya@rentman.io')
+    })
+  })
+
+  describe('an inbound reply', () => {
+    it('says whether it had already been recorded, and which company it is about', async () => {
+      const first = await handleInboundEmail(db, {
+        from: 'priya@rentman.io', subject: 'Re', text: 'yes', messageId: '<abc@rentman.io>', now: NOON,
+      })
+      const again = await handleInboundEmail(db, {
+        from: 'priya@rentman.io', subject: 'Re', text: 'yes', messageId: '<abc@rentman.io>', now: NOON,
+      })
+      if (first.matched === 'none' || again.matched === 'none') throw new Error('unmatched')
+      expect(first.duplicate).toBe(false)
+      expect(again.duplicate).toBe(true)
+      expect(first.companyDomain).toBe('rentman.io')
+      expect(first.companyId).toBe(companyId)
+      expect(again.companyDomain).toBe('rentman.io')
+    })
+
+    it('stamps the suppression it writes with source: reply', async () => {
+      const r = await recordInboundReply(db, {
+        orgId, contactId, channel: 'email', from: 'priya@rentman.io', subject: 'Re', body: 'unsubscribe', now: NOON,
+      })
+      expect(r.suppressed).toBe(true)
+      expect(r.optOutNotRecorded).toBe(false)
+      const [row] = await db.select().from(schema.suppressions)
+      expect(row!.source).toBe('reply')
+    })
+
+    /**
+     * §2.1's Phase 4 obligation. The one opt-out path that runs unattended
+     * used to store `opted_out` with no suppression and `suppressed: false`,
+     * silently. Now: the row still says opted_out (queryable), an audit row
+     * names the touch (countable), and the log shouts (visible).
+     */
+    it('FAILS LOUDLY when the address cannot be suppressed — audit row, log line, flag', async () => {
+      const lines: { message: string; fields?: Readonly<Record<string, unknown>> }[] = []
+      const log: InboundLog = { error: (message, fields) => lines.push({ message, fields }) }
+      const r = await recordInboundReply(db, {
+        orgId, contactId, channel: 'email', from: 'not an address', subject: 'Re', body: 'unsubscribe', now: NOON, log,
+      })
+      expect(r.replyKind).toBe('opted_out')
+      expect(r.suppressed).toBe(false)
+      expect(r.optOutNotRecorded).toBe(true)
+      expect(await db.select().from(schema.suppressions)).toEqual([])
+      const audit = await db.select().from(schema.auditLog)
+      const entry = audit.find((a) => a.action === 'contact.opt_out_not_recorded')
+      expect(entry?.subjectId).toBe(contactId)
+      expect(entry?.detail).toMatchObject({ touchId: r.touchId, why: 'unparseable_address' })
+      expect(lines).toHaveLength(1)
+      expect(lines[0]!.message).toContain('OPT-OUT NOT RECORDED')
+      expect(lines[0]!.fields).toMatchObject({ touchId: r.touchId, why: 'unparseable_address' })
+      // §2.3: ids only. The address the person typed is in the touch row, not the log.
+      expect(JSON.stringify([audit, lines])).not.toContain('not an address')
+      // And the person is still paused: the reply was read, whatever else failed.
+      expect(r.paused).toBe(true)
+    })
+
+    it('FAILS LOUDLY when the suppression write throws', async () => {
+      const lines: string[] = []
+      const flaky = new Proxy(db as object, {
+        get(target, prop, receiver) {
+          if (prop === 'insert') {
+            return (table: unknown) => {
+              if (table === schema.suppressions) throw new Error('Connection terminated unexpectedly')
+              return (target as AgencyDb).insert(table as typeof schema.touches)
+            }
+          }
+          return Reflect.get(target, prop, receiver)
+        },
+      }) as AgencyDb
+      const r = await recordInboundReply(flaky, {
+        orgId, contactId, channel: 'email', from: 'priya@rentman.io', subject: 'Re', body: 'please unsubscribe me', now: NOON,
+        log: { error: (m) => lines.push(m) },
+      })
+      expect(r.optOutNotRecorded).toBe(true)
+      expect(r.replyKind).toBe('opted_out')
+      expect(lines.some((l) => l.includes('OPT-OUT NOT RECORDED'))).toBe(true)
+      const entry = (await db.select().from(schema.auditLog)).find((a) => a.action === 'contact.opt_out_not_recorded')
+      expect(entry?.detail).toMatchObject({ why: 'Error' })
+    })
+
+    /**
+     * The precedence, stated: the opt-out reader runs FIRST. An out-of-office
+     * whose first line asks to be removed is an opt-out that happens to be
+     * automatic, and the automatic flag must not file it as auto_reply with
+     * no suppression.
+     */
+    it('an auto-reply whose first line says unsubscribe still writes the suppression row and is stored opted_out', async () => {
+      const r = await recordInboundReply(db, {
+        orgId, contactId, channel: 'email', from: 'priya@rentman.io', subject: 'Automatic reply',
+        body: 'Unsubscribe.\nI have left the company; this mailbox is not monitored and I do not want more email.',
+        autoReply: true, now: NOON,
+      })
+      expect(r.replyKind).toBe('opted_out')
+      expect(r.suppressed).toBe(true)
+      expect(r.paused).toBe(true)
+      expect((await db.select().from(schema.suppressions))[0]!.value).toBe('priya@rentman.io')
+    })
+
+    it('a genuine auto-reply is stored auto_reply and changes nothing about the conversation', async () => {
+      const [queued] = await db
+        .insert(schema.touches)
+        .values({ orgId, companyId, contactId, campaignId, channel: 'email', direction: 'out', status: 'queued', subject: 's', body: 'b' })
+        .returning()
+      const r = await recordInboundReply(db, {
+        orgId, contactId, channel: 'email', from: 'priya@rentman.io', subject: 'Automatic reply',
+        body: 'I am out of the office until Monday.', autoReply: true, now: NOON,
+      })
+      expect(r.replyKind).toBe('auto_reply')
+      expect(r.paused).toBe(false)
+      expect(r.cancelled).toBe(0)
+      expect(r.suppressed).toBe(false)
+      expect(r.deal).toBeNull()
+      expect((await touch(queued!.id)).status).toBe('queued')
+      const [contact] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, contactId))
+      expect(contact!.pausedAt).toBeNull()
+      expect(await db.select().from(schema.deals)).toEqual([])
+      // The row is still there for the inbox to see.
+      expect((await touch(r.touchId)).replyKind).toBe('auto_reply')
+    })
+
+    it('without the header flag, an out-of-office body still pauses — the flag is what nothing passes yet', async () => {
+      const r = await recordInboundReply(db, {
+        orgId, contactId, channel: 'email', from: 'priya@rentman.io', subject: 'Automatic reply',
+        body: 'I am out of the office until Monday.', now: NOON,
+      })
+      expect(r.replyKind).toBe('auto_reply')
+      expect(r.paused).toBe(true)
+    })
+  })
 })
