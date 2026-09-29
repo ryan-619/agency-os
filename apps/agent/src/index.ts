@@ -1,3 +1,4 @@
+import { hostname } from 'node:os'
 import { and, eq } from 'drizzle-orm'
 import { Pool } from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
@@ -12,7 +13,9 @@ import { createLogger, type Logger } from './logger.js'
 import { answerHealth, startHealthServer, type HealthInputs } from './health.js'
 import { acquireWorkerLock, type WorkerLock } from './boot/singleton.js'
 import { reconcileAfterRestart, recoverStuckSends, sweepExpired } from './boot/reconcile.js'
+import { lastHeartbeatAt, startHeartbeat } from './boot/heartbeat.js'
 import { startSender } from './outreach/sender.js'
+import { outreachOptions } from './outreach/options.js'
 import { providerFrom } from '@agency/llm'
 import { startInbox } from './outreach/inbox.js'
 import { createAgentHttpServer, type StartTurnRequest, type TurnHandle } from './http/server.js'
@@ -108,6 +111,7 @@ async function main(): Promise<void> {
     chatEnabled: credential !== null,
     lockHeld: lock?.held ?? null,
     outreach: outreachMode,
+    heartbeatAt: lastHeartbeatAt(),
   })
   const health = await startHealthServer(env.AGENT_PORT, healthInputs, log)
 
@@ -244,7 +248,19 @@ async function main(): Promise<void> {
       password: env.SMTP_PASSWORD,
       from: env.MAIL_FROM,
     })
-    stops.push(startSender({ db, provider, log, batch: env.OUTREACH_BATCH, intervalMs: env.OUTREACH_TICK_MS }))
+    // The required settings are named here; the optional ones — whatever a
+    // later feature derives from the environment — arrive through the spread,
+    // so adding one never edits this file.
+    stops.push(
+      startSender({
+        db,
+        provider,
+        log,
+        batch: env.OUTREACH_BATCH,
+        intervalMs: env.OUTREACH_TICK_MS,
+        ...outreachOptions(env, log),
+      }),
+    )
   }
   if (env.IMAP_HOST && env.IMAP_USER && env.IMAP_PASSWORD) {
     stops.push(
@@ -265,8 +281,37 @@ async function main(): Promise<void> {
     )
   }
 
+  /**
+   * The heartbeat (§2.4): a row that says this worker is alive, rewritten
+   * every tick, so a silent worker is a timestamp in `/api/health` rather
+   * than a queue somebody notices has stopped moving. Started here, AFTER the
+   * lock, for the same reason the sender is: a worker that could not take the
+   * lock has already exited above, and so never writes a row claiming to be
+   * the one serving. What the row says is read through `healthInputs()`, so
+   * it cannot disagree with `/readyz` about the halt or the lock.
+   */
+  const workerId = `${hostname()}:${process.pid}`
+  stops.push(
+    startHeartbeat({
+      db,
+      log,
+      intervalMs: env.OUTREACH_TICK_MS,
+      workerId,
+      bootedAt: bootAt,
+      inputs: () => {
+        const now = healthInputs()
+        return {
+          outreach: now.outreach,
+          chat: now.chatEnabled ? 'enabled' : 'disabled',
+          detail: { halted: now.halted, lockHeld: now.lockHeld },
+        }
+      },
+    }),
+  )
+
   log.info('agent worker started', {
     nodeEnv: env.NODE_ENV,
+    workerId,
     healthPort: env.AGENT_PORT,
     apiPort,
     apiBind: env.AGENT_BIND,
