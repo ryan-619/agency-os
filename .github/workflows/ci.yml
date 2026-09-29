@@ -107,8 +107,8 @@ jobs:
             );
             const names = rows.map(r => r.tablename);
             console.log(names.length, 'tables:', names.join(', '));
-            if (names.length !== 25) {
-              console.error('expected 23 application tables + schema_migrations');
+            if (names.length !== 27) {
+              console.error('expected 26 application tables + schema_migrations');
               process.exit(1);
             }
             await c.end();
@@ -126,6 +126,7 @@ jobs:
         run: docker compose config --quiet
         env:
           AUTH_SECRET: ci-secret
+          AGENT_INTERNAL_TOKEN: ci-token
           SEED_OWNER_EMAIL: owner@example.com
       - name: Build the web image
         run: docker build -f apps/web/Dockerfile -t agency-os-web .
