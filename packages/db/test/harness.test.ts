@@ -52,7 +52,14 @@ describe('the migrated-database harness', () => {
     for (const expected of ['orgs', 'users', 'companies', 'deals', 'touches', 'calls', 'suppressions']) {
       expect(names, expected).toContain(expected)
     }
-    // 0017's column, the most recent thing a migration added.
+    // 0018's column, the most recent thing a migration added. This assertion
+    // has to name the NEWEST column: a snapshot built from an older set of
+    // migrations would still carry every earlier one.
+    const findingCols = await test.driver.select<{ column_name: string }>(
+      "select column_name from information_schema.columns where table_name = 'findings'",
+    )
+    expect(findingCols.map((c) => c.column_name)).toContain('scored')
+    // And 0017's, as a second line — one column is one migration.
     const cols = await test.driver.select<{ column_name: string }>(
       "select column_name from information_schema.columns where table_name = 'touches'",
     )

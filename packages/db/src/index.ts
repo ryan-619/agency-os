@@ -1,5 +1,10 @@
 /**
  * packages/db — schema, migrations, typed queries.
+ *
+ * The WHOLE package, for the CLIs and the worker. The web app imports the
+ * `./queries` subpath instead, which leaves out the migrator, the paths, the
+ * mail transport, the heartbeat writer and the unsubscribe-token minter — see
+ * queries.ts for why each one stays out of that bundle.
  */
 export * from './migrator.js'
 export * from './schema-version.js'
@@ -21,5 +26,35 @@ export * from './meetings.js'
 export * from './calls.js'
 export * from './outreach.js'
 export * from './smtp.js'
+export * from './send-preview.js'
+export * from './pg-errors.js'
+export * from './contacts-ledger.js'
+export * from './contacts-import.js'
+export * from './companies.js'
+export * from './evidence.js'
+export * from './rescan.js'
+export * from './audit.js'
+export * from './credentials.js'
+export * from './heartbeat-read.js'
+export * from './heartbeat.js'
+export * from './inbox.js'
+export * from './enrolment.js'
+export * from './search.js'
+export * from './analytics.js'
+export * from './chat-threads.js'
+export * from './exports.js'
+export * from './users.js'
+export * from './compliance.js'
+export * from './notes.js'
+export * from './tasks.js'
+export * from './unsubscribe.js'
+export * from './unsubscribe-mint.js'
+export * from './icp-profiles.js'
+export * from './spend.js'
+export * from './digest.js'
+export * from './linkedin-step.js'
+export * from './proposal-shares.js'
+export * from './erasure.js'
+export * from './connector-tools.js'
 export * from './secrets.js'
 export * as schema from './schema.js'

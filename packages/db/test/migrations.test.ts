@@ -7,11 +7,17 @@ import { MIGRATIONS_DIR } from '../src/paths.js'
 const BUSINESS_TABLES = [
   'agent_defs', 'approvals', 'audit_log', 'calls', 'campaigns', 'chat_messages',
   'chat_sessions', 'companies', 'connectors', 'consents', 'contacts', 'deals',
-  'findings', 'icp_profiles', 'meetings', 'proposals', 'scans', 'scores', 'secrets',
-  'suppressions', 'touches',
+  'findings', 'icp_profiles', 'meetings', 'notes', 'proposal_shares', 'proposals',
+  'scans', 'scores', 'secrets', 'suppressions', 'tasks', 'touches',
 ]
 const AUTH_TABLES = ['accounts', 'sessions', 'users', 'verification_tokens']
-const ALL_TABLES = [...BUSINESS_TABLES, ...AUTH_TABLES, 'orgs'].sort()
+/**
+ * Tables that serve the whole deployment rather than one org (0018). They
+ * follow the id and timestamp conventions and deliberately carry NO org_id:
+ * the worker serves every org, so "the org's worker" is not a concept.
+ */
+const SYSTEM_TABLES = ['worker_heartbeats']
+const ALL_TABLES = [...BUSINESS_TABLES, ...AUTH_TABLES, ...SYSTEM_TABLES, 'orgs'].sort()
 
 describe('migration files', () => {
   it('every migration has both an up and a down (PROMPT.md §10)', () => {
@@ -93,7 +99,7 @@ describe('the §4 table conventions hold everywhere', () => {
   afterAll(async () => { await db.close() })
 
   it('every table has a uuid id defaulting to gen_random_uuid()', async () => {
-    for (const table of [...BUSINESS_TABLES, 'orgs', 'users']) {
+    for (const table of [...BUSINESS_TABLES, ...SYSTEM_TABLES, 'orgs', 'users']) {
       const [row] = await db.driver.select<{ data_type: string; column_default: string | null }>(
         `SELECT data_type, column_default FROM information_schema.columns
          WHERE table_schema='public' AND table_name=$1 AND column_name='id'`,
@@ -107,7 +113,7 @@ describe('the §4 table conventions hold everywhere', () => {
   })
 
   it('every table has created_at not-null-default-now and a nullable updated_at', async () => {
-    for (const table of [...BUSINESS_TABLES, 'orgs', 'users']) {
+    for (const table of [...BUSINESS_TABLES, ...SYSTEM_TABLES, 'orgs', 'users']) {
       const rows = await db.driver.select<{ column_name: string; is_nullable: string; column_default: string | null; data_type: string }>(
         `SELECT column_name, is_nullable, column_default, data_type
          FROM information_schema.columns
@@ -171,8 +177,73 @@ describe('the §4 table conventions hold everywhere', () => {
 
   it('findings carries the columns the evidence rules need', async () => {
     const cols = await columnNames(db.driver, 'findings')
-    for (const c of ['observed', 'gap', 'evidence', 'stale', 'signal_key', 'weight', 'detail']) {
+    for (const c of ['observed', 'gap', 'evidence', 'stale', 'signal_key', 'weight', 'detail', 'scored']) {
       expect(cols, `findings.${c} missing`).toContain(c)
+    }
+  })
+})
+
+/**
+ * 0018. A system table keeps every convention a business table keeps except
+ * the one that would be a lie: `org_id`. `worker_heartbeats` is written by a
+ * process that serves every org at once, and a per-org row would be N upserts
+ * per tick describing one worker.
+ */
+describe('system tables', () => {
+  let db: TestDb
+  beforeAll(async () => {
+    db = await freshDb()
+    await migrateUp(db.driver, migrations())
+  })
+  afterAll(async () => { await db.close() })
+
+  it('every system table has a uuid id defaulting to gen_random_uuid()', async () => {
+    for (const table of SYSTEM_TABLES) {
+      const [row] = await db.driver.select<{ data_type: string; column_default: string | null }>(
+        `SELECT data_type, column_default FROM information_schema.columns
+         WHERE table_schema='public' AND table_name=$1 AND column_name='id'`,
+        [table],
+      )
+      expect(row, `${table} has no id column`).toBeDefined()
+      expect(row.data_type).toBe('uuid')
+      expect(row.column_default ?? '').toContain('gen_random_uuid')
+    }
+  })
+
+  it('every system table has created_at not-null-default-now and a nullable updated_at', async () => {
+    for (const table of SYSTEM_TABLES) {
+      const rows = await db.driver.select<{ column_name: string; is_nullable: string; column_default: string | null }>(
+        `SELECT column_name, is_nullable, column_default FROM information_schema.columns
+         WHERE table_schema='public' AND table_name=$1 AND column_name IN ('created_at','updated_at')`,
+        [table],
+      )
+      const created = rows.find((r) => r.column_name === 'created_at')
+      const updated = rows.find((r) => r.column_name === 'updated_at')
+      expect(created, `${table} has no created_at`).toBeDefined()
+      expect(created!.is_nullable).toBe('NO')
+      expect(created!.column_default ?? '').toContain('now()')
+      expect(updated, `${table} has no updated_at`).toBeDefined()
+      expect(updated!.is_nullable).toBe('YES')
+    }
+  })
+
+  it('maintains updated_at by trigger', async () => {
+    const [row] = await db.driver.select<{ id: string; updated_at: string | null }>(
+      `INSERT INTO worker_heartbeats (worker_id, booted_at, last_tick_at, outreach, chat)
+       VALUES ('w-trigger', now(), now(), 'disabled', 'disabled') RETURNING id, updated_at`,
+    )
+    expect(row.updated_at).toBeNull()
+    const [after] = await db.driver.select<{ updated_at: string | null }>(
+      `UPDATE worker_heartbeats SET last_tick_at = now() WHERE id = $1 RETURNING updated_at`,
+      [row.id],
+    )
+    expect(after.updated_at).not.toBeNull()
+  })
+
+  it('carries no org_id — the worker serves every org', async () => {
+    for (const table of SYSTEM_TABLES) {
+      const cols = await columnNames(db.driver, table)
+      expect(cols, `${table} must not be org-scoped`).not.toContain('org_id')
     }
   })
 })

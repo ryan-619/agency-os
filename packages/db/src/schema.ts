@@ -47,6 +47,10 @@ export const users = pgTable(
     name: text('name'),
     /** 'owner' | 'member'. Only owner may edit connectors and credentials (§4). */
     role: text('role').notNull().default('member'),
+    /** Offboarding is a role change, not a row deletion (0004's own words;
+     *  0018). A revoked user keeps every row that names them — approvals,
+     *  handled replies, costs — and can no longer sign in or run a turn. */
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
     // --- Auth.js adapter columns ---
     emailVerified: timestamp('email_verified', { withTimezone: true }),
     image: text('image'),
@@ -193,11 +197,16 @@ export const findings = pgTable(
     /** The header value seen, the URL fetched, the timestamp. */
     evidence: jsonb('evidence').notNull().default(sql`'{}'::jsonb`),
     stale: boolean('stale').notNull().default(false),
+    /** §2.2 (0018). False for an informational signal — observed, recorded,
+     *  and NOT in the ICP. Such a row carries no weight, by CHECK, so nobody
+     *  can read "also observed" as "a gap that counts". */
+    scored: boolean('scored').notNull().default(true),
     ...timestamps,
   },
   (t) => [
     uniqueIndex('findings_scan_signal_key').on(t.scanId, t.signalKey),
     index('findings_company_stale_idx').on(t.companyId, t.stale),
+    index('findings_company_informational_idx').on(t.companyId),
   ],
 )
 
@@ -251,6 +260,12 @@ export const contacts = pgTable(
     /** NOT NULL whenever `pausedAt` is: a pause with no cause gets cleared by
      *  whoever finds it. */
     pausedReason: text('paused_reason'),
+    /** A permanent bounce is evidence about an ADDRESS, not a person asking
+     *  to be left alone — so it is a column and a refusal, never a
+     *  suppression row (0018). The code is the DSN's own RFC 3463 status. */
+    emailBouncedAt: timestamp('email_bounced_at', { withTimezone: true }),
+    /** NOT NULL exactly when `emailBouncedAt` is: the evidence for the mark. */
+    emailBounceCode: text('email_bounce_code'),
     ...timestamps,
   },
   (t) => [
@@ -288,6 +303,10 @@ export const suppressions = pgTable(
     /** Stored already normalised by packages/core. */
     value: text('value').notNull(),
     reason: text('reason').notNull(),
+    /** 'manual' | 'reply' | 'voice' | 'unsubscribe' | 'erasure' | null —
+     *  WHICH path recorded the opt-out (0018). Null on rows written before
+     *  the column existed; inventing a value for them would be a claim. */
+    source: text('source'),
     ...timestamps,
   },
   (t) => [uniqueIndex('suppressions_org_kind_value_key').on(t.orgId, t.kind, t.value)],
@@ -345,6 +364,10 @@ export const meetings = pgTable(
     /** An unauthenticated booking matched records already on file (0015).
      *  Nothing about them was modified; a person confirms who booked. */
     needsReview: boolean('needs_review').notNull().default(false),
+    /** 'held' | 'no_show' | 'rescheduled' | null — what happened, the one
+     *  fact a pipeline learns from a meeting (0018). Cancellation stays
+     *  `cancelledAt`. */
+    outcome: text('outcome'),
     ...timestamps,
   },
   (t) => [
@@ -451,6 +474,21 @@ export const touches = pgTable(
      *  In-Reply-To header against `provider_id`. Address matching alone is
      *  ambiguous once one person is in two campaigns (0011). */
     inReplyTo: uuid('in_reply_to'),
+    // --- a person dealt with a reply (0018) --------------------------------
+    /** When somebody read this INBOUND message and dealt with it. NULL is
+     *  "nobody has". Inbound only, by CHECK. */
+    handledAt: timestamp('handled_at', { withTimezone: true }),
+    /** Who. RESTRICT, like `approvedBy`: the person stays identifiable as
+     *  long as the record does — users are revoked, never deleted. */
+    handledBy: uuid('handled_by').references(() => users.id, { onDelete: 'restrict' }),
+    /**
+     * For an OUTBOUND draft: the inbound touch it answers, so the worker can
+     * thread it (In-Reply-To/References from that row's `provider_id`) and
+     * the inbox can show "answered". A self-reference, so it is declared
+     * without `.references` — as `scanId` is — and the migration owns the
+     * foreign key (SET NULL: deleting the reply must not delete the answer).
+     */
+    answersTouchId: uuid('answers_touch_id'),
     ...timestamps,
   },
   (t) => [
@@ -461,6 +499,8 @@ export const touches = pgTable(
     index('touches_out_by_provider_id_idx').on(t.providerId),
     index('touches_in_by_provider_id_idx').on(t.providerId),
     index('touches_due_idx').on(t.status, t.scheduledFor),
+    index('touches_org_inbox_idx').on(t.orgId, t.createdAt.desc()),
+    index('touches_answers_idx').on(t.answersTouchId),
   ],
 )
 
@@ -673,6 +713,134 @@ export const chatMessages = pgTable(
 )
 
 // ---------------------------------------------------------------------------
+// Notes, tasks, share links (0018)
+// ---------------------------------------------------------------------------
+
+/**
+ * A teammate's words about a company, optionally about one of its contacts.
+ *
+ * Kept apart from evidence on purpose: nothing that writes a proposal or a
+ * brief may read this table, and packages/core's tests assert that by
+ * source. A note is what somebody thinks; a finding is what the scanner saw.
+ */
+export const notes = pgTable(
+  'notes',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    companyId: uuid('company_id').notNull().references(() => companies.id, { onDelete: 'cascade' }),
+    contactId: uuid('contact_id').references(() => contacts.id, { onDelete: 'cascade' }),
+    /** RESTRICT: whoever wrote it stays identifiable as long as the note does. */
+    authorUserId: uuid('author_user_id').notNull().references(() => users.id, { onDelete: 'restrict' }),
+    body: text('body').notNull(),
+    pinned: boolean('pinned').notNull().default(false),
+    ...timestamps,
+  },
+  (t) => [index('notes_company_idx').on(t.companyId, t.pinned, t.createdAt)],
+)
+
+/**
+ * Where LinkedIn steps, kickoff checklists, renewal reminders and plain
+ * to-dos land. `kind` is 'todo' | 'linkedin_send' | 'kickoff' | 'renewal'.
+ */
+export const tasks = pgTable(
+  'tasks',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    companyId: uuid('company_id').references(() => companies.id, { onDelete: 'cascade' }),
+    dealId: uuid('deal_id').references(() => deals.id, { onDelete: 'set null' }),
+    /** For a `linkedin_send`: the touch a person is asked to send by hand.
+     *  Required for that kind, by CHECK; one OPEN task per touch. */
+    touchId: uuid('touch_id').references(() => touches.id, { onDelete: 'cascade' }),
+    kind: text('kind').notNull().default('todo'),
+    title: text('title').notNull(),
+    detail: text('detail'),
+    /** SET NULL: an unassigned task is a normal state. */
+    assigneeUserId: uuid('assignee_user_id').references(() => users.id, { onDelete: 'set null' }),
+    /** Nullable: the agent creates tasks and has no users row; the audit row
+     *  names the actor. */
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    dueAt: timestamp('due_at', { withTimezone: true }),
+    doneAt: timestamp('done_at', { withTimezone: true }),
+    /** RESTRICT: a done task names a person who stays identifiable. NOT NULL
+     *  exactly when `doneAt` is. */
+    doneBy: uuid('done_by').references(() => users.id, { onDelete: 'restrict' }),
+    ...timestamps,
+  },
+  (t) => [
+    index('tasks_org_open_idx').on(t.orgId, t.dueAt),
+    index('tasks_company_idx').on(t.companyId),
+    uniqueIndex('tasks_one_open_per_touch').on(t.touchId),
+  ],
+)
+
+/**
+ * A buyer link to a proposal.
+ *
+ * The token is a bearer credential and ONLY its sha256 is stored — the CHECK
+ * makes a raw token unstorable (§2.3). A view is a count and two instants,
+ * never an IP or a user agent. An acceptance names the person who typed their
+ * name, never a session, because the buyer has none.
+ */
+export const proposalShares = pgTable(
+  'proposal_shares',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    proposalId: uuid('proposal_id').notNull().references(() => proposals.id, { onDelete: 'cascade' }),
+    /** sha256 of the token, lower-case hex. Never the token. */
+    tokenHash: text('token_hash').notNull(),
+    createdBy: uuid('created_by').notNull().references(() => users.id, { onDelete: 'restrict' }),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    viewCount: integer('view_count').notNull().default(0),
+    firstViewedAt: timestamp('first_viewed_at', { withTimezone: true }),
+    lastViewedAt: timestamp('last_viewed_at', { withTimezone: true }),
+    acceptedAt: timestamp('accepted_at', { withTimezone: true }),
+    /** NOT NULL exactly when `acceptedAt` is, and never blank. */
+    acceptedByName: text('accepted_by_name'),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('proposal_shares_token_hash_key').on(t.tokenHash),
+    index('proposal_shares_proposal_idx').on(t.proposalId, t.createdAt.desc()),
+  ],
+)
+
+// ---------------------------------------------------------------------------
+// System tables (0018)
+// ---------------------------------------------------------------------------
+
+/**
+ * One row per worker instance, upserted every tick; the web reads the newest.
+ *
+ * A SYSTEM table with no `org_id`, like the auth tables: the worker serves
+ * every org — `dueTouches` and the restart reconciler are cross-org — so
+ * "the org's worker" is not a concept. A worker that scaled to zero leaves
+ * approvals landing on nothing while `/readyz` answers fine (§2.4); this row
+ * is how the web can say so.
+ */
+export const workerHeartbeats = pgTable(
+  'worker_heartbeats',
+  {
+    id: id(),
+    workerId: text('worker_id').notNull(),
+    bootedAt: timestamp('booted_at', { withTimezone: true }).notNull(),
+    /** Never before `bootedAt`, by CHECK. */
+    lastTickAt: timestamp('last_tick_at', { withTimezone: true }).notNull(),
+    /** 'disabled' | 'send-only' | 'send-and-receive' | 'receive-only' */
+    outreach: text('outreach').notNull(),
+    /** 'enabled' | 'disabled' */
+    chat: text('chat').notNull(),
+    /** Counts and names only. Never a credential, never a message body. */
+    detail: jsonb('detail').notNull().default(sql`'{}'::jsonb`),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex('worker_heartbeats_worker_key').on(t.workerId)],
+)
+
+// ---------------------------------------------------------------------------
 // Relations
 // ---------------------------------------------------------------------------
 
@@ -712,3 +880,7 @@ export type Touch = typeof touches.$inferSelect
 export type Approval = typeof approvals.$inferSelect
 export type Connector = typeof connectors.$inferSelect
 export type AgentDef = typeof agentDefs.$inferSelect
+export type Note = typeof notes.$inferSelect
+export type Task = typeof tasks.$inferSelect
+export type ProposalShare = typeof proposalShares.$inferSelect
+export type WorkerHeartbeat = typeof workerHeartbeats.$inferSelect

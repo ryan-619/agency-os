@@ -25,6 +25,7 @@
  */
 import { and, asc, eq } from 'drizzle-orm'
 import { z } from 'zod'
+import { SENSITIVE_KEY } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 
@@ -52,25 +53,146 @@ export const connectorNameSchema = z
 /** A header value may not be a credential. Credentials go in `secret_ref`. */
 const headerValue = z.string().max(4096)
 
-const stdioConfig = z.object({
-  command: z.string().min(1, 'A command is required.'),
-  args: z.array(z.string()).max(64).default([]),
-  /**
-   * Environment for the child process. NOT a place for a credential: the
-   * worker injects the decrypted secret at launch, and anything typed here is
-   * stored in plain `jsonb` where §2.3 says a credential may never be.
-   */
-  env: z.record(z.string(), z.string().max(4096)).default({}),
-})
+/**
+ * Variables the credential may NOT be injected under: they reconfigure the
+ * child or the CLI itself. `secretEnv` says WHERE the worker puts the
+ * decrypted secret, and a name on this list would hand it to something other
+ * than the connector — `NODE_OPTIONS` runs code, `PATH` picks the binary,
+ * `ANTHROPIC_API_KEY` would make the child's calls bill the agency.
+ */
+export const FORBIDDEN_SECRET_ENV: readonly string[] = Object.freeze([
+  'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_CUSTOM_HEADERS', 'NODE_OPTIONS', 'PATH', 'HOME', 'USER',
+  'LOGNAME', 'SHELL', 'TMPDIR', 'LD_PRELOAD', 'NODE_EXTRA_CA_CERTS', 'DATABASE_URL', 'SECRETS_KEY', 'CLAUDE_CONFIG_DIR',
+])
 
-const httpConfig = z.object({
-  url: z.url('Must be an absolute http(s) URL.'),
-  headers: z.record(z.string(), headerValue).default({}),
-})
+/**
+ * A config KEY that looks like a credential. `SENSITIVE_KEY` from @agency/core
+ * matches `api_key` and `apikey` but NOT the hyphenated `x-api-key` the presets
+ * use (verified against redact.ts), so this covers the hyphenated spellings.
+ * Checked on the key only: the value is whatever the person typed, and the
+ * point is that a credential never gets typed here at all.
+ */
+const CREDENTIAL_SHAPED_KEY = /api[-_]?key|api[-_]?token/i
+
+/** A bare tool name, as `mcp__<server>__<tool>` carries it after the server. */
+const toolName = z
+  .string()
+  .regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/, 'A tool name is letters, digits, underscores and hyphens.')
+  .max(120)
+
+/**
+ * Refuse a `headers` or `env` entry whose KEY is credential-shaped, or is the
+ * connector's own secret slot. The credential goes through `putSecret` and is
+ * injected by the worker at the moment of use; anything typed into these maps
+ * is stored in plain `jsonb`, where §2.3 says a credential may never be. A
+ * non-secret header a preset needs (`close-scope: mcp.read`) passes.
+ */
+function refuseCredentialShapedKeys<T extends { readonly [k: string]: unknown }>(
+  field: 'headers' | 'env',
+  slotOf: (config: T) => string,
+): (config: T, ctx: z.RefinementCtx) => void {
+  const where = field === 'headers' ? 'a header' : 'the environment'
+  return (config, ctx) => {
+    const entries = config[field]
+    if (!entries || typeof entries !== 'object') return
+    const slot = slotOf(config).toLowerCase()
+    for (const key of Object.keys(entries as Record<string, unknown>)) {
+      const folded = key.toLowerCase()
+      if (SENSITIVE_KEY.test(folded) || CREDENTIAL_SHAPED_KEY.test(folded) || folded === slot) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [field, key],
+          message: `Put the credential in the credential field, not in ${where}.`,
+        })
+      }
+    }
+  }
+}
+
+const stdioConfig = z
+  .object({
+    command: z.string().min(1, 'A command is required.'),
+    args: z.array(z.string()).max(64).default([]),
+    /**
+     * Environment for the child process. NOT a place for a credential: the
+     * worker injects the decrypted secret at launch, and anything typed here is
+     * stored in plain `jsonb` where §2.3 says a credential may never be.
+     */
+    env: z.record(z.string(), z.string().max(4096)).default({}),
+    /**
+     * The env var NAME the credential is injected under. Default `MCP_SECRET`.
+     * A name, never a value: the value lives in `secrets` and reaches the
+     * child at launch, from the worker.
+     */
+    secretEnv: z
+      .string()
+      .regex(/^[A-Z][A-Z0-9_]{0,63}$/, 'An environment variable name is upper-case letters, digits and underscores.')
+      .refine(
+        (n) => !FORBIDDEN_SECRET_ENV.includes(n) && !n.startsWith('CLAUDE_'),
+        'That variable belongs to the worker, not to a connector.',
+      )
+      .optional(),
+    /**
+     * Bare tool names the gate refuses outright for this server, before
+     * classification — a DENY, never an allow. Names, never credentials.
+     */
+    disabledTools: z.array(toolName).max(64).default([]),
+  })
+  .superRefine(refuseCredentialShapedKeys('env', (c) => c.secretEnv ?? 'MCP_SECRET'))
+
+const httpConfig = z
+  .object({
+    url: z.url('Must be an absolute http(s) URL.'),
+    headers: z.record(z.string(), headerValue).default({}),
+    /**
+     * The header NAME the credential is sent in. Default `authorization`.
+     * Lower-case, because that is how the worker builds the map and how the
+     * refusal above compares it.
+     */
+    secretHeader: z
+      .string()
+      .regex(/^[a-z][a-z0-9-]{0,63}$/, 'A header name is lower-case letters, digits and hyphens.')
+      .optional(),
+    /**
+     * Text before the value: `Bearer ` (the default when the header is
+     * `authorization`), `` (the default otherwise), or a vendor's own scheme
+     * such as `Sentry-Bearer `. Sixteen characters is enough for any scheme
+     * and too few for a token.
+     */
+    secretPrefix: z.string().max(16).optional(),
+    disabledTools: z.array(toolName).max(64).default([]),
+  })
+  .superRefine(refuseCredentialShapedKeys('headers', (c) => c.secretHeader ?? 'authorization'))
 
 export type StdioConfig = z.infer<typeof stdioConfig>
 export type HttpConfig = z.infer<typeof httpConfig>
 export type ConnectorConfig = StdioConfig | HttpConfig
+
+/** Where the credential goes for an http/sse row: the header, and the text before the value. */
+export function secretPlacement(config: HttpConfig): { header: string; prefix: string } {
+  const header = config.secretHeader ?? 'authorization'
+  const prefix = config.secretPrefix ?? (header === 'authorization' ? 'Bearer ' : '')
+  return { header, prefix }
+}
+
+/** The environment variable a stdio row's credential is injected under. */
+export function secretEnvName(config: StdioConfig): string {
+  return config.secretEnv ?? 'MCP_SECRET'
+}
+
+/**
+ * The fully-qualified names of the tools a row has turned off, as the gate
+ * sees them: `mcp__<name>__<tool>`. Empty when the config does not parse —
+ * a row the worker cannot build has no tools to disable.
+ */
+export function disabledToolNames(row: { readonly name: string; readonly config: unknown }): ReadonlySet<string> {
+  // Read loosely rather than by transport: `disabledTools` has the same
+  // shape on both configs, and this is called from places that hold a row
+  // and not its parsed kind.
+  const parsed = z.object({ disabledTools: z.array(toolName).max(64).default([]) }).safeParse(row.config ?? {})
+  if (!parsed.success) return new Set()
+  return new Set(parsed.data.disabledTools.map((tool) => `mcp__${row.name}__${tool}`))
+}
 
 /**
  * Validate a connector's config for its transport.

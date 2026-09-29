@@ -63,6 +63,13 @@ export interface MessageProvider {
     readonly to: string
     readonly subject: string
     readonly body: string
+    /**
+     * Extra headers the send path built: `In-Reply-To`/`References` for an
+     * answer to a reply, `List-Unsubscribe` from the worker. Optional, so a
+     * provider that cannot carry headers — a person, on LinkedIn — still
+     * satisfies the interface by ignoring them.
+     */
+    readonly headers?: Readonly<Record<string, string>>
   }): Promise<{ readonly providerId: string }>
 }
 
@@ -184,7 +191,16 @@ export async function dispatchTouch(
   db: AgencyDb,
   provider: MessageProvider,
   touch: TouchRow,
-  opts: { readonly now?: Date } = {},
+  opts: {
+    readonly now?: Date
+    /**
+     * Headers the CALLER adds to an outbound message — the worker's
+     * `List-Unsubscribe`, for one. Merged over the threading headers this
+     * function builds itself; a null return adds nothing. Never consulted for
+     * the decision, which needs no headers.
+     */
+    readonly headersFor?: (touch: TouchRow) => Readonly<Record<string, string>> | null
+  } = {},
 ): Promise<SendResult> {
   const now = opts.now ?? new Date()
 
@@ -273,12 +289,38 @@ export async function dispatchTouch(
     }
   }
 
+  // Threading, built HERE rather than by the caller: an outbound row that
+  // answers a reply names it in `answers_touch_id` (0018), and the reply's
+  // `provider_id` is the Message-ID the other side's client will look for in
+  // In-Reply-To and References. One place, so every caller's answer threads.
+  const headers: Record<string, string> = {}
+  if (touch.answersTouchId) {
+    const parent = await db
+      .select({ providerId: schema.touches.providerId })
+      .from(schema.touches)
+      .where(
+        and(
+          eq(schema.touches.id, touch.answersTouchId),
+          eq(schema.touches.orgId, touch.orgId),
+          eq(schema.touches.direction, 'in'),
+        ),
+      )
+      .limit(1)
+    const messageId = parent[0]?.providerId
+    if (messageId) {
+      headers['In-Reply-To'] = messageId
+      headers['References'] = messageId
+    }
+  }
+  Object.assign(headers, opts.headersFor?.(touch) ?? {})
+
   let providerId: string
   try {
     const sent = await provider.send({
       to: facts.recipient,
       subject: touch.subject ?? '',
       body: touch.body ?? '',
+      headers,
     })
     providerId = sent.providerId
   } catch (err) {
@@ -374,12 +416,10 @@ async function subjectExists(
 }
 
 /**
- * Everything `decideSend` needs, in three queries.
+ * The facts for one touch, or why there cannot be any.
  *
- * Deliberately gathered in ONE place. A caller assembling these itself is a
- * caller that can forget the domain half of the suppression lookup, or read
- * the sender's timezone, and those are the bugs the whole design is arranged
- * to make impossible.
+ * A thin wrapper over `sendFactsFor`: it decides what a ROW says about who
+ * approved it, and hands everything else to the one fact-gatherer.
  */
 async function gatherFacts(
   db: AgencyDb,
@@ -395,6 +435,45 @@ async function gatherFacts(
   if (!touch.contactId) {
     return { missing: 'This message has no recipient. Nothing was sent.' }
   }
+  return sendFactsFor(db, {
+    orgId: touch.orgId,
+    campaignId: touch.campaignId,
+    contactId: touch.contactId,
+    approvedByHuman: touch.status === 'approved' && touch.approvedBy !== null,
+    now,
+  })
+}
+
+/**
+ * Everything `decideSend` needs, in three queries.
+ *
+ * Deliberately gathered in ONE place. A caller assembling these itself is a
+ * caller that can forget the domain half of the suppression lookup, or read
+ * the sender's timezone, and those are the bugs the whole design is arranged
+ * to make impossible.
+ *
+ * Exported so a DRY RUN (`previewSend` in send-preview.ts) reads exactly what
+ * the sender reads and writes nothing. Every screen that says "could we
+ * message this person?" reads it from here, through that; a screen with its
+ * own idea of the facts is a screen that can disagree with the sender at the
+ * moment somebody trusted it. Beside the facts it reports HOW two of them
+ * were arrived at — whose zone, and whether the contact is paused — for the
+ * screen to show; the decision does not read those.
+ */
+export async function sendFactsFor(
+  db: AgencyDb,
+  args: {
+    readonly orgId: string
+    readonly campaignId: string
+    readonly contactId: string
+    readonly approvedByHuman: boolean
+    readonly now: Date
+  },
+): Promise<
+  | { facts: SendFacts; recipient: string; zoneFrom: 'contact' | 'company' | null; paused: boolean }
+  | { missing: string }
+> {
+  const { orgId, campaignId, contactId, now } = args
 
   const rows = await db
     .select({
@@ -405,10 +484,10 @@ async function gatherFacts(
     .from(schema.campaigns)
     .innerJoin(
       schema.contacts,
-      and(eq(schema.contacts.id, touch.contactId), eq(schema.contacts.orgId, touch.orgId)),
+      and(eq(schema.contacts.id, contactId), eq(schema.contacts.orgId, orgId)),
     )
     .leftJoin(schema.companies, eq(schema.companies.id, schema.contacts.companyId))
-    .where(and(eq(schema.campaigns.id, touch.campaignId), eq(schema.campaigns.orgId, touch.orgId)))
+    .where(and(eq(schema.campaigns.id, campaignId), eq(schema.campaigns.orgId, orgId)))
     .limit(1)
 
   const row = rows[0]
@@ -416,18 +495,19 @@ async function gatherFacts(
 
   const channel = row.campaign.channel as Channel
   const recipient = recipientFor(channel, row.contact)
+  // The contact's zone, or their company's. Never the sender's, and never
+  // derived from a country (§2.1; see 0010).
+  const zoneFrom = row.contact.timeZone ? 'contact' : row.companyTimeZone ? 'company' : null
   const base = {
     channel,
     recipient,
-    // The contact's zone, or their company's. Never the sender's, and never
-    // derived from a country (§2.1; see 0010).
     recipientTimeZone: row.contact.timeZone ?? row.companyTimeZone ?? null,
     quietStart: row.campaign.quietStart,
     quietEnd: row.campaign.quietEnd,
     dailyCap: row.campaign.dailyCap,
     autoSend: row.campaign.autoSend,
     campaignStatus: row.campaign.status as SendFacts['campaignStatus'],
-    approvedByHuman: touch.status === 'approved' && touch.approvedBy !== null,
+    approvedByHuman: args.approvedByHuman,
     now,
   }
 
@@ -441,6 +521,8 @@ async function gatherFacts(
   if (row.contact.pausedAt) {
     return {
       recipient,
+      zoneFrom,
+      paused: true,
       facts: {
         ...base,
         suppressed: false,
@@ -461,7 +543,7 @@ async function gatherFacts(
       .from(schema.suppressions)
       .where(
         and(
-          eq(schema.suppressions.orgId, touch.orgId),
+          eq(schema.suppressions.orgId, orgId),
           or(
             ...keys.map((k) =>
               and(eq(schema.suppressions.kind, k.kind), eq(schema.suppressions.value, k.value)),
@@ -478,9 +560,9 @@ async function gatherFacts(
     .from(schema.consents)
     .where(
       and(
-        eq(schema.consents.contactId, touch.contactId),
+        eq(schema.consents.contactId, contactId),
         eq(schema.consents.channel, channel),
-        eq(schema.consents.orgId, touch.orgId),
+        eq(schema.consents.orgId, orgId),
       ),
     )
     .limit(1)
@@ -495,8 +577,8 @@ async function gatherFacts(
     .from(schema.touches)
     .where(
       and(
-        eq(schema.touches.orgId, touch.orgId),
-        eq(schema.touches.campaignId, touch.campaignId),
+        eq(schema.touches.orgId, orgId),
+        eq(schema.touches.campaignId, campaignId),
         eq(schema.touches.direction, 'out'),
         isNotNull(schema.touches.sentAt),
         gte(schema.touches.sentAt, startOfDay),
@@ -505,6 +587,8 @@ async function gatherFacts(
 
   return {
     recipient,
+    zoneFrom,
+    paused: false,
     facts: {
       ...base,
       suppressed,
@@ -859,6 +943,13 @@ export async function recordInboundReply(
     readonly body: string | null
     readonly providerId?: string | null
     readonly inReplyTo?: string | null
+    /**
+     * Whether the mail's HEADERS said it was automatic. Accepted and IGNORED
+     * until `mail-signals-and-bounce-pause` gives it meaning: the reader
+     * that decides it is that feature's, and a caller passing it early
+     * changes nothing. Stated so nobody reads the parameter as a promise.
+     */
+    readonly autoReply?: boolean
     readonly now?: Date
   },
 ): Promise<{
@@ -869,15 +960,20 @@ export async function recordInboundReply(
   deal: string | null
   /** The deterministic kind stored on the inbound touch (§5.5). */
   replyKind: ReplyKind
+  /** The company the reply is about, for a caller's own notification. */
+  companyId: string | null
+  companyDomain: string | null
 }> {
   const now = args.now ?? new Date()
 
   const contactRows = await db
-    .select({ companyId: schema.contacts.companyId })
+    .select({ companyId: schema.contacts.companyId, companyDomain: schema.companies.domain })
     .from(schema.contacts)
+    .leftJoin(schema.companies, eq(schema.companies.id, schema.contacts.companyId))
     .where(and(eq(schema.contacts.orgId, args.orgId), eq(schema.contacts.id, args.contactId)))
     .limit(1)
   const companyId = contactRows[0]?.companyId ?? null
+  const companyDomain = contactRows[0]?.companyDomain ?? null
 
   const inserted = await db
     .insert(schema.touches)
@@ -942,6 +1038,7 @@ export async function recordInboundReply(
       kind: 'email',
       value: args.from,
       reason: `replied asking to stop, ${now.toISOString().slice(0, 10)}`,
+      source: 'reply',
     })
     suppressed = added.ok
   }
@@ -967,7 +1064,7 @@ export async function recordInboundReply(
     detail: { channel: args.channel, paused, cancelledQueued: cancelled.length, suppressed, deal },
   }).catch(() => {})
 
-  return { touchId, paused, cancelled: cancelled.length, suppressed, deal, replyKind }
+  return { touchId, paused, cancelled: cancelled.length, suppressed, deal, replyKind, companyId, companyDomain }
 }
 
 export type InboundOutcome =
@@ -979,6 +1076,14 @@ export type InboundOutcome =
       readonly paused: boolean
       readonly suppressed: boolean
       readonly replyKind: ReplyKind
+      /**
+       * True when this Message-ID had already been recorded, so nothing was
+       * written this time. A caller notifying somebody must not notify them
+       * twice for one reply a provider retried.
+       */
+      readonly duplicate: boolean
+      readonly companyId: string | null
+      readonly companyDomain: string | null
     }
   | { readonly matched: 'none'; readonly why: string }
 
@@ -1009,6 +1114,15 @@ export async function handleInboundEmail(
     readonly messageId?: string | null
     /** Every Message-ID in In-Reply-To and References, in that order. */
     readonly references?: readonly string[]
+    /**
+     * The raw header map and the DSN status, when the caller has them.
+     * Accepted and IGNORED here: `mail-signals-and-bounce-pause` is the
+     * feature that reads them, and until it lands a caller passing them
+     * changes nothing. Declared now so `inbound-resend` can pass them
+     * without importing that feature.
+     */
+    readonly headers?: Readonly<Record<string, string>>
+    readonly dsn?: string | null
     readonly now?: Date
   },
 ): Promise<InboundOutcome> {
@@ -1025,8 +1139,11 @@ export async function handleInboundEmail(
         orgId: schema.touches.orgId,
         contactId: schema.touches.contactId,
         replyKind: schema.touches.replyKind,
+        companyId: schema.touches.companyId,
+        companyDomain: schema.companies.domain,
       })
       .from(schema.touches)
+      .leftJoin(schema.companies, eq(schema.companies.id, schema.touches.companyId))
       .where(and(eq(schema.touches.direction, 'in'), eq(schema.touches.providerId, mail.messageId)))
       .limit(1)
     if (dup[0]?.contactId) {
@@ -1040,6 +1157,9 @@ export async function handleInboundEmail(
         paused: false,
         suppressed: false,
         replyKind: (dup[0].replyKind as ReplyKind | null) ?? 'other',
+        duplicate: true,
+        companyId: dup[0].companyId,
+        companyDomain: dup[0].companyDomain,
       }
     }
   }
@@ -1079,6 +1199,9 @@ export async function handleInboundEmail(
         touchId: r.touchId,
         paused: r.paused,
         suppressed: r.suppressed,
+        duplicate: false,
+        companyId: r.companyId,
+        companyDomain: r.companyDomain,
       }
     }
   }
@@ -1107,6 +1230,7 @@ export async function handleInboundEmail(
   return {
     matched: 'contact', contactId: only.id, orgId: only.orgId,
     touchId: r.touchId, paused: r.paused, suppressed: r.suppressed, replyKind: r.replyKind,
+    duplicate: false, companyId: r.companyId, companyDomain: r.companyDomain,
   }
 }
 
