@@ -31,6 +31,40 @@ function secureEnough(url: string): boolean {
   return mode === 'require' || mode === 'verify-ca' || mode === 'verify-full'
 }
 
+/**
+ * A blank value is UNSET, not a present value that happens to be empty.
+ *
+ * `.env.example` documents every variable as `NAME=` at column 0, and
+ * `cp .env.example .env` is the first command in CLAUDE.md. Every feature
+ * behind one of these variables fails closed when it is absent — so a copied
+ * file must not refuse to boot the whole app over a feature nobody has
+ * turned on. A PRESENT value is still held to whatever the schema after it
+ * demands: a short secret is a misconfiguration, and "fails closed" means
+ * refusing it, not quietly accepting it.
+ */
+const blankIsUnset = (v: unknown): unknown => (typeof v === 'string' && v.trim() === '' ? undefined : v)
+
+/**
+ * The one host a Slack incoming webhook lives on. Written out here so the
+ * schema entry stays on one line: `packages/db/test/deployment.test.ts` reads
+ * this file line by line to find the variables the app REQUIRES, and an entry
+ * whose `.optional()` sits three lines down reads as one of them.
+ */
+const slackWebhookUrl = z
+  .string()
+  .url()
+  .refine(
+    (v) => {
+      try {
+        const u = new URL(v)
+        return u.protocol === 'https:' && u.hostname === 'hooks.slack.com'
+      } catch {
+        return false
+      }
+    },
+    'SLACK_WEBHOOK_URL must be an https://hooks.slack.com/… URL',
+  )
+
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
 
@@ -161,7 +195,60 @@ const schema = z.object({
    * the internet mark a contact as having replied, pause their sequence, and
    * put their address on the suppression list.
    */
-  INBOUND_WEBHOOK_SECRET: z.string().min(32).optional(),
+  INBOUND_WEBHOOK_SECRET: z.preprocess(blankIsUnset, z.string().min(32).optional()),
+
+  /**
+   * Vercel sends it as `Authorization: Bearer <value>` on every cron GET.
+   * Unset → every cron route answers 503. The routes also refuse to run
+   * anywhere but production (see VERCEL_ENV below), so a preview deployment
+   * that happens to inherit the secret does not rescan the pipeline.
+   */
+  CRON_SECRET: z.preprocess(blankIsUnset, z.string().min(32).optional()),
+  /**
+   * Companies per cron rescan run. Sequential, because DATABASE_POOL_MAX is 1
+   * on Vercel; each scan can take around two minutes in the worst case under
+   * a 300-second function ceiling, so the ceiling on this number is the
+   * ceiling on the function.
+   */
+  RESCAN_BATCH_SIZE: z.coerce.number().int().min(1).max(20).default(6),
+  /**
+   * A Slack incoming webhook. The URL IS the credential — never logged, never
+   * in an audit row — and `redact()` cannot see it, because it matches on key
+   * names and this one lives in a URL. Host-pinned: this variable makes the
+   * web function POST to whatever it names, and a value pointing at the cloud
+   * metadata endpoint would carry every notification there.
+   */
+  SLACK_WEBHOOK_URL: z.preprocess(blankIsUnset, slackWebhookUrl.optional()),
+  /**
+   * Signs one-click unsubscribe tokens. Unset → /api/unsubscribe answers 503
+   * and the worker adds no List-Unsubscribe header. The SAME value on the
+   * worker: a token this app cannot verify is a link that does nothing.
+   */
+  UNSUBSCRIBE_SECRET: z.preprocess(blankIsUnset, z.string().min(32).optional()),
+  /**
+   * Resend's endpoint signing secret (`whsec_…`). Unset → /api/inbound/resend
+   * answers 503, like /api/inbound/email without its secret.
+   */
+  RESEND_WEBHOOK_SECRET: z.preprocess(blankIsUnset, z.string().min(16).optional()),
+  /**
+   * Resend API key, for the follow-up fetch of a received email's body. The
+   * webhook carries only the envelope. Unset → /api/inbound/resend answers
+   * 503 even with the signing secret set: a reply whose text cannot be read
+   * cannot be classified, so nothing would be honest about it.
+   */
+  RESEND_API_KEY: z.preprocess(blankIsUnset, z.string().min(1).optional()),
+  /**
+   * Documented here so `.env.example` and this schema agree; READ by
+   * `secretsKeyFromEnv()` in packages/db, which reports a malformed key as
+   * unset and says why. Nothing in this app reads the parsed value.
+   */
+  SECRETS_KEY: z.string().optional(),
+  /**
+   * Set by the platform on Vercel. Read HERE, never from process.env in a
+   * route: the cron routes refuse to run anywhere but production. Unset
+   * locally, and never set by hand.
+   */
+  VERCEL_ENV: z.enum(['production', 'preview', 'development']).optional(),
 
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 })
