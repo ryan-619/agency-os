@@ -456,3 +456,91 @@ textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .consent-box legend { font-size: 12.5px; color: var(--muted); padding: 0 6px; }
 .consent-box .wording { font-size: 12.5px; color: var(--ink); margin: 4px 0 8px; line-height: 1.5; }
 .consent-box .tool-check { margin-top: 8px; }
+
+/* --- shared classes for the pages that follow ---------------------------- */
+/*
+ * Each group below names the component or page that uses it. The classes are
+ * written here once so that a feature adding a page adds the page and not a
+ * rule to this file; a feature needing something not here uses an existing
+ * class and an inline style.
+ */
+
+/* The search box above the sidebar navigation (components/search-box.tsx). */
+input[type=search] {
+  width: 100%; padding: 7px 10px; border: 1px solid var(--line);
+  border-radius: 6px; background: var(--bg); color: var(--ink); font-size: 13px;
+}
+input[type=search]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.search-box { position: relative; margin-bottom: 14px; }
+.search-results {
+  position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 20;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .08); max-height: 320px; overflow: auto; padding: 4px 0;
+}
+.search-hit { display: block; padding: 6px 10px; font-size: 12.5px; color: var(--ink); text-decoration: none; }
+.search-hit:hover, .search-hit.on { background: var(--bg); }
+.search-hit .k { color: var(--muted); font-size: 11px; margin-left: 6px; }
+
+/* The consent ledger on /contacts: one cell per channel, the same tokens
+ * `.consent` uses on a company page, so yes/no/none read the same everywhere. */
+.ledger-state { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.ledger-state.yes { color: var(--ok); }
+.ledger-state.no { color: var(--warn); }
+.ledger-state.none { color: var(--warn); }
+.ledger-state.unknown { color: var(--muted); font-style: italic; }
+
+/* A pipeline card nobody has touched for too long, and its due date (pipeline/board.tsx). */
+.kcard.rotten { border-left: 3px solid var(--warn); }
+.kcard-due { font-size: 11.5px; color: var(--muted); }
+.kcard-due.overdue { color: var(--warn); font-weight: 600; }
+
+/* The inbox (/inbox): one row per reply, its kind, and what can be done with it. */
+.inbox-row { display: grid; grid-template-columns: 1fr auto; gap: 8px 16px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.inbox-row:last-child { border-bottom: 0; }
+.inbox-kind { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; font-size: 11.5px; color: var(--muted); white-space: nowrap; }
+.inbox-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: flex-start; }
+.inbox-actions button { margin-top: 0; width: auto; padding: 5px 10px; font-size: 12.5px; }
+
+/* Tasks (/tasks and the notes panel): a row per task, struck when done, warned when overdue. */
+.task-row { display: flex; gap: 10px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+.task-row:last-child { border-bottom: 0; }
+.task-done { color: var(--muted); text-decoration: line-through; }
+.task-overdue { color: var(--warn); font-weight: 600; }
+
+/* The connector catalog (/settings/connectors): a card per preset, grouped by class. */
+.catalog { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-top: 12px; }
+.catalog-card { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); padding: 12px 14px; font-size: 13px; }
+.catalog-card h3 { margin: 0 0 4px; font-size: 14px; }
+.catalog-class { font-size: 11px; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); margin: 18px 0 6px; }
+
+/* The buyer's share page (/p/<token>): the sign-in frame (`.auth-wrap`), wide
+ * enough for a document, with nothing of the app around it. */
+.buyer { max-width: 820px; padding: 32px 36px; }
+.buyer .proposal h1 { font-size: 22px; margin: 0 0 6px; }
+.buyer-accept { border-top: 1px solid var(--line); margin-top: 26px; padding-top: 18px; }
+.buyer-accept button { width: auto; }
+
+/* The unified timeline on a company page: scans, touches, meetings, notes, in one order. */
+.timeline { list-style: none; margin: 0; padding: 0 0 0 14px; border-left: 2px solid var(--line); }
+.timeline-item { position: relative; padding: 4px 0 12px 12px; font-size: 13px; }
+.timeline-item::before { content: ''; position: absolute; left: -19px; top: 11px; width: 8px; height: 8px; border-radius: 50%; background: var(--line); }
+.timeline-item .k { color: var(--muted); font-size: 11.5px; margin-right: 6px; }
+
+/* Informational signals on a company page: observed, never scored, never a gap. */
+.informational { border: 1px dashed var(--line); border-radius: var(--radius); padding: 12px 16px; margin-top: 12px; }
+.informational table { margin: 6px 0 0; }
+
+/* Scan history on a company page: one row per scan, most recent first. */
+.history-table { font-size: 12.5px; }
+.history-table td, .history-table th { padding: 5px 8px; }
+
+/* The findings diff between two scans: what closed, what opened, what could not be checked. */
+.diff-fixed { color: var(--ok); }
+.diff-regressed { color: var(--warn); }
+.diff-not-assessed { color: var(--muted); font-style: italic; }
+
+/* Printing a proposal: the document and nothing that only works on a screen. */
+@media print {
+  .side, .search-box, .row-actions, button { display: none; }
+  .main { margin: 0; }
+}

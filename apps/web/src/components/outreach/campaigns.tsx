@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { REFUSAL_WORDS } from '@/lib/refusal-words'
 
 /**
  * Campaigns (PROMPT.md §8.4).
@@ -31,18 +32,6 @@ export interface CampaignView {
     readonly waitingToSend: number
     readonly refusals: readonly { readonly code: string; readonly n: number }[]
   }
-}
-
-const REFUSAL_WORDS: Record<string, string> = {
-  suppressed: 'on the suppression list',
-  consent_revoked: 'declined, or replied',
-  cold_channel_forbidden: 'cold channel not allowed',
-  quiet_hours: 'quiet hours',
-  unknown_timezone: 'no timezone on the contact',
-  daily_cap: 'daily cap',
-  unparseable_recipient: 'no usable address',
-  needs_approval: 'denied by a person',
-  no_consent: 'no opt-in',
 }
 
 export function CampaignsPanel({

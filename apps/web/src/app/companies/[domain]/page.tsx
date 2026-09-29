@@ -6,6 +6,11 @@ import { can } from '@agency/core'
 import {
   companyThread, listContactsForCompany, meetingsForCompany, openDealFor, proposalsForCompany, type AgencyDb,
 } from '@agency/db/queries'
+import { CompanyEditSlot } from '@/components/company/edit'
+import { EvidencePanelsSlot } from '@/components/company/evidence'
+import { InformationalSlot } from '@/components/company/informational'
+import { NotesSlot } from '@/components/company/notes'
+import type { CompanySlotProps } from '@/components/company/slot'
 import { ContactsPanel } from '@/components/outreach/contacts'
 import { CompanyActions } from '@/components/pipeline/company-actions'
 import { When } from '@/components/when'
@@ -51,11 +56,17 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
   const score = found?.score ?? null
 
   const findings = found?.findings ?? []
+  // Only the SCORED rows are a gap, a strength or a missing observation; an
+  // informational signal is context and belongs to <InformationalSlot>.
+  // `findings.scored` arrives in the same PR as this line (0018, from the
+  // parallel schema worktree), so it is read structurally: an absent property
+  // means "scored", which is what every row was before that migration.
+  const scoredRows = findings.filter((f) => ('scored' in f ? (f as { scored: boolean }).scored : true))
   // §2.2 and §12: a finding whose `observed` is false is NEVER rendered as a
   // gap. The two lists are built from the column, not from a convention.
-  const gaps = findings.filter((f) => f.observed && f.gap === true)
-  const inPlace = findings.filter((f) => f.observed && f.gap === false)
-  const notObserved = findings.filter((f) => !f.observed)
+  const gaps = scoredRows.filter((f) => f.observed && f.gap === true)
+  const inPlace = scoredRows.filter((f) => f.observed && f.gap === false)
+  const notObserved = scoredRows.filter((f) => !f.observed)
 
   // Derived from when the scan RAN, not read from `findings.stale`. That column
   // is a cache written by a sweep that only runs during `npm run scan`, so it
@@ -78,6 +89,14 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
           ? { ok: false, why: 'No gaps were observed. There is nothing to propose.' }
           : { ok: true }
   const principal = { id: user.id, orgId: user.orgId, role: user.role }
+  const slot: CompanySlotProps = {
+    orgId: user.orgId,
+    companyId: company.id,
+    domain: company.domain,
+    userId: user.id,
+    canWrite: can(principal, 'companies:write'),
+    staleAfterDays: staleAfter,
+  }
 
   const signOutAction = async () => {
     'use server'
@@ -101,6 +120,7 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
           ' · never scanned'
         )}
       </p>
+      <CompanyEditSlot {...slot} />
 
       {!found ? (
         <div className="note">
@@ -208,17 +228,20 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
             </>
           ) : null}
 
+          <InformationalSlot {...slot} />
+
           <h2>Scan</h2>
           <table>
             <tbody>
               <tr><th>Ran at</th><td className="mono">{new Date(found.scan.ranAt).toISOString()}</td></tr>
               <tr><th>Reached the site</th><td className="mono">{found.scan.ok ? 'yes' : 'no'}</td></tr>
-              <tr><th>Signals observed</th><td className="mono">{gaps.length + inPlace.length} of {findings.length}</td></tr>
+              <tr><th>Signals observed</th><td className="mono">{gaps.length + inPlace.length} of {scoredRows.length}</td></tr>
               <tr><th>Score computed</th><td className="mono">{score ? new Date(score.computedAt).toISOString() : '—'}</td></tr>
             </tbody>
           </table>
         </>
       )}
+      <EvidencePanelsSlot {...slot} />
       <CompanyActions
         companyId={company.id}
         companyDomain={company.domain}
@@ -289,6 +312,7 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
           consents: c.consents.map((k) => ({ channel: k.channel, granted: k.granted, source: k.source })),
         }))}
       />
+      <NotesSlot {...slot} />
 
       <section className="card" style={{ marginTop: 18 }}>
         <h2>Conversation</h2>
