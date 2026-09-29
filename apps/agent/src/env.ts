@@ -198,6 +198,37 @@ const schema = z.object({
   OUTREACH_TICK_MS: z.coerce.number().int().positive().default(15_000),
   /** How many it will dispatch per tick, across every campaign. */
   OUTREACH_BATCH: z.coerce.number().int().positive().default(20),
+
+  // The three below are read through `outreach/options.ts`, the one place the
+  // sender's optional settings are derived from the environment. Every one of
+  // them is optional or defaulted: unset, the sender behaves exactly as it did
+  // before the variable existed. Every message here names a variable and
+  // never its value (§2.3).
+
+  /**
+   * Signs the one-click unsubscribe token (RFC 8058) that rides in the
+   * List-Unsubscribe headers of every outreach email. The SAME value as the
+   * web app's, because the web app is what verifies the click. Either this or
+   * WEB_PUBLIC_URL unset means no header, said once in the boot log — an
+   * opt-out link nobody can verify is worse than none.
+   */
+  UNSUBSCRIBE_SECRET: z.string().min(32, 'UNSUBSCRIBE_SECRET must be at least 32 characters').optional(),
+
+  /**
+   * The web app's public origin as the WORKER sees it — where
+   * `/api/unsubscribe` lives, e.g. https://agency.example. The header's link
+   * is built from this and nothing else: not the address the worker binds,
+   * which is a loopback nobody's mail client can reach.
+   */
+  WEB_PUBLIC_URL: z.string().url().optional(),
+
+  /**
+   * A campaign whose addresses bounce past this percentage pauses itself,
+   * once it has been sent to at least twenty — below that the ratio is
+   * noise. The existing `campaign_inactive` deferral is the stop; a person
+   * re-activates it after fixing the list.
+   */
+  OUTREACH_BOUNCE_PAUSE_PCT: z.coerce.number().min(0).max(100).default(5),
 })
 
 export type Env = z.infer<typeof schema>
