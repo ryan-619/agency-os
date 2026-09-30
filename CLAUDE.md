@@ -12,9 +12,9 @@ compliance and audit pages, search and CSV exports, the settings pages,
 proposal print and buyer share links, LinkedIn steps a person sends, bounce
 handling, one-click unsubscribe, a worker heartbeat, and two Vercel crons (a
 nightly rescan and a Slack digest). The agent's own tools went from nine to
-twenty-three. Everything web-side works with no worker; §2 has a subsection
-for each piece, and DEPLOYING.md carries the release checklist, which starts
-with applying 0018 BEFORE the code that reads it.
+twenty-three. Everything web-side works with no worker; §2 describes each
+piece and §4 the decisions behind them, and DEPLOYING.md carries the release
+checklist, which starts with applying 0018 BEFORE the code that reads it.
 
 **The worker deploys to Fly.io** (`fly.toml` at the repo root), and its
 defaults are the dangerous part: Fly scales a machine to zero between
@@ -1383,6 +1383,38 @@ named `Acme,72,A — call first`. Existing domains are untouched.
 **A person's whole record is one download, and erasure keeps the
 suppression** — see the send path above.
 
+### The settings pages and the dashboard
+
+**`/settings` is five read-mostly pages.** `/settings/icp` shows the stored
+definition with no editor (§4). `/settings/spend` reads only Postgres sums of
+`chat_messages.cost_usd` — per UTC day and per person, revoked people
+included — gated on `audit:read` like `/compliance`. `/settings/deployment`
+names every variable and never shows a value or a URL, beside the heartbeat
+and the schema state computed exactly as `/api/health` computes it; it is the
+page that answers "why would nothing send?". `/settings/mail` checks the WEB
+app's `MAIL_FROM` domain — SPF, DMARC, and DKIM at the common selectors or
+`?dkim=<one label>` — with TXT lookups made from the browser through
+`/api/settings/mail-dns`, so a slow nameserver delays one panel rather than the
+page. The worker's `MAIL_FROM` lives on its own host, and the page says it
+cannot see it. A 1024-bit RSA DKIM key (Resend's and Google's default) passes
+with a note, and only a shorter one is "weak"; an answer that could not be
+read is "could not be checked", never "missing".
+
+**The dashboard states the phases once and every bullet from a fact.** Its
+headline says "Phases 0–6 are built", and that Phase 6 is deliberately not
+switched on only while no call is on record in this database. The worker
+line comes from the newest heartbeat. "Needs a look" is a row of counters —
+failing compliance checks, unhandled replies, drafts and agent actions
+awaiting approval, deals untouched past their stage's limit or past due,
+overdue tasks, and stale, never-scanned and unreachable companies at the
+ICP's own threshold — each linking to the filter that lists exactly its rows;
+a zero whose recorder is absent reads "None recorded" and names what is
+missing. The last ten audit lines are `sentenceFor`'s. "What this instance can
+and cannot do" is chosen in `lib/dashboard-view.ts` from `deployment()` or
+from an observation — the heartbeat, the newest `scan.cron_run`, calls on
+record — so "stale companies are rescanned daily" is only said once a rescan
+has actually run in the last 36 hours.
+
 ## 3. Commands
 
 ```bash
@@ -2414,8 +2446,8 @@ on a human, which is Phase 4's single send path. `get_pipeline` and
 forbids a tool that teaches the model a false shape of the business — and
 ship now, with `book_meeting` beside them; all three write internal state
 only and say in their summary that nothing was sent. The same rule held the
-0018 tools back until their tables had writers: wave 1 shipped them as stubs
-answering `invalid_state`, and `packages/tools/test/no-stubs.test.ts` now fails
+0018 tools back until their tables had writers: the release's first commit
+shipped them as stubs answering `invalid_state`, and `packages/tools/test/no-stubs.test.ts` now fails
 if a stub marker, or the stubs' "not available in this revision", survives in
 any shipped source.
 
