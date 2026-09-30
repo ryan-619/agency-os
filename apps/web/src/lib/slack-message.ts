@@ -71,7 +71,15 @@ export type NotificationEvent =
       refusals24h: readonly { code: string; n: number }[]
       optOutsNotRecorded24h: number
       spend24hUsd: string
-      worker: 'never' | 'live' | 'silent' | 'not_configured'
+      worker: DigestWorkerStatus
+      /** The newest heartbeat's instant, ISO — what a retired worker's line dates it by. */
+      workerLastSeenAt: string | null
+      /**
+       * The bounce auto-pauses this run read, and how many get a
+       * `campaign_paused` notice of their own after this message (at most
+       * the cap). Counts only: the rest are named on /campaigns.
+       */
+      campaignPauses: { found: number; notices: number }
       /** Domains, most rotten first. */
       topRotting: readonly string[]
     }
@@ -94,11 +102,26 @@ const REPLY_WORDS: Readonly<Record<ReplyKind, string>> = {
   other: 'a reply',
 }
 
-const WORKER_WORDS: Readonly<Record<'never' | 'live' | 'silent' | 'not_configured', string>> = {
+/** The digest's "Worker:" vocabulary — `heartbeatReportedStatus` in packages/db. */
+type DigestWorkerStatus = 'never' | 'live' | 'silent' | 'not_configured' | 'retired'
+
+const WORKER_WORDS: Readonly<Record<Exclude<DigestWorkerStatus, 'retired'>, string>> = {
   never: 'never seen',
   live: 'live',
   silent: 'SILENT — nothing is sending or reading replies',
   not_configured: 'not configured on this deployment',
+}
+
+/**
+ * A session somebody ran by hand and closed more than a week ago, with no
+ * worker configured: dated by its last heartbeat (the UTC day — the instant
+ * is on /settings/deployment) and not called silent, because nobody is being
+ * alerted about it and the line should not read as an alarm.
+ */
+function workerWords(worker: DigestWorkerStatus, lastSeenAt: string | null): string {
+  if (worker !== 'retired') return WORKER_WORDS[worker]
+  const day = lastSeenAt !== null && /^\d{4}-\d{2}-\d{2}T/.test(lastSeenAt) ? lastSeenAt.slice(0, 10) : null
+  return `retired — ${day ? `last seen ${day}; ` : ''}no worker is configured, so nothing is sending or reading replies`
 }
 
 /**
@@ -200,8 +223,20 @@ export function slackMessage(event: NotificationEvent, origin: string): SlackPay
       if (event.optOutsNotRecorded24h > 0) {
         lines.push(`NEEDS A PERSON: ${event.optOutsNotRecorded24h} opt-out(s) in the last 24h could not be recorded.`)
       }
+      // Past the cap a pause gets no notice of its own; this line is where the
+      // channel hears there were more. A count and the list page, never a name.
+      const shown = Math.max(0, event.campaignPauses.notices)
+      const more = event.campaignPauses.found - shown
+      if (more > 0) {
+        const campaigns = more === 1 ? 'campaign paused itself' : 'campaigns paused themselves'
+        lines.push(
+          shown > 0
+            ? `Campaign pauses: ${shown} announced below, and ${more} more ${campaigns} — see ${link('/campaigns')}`
+            : `${more} ${campaigns} since the last digest — see ${link('/campaigns')}`,
+        )
+      }
       lines.push(`Agent spend in the last 24h: USD ${event.spend24hUsd}`)
-      lines.push(`Worker: ${WORKER_WORDS[event.worker]}`)
+      lines.push(`Worker: ${workerWords(event.worker, event.workerLastSeenAt)}`)
       if (event.topRotting.length > 0) {
         lines.push(`Rotting first: ${event.topRotting.map(displayDomain).join(', ')}`)
       }

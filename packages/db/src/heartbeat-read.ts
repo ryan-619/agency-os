@@ -40,6 +40,19 @@ export type HeartbeatChat = 'enabled' | 'disabled'
 export const HEARTBEAT_SILENT_AFTER_SECONDS = 600
 
 /**
+ * Where NO worker is configured, a silent row older than this is a retired
+ * session rather than a worker that stopped. `./tools/run-worker.sh` run
+ * once against production and closed leaves its row behind, and only a
+ * running worker's own write prunes the table — so without a horizon that
+ * row raised the worker-silent alert every morning forever, the daily noise
+ * that teaches a channel to ignore the one alert that matters. A week,
+ * because a worker that was running and stopped is worth a week of notices
+ * first. The one place this number lives: `workerSilent` on the web reads
+ * it from here.
+ */
+export const HEARTBEAT_RETIRED_AFTER_DAYS = 7
+
+/**
  * How many missed ticks make a worker silent when the row says how often it
  * ticks. A worker configured with a twenty-minute tick is not silent eleven
  * minutes after its last write; it is on time. The threshold is the larger
@@ -122,6 +135,14 @@ export interface HeartbeatReport {
    * no row is `never`: something should be ticking and nothing ever has.
    */
   readonly status: 'not_configured' | 'never' | 'live' | 'silent'
+  /**
+   * A `silent` row older than `HEARTBEAT_RETIRED_AFTER_DAYS` where no worker
+   * is configured: a session somebody ran by hand and closed. The status
+   * stays `silent`, because nothing is sending and every page that says so
+   * is right; the digest line and /api/health name it `retired`
+   * (`heartbeatReportedStatus`), and nobody is alerted about it.
+   */
+  readonly retired: boolean
 }
 
 /**
@@ -134,12 +155,30 @@ export function heartbeatReport(
   now: Date,
 ): HeartbeatReport {
   const observed = heartbeatStatus(row, now, heartbeatSilentAfter(row))
+  const ageSeconds = heartbeatAge(row, now)
   return {
     configured,
     lastSeenAt: row?.lastTickAt ?? null,
-    ageSeconds: heartbeatAge(row, now),
+    ageSeconds,
     outreach: row?.outreach ?? null,
     chat: row?.chat ?? null,
     status: observed === 'never' && !configured ? 'not_configured' : observed,
+    // Configured, a stopped worker is silent however long ago it stopped:
+    // somebody meant one to be running. An age that cannot be read is not a week.
+    retired:
+      !configured &&
+      observed === 'silent' &&
+      ageSeconds !== null &&
+      Number.isFinite(ageSeconds) &&
+      ageSeconds > HEARTBEAT_RETIRED_AFTER_DAYS * 86_400,
   }
+}
+
+/** What the digest's "Worker:" line and /api/health call the worker: the report's status, or `retired`. */
+export type HeartbeatReportedStatus = HeartbeatReport['status'] | 'retired'
+
+export function heartbeatReportedStatus(
+  report: Pick<HeartbeatReport, 'status' | 'retired'>,
+): HeartbeatReportedStatus {
+  return report.retired ? 'retired' : report.status
 }

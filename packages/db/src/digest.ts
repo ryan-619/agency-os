@@ -35,17 +35,21 @@
  *   * **A campaign that paused itself is announced once.** The worker pauses
  *     a campaign whose addresses bounce (`campaign.auto_paused`) and has no
  *     Slack path of its own; the digest is the web-side reader of those rows,
- *     inside the same once-per-day guard, and reads only the rows written
- *     since the previous digest — so two runs never announce one pause.
+ *     inside the same once-per-day guard, and reads strictly after the
+ *     high-water mark the previous run recorded — the stored `(created_at,
+ *     id)` of the last pause it read — so two runs never announce one pause,
+ *     and a pause stamped between two clocks is still read by one of them.
  *
- * The audit row carries counts only — no domain list, no ids of people —
- * because /audit shows it to every member and Slack already had the rest.
+ * The audit row carries counts only — and the pause mark, which is another
+ * audit row's id and instant — no domain list and no ids of people, because
+ * /audit shows it to every member and Slack already had the rest.
  */
-import { and, desc, eq, gt, gte, inArray, isNull, lte, sql } from 'drizzle-orm'
+import { and, desc, eq, gt, gte, inArray, isNull, lte, sql, type SQL } from 'drizzle-orm'
 import { DEFAULT_STALE_AFTER_DAYS, isStale, rottingState } from '@agency/core'
 import * as schema from './schema.js'
 import { appendAudit } from './approvals.js'
 import { complianceRefusalsByCode } from './compliance.js'
+import type { HeartbeatReportedStatus } from './heartbeat-read.js'
 import { inboxUnhandledCount } from './inbox.js'
 import { tasksCounts } from './tasks.js'
 import type { AgencyDb } from './repository.js'
@@ -286,50 +290,122 @@ export interface DigestCampaignPause {
 }
 
 /**
- * The campaigns that paused themselves since the previous digest, oldest
- * first — at most `DIGEST_MAX_PAUSE_NOTICES` of them, and how many there
- * were in all.
+ * Where a run stopped reading `campaign.auto_paused` rows — the high-water
+ * mark the next run reads strictly after. Kept in the `cron.digest` row as
+ * `campaignPauses.readThrough`.
  *
- * The window is the digest's own 24-hour lookback, started no earlier than
- * the previous `cron.digest` row: a manual run twenty-one hours after the
- * scheduled one would otherwise read three hours of pauses the scheduled one
- * already announced. Call it BEFORE `digestRecord`, inside `digestOnce`,
- * where the newest `cron.digest` row is the previous run's. Ids and the two
- * numbers the pause was made on — never who bounced (the writer stores
- * nothing else).
+ * `at` is the row's `created_at` as the DATABASE stored it, to the
+ * microsecond, in UTC ISO text — never a JavaScript `Date`, which holds
+ * milliseconds and would put the mark up to 999µs before the row it names
+ * (the /audit cursor's trap: `listAudit` in audit.ts). `id` breaks the tie
+ * between rows one transaction stamped with the same `now()`. A run that has
+ * never read a pause, and had no mark to carry, records the instant it read
+ * up to with `id: null`.
+ */
+export interface DigestPauseMark {
+  readonly at: string
+  readonly id: string | null
+}
+
+/**
+ * How far back the previous run's `cron.digest` row is looked for. Wider
+ * than a day on purpose: Vercel fires a cron anywhere inside its minute, so
+ * on about half of days the previous run is a little more than 24 hours
+ * old, and a failed day makes it two. A previous run older than this is not
+ * looked for, and the run reads the 24-hour lookback instead.
+ */
+export const DIGEST_MARK_LOOKBACK_DAYS = 7
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$/
+
+/** `created_at` to the microsecond, in UTC, as ISO text — read in SQL, so no `Date` ever holds it. */
+const createdAtText = sql<string>`to_char(${schema.auditLog.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`
+
+/**
+ * The campaigns that paused themselves since the previous digest, oldest
+ * first — at most `DIGEST_MAX_PAUSE_NOTICES` of them, how many there were in
+ * all, and the mark this run read through (record it in `digestRecord`).
+ *
+ * Both ends of the window are on ONE clock. The upper end is the route's
+ * `now`. The lower end is the previous run's mark: the stored `(created_at,
+ * id)` of the last pause it read, compared in SQL, read strictly after. It
+ * used to be the previous `cron.digest` row's own `created_at` — Postgres
+ * `now()` at that transaction's start, a different clock from the `now` the
+ * previous run had read up to — so a pause stamped between the route taking
+ * `now` and the digest's BEGIN was read by neither run, and with the web's
+ * clock ahead of the database's, one stamped the other way round was read by
+ * both. Anything this run's upper end leaves out is after its mark, so the
+ * next run reads it: whatever the two clocks say, a pause is read once.
+ *
+ * With no mark — no previous run in `DIGEST_MARK_LOOKBACK_DAYS`, or one from
+ * before the mark was recorded — the window is the 24-hour lookback, started
+ * no earlier than that previous row when there is one, as before: a manual
+ * run twenty-one hours after the scheduled one would otherwise read three
+ * hours of pauses the scheduled one already announced. A run that reads
+ * nothing carries the previous mark forward rather than moving it to its own
+ * `now`, so a pause the database stamped before this run read, and committed
+ * after, is still after the mark.
+ *
+ * Call it BEFORE `digestRecord`, inside `digestOnce`, where the newest
+ * `cron.digest` row is the previous run's. The rows past the cap are read —
+ * counted in `found` and passed by the mark, so the digest says how many
+ * more there were — and never announced one by one. Ids and the two numbers
+ * the pause was made on — never who bounced (the writer stores nothing else).
  */
 export async function digestCampaignPauses(
   db: AgencyDb,
   orgId: string,
   opts: { readonly now: Date },
-): Promise<{ readonly pauses: readonly DigestCampaignPause[]; readonly found: number }> {
+): Promise<{
+  readonly pauses: readonly DigestCampaignPause[]
+  readonly found: number
+  readonly readThrough: DigestPauseMark
+}> {
+  const t = schema.auditLog
   const lookback = new Date(opts.now.getTime() - DIGEST_LOOKBACK_HOURS * HOUR_MS)
   const [previous] = await db
-    .select({ at: schema.auditLog.createdAt })
-    .from(schema.auditLog)
+    .select({ id: t.id, detail: t.detail })
+    .from(t)
     .where(
       and(
-        eq(schema.auditLog.orgId, orgId),
-        eq(schema.auditLog.action, 'cron.digest'),
-        gte(schema.auditLog.createdAt, lookback),
-        lte(schema.auditLog.createdAt, opts.now),
+        eq(t.orgId, orgId),
+        eq(t.action, 'cron.digest'),
+        gte(t.createdAt, new Date(opts.now.getTime() - DIGEST_MARK_LOOKBACK_DAYS * 24 * HOUR_MS)),
       ),
     )
-    .orderBy(desc(schema.auditLog.createdAt))
+    .orderBy(desc(t.createdAt), desc(t.id))
     .limit(1)
-  const rows = await db
-    .select({ campaignId: schema.auditLog.subjectId, detail: schema.auditLog.detail })
-    .from(schema.auditLog)
-    .where(
-      and(
-        eq(schema.auditLog.orgId, orgId),
-        eq(schema.auditLog.action, 'campaign.auto_paused'),
-        // After the previous digest, strictly: a pause it read was announced.
-        previous ? gt(schema.auditLog.createdAt, previous.at) : gte(schema.auditLog.createdAt, lookback),
-        lte(schema.auditLog.createdAt, opts.now),
+  const mark = previous ? pauseMarkIn(previous.detail) : null
+
+  let after: SQL | undefined
+  if (mark?.id) {
+    // The marked row's STORED created_at, by id, as /audit's cursor reads it;
+    // the text is exact too, and stands in only if the row is gone.
+    after = sql`(${t.createdAt}, ${t.id}) > (
+      COALESCE(
+        (SELECT m.created_at FROM audit_log m WHERE m.id = ${mark.id}::uuid AND m.org_id = ${orgId}::uuid),
+        ${mark.at}::timestamptz
       ),
+      ${mark.id}::uuid
+    )`
+  } else if (mark) {
+    after = sql`${t.createdAt} > ${mark.at}::timestamptz`
+  } else if (previous) {
+    // A previous run that recorded no mark: after its own row, strictly, and inside the lookback.
+    after = and(
+      gte(t.createdAt, lookback),
+      sql`${t.createdAt} > (SELECT p.created_at FROM audit_log p WHERE p.id = ${previous.id}::uuid AND p.org_id = ${orgId}::uuid)`,
     )
-    .orderBy(schema.auditLog.createdAt, schema.auditLog.id)
+  } else {
+    after = gte(t.createdAt, lookback)
+  }
+
+  const rows = await db
+    .select({ id: t.id, at: createdAtText, campaignId: t.subjectId, detail: t.detail })
+    .from(t)
+    .where(and(eq(t.orgId, orgId), eq(t.action, 'campaign.auto_paused'), after, lte(t.createdAt, opts.now)))
+    .orderBy(t.createdAt, t.id)
   const pauses: DigestCampaignPause[] = []
   for (const r of rows) {
     const bouncePct = numberIn(r.detail, 'bouncePct')
@@ -338,7 +414,25 @@ export async function digestCampaignPauses(
     if (r.campaignId === null || bouncePct === null || threshold === null) continue
     pauses.push({ campaignId: r.campaignId, bouncePct, threshold })
   }
-  return { pauses: pauses.slice(0, DIGEST_MAX_PAUSE_NOTICES), found: pauses.length }
+  // Past every row read, the skipped ones included: a row that cannot be announced today cannot be tomorrow.
+  const last = rows.at(-1)
+  const readThrough: DigestPauseMark = last
+    ? { at: last.at, id: last.id }
+    : mark ?? { at: opts.now.toISOString(), id: null }
+  return { pauses: pauses.slice(0, DIGEST_MAX_PAUSE_NOTICES), found: pauses.length, readThrough }
+}
+
+/** The mark a `cron.digest` row recorded, or null for a row from before there was one, or one that does not parse. */
+function pauseMarkIn(detail: unknown): DigestPauseMark | null {
+  if (typeof detail !== 'object' || detail === null) return null
+  const pauses = (detail as Record<string, unknown>)['campaignPauses']
+  if (typeof pauses !== 'object' || pauses === null) return null
+  const mark = (pauses as Record<string, unknown>)['readThrough']
+  if (typeof mark !== 'object' || mark === null) return null
+  const { at, id } = mark as Record<string, unknown>
+  if (typeof at !== 'string' || !ISO_INSTANT.test(at)) return null
+  if (id === null) return { at, id: null }
+  return typeof id === 'string' && UUID.test(id) ? { at, id } : null
 }
 
 function numberIn(detail: unknown, key: string): number | null {
@@ -437,8 +531,12 @@ export function digestCounts(facts: DigestFacts): DigestCounts {
 /** Why a digest that ran did not reach Slack. */
 export type DigestNotPosted = 'no_slack' | 'slack_failed'
 
-/** The worker's status as the digest reported it — `HeartbeatReport['status']`. */
-export type DigestWorker = 'never' | 'live' | 'silent' | 'not_configured'
+/**
+ * The worker's status as the digest reported it — `heartbeatReportedStatus`:
+ * `HeartbeatReport['status']`, or `retired` for a closed session nobody is
+ * alerted about.
+ */
+export type DigestWorker = HeartbeatReportedStatus
 
 export type DigestRecord = {
   readonly orgId: string
@@ -452,11 +550,16 @@ export type DigestRecord = {
   readonly workerAlert?: 'not_needed' | 'posted' | 'failed' | 'no_slack'
   /**
    * The bounce auto-pauses this run read (`digestCampaignPauses`): how many
-   * there were, and how many Slack took a notice for. `found > posted` is a
-   * pause the channel was not told about — past the cap, a failed post, or
-   * no Slack.
+   * there were, how many Slack took a notice for, and the mark the run read
+   * through, which the next run reads strictly after. `found > posted` is a
+   * pause that got no notice of its own — past the cap (the digest says how
+   * many), a failed post, or no Slack.
    */
-  readonly campaignPauses?: { readonly found: number; readonly posted: number }
+  readonly campaignPauses?: {
+    readonly found: number
+    readonly posted: number
+    readonly readThrough: DigestPauseMark
+  }
 } & ({ readonly posted: true } | { readonly posted: false; readonly why: DigestNotPosted })
 
 /**
@@ -475,7 +578,15 @@ export async function digestRecord(db: AgencyDb, record: DigestRecord): Promise<
       counts: record.counts,
       ...(record.worker ? { worker: record.worker } : {}),
       ...(record.workerAlert ? { workerAlert: record.workerAlert } : {}),
-      ...(record.campaignPauses ? { campaignPauses: { found: record.campaignPauses.found, posted: record.campaignPauses.posted } } : {}),
+      ...(record.campaignPauses
+        ? {
+            campaignPauses: {
+              found: record.campaignPauses.found,
+              posted: record.campaignPauses.posted,
+              readThrough: { at: record.campaignPauses.readThrough.at, id: record.campaignPauses.readThrough.id },
+            },
+          }
+        : {}),
     },
   })
 }

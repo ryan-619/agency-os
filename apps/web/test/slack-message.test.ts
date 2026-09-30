@@ -27,7 +27,8 @@ const EVENTS: readonly NotificationEvent[] = [
   {
     kind: 'digest', orgId: ORG, pendingApprovals: 2, unhandledReplies: 3, rottingDeals: 1, staleCompanies: 4, neverScanned: 5,
     dueTasks: 1, overdueTasks: 1, refusals24h: [{ code: 'daily_cap', n: 3 }, { code: 'quiet_hours', n: 1 }],
-    optOutsNotRecorded24h: 0, spend24hUsd: '0.12', worker: 'live', topRotting: ['acme.example', 'b.example'],
+    optOutsNotRecorded24h: 0, spend24hUsd: '0.12', worker: 'live', workerLastSeenAt: '2026-09-30T06:40:00.000Z',
+    campaignPauses: { found: 0, notices: 0 }, topRotting: ['acme.example', 'b.example'],
   },
   { kind: 'campaign_paused', orgId: ORG, campaignId: '00000000-0000-4000-8000-000000000006', bouncePct: 7.5, threshold: 5 },
   // A reply that said stop and could not be suppressed (the inbound routes).
@@ -172,6 +173,20 @@ describe('slackMessage', () => {
     const payload = slackMessage(digest, ORIGIN)
     expect(payload.text.length).toBeLessThanOrEqual(4000)
     expect(payload.text.endsWith('…')).toBe(true)
+  })
+
+  it('says a retired worker is retired, when it was last seen, and that none is configured — not that it is silent', () => {
+    const digest = { ...EVENTS[6]!, worker: 'retired', workerLastSeenAt: '2026-09-02T17:30:00.000Z' } as NotificationEvent
+    const text = slackMessage(digest, ORIGIN).text
+    expect(text).toContain('Worker: retired — last seen 2026-09-02; no worker is configured')
+    expect(text).not.toContain('SILENT')
+  })
+
+  it('counts the campaigns that paused themselves past the notices, and links to the list — never a name', () => {
+    const digest = { ...EVENTS[6]!, campaignPauses: { found: 7, notices: 3 } } as NotificationEvent
+    const text = slackMessage(digest, ORIGIN).text
+    expect(text).toContain(`and 4 more campaigns paused themselves — see ${ORIGIN}/campaigns`)
+    expect(slackMessage(EVENTS[6]!, ORIGIN).text).not.toContain('paused themselves')
   })
 
   it('says what a silent worker means for the queue', () => {
