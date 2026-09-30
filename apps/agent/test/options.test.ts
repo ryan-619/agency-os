@@ -354,6 +354,9 @@ describe('the system prompt', () => {
   it('says a note is never evidence', () => {
     for (const tool of ['add_note', 'create_task', 'list_tasks']) expect(prompt, tool).toContain(tool)
     expect(prompt).toMatch(/a note is your words, never evidence/i)
+    // add_note files the note under the chat owner's name (author_user_id is
+    // NOT NULL), so the model is told whose name its words will carry.
+    expect(prompt).toMatch(/filed under the name of the person you are helping/i)
   })
 
   /**

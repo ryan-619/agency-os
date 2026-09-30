@@ -11,7 +11,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import {
-  consentLedgerFor, dispatchTouch, previewSend, schema, type AgencyDb, type MessageProvider,
+  consentLedgerFor, dispatchTouch, evidenceAsOfFor, previewSend, schema, type AgencyDb, type MessageProvider,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
 
@@ -137,6 +137,31 @@ describe('previewSend agrees with dispatchTouch', () => {
     expect(p.facts.paused).toBe(true)
   })
 
+  /**
+   * Found by review: the paused branch of `sendFactsFor` skipped the
+   * suppression lookup, so a paused AND suppressed person previewed as "not
+   * suppressed" — the check-send route and `check_send` invited a resume —
+   * and the sender logged the opt-out as a revoked consent.
+   */
+  it('a paused AND suppressed contact reads as suppressed, and says both', async () => {
+    await db.update(schema.contacts).set({ pausedAt: NOON, pausedReason: 'replied 2026-09-15' }).where(eq(schema.contacts.id, contactId))
+    await db.insert(schema.suppressions).values({ orgId, kind: 'email', value: 'priya@rentman.io', reason: 'opted out' })
+    const p = await agrees('suppressed')
+    expect(p.facts.suppressed).toBe(true)
+    expect(p.facts.paused).toBe(true)
+    expect(p.facts.pausedReason).toBe('replied 2026-09-15')
+    // Nobody recorded a consent answer; the pause is not one.
+    expect(p.facts.consentRecorded).toBeNull()
+  })
+
+  /** Found by review: a refused AND bounced person read as `bounced`, which a person may resolve. */
+  it('a declined AND bounced contact reads as consent_revoked, which nobody may approve past', async () => {
+    await db.insert(schema.consents).values({ orgId, contactId, channel: 'email', granted: false, source: 'reply 2026-08-02' })
+    await db.update(schema.contacts).set({ emailBouncedAt: NOON, emailBounceCode: '5.1.1' }).where(eq(schema.contacts.id, contactId))
+    const p = await agrees('consent_revoked')
+    expect(p.decision).toMatchObject({ humanCanResolve: false })
+  })
+
   it('a declined consent', async () => {
     await db.insert(schema.consents).values({ orgId, contactId, channel: 'email', granted: false, source: 'reply 2026-08-02' })
     const p = await agrees('consent_revoked')
@@ -176,6 +201,45 @@ describe('previewSend agrees with dispatchTouch', () => {
     await db.update(schema.campaigns).set({ status: 'paused' }).where(eq(schema.campaigns.id, campaignId))
     const p = await agrees('campaign_inactive')
     expect(p.facts.campaignStatus).toBe('paused')
+  })
+
+  it('stale evidence: a scan past the window, as the sender would read it', async () => {
+    await db.insert(schema.scans).values({ orgId, companyId, ranAt: new Date('2026-08-20T09:00:00.000Z'), ok: true })
+    const p = await agrees('stale_evidence')
+    expect(p.facts.evidenceStale).toBe(true)
+    expect(p.decision).toMatchObject({ humanCanResolve: false })
+    expect(sent).toEqual([])
+  })
+
+  /**
+   * A stored draft is previewed as the words it IS: written on its
+   * `created_at`, from the scan current then. A re-scan since does not make
+   * those words current — the sender refuses them, and so must the preview —
+   * while a message written NOW would quote the new scan.
+   */
+  it('previews a stored draft at the moment it was written, and an answer as quoting no scan', async () => {
+    const written = new Date('2026-08-25T09:00:00.000Z')
+    await db.insert(schema.scans).values({ orgId, companyId, ranAt: new Date('2026-08-20T09:00:00.000Z'), ok: true })
+    await db.insert(schema.scans).values({ orgId, companyId, ranAt: new Date('2026-09-14T09:00:00.000Z'), ok: true })
+    const [row] = await db
+      .insert(schema.touches)
+      .values({
+        orgId, companyId, contactId, campaignId, channel: 'email', direction: 'out', status: 'approved',
+        approvedBy: userId, approvedAt: written, subject: 's', body: 'b', createdAt: written,
+      })
+      .returning()
+
+    const now = await previewSend(db, { orgId, contactId, campaignId, now: NOON })
+    const stored = await previewSend(db, { orgId, contactId, campaignId, now: NOON, writtenAt: evidenceAsOfFor(row!) })
+    const answer = await previewSend(db, { orgId, contactId, campaignId, now: NOON, writtenAt: null })
+    if (!now.ok || !stored.ok || !answer.ok) throw new Error('preview failed')
+    expect(now.decision.code).toBe('send_now')
+    expect(stored.decision.code).toBe('stale_evidence')
+    expect(answer.decision.code).toBe('send_now')
+
+    const real = await dispatchTouch(db, provider, row!, { now: NOON })
+    expect(real.decision.code).toBe(stored.decision.code)
+    expect(sent).toEqual([])
   })
 
   it('a LinkedIn contact with a bare handle is unparseable, never clear', async () => {

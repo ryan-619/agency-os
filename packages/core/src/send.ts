@@ -40,6 +40,18 @@
  *  - `suppressionKeys` may be null, meaning the recipient could not be
  *    normalised — so no suppression row could ever have matched them. That is
  *    a refusal that needs a human, not a clear result.
+ *
+ * ## Two steps §8.4 does not name, and where they sit
+ *
+ * The order below is §8.4's with two additions, both after consent and
+ * before the clock: a permanent BOUNCE (evidence that the address does not
+ * work) and STALE EVIDENCE (§2.2: the findings the words quote are past
+ * their re-verification deadline). Neither is a person asking to be left
+ * alone, so neither may outrank suppression or a recorded refusal — the
+ * reason logged for somebody who opted out must be the opt-out. And both
+ * come before quiet hours, because the clock DEFERS a message and these do
+ * not: a message held until morning would still bounce, and would still
+ * quote something that is no longer known to be true.
  */
 
 import { normalisePhone, suppressionKeysFor, type SuppressionKind } from './normalise.js'
@@ -69,6 +81,7 @@ export type SendRefusalCode =
   | 'cold_channel_forbidden'
   | 'no_consent'
   | 'consent_revoked'
+  | 'stale_evidence'
   | 'quiet_hours'
   | 'unknown_timezone'
   | 'daily_cap'
@@ -88,8 +101,10 @@ export interface SendRefusal {
    * True when a human could legitimately resolve this by deciding.
    *
    * False for the rules that no human may override: a suppression is someone's
-   * opt-out, and a cold call is illegal. Offering those to an approver would
-   * turn a policy into a habit of clicking yes.
+   * opt-out, a cold call is illegal, and a finding past its re-verification
+   * deadline is not known to be true however many people approve the words.
+   * Offering those to an approver would turn a policy into a habit of
+   * clicking yes.
    */
   readonly humanCanResolve: boolean
 }
@@ -126,6 +141,23 @@ export interface SendFacts {
    * by approving: the step sits above the approval gate. Absent means false.
    */
   readonly recipientBounced?: boolean
+  /**
+   * The findings these WORDS were written from are past their
+   * re-verification deadline now (§2.2: "must be re-verified before
+   * appearing in any outbound draft").
+   *
+   * Required, not optional: the one thing a message body cannot do is
+   * notice that it has aged. A draft quotes the scan that was current when
+   * it was written, and a deferral — the cap, quiet hours, a paused
+   * campaign — can hold it for weeks; the rescan cron refreshes the scan and
+   * never the words. So the caller must say, for every message, whether the
+   * evidence behind it is still fresh AT THE MOMENT OF SENDING, judged by
+   * `isStale` on the scan's `ran_at` and never by `findings.stale`.
+   *
+   * False when the words quote no scan — an answer to a reply, or a company
+   * with no successful scan at or before the moment they were written.
+   */
+  readonly evidenceStale: boolean
   /**
    * The consent row for THIS channel, or null when there is none.
    *
@@ -215,22 +247,6 @@ export function decideSend(facts: SendFacts): SendDecision {
         'sending to them — a suppression is somebody asking to be left alone.',
     )
   }
-  // A permanent bounce, after suppression and before consent. After, because
-  // a person who opted out AND whose address bounced must be logged as the
-  // opt-out — that is the reason nobody may approve past. Before consent,
-  // because a recorded refusal is a statement about a person and this is a
-  // statement about whether the address works at all: an address that does
-  // not exist makes every later rule moot, and "declined" would send the
-  // reader to the wrong fix.
-  if (facts.recipientBounced === true) {
-    return refuse(
-      'bounced',
-      'The last message to this address bounced permanently — the receiving server said it ' +
-        'does not accept mail for it. Nothing was sent. Correct the address on the contact; ' +
-        'changing it clears the mark. Approving does not.',
-      true,
-    )
-  }
 
   // 2. Consent. Absence is NO, and there is no "unknown" state to misread.
   if (facts.consent === null) {
@@ -246,6 +262,40 @@ export function decideSend(facts: SendFacts): SendDecision {
       'consent_revoked',
       `This contact has declined ${facts.channel} (recorded: ${facts.consent.source}). ` +
         'Nothing was sent, and no one can approve overriding it.',
+    )
+  }
+
+  // 2a. A permanent bounce, after consent. A person who declined — or who is
+  //     paused, which the caller models as a revoked consent — and whose
+  //     address ALSO bounced must be reported as the refusal, because that is
+  //     the one nobody may approve past: reported as `bounced` it read as
+  //     resolvable, so /approvals enabled Approve and the inbox resumed them.
+  //     Found by review. Before the clock, because a message held until
+  //     morning would bounce all the same.
+  if (facts.recipientBounced === true) {
+    return refuse(
+      'bounced',
+      'The last message to this address bounced permanently — the receiving server said it ' +
+        'does not accept mail for it. Nothing was sent. Correct the address on the contact; ' +
+        'changing it clears the mark. Approving does not.',
+      true,
+    )
+  }
+
+  // 2b. Stale evidence (§2.2). The words quote findings that are past their
+  //     re-verification deadline now, however fresh they were when written.
+  //     Nobody may approve past it: approving the words does not make them
+  //     current, and the send path is where "must be re-verified before
+  //     appearing in any outbound draft" is kept for a message nobody reads
+  //     again — an auto-send row a deferral held for weeks. Before quiet
+  //     hours, so a stale message is refused, never deferred to go stale
+  //     further.
+  if (facts.evidenceStale) {
+    return refuse(
+      'stale_evidence',
+      'The findings this message quotes come from a scan past its re-verification deadline (§2.2), ' +
+        'so they are no longer known to be true. Nothing was sent, and approving does not make ' +
+        'them current. Re-scan the company, then draft the message again.',
     )
   }
 

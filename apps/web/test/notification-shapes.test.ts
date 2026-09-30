@@ -21,7 +21,7 @@ import { dirname, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { BookingOutcome, DealRow, InboundOutcome, ProposalRow } from '@agency/db/queries'
 import { slackMessage, type NotificationEvent } from '../src/lib/slack-message'
-import { replyNotification } from '../src/app/api/inbound/email/notification'
+import { optOutNotRecordedNotification, replyNotification } from '../src/app/api/inbound/email/notification'
 import { bookingNotification } from '../src/app/api/book/[slug]/notification'
 import { closedStage, dealClosedNotification } from '../src/app/api/deals/[id]/notification'
 import { proposalAcceptedNotification } from '../src/app/api/proposals/[id]/notification'
@@ -62,6 +62,7 @@ describe('the reply hook (POST /api/inbound/email)', () => {
     duplicate: false,
     companyId: COMPANY,
     companyDomain: 'acme.example',
+    optOutNotRecorded: false,
     ...DECOYS,
   }
 
@@ -92,6 +93,40 @@ describe('the reply hook (POST /api/inbound/email)', () => {
     const event = replyNotification({ ...recorded, replyKind: 'opted_out', suppressed: true })
     expect(event?.suppressed).toBe(true)
     expect(slackMessage(event!, ORIGIN).text).toContain('do not answer')
+  })
+
+  /**
+   * Found by review: a "stop" whose suppression could not be written was
+   * announced as an ordinary reply — "asked to stop … paused" — which reads
+   * as handled. It raises the alarm instead, and ONLY the alarm.
+   */
+  describe('a reply that said stop and could not be suppressed', () => {
+    const notRecorded = { ...recorded, replyKind: 'opted_out' as const, suppressed: false, optOutNotRecorded: true }
+
+    it('raises opt_out_not_recorded on the reply path, with ids only', () => {
+      const alarm: NotificationEvent | null = optOutNotRecordedNotification(notRecorded)
+      expect(alarm).toEqual({
+        kind: 'opt_out_not_recorded',
+        orgId: ORG,
+        touchId: recorded.touchId,
+        contactId: recorded.contactId,
+        path: 'reply',
+      })
+      expectNoLeadData(alarm!)
+      const text = slackMessage(alarm!, ORIGIN).text
+      expect(text).toMatch(/^OPT-OUT NOT RECORDED\. Somebody asked to be left alone through a reply/)
+      expect(text).not.toContain('paused')
+    })
+
+    it('is not ALSO announced as an ordinary reply', () => {
+      expect(replyNotification(notRecorded)).toBeNull()
+    })
+
+    it('raises nothing for a recorded reply, a redelivery, or nothing matched', () => {
+      expect(optOutNotRecordedNotification(recorded)).toBeNull()
+      expect(optOutNotRecordedNotification({ ...notRecorded, duplicate: true })).toBeNull()
+      expect(optOutNotRecordedNotification({ matched: 'none', why: 'no contact has this address' })).toBeNull()
+    })
   })
 })
 
@@ -268,6 +303,24 @@ describe('the hooks, as the routes wire them (read from the source)', () => {
     expect(source).not.toContain(`from '@/`)
     expect(source).not.toMatch(/\.\.\.[a-z]/i)
   })
+
+  /**
+   * The alarm is the one post that must not be lost to a host without
+   * `waitUntil`, so it is AWAITED, never scheduled — like the unsubscribe
+   * and erasure routes' — and it comes after the write it reports on.
+   */
+  it.each(['inbound/email/route.ts', 'inbound/resend/route.ts'])(
+    '%s awaits the unrecorded-opt-out alarm after the delivery is handled, never inside after()',
+    (path) => {
+      const route = code(path)
+      expect(route).toContain('optOutNotRecordedNotification(')
+      const awaited = route.indexOf('if (alarm) await notify(alarm)')
+      expect(awaited).toBeGreaterThan(-1)
+      const handled = Math.max(route.indexOf('await handleInboundEmail('), route.indexOf('await receiveResendWebhook('))
+      expect(awaited).toBeGreaterThan(handled)
+      expect(route).not.toMatch(/after\(\(\) => notify\(alarm\)\)/)
+    },
+  )
 
   it('the webhook compares its secret with the shared helper, not a private copy', () => {
     const route = read('inbound/email/route.ts')

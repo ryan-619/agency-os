@@ -305,6 +305,23 @@ describe('the reporting tools', () => {
       expect(audited).toEqual([{ action: 'agent.get_compliance_summary', detail: { staleDays } }])
     })
 
+    // The two counts a review found under-reporting: a queued auto-send row
+    // leaves with nobody looking again, and a failed unsubscribe is an
+    // unrecorded opt-out as much as a failed reply is.
+    it('counts a queued message on missing evidence and an unsubscribe that failed to store', async () => {
+      await db.insert(schema.touches).values({ orgId, companyId, channel: 'email', direction: 'out', status: 'queued' })
+      await db.insert(schema.auditLog).values({
+        orgId, actor: 'system', action: 'unsubscribe.not_recorded', subjectType: 'touch', detail: { why: 'no_recipient' },
+      })
+      const out = await run(getComplianceSummary, {})
+      if (!out.ok) throw new Error(out.message)
+      expect(out.summary).toContain('Opt-outs that failed to store: 1 in the last 30 days, 1 all time.')
+      expect(out.summary).toContain(
+        'Outbound messages not yet sent on stale or missing evidence: 1 of 1 not yet sent (must be 0) — 0 awaiting approval; ' +
+          '0 approved, 1 queued and 0 sending, which go with no further look.',
+      )
+    })
+
     it('counts one org only', async () => {
       await db.insert(schema.suppressions).values({ orgId: otherOrgId, kind: 'email', value: 'x@rival.example', reason: 'asked', source: 'manual' })
       await newCompany('rival.example', otherOrgId)
@@ -353,6 +370,33 @@ describe('the reporting tools', () => {
       if (!out.ok) throw new Error(out.message)
       expect(hitsOf(out.data).map((h) => h.kind)).toEqual(['contact'])
       expect(audited).toEqual([{ action: 'agent.search_crm', detail: { sections: ['contacts'], returned: 1, truncated: false } }])
+    })
+
+    /**
+     * The shape admits `[]`, and `?? SEARCH_SECTION_NAMES` does not replace
+     * it: an owner asking with an empty list used to be told "The person you
+     * are helping cannot read ." — a permission refusal for nothing refused.
+     */
+    it('reads an empty list of sections as all of them, never as a refusal', async () => {
+      await db.insert(schema.contacts).values({ orgId, companyId, email: 'kestrel@rentman.io', firstName: 'Kestrel' })
+      const out = await run(searchCrm, { query: 'rentman', sections: [] })
+      if (!out.ok) throw new Error(`${out.code}: ${out.message}`)
+      const hits = hitsOf(out.data)
+      expect(hits).toContainEqual(expect.objectContaining({ kind: 'company', domain: 'rentman.io' }))
+      expect(hits).toContainEqual(expect.objectContaining({ kind: 'contact', domain: 'rentman.io' }))
+      expect(out.summary).toContain('Searched companies, contacts, deals, campaigns, meetings, proposals, touches.')
+      expect(out.summary).not.toContain('not permitted')
+      expect(audited[0]?.detail).toMatchObject({
+        sections: ['companies', 'contacts', 'deals', 'campaigns', 'meetings', 'proposals', 'touches'],
+      })
+    })
+
+    it('still refuses a role that may read nothing, with a sentence rather than an empty list', async () => {
+      const out = await run(searchCrm, { query: 'rentman', sections: [] }, stranger())
+      expect(out).toMatchObject({ ok: false, code: 'not_permitted' })
+      if (out.ok) return
+      expect(out.message).not.toMatch(/read \.$/)
+      expect(audited).toEqual([])
     })
 
     it('does not audit the query, which is somebody’s words', async () => {

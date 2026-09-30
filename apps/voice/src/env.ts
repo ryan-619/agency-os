@@ -1,21 +1,18 @@
 import { z } from 'zod'
 
 /**
- * A blank value is UNSET — the web app's rule and the worker's, and a copy of
- * the same helper (`apps/web/src/lib/env.ts`).
+ * A blank value is UNSET — the web app's rule, and the worker's. `node
+ * --env-file` reads `NAME=` as the empty string, and compose's `NAME:
+ * ${NAME:-}` hands a variable nobody set to the container the same way, so a
+ * blank URL, uuid or enum here stopped the service booting over a feature
+ * nobody had turned on. Blank still means what unset means: with no
+ * `VOICE_PUBLIC_URL` every webhook is refused.
  *
- * `docker compose --profile voice up` hands this container
- * `VOICE_PUBLIC_URL: ${VOICE_PUBLIC_URL:-}` and `VOICE_ORG_ID: ${VOICE_ORG_ID:-}`
- * as EMPTY STRINGS when they are not set, and zod refuses `''` as a URL and
- * as a uuid. So the one configuration this service is documented to boot in
- * — unconfigured, refusing every webhook, until A2P 10DLC clears — refused to
- * boot at all. A PRESENT value is still held to its shape, and a refusal
- * names the variable, never the value.
- *
- * Every entry keeps `.optional()` or `.default(` on the line that names it,
- * as the worker's do: a test reads env schemas line by line to decide which
- * variables are required. DATABASE_URL is not wrapped — a blank one is
- * refused, and the message says so.
+ * Every entry but DATABASE_URL goes through it, so a blank takes the default
+ * everywhere — a blank `VOICE_MODEL=` or `VOICE_LANGUAGE=` is the default,
+ * not a model or a language called `''`. `test/env.test.ts` reads the names
+ * from this file and checks each one; every entry keeps `.optional()` or
+ * `.default(` on the line that names it, as the worker's do.
  */
 const blankIsUnset = (v: unknown): unknown => (typeof v === 'string' && v.trim() === '' ? undefined : v)
 

@@ -15,7 +15,7 @@ import { getDb } from '@/lib/db'
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
 
-const UUID = /^[0-9a-f-]{36}$/i
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 const optionalId = (v: unknown): v is string | null | undefined =>
   v === undefined || v === null || (typeof v === 'string' && UUID.test(v))

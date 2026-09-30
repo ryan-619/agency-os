@@ -5,6 +5,8 @@ import { DEAL_STAGES, advanceDeal, appendAudit, schema, type AgencyDb, type Deal
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 /**
  * Put a company on the board (PROMPT.md §8.6).
  *
@@ -33,7 +35,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     return NextResponse.json({ error: 'invalid_json' }, { status: 400 })
   }
   const { companyId, stage, nextAction } = (body ?? {}) as { companyId?: unknown; stage?: unknown; nextAction?: unknown }
-  if (typeof companyId !== 'string' || !/^[0-9a-f-]{36}$/i.test(companyId)) {
+  if (typeof companyId !== 'string' || !UUID.test(companyId)) {
     return NextResponse.json({ error: 'companyId is required' }, { status: 400 })
   }
   const to = typeof stage === 'string' && (DEAL_STAGES as readonly string[]).includes(stage) ? (stage as DealStage) : 'new'

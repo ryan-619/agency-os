@@ -8,6 +8,8 @@ import { getDb } from '@/lib/db'
 import { inZone } from '@/lib/format'
 import { icpForOrg } from '@/lib/queries'
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 /**
  * The brief for one meeting (PROMPT.md §8.6, §7).
  *
@@ -37,7 +39,7 @@ export default async function MeetingBriefPage({ params }: { params: Promise<{ i
   if (!session?.user) redirect('/signin')
   const user = session.user
   const { id } = await params
-  if (!/^[0-9a-f-]{36}$/i.test(id)) notFound()
+  if (!UUID.test(id)) notFound()
 
   const db = getDb() as unknown as AgencyDb
   const [result, icpRow, links] = await Promise.all([

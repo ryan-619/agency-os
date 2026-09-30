@@ -33,7 +33,7 @@
  *     uuids; a guessed id from another org must answer nothing, including on
  *     the cursor's own lookup.
  */
-import { and, desc, eq, inArray, like, or, sql, type SQL } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, like, or, sql, type SQL } from 'drizzle-orm'
 import * as schema from './schema.js'
 import type { appendAudit } from './approvals.js'
 import type { SuppressionRow } from './campaigns.js'
@@ -333,6 +333,13 @@ export async function auditResolveActors(
  * The value is in `detail`. The audience is the same one that can read the
  * suppression list itself (`audit:read` and the list are both every member),
  * and for a removal the audit row is the only place the value survives.
+ *
+ * Which makes these the one place the append-only log holds an address, a
+ * number or a profile, and an erasure cannot scrub them. They are kept for
+ * the reason the suppression row is — the record of who asked to be left
+ * alone must outlive the person's file — and a person's downloadable record
+ * includes them (`auditSuppressionHistory`, read by `erasureRecord`), so the
+ * record's own list of what it leaves out can say so truthfully.
  */
 
 /** A person added (or re-added) a value on the suppressions page. */
@@ -376,4 +383,41 @@ export function auditSuppressionRemoved(args: {
       addedAt: args.removed.createdAt.toISOString(),
     },
   }
+}
+
+/** The actions whose detail carries a suppression's value, as the two builders above write them. */
+const SUPPRESSION_HISTORY = ['suppression.added', 'suppression.already_present', 'suppression.removed'] as const
+
+/**
+ * The audit log's history of the suppression list for these keys — every
+ * `suppression.added`, `.already_present` and `.removed` row whose detail
+ * names one of them — oldest first, in this org only. `erasureRecord` reads
+ * it so a person's record holds these rows: they carry the person's address
+ * or number and are kept after an erasure.
+ *
+ * Matched on the NORMALISED `kind` and `value` the builders store, which is
+ * the shape `suppressionKeysFor` produces, so a caller passes the send path's
+ * own keys.
+ */
+export async function auditSuppressionHistory(
+  db: AgencyDb,
+  orgId: string,
+  keys: readonly { readonly kind: string; readonly value: string }[],
+): Promise<AuditRow[]> {
+  if (keys.length === 0) return []
+  return db
+    .select()
+    .from(schema.auditLog)
+    .where(
+      and(
+        eq(schema.auditLog.orgId, orgId),
+        inArray(schema.auditLog.action, [...SUPPRESSION_HISTORY]),
+        or(
+          ...keys.map(
+            (k) => sql`(${schema.auditLog.detail}->>'kind' = ${k.kind} AND ${schema.auditLog.detail}->>'value' = ${k.value})`,
+          ),
+        ),
+      ),
+    )
+    .orderBy(asc(schema.auditLog.createdAt), asc(schema.auditLog.id))
 }

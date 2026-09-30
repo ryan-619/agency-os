@@ -5,7 +5,7 @@ import { env } from '@/lib/env'
 import { log } from '@/lib/logger'
 import { receiveResendWebhook } from '@/lib/resend-inbound'
 import { notify } from '@/lib/slack'
-import { replyNotification } from '../email/notification'
+import { optOutNotRecordedNotification, replyNotification } from '../email/notification'
 
 /**
  * Replies through Resend's signed webhook — the inbound path for a
@@ -31,7 +31,9 @@ import { replyNotification } from '../email/notification'
  * announces nothing), scheduled with `after()` once Resend has its answer,
  * and the scheduling itself in a try/catch — a host with no `waitUntil`
  * throws from `after()`, and a reply already recorded must not become a 500
- * that Resend would retry.
+ * that Resend would retry. A "stop" whose suppression could not be written
+ * raises the awaited `opt_out_not_recorded` alarm instead, as the generic
+ * route does.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -44,6 +46,11 @@ export async function POST(request: Request): Promise<NextResponse> {
     now: new Date(),
     handle: (mail) => handleInboundEmail(getDb() as unknown as AgencyDb, mail),
   })
+
+  // The opt-out that could not be recorded is AWAITED, in place of the
+  // ordinary message — see the generic route.
+  const alarm = result.outcome ? optOutNotRecordedNotification(result.outcome) : null
+  if (alarm) await notify(alarm)
 
   const event = result.outcome ? replyNotification(result.outcome) : null
   if (event) {

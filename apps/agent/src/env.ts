@@ -1,24 +1,27 @@
 import { z } from 'zod'
+import { isScannableHost } from '@agency/scanner'
 
 /**
  * A blank value is UNSET, not a present value that happens to be empty — the
- * web app's rule, and a copy of its helper (`apps/web/src/lib/env.ts`).
+ * web app's rule (apps/web/src/lib/env.ts), now the worker's too.
  *
- * `.env.example` documents every optional variable as `NAME=`, and compose
- * hands a container `${NAME:-}` as an empty string. Without this, a blank URL,
- * uuid, enum or length-checked secret stopped the worker booting over a
- * feature nobody had turned on; a blank `LLM_MODEL=` reached the provider as
- * a model called `''`; a blank `OUTREACH_BOUNCE_PAUSE_PCT=` was coerced to 0,
- * so the first bounce paused the campaign; and a blank `IMAP_SECURE=` read as
- * `false` where an absent one reads as `true`. Blank now takes the default,
- * every time. A PRESENT value is still held to whatever the schema after it
- * demands, and a refusal names the variable, never the value.
+ * `node --env-file` reads `NAME=` as the empty string, and so does a compose
+ * `NAME: ${NAME:-}` line for a variable the operator never set. Every feature
+ * behind these variables fails closed when it is absent, so a blank one must
+ * not stop the worker booting — and must not be READ as a value either: a
+ * blank `LLM_MODEL` named the model `''`, and a blank
+ * `OUTREACH_BOUNCE_PAUSE_PCT` coerced to 0, which paused a campaign on its
+ * first bounce. A PRESENT value is still held to its shape.
  *
- * Every entry keeps `.optional()` or `.default(` on the line that names it:
- * `packages/db/test/deployment.test.ts` reads this file line by line to find
- * the variables the worker REQUIRES, and an entry whose `.optional()` sits
- * three lines down reads as one of them. The two required variables are not
- * wrapped — a blank one is refused, and the message says which.
+ * Every entry but the two required ones goes through it, not only those
+ * whose blank used to refuse: a blank `IMAP_SECURE=` read as `false` —
+ * plaintext — where an absent one reads as `true`, and a blank numeric
+ * default coerced to 0 and was refused at boot. Blank takes the default,
+ * everywhere; `test/env.test.ts` reads the names from this file and checks
+ * each one. Every entry keeps `.optional()` or `.default(` on the line that
+ * names it, because `packages/db/test/deployment.test.ts` reads this file
+ * line by line to find the REQUIRED variables. DATABASE_URL and
+ * AGENT_INTERNAL_TOKEN are not wrapped: a blank one is refused, and named.
  */
 const blankIsUnset = (v: unknown): unknown => (typeof v === 'string' && v.trim() === '' ? undefined : v)
 
@@ -232,10 +235,13 @@ const schema = z.object({
   UNSUBSCRIBE_SECRET: z.preprocess(blankIsUnset, z.string().min(32, 'UNSUBSCRIBE_SECRET must be at least 32 characters').optional()),
 
   /**
-   * The web app's public origin as the WORKER sees it — where
-   * `/api/unsubscribe` lives, e.g. https://agency.example. The header's link
-   * is built from this and nothing else: not the address the worker binds,
-   * which is a loopback nobody's mail client can reach.
+   * The web app's public origin: the origin a recipient's mail client can
+   * reach — where `/api/unsubscribe` lives, e.g. https://agency.example. The
+   * header's link is built from this and nothing else: not the address the
+   * worker binds, and not the compose service name, neither of which anybody
+   * outside can reach. In production it must be `https:` on a public
+   * multi-label host (checked in `loadEnv`): RFC 8058 one-click needs an
+   * HTTPS URI, and mailbox providers ignore any other.
    */
   WEB_PUBLIC_URL: z.preprocess(blankIsUnset, z.string().url().optional()),
 
@@ -299,5 +305,39 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     )
   }
 
+  /**
+   * The one-click link must be one a recipient can press (RFC 8058 §3.1: an
+   * HTTPS URI). `http://localhost:3000` or `http://web:3000` is a URL that
+   * validates and that nobody outside can reach, and a header built on it is
+   * the "worse than no link" case `outreach/options.ts` exists to prevent —
+   * the person believes they asked. Refused at boot in production, naming
+   * the variable and never its value; development may still point at
+   * localhost, where the only recipient is the developer.
+   */
+  if (env.WEB_PUBLIC_URL !== undefined && env.NODE_ENV === 'production' && !isRecipientReachable(env.WEB_PUBLIC_URL)) {
+    throw new Error(
+      'WEB_PUBLIC_URL must be an https:// origin on a public multi-label host in production — the ' +
+        "origin a recipient's mail client can reach. One-click unsubscribe (RFC 8058) needs an HTTPS " +
+        'URI, and a loopback, an IP literal or a compose service name is a link nobody can press. ' +
+        'Unset it to send without the header (said once at boot) until the web app has one.',
+    )
+  }
+
   return env
+}
+
+/**
+ * `https:` on a public DNS name: at least one dot, no IP literal, no
+ * `localhost`, no reserved or internal-use suffix — the scanner's own test
+ * for a host out on the internet (`isScannableHost`), which is the same
+ * question asked from the other side.
+ */
+function isRecipientReachable(raw: string): boolean {
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch {
+    return false
+  }
+  return url.protocol === 'https:' && isScannableHost(url.hostname.toLowerCase())
 }

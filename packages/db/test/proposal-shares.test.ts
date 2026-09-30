@@ -21,7 +21,8 @@ import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import {
   SHARE_TOKEN_SHAPE, generateProposal, openDealFor, readProposal, schema, setProposalStatus, shareAccept,
-  shareHashToken, shareList, shareMint, shareNormaliseName, shareReadByToken, shareRevoke, type AgencyDb,
+  shareEvidenceSuperseded, shareHashToken, shareList, shareMint, shareNormaliseName, shareReadByToken, shareRevoke,
+  type AgencyDb,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
 
@@ -85,6 +86,10 @@ describe('proposal share links', () => {
   }
   const shareRows = () => test.pg.query<Record<string, unknown>>('SELECT * FROM proposal_shares')
   const auditRows = () => db.select().from(schema.auditLog).where(eq(schema.auditLog.orgId, orgId))
+  /** A later scan of the same company; a successful one supersedes the proposal's. */
+  const rescan = async (ranAt: Date, ok = true) => {
+    await db.insert(schema.scans).values({ orgId, companyId, ranAt, ok, error: ok ? null : 'TimeoutError' })
+  }
   const setStaleAfter = async (days: number) => {
     await db
       .update(schema.icpProfiles)
@@ -148,6 +153,26 @@ describe('proposal share links', () => {
       // expire as it was created.
       expect(await mint({ now: at(14) })).toMatchObject({ ok: false, reason: 'stale' })
       expect((await shareRows()).rows).toEqual([])
+    })
+
+    // quotableFindings never quotes a superseded scan: the newer one may say a
+    // gap this proposal prices is closed. Mint used to check freshness only.
+    it('refuses a proposal a newer successful scan has superseded, and writes nothing', async () => {
+      await markSent()
+      await rescan(at(3))
+      const r = await mint({ now: at(4) })
+      expect(r).toMatchObject({ ok: false, reason: 'superseded' })
+      if (r.ok) return
+      expect(r.message).toContain('A newer scan exists — regenerate the proposal')
+      expect((await shareRows()).rows).toEqual([])
+      expect(await shareEvidenceSuperseded(db, orgId, proposalId)).toBe(true)
+    })
+
+    it('is not superseded by a newer scan that never reached the site', async () => {
+      await markSent()
+      await rescan(at(3), false)
+      expect(await shareEvidenceSuperseded(db, orgId, proposalId)).toBe(false)
+      expect((await mint({ now: at(4) })).ok).toBe(true)
     })
 
     it('ends a link when its evidence goes stale — a link minted on day 13 expires on day 14', async () => {
@@ -252,6 +277,14 @@ describe('proposal share links', () => {
       expect((await shareRows()).rows[0]!.view_count).toBe(0)
     })
 
+    it('stops showing the document once a newer successful scan supersedes it — and counts nothing', async () => {
+      await markSent()
+      const { token } = await minted({ now: at(2) })
+      await rescan(at(3))
+      expect(await shareReadByToken(db, token, at(4))).toEqual({ state: 'reverifying', org: { name: 'Northwind Security' } })
+      expect((await shareRows()).rows[0]!.view_count).toBe(0)
+    })
+
     it('renders a decided proposal read-only', async () => {
       await markSent()
       const { token } = await minted()
@@ -312,7 +345,12 @@ describe('proposal share links', () => {
       expect((await auditRows()).filter((a) => a.action === 'proposal.accepted_via_share')).toHaveLength(1)
     })
 
-    it('two clicks at once produce one acceptance', async () => {
+    // Named for what it proves. PGlite runs one transaction at a time, so the
+    // two calls below are SEQUENTIAL and the FOR UPDATE is never contended:
+    // this pins that a second click with the same clock is refused, not that
+    // the row lock serialises two real sessions. The lock is pinned by
+    // reading the source, below.
+    it('a second click with the same clock is refused: one acceptance (sequential idempotency)', async () => {
       await markSent()
       const { token } = await minted()
       const results = await Promise.all([
@@ -394,6 +432,38 @@ describe('proposal share links', () => {
       const { token } = await minted({ now: at(13) })
       const r = await shareAccept(db, { token, acceptedByName: 'Priya Shah', now: new Date(at(14).getTime() - 1000) })
       expect(r.ok).toBe(true)
+    })
+
+    it('refuses when a newer successful scan superseded the evidence under a live link, and writes nothing', async () => {
+      await markSent()
+      const { token } = await minted({ now: at(2) })
+      await rescan(at(3))
+      expect(await shareAccept(db, { token, acceptedByName: 'Priya Shah', now: at(4) })).toEqual({
+        ok: false, reason: 'reverifying', status: 410,
+      })
+      expect((await shareRows()).rows[0]!.accepted_at).toBeNull()
+      expect((await readProposal(db, orgId, proposalId))!.status).toBe('sent')
+      expect((await auditRows()).filter((a) => a.action.startsWith('proposal.accepted'))).toEqual([])
+    })
+
+    // The only thing that serialises two real sessions accepting at once is
+    // the row lock, and the suite's engine cannot contend it (see the
+    // sequential test above). So it is pinned the house way: by the source.
+    it('takes its row locks: the share row and the proposal, FOR UPDATE, inside the transaction', () => {
+      const source = readFileSync(fileURLToPath(new URL('../src/proposal-shares.ts', import.meta.url)), 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/^\s*\/\/.*$/gm, '')
+      const body = (name: string): string => {
+        const start = source.indexOf(`function ${name}(`)
+        expect(start, name).toBeGreaterThan(-1)
+        const end = source.indexOf('\n}\n', start)
+        return source.slice(start, end)
+      }
+      expect(body('shareByToken')).toMatch(/lock \? await q\.for\('update'\)/)
+      const accept = body('shareAccept')
+      expect(accept).toContain('db.transaction(')
+      expect(accept).toMatch(/shareByToken\(txDb, args\.token, true\)/)
+      expect(accept).toMatch(/\.limit\(1\)\s*\.for\('update'\)/)
     })
 
     it('refuses when the evidence aged out under a live link, and writes nothing', async () => {

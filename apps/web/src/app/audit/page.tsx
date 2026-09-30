@@ -35,6 +35,7 @@ import { icpForOrg } from '@/lib/queries'
  * that claims a filter.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 const PAGE = 100
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i

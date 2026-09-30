@@ -96,11 +96,25 @@ function scriptProblems(d: Directives): string[] {
   return problems
 }
 
+/**
+ * Read when the capture recorded more than one non-blank enforced policy.
+ * Each is enforced, so the effective script policy is their INTERSECTION —
+ * and judging an intersection is not what this check does. Reading the first
+ * alone gave "scripts are unrestricted" to a site whose script-src sat in its
+ * second header, so it says it did not judge rather than guess (§2.2).
+ */
+export const SEVERAL_CSP_HEADERS =
+  'several Content-Security-Policy headers were sent; this check reads one policy at a time'
+
 function cspObservations(raw: RawCapture, url: string): Pick<Record<AdditiveKey, Observation>, 'csp_report_only' | 'csp_quality'> {
   const headers = raw.home.headers
   const enforced = headers['content-security-policy']
   const reportOnly = headers['content-security-policy-report-only']
-  const enforcedPresent = enforced !== undefined && enforced.trim() !== ''
+  // Every enforced value when the capture recorded them (`cspHeaders`), else
+  // the first-value map's one — which is all a recorded fixture holds.
+  const enforcedValues = (raw.home.cspHeaders ?? (enforced !== undefined ? [enforced] : []))
+    .filter((v) => v.trim() !== '')
+  const enforcedPresent = enforcedValues.length > 0
 
   const csp_report_only =
     reportOnly === undefined
@@ -124,12 +138,21 @@ function cspObservations(raw: RawCapture, url: string): Pick<Record<AdditiveKey,
       }),
     }
   }
+  if (enforcedValues.length > 1) {
+    return {
+      csp_report_only,
+      csp_quality: observation(false, null, SEVERAL_CSP_HEADERS, {
+        url, header: 'content-security-policy', headers: enforcedValues.length, seen: enforcedValues,
+      }),
+    }
+  }
+  const policy = enforcedValues[0]!
 
   // A value can hold several policies separated by commas, and a browser
   // enforces every one. A script must satisfy all of them, so one policy
   // with a clean script source bounds the rest — the weaker policies are
   // only a gap when no policy is clean.
-  const policies = enforced.split(',').map(parsePolicy).filter((p) => p.size > 0)
+  const policies = policy.split(',').map(parsePolicy).filter((p) => p.size > 0)
   // A value that is only separators is a policy with no directives at all.
   const judged = (policies.length > 0 ? policies : [new Map<string, readonly string[]>()])
     .map((p) => ({ p, problems: scriptProblems(p) }))
@@ -434,21 +457,35 @@ function mixedContent(raw: RawCapture, facts: HtmlFacts, url: string): Observati
 // What the server says about itself
 // ---------------------------------------------------------------------------
 
-const STACK_HEADERS = ['x-aspnet-version', 'x-aspnetmvc-version', 'x-generator', 'x-backend-server', 'via'] as const
+const STACK_HEADERS = ['x-aspnet-version', 'x-aspnetmvc-version', 'x-generator', 'x-backend-server'] as const
 /** A version, or a build hash — `Framer/bea9510`. A bare `cloudflare` is neither. */
 const VERSIONED_SERVER = /\/[0-9a-f]{6,}$|\d+\.\d+/i
+
+/**
+ * Whether a `Via` header names a version or a build. Each hop is
+ * `[protocol/]version received-by [(comment)]` (RFC 9110 §7.6.3), and the
+ * leading `1.1` is the HTTP version every intermediary is REQUIRED to add —
+ * not a software version. So the protocol token is dropped and the rest of
+ * each hop is judged the way `Server` is: `1.1 varnish (Varnish/6.0)` names
+ * one, while `1.1 google`, `1.1 varnish` and `1.1 vegur` name a CDN hop, which
+ * is no more a disclosure than a bare `Server: cloudflare`.
+ */
+export function viaDisclosesVersion(via: string): boolean {
+  return via.split(',').some((hop) => VERSIONED_SERVER.test(hop.trim().replace(/^\S+\s*/, '')))
+}
 
 function stackDisclosure(raw: RawCapture, url: string): Observation {
   const h = raw.home.headers
   const seen: Record<string, string> = {}
   for (const name of STACK_HEADERS) if (h[name] !== undefined) seen[name] = h[name]!
+  if (h.via !== undefined && viaDisclosesVersion(h.via)) seen.via = h.via
   if (h.server !== undefined && VERSIONED_SERVER.test(h.server.trim())) seen.server = h.server
   const names = Object.keys(seen)
   return observation(
     true,
     names.length > 0,
     names.length > 0 ? names.map((n) => `${n}: ${seen[n]}`).join('; ') : 'no version or backend disclosed',
-    { url, headers: seen, server: h.server ?? 'absent' },
+    { url, headers: seen, server: h.server ?? 'absent', via: h.via ?? 'absent' },
   )
 }
 

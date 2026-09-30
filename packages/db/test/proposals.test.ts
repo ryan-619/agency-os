@@ -96,6 +96,40 @@ describe('proposals', () => {
     expect(await openDealFor(db, orgId, companyId)).toBeNull()
   })
 
+  // After an informational key is promoted into the ICP, a scan recorded
+  // before the promotion holds that key observed but scored = false. The
+  // generator used to drop the row and list the signal as "not assessed" in
+  // the buyer's document.
+  it('refuses a scan recorded before an informational signal was promoted into the ICP', async () => {
+    const s = await scan(new Date('2026-09-12T08:00:00.000Z'))
+    await db.insert(schema.findings).values({
+      orgId, scanId: s.id, companyId, signalKey: 'hsts_quality', observed: true, gap: true, weight: 0, scored: false,
+      detail: 'max-age=300 is under 180 days', evidence: { maxAge: 300 },
+    })
+    // Fine before the promotion: the row is context.
+    const before = await generate()
+    expect(before.ok).toBe(true)
+    // Promote it, in place.
+    const order = Object.keys(ICP.signals).length + 1
+    await db.update(schema.icpProfiles).set({
+      definition: { ...ICP, signals: { ...ICP.signals, hsts_quality: { weight: 4, order, why: 'HSTS max-age under 180 days' } } },
+    })
+    const r = await generate()
+    expect(r).toMatchObject({ ok: false, reason: 'rescore' })
+    if (r.ok) return
+    expect(r.message).toContain('scored under a different profile — re-scan')
+  })
+
+  it('refuses a scan whose score names a profile that is no longer the active one', async () => {
+    const s = await scan(new Date('2026-09-12T08:00:00.000Z'))
+    const [earlier] = await db.select({ id: schema.icpProfiles.id }).from(schema.icpProfiles)
+    await db.insert(schema.scores).values({ orgId, companyId, scanId: s.id, icpProfileId: earlier!.id, score: 60, tier: 'B' })
+    expect((await generate()).ok).toBe(true)
+    await db.update(schema.icpProfiles).set({ active: false })
+    await db.insert(schema.icpProfiles).values({ orgId, name: 'ICP v2', definition: ICP, active: true })
+    expect(await generate()).toMatchObject({ ok: false, reason: 'rescore' })
+  })
+
   it('refuses a company that was never scanned', async () => {
     expect(await generate()).toMatchObject({ ok: false, reason: 'no_scan' })
   })

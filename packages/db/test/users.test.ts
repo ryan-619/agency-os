@@ -7,7 +7,13 @@
  * get wrong quietly is the grant's refusal: `users_email_key` is global, so a
  * sentence that depends on WHICH org holds an address is a roster oracle
  * (§2.3). That test asserts the sentence and that nothing was written.
+ *
+ * A statement is not enough for the last-owner rule on its own: two owners
+ * removing each other at once is write skew under READ COMMITTED, and the
+ * lock that closes it is pinned in "the last-owner race" below.
  */
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { and, eq } from 'drizzle-orm'
@@ -321,6 +327,117 @@ describe('users (the team page)', () => {
       expect(r).toEqual({ ok: false, reason: 'not_found' })
       expect((await readUser(stranger))!.revokedAt).toBeNull()
       expect(await db.select().from(schema.sessions)).toHaveLength(1)
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Two owners removing each other at once
+  // -------------------------------------------------------------------------
+
+  /**
+   * The EXISTS in the UPDATE is write skew under READ COMMITTED: A revokes B
+   * while B revokes A, each statement locks only its own target row, each
+   * EXISTS still sees the other owner live, and the org ends with none. That
+   * was reproduced on a real Postgres 16, and fixed there, with two sessions
+   * — PGlite has ONE session, so the interleaving cannot be driven here. What
+   * can be pinned is the fix's shape: every write that can take an owner
+   * away takes the org's advisory lock INSIDE its transaction and BEFORE its
+   * UPDATE, so the second writer's UPDATE reads a snapshot taken after the
+   * first one committed.
+   */
+  describe('the last-owner race', () => {
+    interface Traced {
+      readonly sql: string
+      readonly params: unknown[]
+      readonly inTx: boolean
+    }
+
+    /** A db whose every statement is recorded, with whether it ran inside a transaction. */
+    const traced = (): { db: AgencyDb; log: Traced[] } => {
+      const log: Traced[] = []
+      let depth = 0
+      const pg = test.pg
+      const original = pg.transaction.bind(pg)
+      pg.transaction = (async (fn: Parameters<typeof original>[0]) =>
+        original(async (tx) => {
+          depth += 1
+          try {
+            return await fn(tx)
+          } finally {
+            depth -= 1
+          }
+        })) as typeof pg.transaction
+      const tracedDb = drizzle(pg, {
+        schema,
+        logger: { logQuery: (q: string, params: unknown[]) => log.push({ sql: q, params, inTx: depth > 0 }) },
+      }) as unknown as AgencyDb
+      return { db: tracedDb, log }
+    }
+
+    const lockThenUpdate = (log: readonly Traced[]): void => {
+      const lock = log.findIndex((s) => s.sql.includes('pg_advisory_xact_lock'))
+      const update = log.findIndex((s) => /^update "users"/i.test(s.sql))
+      expect(lock, 'the org lock was taken').toBeGreaterThanOrEqual(0)
+      expect(update, 'the UPDATE ran').toBeGreaterThan(lock)
+      expect(log[lock]!.inTx, 'the lock is transaction-scoped').toBe(true)
+      expect(log[update]!.inTx, 'the UPDATE is in the same transaction').toBe(true)
+      // Keyed by the org, not by the row: the two racing writes are on different rows.
+      expect(log[lock]!.params).toContain(orgId)
+    }
+
+    it('revoking an owner takes the org’s lock inside the transaction, before the UPDATE', async () => {
+      const second = await addUser('second@agency.test', 'owner')
+      const t = traced()
+      expect(await usersRevoke(t.db, { orgId, userId: second, actor: ownerId, actorUserId: ownerId }))
+        .toEqual({ ok: true, sessionsEnded: 0 })
+      lockThenUpdate(t.log)
+    })
+
+    it('demoting an owner does the same, since two demotions race the same way', async () => {
+      const second = await addUser('second@agency.test', 'owner')
+      const t = traced()
+      expect(await usersSetRole(t.db, { orgId, userId: second, role: 'member', actor: ownerId })).toEqual({ ok: true })
+      lockThenUpdate(t.log)
+    })
+
+    /** The sequential half of the race, which is all one session can show. */
+    it('refuses the second of two owners removing each other, by revoke or by demotion', async () => {
+      const second = await addUser('second@agency.test', 'owner')
+      expect(await usersRevoke(db, { orgId, userId: second, actor: ownerId, actorUserId: ownerId }))
+        .toEqual({ ok: true, sessionsEnded: 0 })
+      expect(await usersRevoke(db, { orgId, userId: ownerId, actor: second, actorUserId: second }))
+        .toEqual({ ok: false, reason: 'last_owner' })
+
+      const third = await addUser('third@agency.test', 'owner')
+      expect(await usersSetRole(db, { orgId, userId: third, role: 'member', actor: ownerId })).toEqual({ ok: true })
+      expect(await usersSetRole(db, { orgId, userId: ownerId, role: 'member', actor: third }))
+        .toEqual({ ok: false, reason: 'last_owner' })
+
+      const live = (await usersList(db, orgId)).filter((m) => m.role === 'owner' && m.revokedAt === null)
+      expect(live.map((m) => m.email)).toEqual(['owner@agency.test'])
+    })
+
+    /**
+     * Read off the source as well, so a later edit that moves the UPDATE out
+     * of the locked transaction — or adds a third owner-removing write
+     * without the lock — fails here rather than in production.
+     */
+    it('every UPDATE that asks for another live owner is preceded by lockOwners in its function', () => {
+      const src = readFileSync(fileURLToPath(new URL('../src/users.ts', import.meta.url)), 'utf8')
+      const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+      const fns = code.split(/\nexport async function /).slice(1)
+      const guarded = fns.filter((f) => f.includes('anotherLiveOwner'))
+      expect(guarded.map((f) => f.slice(0, f.indexOf('('))).sort()).toEqual(['usersRevoke', 'usersSetRole'])
+      for (const f of guarded) {
+        const name = f.slice(0, f.indexOf('('))
+        const tx = f.indexOf('.transaction(')
+        const lock = f.indexOf('lockOwners(')
+        const update = f.indexOf('.update(schema.users)')
+        expect(tx, name).toBeGreaterThan(0)
+        expect(lock, name).toBeGreaterThan(tx)
+        expect(update, name).toBeGreaterThan(lock)
+      }
+      expect(code).toMatch(/pg_advisory_xact_lock\(hashtext\('users\.owners'\), hashtext\(\$\{orgId\}\)\)/)
     })
   })
 

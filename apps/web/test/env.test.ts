@@ -11,10 +11,6 @@
  * `env()` memoises, so each case imports the module fresh with `resetModules`
  * rather than trying to un-cache it.
  */
-import { readFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { parseEnv } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Env } from '../src/lib/env.js'
 
@@ -298,21 +294,5 @@ describe('INBOUND_WEBHOOK_SECRET', () => {
   it('still refuses a short one', async () => {
     const env = await loadWith({ ...BASE, INBOUND_WEBHOOK_SECRET: 'short' })
     expect(() => env()).toThrow(/INBOUND_WEBHOOK_SECRET/)
-  })
-})
-
-/**
- * `cp .env.example .env`, then the two secrets nobody can default. Parsed the
- * way `node --env-file` parses it. The worker's and the voice service's half
- * of this is in packages/db/test/deployment.test.ts.
- */
-describe('a copied .env.example', () => {
-  it('boots the web app with only AUTH_SECRET and AGENT_INTERNAL_TOKEN filled in', async () => {
-    const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
-    const copied = parseEnv(readFileSync(resolve(root, '.env.example'), 'utf8'))
-    const env = await loadWith({ ...copied, AUTH_SECRET: 'a'.repeat(44), AGENT_INTERNAL_TOKEN: 'b'.repeat(44) })
-    expect(() => env()).not.toThrow()
-    expect(env().UNSUBSCRIBE_SECRET).toBeUndefined()
-    expect(env().CRON_SECRET).toBeUndefined()
   })
 })

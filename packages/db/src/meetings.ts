@@ -286,6 +286,15 @@ async function outcomeRefusal(
  * "Rescheduled" is not written here. It names a new meeting, and an outcome
  * that says "moved" with nowhere it moved to is a claim with no evidence —
  * `rescheduleMeeting` writes it together with the meeting it points at.
+ *
+ * Nor is it overwritten here: the predicate refuses a `rescheduled` row,
+ * NULL-safely, and the answer is `already_rescheduled`. It used to be
+ * allowed, as a correction, and that reopened `rescheduleMeeting`'s own
+ * guard — "held" over "rescheduled" made the meeting reschedulable again, so
+ * a second reschedule recorded a second new meeting and left the first on
+ * the books with nothing pointing at it. The replacement is where anything
+ * further about that booking is recorded; one that is not happening is
+ * cancelled from its own page.
  */
 export async function setMeetingOutcome(
   db: AgencyDb,
@@ -296,7 +305,10 @@ export async function setMeetingOutcome(
     readonly actor: string
     readonly now?: Date
   },
-): Promise<{ ok: true; meeting: MeetingRow } | { ok: false; reason: MeetingOutcomeRefusal; message: string }> {
+): Promise<
+  | { ok: true; meeting: MeetingRow }
+  | { ok: false; reason: MeetingOutcomeRefusal | 'already_rescheduled'; message: string }
+> {
   const now = args.now ?? new Date()
   const rows = await db
     .update(schema.meetings)
@@ -304,16 +316,15 @@ export async function setMeetingOutcome(
     .where(and(
       eq(schema.meetings.orgId, args.orgId), eq(schema.meetings.id, args.id),
       isNull(schema.meetings.cancelledAt), lte(schema.meetings.startsAt, now),
+      // NULL-safe: `outcome <> 'rescheduled'` alone is NULL for a meeting with
+      // no outcome yet, and would refuse the first outcome anybody records.
+      or(isNull(schema.meetings.outcome), ne(schema.meetings.outcome, 'rescheduled')),
     ))
     .returning()
   const meeting = rows[0]
   if (!meeting) {
     const why = await outcomeRefusal(db, args.orgId, args.id, now)
-    // `already_rescheduled` is not a refusal HERE — this write may correct it.
-    // Reaching it means the row changed between the two statements.
-    return why.reason === 'already_rescheduled'
-      ? { ok: false, reason: 'not_found', message: OUTCOME_REFUSALS.not_found }
-      : { ok: false, reason: why.reason, message: why.message }
+    return { ok: false, reason: why.reason, message: why.message }
   }
   await appendAudit(db, {
     orgId: args.orgId,

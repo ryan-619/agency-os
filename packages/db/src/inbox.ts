@@ -19,7 +19,12 @@
  *    it to `other` would leave the suppression in place and the screen saying
  *    something else; a human SETTING it would store a kind with no suppression
  *    behind it. Two different claims about one reply either way, so the type,
- *    the route's enum and the query's predicate all refuse it.
+ *    the route's enum and the query's predicate all refuse it — and so does a
+ *    reply from somebody on the suppression list, or an UNCLASSIFIED reply
+ *    (every one before 0017) whose own words read as an opt-out, which is the
+ *    same claim arriving by a door the kind column never saw. Moving a reply
+ *    OFF `auto_reply` pauses the person and cancels what was queued for them,
+ *    exactly as the reply would have if it had been read as a person's.
  *  - `replyQueueDraft`: an answer, parked as an `awaiting_approval` OUTBOUND
  *    draft naming the reply in `answers_touch_id` so the worker threads it
  *    under their message. Nothing is sent from here: the draft goes through
@@ -27,19 +32,27 @@
  *    sending. A reply pauses the person, so the draft also RESUMES them —
  *    deliberately, by a person, with an audit row — or the approved answer
  *    would be refused `consent_revoked` by the very pause their reply caused.
+ *    Only THAT pause: a person paused for any other reason (a teammate, an
+ *    unsubscribe, an erasure that could not finish) is refused here and
+ *    resumed on /contacts by somebody who decided to.
  *
  * What `replyQueueDraft` will NOT write: an answer to somebody who asked to
  * stop. §2.1 — "an approver offered enough impossible things learns to click
  * yes." A row whose kind is `opted_out`, or a person any of whose suppression
  * keys is on the list, gets `{ ok: false, reason: 'opted_out' }`; a person who
- * has a recorded refusal of the channel gets `consent_refused`. The contact is
- * NOT resumed on either path. The send path would refuse the draft anyway —
- * those are the refusals nobody may approve past — but refusing HERE keeps the
- * message off the approver's screen, and keeps the pause the reply put on the
- * person exactly where it was.
+ * has a recorded refusal of the channel gets `consent_refused`. A person with
+ * an opt-out the system FAILED to record — an unsubscribe, an erasure or a
+ * reply whose suppression could not be written, on the audit log as such —
+ * gets `opt_out_not_recorded`, however long ago it was: nothing else stands
+ * between them and the answer, because no suppression row exists. The
+ * contact is NOT resumed on any of these paths. The send path would refuse
+ * most of them anyway, but refusing HERE keeps the message off the
+ * approver's screen, and keeps the pause exactly where it was.
  *
- * Every write here is audited with ids and kinds only. §2.3: the subject and
- * the body of a message are never in an audit row.
+ * Every write here is audited with ids, kinds and classes only. §2.3: the
+ * subject and the body of a message are never in an audit row, and neither is
+ * a pause reason — a teammate's reason can carry their address and the
+ * contact's words, so `contact.resumed` records its CLASS (`pauseReasonClass`).
  */
 import { and, asc, count, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm'
 import { alias } from 'drizzle-orm/pg-core'
@@ -49,7 +62,7 @@ import {
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
-import { resumeContact, type TouchRow } from './outreach.js'
+import { looksLikeOptOut, pauseContact, resumeContact, type TouchRow } from './outreach.js'
 import { previewSend } from './send-preview.js'
 
 /** A group on the inbox: a stored kind, or the rows nobody has classified. */
@@ -66,6 +79,40 @@ export const REPLY_HUMAN_KINDS: readonly ReplyHumanKind[] = [
 export function inboxKindFilter(value: unknown): InboxKindFilter | null {
   if (value === 'unclassified') return 'unclassified'
   return typeof value === 'string' && (REPLY_KINDS as readonly string[]).includes(value) ? (value as ReplyKind) : null
+}
+
+/**
+ * What paused a person, as a CLASS — the reason's text never leaves the
+ * contact row (§2.3). Derived from the shape each writer gives the reason:
+ *
+ *  - `replied`       `recordInboundReply`: exactly `replied <ISO instant>`
+ *  - `opt_out_not_recorded`  an unsubscribe whose suppression failed
+ *  - `manual`        the contacts route: `<why> (by <who>)`
+ *  - `erasure`       an erasure that could not finish
+ *  - `unsubscribed`  a one-click unsubscribe that was recorded
+ *  - `other`         anything else, or no reason at all
+ *
+ * `replied` is matched in full rather than by prefix, because a teammate's
+ * reason can begin with the word too ("replied on the phone (by …)") and
+ * only a pause a REPLY caused is one answering the reply may end.
+ */
+export type PauseReasonClass = 'replied' | 'unsubscribed' | 'erasure' | 'manual' | 'opt_out_not_recorded' | 'other'
+
+const REPLY_PAUSE = /^replied \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/
+
+export function pauseReasonClass(reason: string | null | undefined): PauseReasonClass {
+  if (!reason) return 'other'
+  if (REPLY_PAUSE.test(reason)) return 'replied'
+  if (reason.startsWith('opt-out not recorded')) return 'opt_out_not_recorded'
+  if (/\(by [^()]*\)$/.test(reason)) return 'manual'
+  if (reason.startsWith('erasure ')) return 'erasure'
+  if (reason.startsWith('unsubscribed ')) return 'unsubscribed'
+  return 'other'
+}
+
+/** The pause reason a reply writes, `recordInboundReply`'s format, for a reply read late. */
+function replyPauseReason(reply: { readonly sentAt: Date | null; readonly createdAt: Date }): string {
+  return `replied ${(reply.sentAt ?? reply.createdAt).toISOString()}`
 }
 
 export interface InboxRow {
@@ -229,15 +276,11 @@ export async function inboxTouches(
   // One query for the page rather than one per row.
   const keysByTouch = new Map<string, readonly { kind: string; value: string }[]>()
   for (const r of rows) {
-    const channel = r.touch.channel as Channel
-    const onFile = r.contact
-      ? suppressionKeysFor(
-          addressFor(channel, { email: r.contact.email, phone: r.contactPhone, linkedinUrl: r.contactLinkedin }),
-          channel,
-        ) ?? []
-      : []
-    const from = r.touch.recipient ? suppressionKeysFor(r.touch.recipient, channel) ?? [] : []
-    const keys = [...onFile, ...from]
+    const keys = replyKeys(
+      r.touch.channel as Channel,
+      r.contact ? { email: r.contact.email, phone: r.contactPhone, linkedinUrl: r.contactLinkedin } : null,
+      r.touch.recipient,
+    )
     if (keys.length > 0) keysByTouch.set(r.touch.id, keys)
   }
   const values = [...new Set([...keysByTouch.values()].flat().map((k) => k.value))]
@@ -280,6 +323,24 @@ export async function inboxUnhandledCount(db: AgencyDb, orgId: string): Promise<
       and(eq(schema.touches.orgId, orgId), eq(schema.touches.direction, 'in'), isNull(schema.touches.handledAt)),
     )
   return rows[0]?.n ?? 0
+}
+
+/**
+ * Every suppression key a reply's person matches: the address on file (what
+ * the sender will check) and the address the reply came FROM (the one
+ * `recordInboundReply` suppresses, which the sender never sees). The send
+ * path's own `suppressionKeysFor`, so an email is matched by address and by
+ * domain. An unreadable value contributes nothing — callers that must treat
+ * that as unknown say so themselves.
+ */
+function replyKeys(
+  channel: Channel,
+  contact: { readonly email: string | null; readonly phone?: string | null; readonly linkedinUrl?: string | null } | null,
+  from: string | null,
+): { kind: string; value: string }[] {
+  const onFile = contact ? suppressionKeysFor(addressFor(channel, contact), channel) ?? [] : []
+  const sender = from ? suppressionKeysFor(from, channel) ?? [] : []
+  return [...onFile, ...sender]
 }
 
 /** Where a message on this channel is addressed — the send path's own rule, restated. */
@@ -363,8 +424,25 @@ export async function replyMarkHandled(
 // ---------------------------------------------------------------------------
 
 export type ReplyReclassifyOutcome =
-  | { readonly ok: true; readonly from: ReplyKind | null }
-  | { readonly ok: false; readonly reason: 'not_found' | 'opt_out_is_not_a_choice' }
+  | {
+      readonly ok: true
+      readonly from: ReplyKind | null
+      /** A reply moved off `auto_reply` pauses the person, as the reply would have; true when this call paused them. */
+      readonly paused: boolean
+      /** Queued, awaiting-approval and approved messages to them that the move cancelled. */
+      readonly cancelled: number
+    }
+  | {
+      readonly ok: false
+      /**
+       * - `opt_out_is_not_a_choice` the row is `opted_out`, or the kind asked for is.
+       * - `suppressed`       the reply's From, or the person's address on
+       *                      file, is on the suppression list.
+       * - `reads_as_opt_out` the reply was never classified (every reply before
+       *                      0017) and its own words read as an opt-out.
+       */
+      readonly reason: 'not_found' | 'opt_out_is_not_a_choice' | 'suppressed' | 'reads_as_opt_out'
+    }
 
 /**
  * Set a reply's kind to one of the five a person may choose.
@@ -374,17 +452,51 @@ export type ReplyReclassifyOutcome =
  * — and `kind` is typed to exclude it, with a runtime check for a caller who
  * cast. The transaction locks the row so `from` in the audit is exactly what
  * was replaced, not what somebody else replaced a moment earlier.
+ *
+ * Two more refusals, because the kind column is not the only record of an
+ * opt-out. A reply whose person is on the suppression list — by the From it
+ * came from or the address on file, the keys `inboxTouches` reads — keeps its
+ * kind: relabelling it would make a reply from somebody who asked to stop read
+ * as something else. And a reply with NO kind (0017 added the column with no
+ * backfill) whose words `looksLikeOptOut` reads as a stop is refused too: its
+ * NULL is "never classified", not "not an opt-out". Both route and tool come
+ * through here, so neither can relabel one.
+ *
+ * Moving a reply OFF `auto_reply` to a kind a person wrote is the correction
+ * of a reply that never paused anybody (`recordInboundReply` skips the pause,
+ * the cancel and the deal move for a genuine automatic answer). So it does
+ * what the reply would have done: pauses the person, with the reason a reply
+ * writes (`replied <when the reply arrived>`, so answering it later resumes
+ * them), and refuses what was queued for them. The deal is left where it is —
+ * moving it is the board's job, and `advanceDeal` records its own move.
  */
 export async function replyReclassify(
   db: AgencyDb,
-  args: { readonly orgId: string; readonly touchId: string; readonly kind: ReplyHumanKind; readonly actor: string },
+  args: {
+    readonly orgId: string
+    readonly touchId: string
+    readonly kind: ReplyHumanKind
+    readonly actor: string
+    readonly now?: Date
+  },
 ): Promise<ReplyReclassifyOutcome> {
   if ((args.kind as string) === 'opted_out' || !REPLY_HUMAN_KINDS.includes(args.kind)) {
     return { ok: false, reason: 'opt_out_is_not_a_choice' }
   }
-  return db.transaction(async (tx) => {
+  const now = args.now ?? new Date()
+  return db.transaction(async (transaction) => {
+    const tx = transaction as unknown as AgencyDb
     const current = await tx
-      .select({ id: schema.touches.id, replyKind: schema.touches.replyKind })
+      .select({
+        id: schema.touches.id,
+        replyKind: schema.touches.replyKind,
+        channel: schema.touches.channel,
+        body: schema.touches.body,
+        recipient: schema.touches.recipient,
+        contactId: schema.touches.contactId,
+        sentAt: schema.touches.sentAt,
+        createdAt: schema.touches.createdAt,
+      })
       .from(schema.touches)
       .where(
         and(eq(schema.touches.id, args.touchId), eq(schema.touches.orgId, args.orgId), eq(schema.touches.direction, 'in')),
@@ -394,6 +506,20 @@ export async function replyReclassify(
     const row = current[0]
     if (!row) return { ok: false, reason: 'not_found' } as const
     if (row.replyKind === 'opted_out') return { ok: false, reason: 'opt_out_is_not_a_choice' } as const
+    if (row.replyKind === null && looksLikeOptOut(row.body)) return { ok: false, reason: 'reads_as_opt_out' } as const
+
+    const contact = row.contactId
+      ? (
+          await tx
+            .select({ email: schema.contacts.email, phone: schema.contacts.phone, linkedinUrl: schema.contacts.linkedinUrl })
+            .from(schema.contacts)
+            .where(and(eq(schema.contacts.id, row.contactId), eq(schema.contacts.orgId, args.orgId)))
+            .limit(1)
+        )[0] ?? null
+      : null
+    if (await anySuppressed(tx, args.orgId, replyKeys(row.channel as Channel, contact, row.recipient))) {
+      return { ok: false, reason: 'suppressed' } as const
+    }
     const from = (row.replyKind as ReplyKind | null) ?? null
 
     const updated = await tx
@@ -410,16 +536,45 @@ export async function replyReclassify(
       .returning({ id: schema.touches.id })
     if (!updated[0]) return { ok: false, reason: 'opt_out_is_not_a_choice' } as const
 
+    // A person's reply after all: what `recordInboundReply` does for one.
+    let paused = false
+    let cancelled = 0
+    if (from === 'auto_reply' && args.kind !== 'auto_reply' && row.contactId && contact) {
+      paused = await pauseContact(tx, args.orgId, row.contactId, replyPauseReason(row), now)
+      cancelled = (await cancelQueuedFor(tx, args.orgId, row.contactId)).length
+    }
+
     await appendAudit(tx, {
       orgId: args.orgId,
       actor: args.actor,
       action: 'reply.reclassified',
       subjectType: 'touch',
       subjectId: row.id,
-      detail: { from, to: args.kind },
+      detail: { from, to: args.kind, paused, cancelledQueued: cancelled },
     })
-    return { ok: true, from } as const
+    return { ok: true, from, paused, cancelled } as const
   })
+}
+
+/**
+ * Refuse everything still waiting to go to a person — `recordInboundReply`'s
+ * own statement, restated because it is inline there. Marked refused rather
+ * than deleted: the record that a message was about to go, and did not, is
+ * the useful one.
+ */
+async function cancelQueuedFor(db: AgencyDb, orgId: string, contactId: string): Promise<{ id: string }[]> {
+  return db
+    .update(schema.touches)
+    .set({ status: 'refused', refusalCode: 'consent_revoked' })
+    .where(
+      and(
+        eq(schema.touches.orgId, orgId),
+        eq(schema.touches.contactId, contactId),
+        eq(schema.touches.direction, 'out'),
+        inArray(schema.touches.status, ['queued', 'awaiting_approval', 'approved']),
+      ),
+    )
+    .returning({ id: schema.touches.id })
 }
 
 // ---------------------------------------------------------------------------
@@ -436,6 +591,17 @@ export type ReplyDraftRefusal =
   | 'consent_refused'
   | 'already_queued'
 
+/**
+ * Two refusals that send a person to /contacts rather than to the draft, each
+ * answered by the route with this module's own sentence and a 409. Kept apart
+ * from `ReplyDraftRefusal`, whose statuses and words the web app keeps.
+ *
+ * - `paused_for_another_reason` the person is paused, and not by a reply.
+ * - `opt_out_not_recorded`      somebody asked to stop and the system could
+ *                               not record it (the audit log says so).
+ */
+export type ReplyDraftHold = 'paused_for_another_reason' | 'opt_out_not_recorded'
+
 export type ReplyDraftOutcome =
   | {
       readonly ok: true
@@ -450,7 +616,7 @@ export type ReplyDraftOutcome =
        */
       readonly wouldHold: { readonly code: SendRefusalCode; readonly reason: string } | null
     }
-  | { readonly ok: false; readonly reason: ReplyDraftRefusal; readonly message: string }
+  | { readonly ok: false; readonly reason: ReplyDraftRefusal | ReplyDraftHold; readonly message: string }
 
 /** An answer that is still on its way — one of these per reply, at most. */
 const LIVE_STATUSES = ['queued', 'awaiting_approval', 'approved', 'sending'] as const
@@ -465,6 +631,24 @@ class DraftRefused extends Error {
 }
 
 const STOPPED = 'This person asked to stop. The suppression row is what enforces it; do not answer.'
+
+const NOT_RECORDED =
+  'This person asked to stop — by unsubscribing, asking to be erased, or in a reply — and the system could not ' +
+  'record it: there is no suppression row, and the audit log says so. Record the opt-out by hand on ' +
+  '/suppressions (or finish the erasure). Answering them is not the fix. Nothing was drafted and nobody was resumed.'
+
+const PAUSED_ELSEWHERE =
+  'This person is paused for another reason, not by this reply. Resume them on /contacts first, if that is right — ' +
+  'answering a reply only ends the pause the reply itself caused. Nothing was drafted.'
+
+/**
+ * The audit actions that mean "somebody asked to stop, and it was NOT
+ * recorded": a reply's suppression that could not be written, a one-click
+ * unsubscribe that could not be (filed under its touch, with the contact in
+ * `detail`), and an erasure rolled back whole. None of them leaves a
+ * suppression row for anything else to find.
+ */
+const OPT_OUT_NOT_RECORDED_ACTIONS = ['contact.opt_out_not_recorded', 'contact.erasure_failed', 'unsubscribe.not_recorded']
 
 /**
  * Park an answer to a reply as an `awaiting_approval` draft.
@@ -507,7 +691,7 @@ export async function replyQueueDraft(
     readonly now?: Date
   },
 ): Promise<ReplyDraftOutcome> {
-  const refuse = (reason: ReplyDraftRefusal, message: string): never => {
+  const refuse = (reason: ReplyDraftRefusal | ReplyDraftHold, message: string): never => {
     throw new DraftRefused({ ok: false, reason, message })
   }
   const now = args.now ?? new Date()
@@ -593,6 +777,17 @@ export async function replyQueueDraft(
       }
       const fromKeys = reply.recipient ? suppressionKeysFor(reply.recipient, channel) ?? [] : []
       if (await anySuppressed(tx, args.orgId, [...(keys ?? []), ...fromKeys])) refuse('opted_out', STOPPED)
+      // An opt-out that FAILED to record leaves no suppression row, so the
+      // check above cannot see it; the audit row is what remains. Refused
+      // however old it is: nobody has recorded it since, or the suppression
+      // check would have answered first.
+      if (await optOutNotRecorded(tx, args.orgId, contact.id)) refuse('opt_out_not_recorded', NOT_RECORDED)
+      // Answering ends only the pause the reply caused. Any other pause — a
+      // teammate's, an unsubscribe's, an erasure that could not finish — is
+      // somebody else's decision, and undoing it is theirs to make on /contacts.
+      if (contact.pausedAt && pauseReasonClass(contact.pausedReason) !== 'replied') {
+        refuse('paused_for_another_reason', PAUSED_ELSEWHERE)
+      }
 
       const live = await tx
         .select({ id: schema.touches.id })
@@ -630,8 +825,10 @@ export async function replyQueueDraft(
 
       // Their reply paused them. Answering is a person deciding they may be
       // written to again — the ONLY way a pause ends — and it is recorded as
-      // that, with the reason, so /approvals has nothing to resume and the
-      // audit log says who chose to.
+      // that, so /approvals has nothing to resume and the audit log says who
+      // chose to. The pause's CLASS, never its text: a reason can carry a
+      // teammate's address and the contact's words, and this log is
+      // append-only and outlives an erasure.
       let resumed = false
       if (contact.pausedAt) {
         resumed = await resumeContact(tx, args.orgId, contact.id)
@@ -641,12 +838,16 @@ export async function replyQueueDraft(
           action: 'contact.resumed',
           subjectType: 'contact',
           subjectId: contact.id,
-          detail: { reason: 'answering their reply from the inbox', inboundTouchId: reply.id, hadReason: contact.pausedReason },
+          detail: {
+            reason: 'answering their reply from the inbox',
+            inboundTouchId: reply.id,
+            pausedFor: pauseReasonClass(contact.pausedReason),
+          },
         })
       }
 
       // The sender's own answer, as if a person had approved this minute.
-      const preview = await previewSend(tx, { orgId: args.orgId, contactId: contact.id, campaignId: campaign.id, now })
+      const preview = await previewSend(tx, { orgId: args.orgId, contactId: contact.id, campaignId: campaign.id, now, writtenAt: null })
       if (!preview.ok) refuse('no_contact', preview.message)
       const decision = preview.ok ? preview.decision : null
       let wouldHold: { code: SendRefusalCode; reason: string } | null = null
@@ -678,6 +879,29 @@ export async function replyQueueDraft(
     if (err instanceof DraftRefused) return err.outcome
     throw err
   }
+}
+
+/**
+ * Has this person an opt-out on the audit log that was never recorded?
+ * `contact.*` rows name the contact as their subject; `unsubscribe.not_recorded`
+ * names the touch and carries the contact in `detail`.
+ */
+async function optOutNotRecorded(db: AgencyDb, orgId: string, contactId: string): Promise<boolean> {
+  const rows = await db
+    .select({ id: schema.auditLog.id })
+    .from(schema.auditLog)
+    .where(
+      and(
+        eq(schema.auditLog.orgId, orgId),
+        inArray(schema.auditLog.action, OPT_OUT_NOT_RECORDED_ACTIONS),
+        or(
+          and(eq(schema.auditLog.subjectType, 'contact'), eq(schema.auditLog.subjectId, contactId)),
+          sql`${schema.auditLog.detail}->>'contactId' = ${contactId}`,
+        ),
+      ),
+    )
+    .limit(1)
+  return rows.length > 0
 }
 
 /** Does any of these keys have a suppression row in this org? One query. */

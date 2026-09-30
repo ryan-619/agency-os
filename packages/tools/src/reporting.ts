@@ -420,7 +420,12 @@ export const getComplianceSummary: AgencyToolSpec<Record<string, never>> = {
         touches: s.coldOptIn.touches,
         stoppedBySendPath: s.coldOptIn.stoppedBySendPath,
       },
-      draftsOnStaleEvidence: { count: s.draftsOnStaleEvidence.count, awaiting: s.draftsOnStaleEvidence.awaiting },
+      draftsOnStaleEvidence: {
+        count: s.draftsOnStaleEvidence.count,
+        byStatus: s.draftsOnStaleEvidence.byStatus,
+        awaiting: s.draftsOnStaleEvidence.awaiting,
+        unsent: s.draftsOnStaleEvidence.unsent,
+      },
       consents: s.consents,
       suppressions: {
         lastWindow: s.suppressions.lastWindow,
@@ -461,7 +466,10 @@ export const getComplianceSummary: AgencyToolSpec<Record<string, never>> = {
       `Opt-outs that failed to store: ${counts.optOutsNotRecorded.lastWindow} in ${w}, ${counts.optOutsNotRecorded.allTime} all time.`,
       `Messages that went out on an opt-in-only channel with no opt-in: ${counts.coldWithoutOptIn.touches} to ` +
         `${counts.coldWithoutOptIn.contacts} contacts (must be 0); ${counts.coldWithoutOptIn.stoppedBySendPath} stopped by the send path.`,
-      `Drafts awaiting approval on stale or missing evidence: ${counts.draftsOnStaleEvidence.count} of ${counts.draftsOnStaleEvidence.awaiting} awaiting.`,
+      `Outbound messages not yet sent on stale or missing evidence: ${counts.draftsOnStaleEvidence.count} of ` +
+        `${counts.draftsOnStaleEvidence.unsent} not yet sent (must be 0) — ${counts.draftsOnStaleEvidence.byStatus.awaiting_approval} ` +
+        `awaiting approval; ${counts.draftsOnStaleEvidence.byStatus.approved} approved, ${counts.draftsOnStaleEvidence.byStatus.queued} ` +
+        `queued and ${counts.draftsOnStaleEvidence.byStatus.sending} sending, which go with no further look.`,
       `Consent rows: ${tally(s.consents.byChannel, (i) => s.consents.byChannel[i]!.channel)}; ` +
         `${s.consents.total.granted} granted and ${s.consents.total.refused} refused in all.`,
       `Suppressions: ${s.suppressions.lastWindow.total} added in ${w} (${sources(s.suppressions.lastWindow.bySource)}); ` +
@@ -496,7 +504,7 @@ const searchCrmShape = {
   sections: z
     .array(z.enum(['companies', 'contacts', 'deals', 'campaigns', 'meetings', 'proposals', 'touches']))
     .optional()
-    .describe('Which kinds of record to search. Default: all of them.'),
+    .describe('Which kinds of record to search. Omitted or empty: all of them.'),
 }
 
 /** A hit's company, from the link the search module built — the domain `get_company` takes. */
@@ -522,7 +530,10 @@ export const searchCrm: AgencyToolSpec<typeof searchCrmShape> = {
     // Asking for a section narrows it; it cannot open one `can()` closed.
     const allowed = searchSectionsFor(ctx.principal)
     if (!allowed) return fail('not_permitted', 'The person you are helping cannot search the CRM.')
-    const asked = new Set<SearchSectionName>(input.sections ?? SEARCH_SECTION_NAMES)
+    // An EMPTY list is read as an omitted one. The shape admits `[]`, and
+    // `??` does not replace it, so it used to search nothing and then answer
+    // "cannot read ." — telling the model an owner may not search the CRM.
+    const asked = new Set<SearchSectionName>(input.sections?.length ? input.sections : SEARCH_SECTION_NAMES)
     const on = (s: SearchSectionName): boolean => asked.has(s) && allowed[s]
     const sections: SearchSections = {
       companies: on('companies'),
@@ -536,7 +547,9 @@ export const searchCrm: AgencyToolSpec<typeof searchCrmShape> = {
     }
     const searched = SEARCH_SECTION_NAMES.filter(on)
     const refused = [...asked].filter((s) => !allowed[s])
-    if (searched.length === 0) {
+    // A refusal names what was refused; with `asked` never empty, nothing
+    // searched means everything asked for was refused.
+    if (searched.length === 0 && refused.length > 0) {
       return fail('not_permitted', `The person you are helping cannot read ${refused.join(', ')}.`)
     }
 

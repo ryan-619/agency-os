@@ -15,11 +15,13 @@
  * possible bug in this file, and it is checked on every path.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import { decideSend } from '@agency/core'
 import {
-  approveDraft, contactsUpdate, denyDraft, dispatchTouch, dueTouches, handleInboundEmail, looksLikeOptOut,
+  approveDraft, contactsUpdate, denyDraft, dispatchTouch, dueTouches, evidenceAsOfFor, handleInboundEmail, looksLikeOptOut,
   outreachRecordBounce, pauseContact, pendingDrafts, recordInboundReply, resumeContact, schema, sendFactsFor, sendOne,
   type AgencyDb, type InboundLog, type MessageProvider,
 } from '../src/index.js'
@@ -825,7 +827,7 @@ describe('the send-path contract', () => {
 
   describe('sendFactsFor — the sender’s own facts, exported', () => {
     const facts = (over: Record<string, unknown> = {}) =>
-      sendFactsFor(db, { orgId, campaignId, contactId, approvedByHuman: false, now: NOON, ...over })
+      sendFactsFor(db, { orgId, campaignId, contactId, approvedByHuman: false, evidenceAsOf: NOON, now: NOON, ...over })
 
     it('gathers the facts the decision needs, and says whose zone', async () => {
       const out = await facts()
@@ -856,6 +858,48 @@ describe('the send-path contract', () => {
       expect(decideSend(out.facts).code).toBe('consent_revoked')
     })
 
+    /**
+     * Found by review: the paused branch skipped the suppression lookup and
+     * hard-coded `suppressed: false`, so every preview called a paused AND
+     * suppressed person "not suppressed", and the sender logged the opt-out
+     * as a revoked consent. The lookup runs on both branches now, and
+     * `decideSend` orders the refusals.
+     */
+    it('runs the suppression lookup for a paused contact too: paused AND suppressed is suppressed', async () => {
+      await pauseContact(db, orgId, contactId, `replied ${NOON.toISOString()}`, NOON)
+      await db.insert(schema.suppressions).values({ orgId, kind: 'email', value: 'priya@rentman.io', reason: 'asked' })
+      const out = await facts()
+      if ('missing' in out) throw new Error(out.missing)
+      expect(out.paused).toBe(true)
+      expect(out.facts.suppressed).toBe(true)
+      expect(decideSend(out.facts).code).toBe('suppressed')
+    })
+
+    it('says why a contact is paused, and keeps the consent row as recorded apart from the pause', async () => {
+      await pauseContact(db, orgId, contactId, 'replied 2026-09-15T12:00:00.000Z', NOON)
+      const never = await facts()
+      if ('missing' in never) throw new Error(never.missing)
+      expect(never.pausedReason).toBe('replied 2026-09-15T12:00:00.000Z')
+      // The decision reads the pause as a revoked consent; the record says nobody asked.
+      expect(never.facts.consent).toEqual({ granted: false, source: 'replied 2026-09-15T12:00:00.000Z' })
+      expect(never.consentRecorded).toBeNull()
+
+      // A refusal they RECORDED is the stronger statement, and the decision reads it in its own words.
+      await db.insert(schema.consents).values({ orgId, contactId, channel: 'email', granted: false, source: 'said no on a call' })
+      const refused = await facts()
+      if ('missing' in refused) throw new Error(refused.missing)
+      expect(refused.facts.consent).toEqual({ granted: false, source: 'said no on a call' })
+      expect(refused.consentRecorded).toEqual({ granted: false, source: 'said no on a call' })
+      expect(decideSend(refused.facts).code).toBe('consent_revoked')
+    })
+
+    it('is not paused, with no reason, for a contact nobody paused', async () => {
+      const out = await facts()
+      if ('missing' in out) throw new Error(out.missing)
+      expect(out.paused).toBe(false)
+      expect(out.pausedReason).toBeNull()
+    })
+
     it('falls back to the company zone and says so; with neither, the zone is null', async () => {
       await db.update(schema.contacts).set({ timeZone: null }).where(eq(schema.contacts.id, contactId))
       const company = await facts()
@@ -882,6 +926,278 @@ describe('the send-path contract', () => {
       if ('missing' in a || 'missing' in b) throw new Error('missing')
       expect(decideSend(a.facts).code).toBe('needs_approval')
       expect(decideSend(b.facts).code).toBe('send_now')
+    })
+  })
+
+  /**
+   * §2.2 at the moment of sending. Found by review (VERIFIED): enrolment
+   * checks freshness when it WRITES an auto-send row, and a deferral — the
+   * cap, quiet hours, a paused campaign re-activated weeks later — then sent
+   * the frozen words with nobody reading them. The evidence is the latest
+   * successful scan at or before the moment the words were written, judged
+   * by `isStale` on its `ran_at` at the moment of sending.
+   */
+  describe('stale evidence at the moment of sending (§2.2)', () => {
+    const SCANNED = new Date('2026-08-20T09:00:00.000Z')
+    const WRITTEN = new Date('2026-08-25T09:00:00.000Z')
+    const ICP = JSON.parse(
+      readFileSync(fileURLToPath(new URL('../seed/icp-security-gap-saas.json', import.meta.url)), 'utf8'),
+    ) as Record<string, unknown>
+
+    const scan = async (ranAt: Date, ok = true) =>
+      db.insert(schema.scans).values({ orgId, companyId, ranAt, ok, error: ok ? null : 'timeout' })
+
+    /** An auto-send row written on WRITTEN, from the scan that was current then. */
+    const queued = async (over: Partial<typeof schema.touches.$inferInsert> = {}) =>
+      (await db
+        .insert(schema.touches)
+        .values({
+          orgId, companyId, contactId, campaignId, channel: 'email', direction: 'out', status: 'queued',
+          subject: 'A gap on your security page', body: 'We noticed…', createdAt: WRITTEN, ...over,
+        })
+        .returning())[0]!
+
+    const factsAt = (evidenceAsOf: Date | null, now = NOON) =>
+      sendFactsFor(db, { orgId, campaignId, contactId, approvedByHuman: false, evidenceAsOf, now })
+
+    it('refuses a queued auto-send row whose evidence aged past the window while it waited, and calls no provider', async () => {
+      await scan(SCANNED)
+      const row = await queued()
+      const r = await dispatchTouch(db, provider, row, { now: NOON })
+      expect(r.sent).toBe(false)
+      expect(r.decision).toMatchObject({ allowed: false, code: 'stale_evidence', humanCanResolve: false })
+      expect(provider.sent).toEqual([])
+      const after = await touch(row.id)
+      expect(after.status).toBe('refused')
+      expect(after.refusalCode).toBe('stale_evidence')
+      const audit = (await db.select().from(schema.auditLog)).find((a) => a.action === 'send.stale_evidence')
+      expect(audit?.detail).toMatchObject({ code: 'stale_evidence', channel: 'email' })
+    })
+
+    it('sends the same row while the evidence is still inside the window', async () => {
+      await scan(SCANNED)
+      const row = await queued()
+      const r = await dispatchTouch(db, provider, row, { now: new Date('2026-08-26T12:00:00.000Z') })
+      expect(r.sent).toBe(true)
+    })
+
+    it('refuses an approved draft too: a person approved the words, not their age', async () => {
+      await scan(SCANNED)
+      const row = await queued({ status: 'approved', approvedBy: userId, approvedAt: WRITTEN })
+      const r = await dispatchTouch(db, provider, row, { now: NOON })
+      expect(r.decision).toMatchObject({ allowed: false, code: 'stale_evidence' })
+      expect(provider.sent).toEqual([])
+    })
+
+    /** The rescan cron refreshes the scan, never the words: a new draft does. */
+    it('is not freshened by a re-scan AFTER the words were written', async () => {
+      await scan(SCANNED)
+      await scan(new Date('2026-09-14T09:00:00.000Z'))
+      const row = await queued()
+      const out = await factsAt(evidenceAsOfFor(row))
+      if ('missing' in out) throw new Error(out.missing)
+      expect(out.facts.evidenceStale).toBe(true)
+      // …while words written after that re-scan quote it, and are fresh.
+      const later = await factsAt(new Date('2026-09-14T10:00:00.000Z'))
+      if ('missing' in later) throw new Error(later.missing)
+      expect(later.facts.evidenceStale).toBe(false)
+    })
+
+    it('reads only SUCCESSFUL scans: a later timeout is not evidence, and is not a fix', async () => {
+      await scan(SCANNED)
+      await scan(new Date('2026-08-24T09:00:00.000Z'), false)
+      const out = await factsAt(WRITTEN)
+      if ('missing' in out) throw new Error(out.missing)
+      expect(out.facts.evidenceStale).toBe(true)
+    })
+
+    it('is not stale when no successful scan could have been quoted', async () => {
+      const none = await factsAt(WRITTEN)
+      if ('missing' in none) throw new Error(none.missing)
+      expect(none.facts.evidenceStale).toBe(false)
+      await scan(SCANNED, false)
+      const failedOnly = await factsAt(WRITTEN)
+      if ('missing' in failedOnly) throw new Error(failedOnly.missing)
+      expect(failedOnly.facts.evidenceStale).toBe(false)
+      // A scan that ran after the words were written was not what they quote.
+      await scan(new Date('2026-08-30T09:00:00.000Z'))
+      const after = await factsAt(WRITTEN)
+      if ('missing' in after) throw new Error(after.missing)
+      expect(after.facts.evidenceStale).toBe(false)
+    })
+
+    /** An answer to a reply quotes no scan, so nothing about a scan can make it stale. */
+    it('never refuses an answer to a reply for a stale scan', async () => {
+      await scan(SCANNED)
+      const [parent] = await db
+        .insert(schema.touches)
+        .values({ orgId, companyId, contactId, channel: 'email', direction: 'in', status: 'replied', providerId: '<r@x>' })
+        .returning()
+      const answer = await queued({ answersTouchId: parent!.id })
+      expect(evidenceAsOfFor(answer)).toBeNull()
+      const r = await dispatchTouch(db, provider, answer, { now: NOON })
+      expect(r.sent).toBe(true)
+    })
+
+    it('reads the window from the active ICP, and falls back to 14 days without one', async () => {
+      await scan(SCANNED)
+      // 26 days after the scan: stale at the default.
+      const byDefault = await factsAt(WRITTEN)
+      if ('missing' in byDefault) throw new Error(byDefault.missing)
+      expect(byDefault.facts.evidenceStale).toBe(true)
+
+      const freshness = { stale_after_days: 30 }
+      await db.insert(schema.icpProfiles).values({ orgId, name: 'ICP', definition: { ...ICP, freshness }, active: true })
+      const byIcp = await factsAt(WRITTEN)
+      if ('missing' in byIcp) throw new Error(byIcp.missing)
+      expect(byIcp.facts.evidenceStale).toBe(false)
+
+      // A value `isStale` would throw on is not allowed to stop the sender.
+      await db.update(schema.icpProfiles).set({ definition: { ...ICP, freshness: { stale_after_days: 0 } } }).where(eq(schema.icpProfiles.orgId, orgId))
+      const broken = await factsAt(WRITTEN)
+      if ('missing' in broken) throw new Error(broken.missing)
+      expect(broken.facts.evidenceStale).toBe(true)
+    })
+  })
+
+  /**
+   * The last look before the wire, and the write after it. Found by review:
+   * an erasure committing between the facts and the look left `fresh`
+   * undefined, which read as "not paused", and the provider sent to an
+   * erased and suppressed person — and the final UPDATE then wrote the
+   * recipient back over the erasure's scrub.
+   */
+  describe('the last look before the wire', () => {
+    /** A database that runs `race` just before the last look reads the contact. */
+    const racing = (race: () => Promise<unknown>): AgencyDb =>
+      new Proxy(db as object, {
+        get(target, prop, receiver) {
+          if (prop !== 'select') return Reflect.get(target, prop, receiver)
+          return (fields?: Record<string, unknown>) => {
+            const keys = fields ? Object.keys(fields).sort().join(',') : ''
+            if (keys !== 'emailBouncedAt,pausedAt') return (target as AgencyDb).select(fields as never)
+            // A thenable-free way in: run the race, then hand back the real builder.
+            const builder = (target as AgencyDb).select(fields as never)
+            const from = builder.from.bind(builder)
+            ;(builder as { from: unknown }).from = (table: unknown) => {
+              const q = from(table as never)
+              const where = q.where.bind(q)
+              ;(q as { where: unknown }).where = (cond: unknown) => {
+                const w = where(cond as never)
+                const limit = w.limit.bind(w)
+                ;(w as { limit: unknown }).limit = (n: number) => race().then(() => limit(n))
+                return w
+              }
+              return q
+            }
+            return builder
+          }
+        },
+      }) as AgencyDb
+
+    const queuedRow = async () =>
+      (await db
+        .insert(schema.touches)
+        .values({ orgId, companyId, contactId, campaignId, channel: 'email', direction: 'out', status: 'queued', subject: 's', body: 'b' })
+        .returning())[0]!
+
+    it('refuses, and never calls the provider, when the contact was erased in between', async () => {
+      const row = await queuedRow()
+      const erased = racing(async () => {
+        // What an erasure does to this row and this person, in its order: the
+        // suppression first, the scrub, then the contact.
+        await db.insert(schema.suppressions).values({ orgId, kind: 'email', value: 'priya@rentman.io', reason: 'erased', source: 'erasure' })
+        await db.update(schema.touches).set({ recipient: null }).where(eq(schema.touches.contactId, contactId))
+        await db.delete(schema.contacts).where(eq(schema.contacts.id, contactId))
+      })
+      const r = await dispatchTouch(erased, provider, row, { now: NOON })
+      expect(r.sent).toBe(false)
+      expect(r.decision).toMatchObject({ allowed: false, code: 'consent_revoked', humanCanResolve: false })
+      expect(provider.sent).toEqual([])
+      const after = await touch(row.id)
+      expect(after.status).toBe('refused')
+      expect(after.refusalCode).toBe('consent_revoked')
+      expect(after.contactId).toBeNull()
+      // The erasure blanked it; the refusal did not write it back.
+      expect(after.recipient).toBeNull()
+    })
+
+    it('refuses as suppressed when a suppression lands in between', async () => {
+      const row = await queuedRow()
+      const stopped = racing(() =>
+        db.insert(schema.suppressions).values({ orgId, kind: 'email', value: 'priya@rentman.io', reason: 'clicked unsubscribe', source: 'unsubscribe' }),
+      )
+      const r = await dispatchTouch(stopped, provider, row, { now: NOON })
+      expect(r.decision).toMatchObject({ allowed: false, code: 'suppressed', humanCanResolve: false })
+      expect(provider.sent).toEqual([])
+      expect((await touch(row.id)).refusalCode).toBe('suppressed')
+    })
+
+    it('checks the domain half of the suppression too', async () => {
+      const row = await queuedRow()
+      const stopped = racing(() => db.insert(schema.suppressions).values({ orgId, kind: 'domain', value: 'rentman.io', reason: 'asked' }))
+      const r = await dispatchTouch(stopped, provider, row, { now: NOON })
+      expect(r.decision).toMatchObject({ allowed: false, code: 'suppressed' })
+      expect(provider.sent).toEqual([])
+    })
+
+    it('does not write the recipient back when the contact was erased while the provider had it', async () => {
+      const row = await queuedRow()
+      await db.update(schema.touches).set({ status: 'sending' }).where(eq(schema.touches.id, row.id))
+      const erasing: MessageProvider = {
+        name: 'erasing',
+        channels: ['email'],
+        async send(m) {
+          await db.update(schema.touches).set({ recipient: null }).where(eq(schema.touches.contactId, contactId))
+          await db.delete(schema.contacts).where(eq(schema.contacts.id, contactId))
+          return provider.send(m)
+        },
+      }
+      const r = await dispatchTouch(db, erasing, row, { now: NOON })
+      expect(r.sent).toBe(true)
+      const after = await touch(row.id)
+      expect(after.status).toBe('sent')
+      expect(after.providerId).toBe('test-1')
+      expect(after.recipient).toBeNull()
+    })
+
+    it('does not overwrite a row somebody else settled while the provider had it', async () => {
+      const row = await queuedRow()
+      await db.update(schema.touches).set({ status: 'sending' }).where(eq(schema.touches.id, row.id))
+      const lines: string[] = []
+      const original = console.error
+      console.error = (line: string) => lines.push(line)
+      const recovered: MessageProvider = {
+        name: 'slow',
+        channels: ['email'],
+        async send(m) {
+          // A stuck-send recovery gave up on it meanwhile.
+          await db.update(schema.touches).set({ status: 'failed', error: 'stuck in sending' }).where(eq(schema.touches.id, row.id))
+          return provider.send(m)
+        },
+      }
+      try {
+        const r = await dispatchTouch(db, recovered, row, { now: NOON })
+        expect(r.sent).toBe(true)
+      } finally {
+        console.error = original
+      }
+      const after = await touch(row.id)
+      expect(after.status).toBe('failed')
+      expect(after.error).toBe('stuck in sending')
+      // The audit row still says it went, which is the truth; the log says the row disagreed.
+      expect((await db.select().from(schema.auditLog)).some((a) => a.action === 'send.sent')).toBe(true)
+      expect(lines.some((l) => l.includes('already settled'))).toBe(true)
+    })
+
+    it('records a claimed row as sent, as before', async () => {
+      const row = await queuedRow()
+      await db.update(schema.touches).set({ status: 'sending' }).where(eq(schema.touches.id, row.id))
+      const r = await dispatchTouch(db, provider, row, { now: NOON })
+      expect(r.sent).toBe(true)
+      const after = await touch(row.id)
+      expect(after.status).toBe('sent')
+      expect(after.recipient).toBe('priya@rentman.io')
     })
   })
 
@@ -1093,7 +1409,110 @@ describe('the send-path contract', () => {
       expect(r.replyKind).toBe('auto_reply')
       expect(r.paused).toBe(true)
     })
+
+    /**
+     * Found by review (VERIFIED): with only the narrow opt-out reader, an
+     * automatic mail that asked to be removed in any words it did not know
+     * skipped the pause — including this file's own example. The broad
+     * reader makes such a mail an ordinary reply: paused, queue cancelled,
+     * deal advanced. It never writes a suppression.
+     */
+    it.each([
+      ['the send path’s own example', 'I have left — remove me from your list'],
+      ['a bare removal request', 'remove me from your list'],
+      [
+        'an out-of-office that ends asking to be removed',
+        'Thank you for your email. I am out of the office until 21 September with no access to email.\n\n' +
+          'Please remove me from your mailing list.',
+      ],
+    ])('an automatic mail that mentions removal pauses like any reply: %s', async (_label, body) => {
+      const [queuedRow] = await db
+        .insert(schema.touches)
+        .values({ orgId, companyId, contactId, campaignId, channel: 'email', direction: 'out', status: 'queued', subject: 's', body: 'b' })
+        .returning()
+      const r = await recordInboundReply(db, {
+        orgId, contactId, channel: 'email', from: 'priya@rentman.io', subject: 'Automatic reply', body, autoReply: true, now: NOON,
+      })
+      expect(r.paused).toBe(true)
+      expect(r.cancelled).toBe(1)
+      expect((await touch(queuedRow!.id)).status).toBe('refused')
+      expect(r.deal).toMatch(/replied$/)
+      // The broad reader decides the pause, never the suppression.
+      expect(r.suppressed).toBe(false)
+      expect(await db.select().from(schema.suppressions)).toEqual([])
+      const [contact] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, contactId))
+      expect(contact!.pausedAt).not.toBeNull()
+    })
+
+    it('an ordinary out-of-office with no removal words still skips the pause', async () => {
+      const r = await recordInboundReply(db, {
+        orgId, contactId, channel: 'email', from: 'priya@rentman.io', subject: 'Automatic reply',
+        body:
+          'Thank you for your email. I am currently out of the office with limited access to email and will ' +
+          'return on 21 September. For urgent matters please contact support@rentman.io.',
+        autoReply: true, now: NOON,
+      })
+      expect(r.replyKind).toBe('auto_reply')
+      expect(r.paused).toBe(false)
+      expect(r.cancelled).toBe(0)
+      expect(r.deal).toBeNull()
+    })
+
+    it('an automatic mail that only quotes OUR unsubscribe line still skips the pause', async () => {
+      const r = await recordInboundReply(db, {
+        orgId, contactId, channel: 'email', from: 'priya@rentman.io', subject: 'Automatic reply',
+        body: 'I am out of the office until Monday.\n\nOn Tue, Agency wrote:\n> Reply "unsubscribe" to stop hearing from us.',
+        autoReply: true, now: NOON,
+      })
+      expect(r.paused).toBe(false)
+    })
   })
+
+  /**
+   * `handleInboundEmail` carries `optOutNotRecorded` out, so the web routes
+   * can raise the alarm instead of announcing an ordinary reply. Found by
+   * review: the flag stopped at `recordInboundReply`, and the Slack message
+   * the routes did send read as handled.
+   */
+  describe('an opt-out that could not be recorded, as the inbound paths see it', () => {
+    const failingSuppressions = (): AgencyDb =>
+      new Proxy(db as object, {
+        get(target, prop, receiver) {
+          if (prop === 'insert') {
+            return (table: unknown) => {
+              if (table === schema.suppressions) throw new Error('Connection terminated unexpectedly')
+              return (target as AgencyDb).insert(table as typeof schema.touches)
+            }
+          }
+          return Reflect.get(target, prop, receiver)
+        },
+      }) as AgencyDb
+
+    it('is reported by handleInboundEmail, and only on the first delivery', async () => {
+      const log: InboundLog = { error: () => {} }
+      const mail = { from: 'priya@rentman.io', subject: 'Re', text: 'unsubscribe', messageId: '<stop@rentman.io>', now: NOON, log }
+      const first = await handleInboundEmail(failingSuppressions(), mail)
+      if (first.matched === 'none') throw new Error(first.why)
+      expect(first.replyKind).toBe('opted_out')
+      expect(first.suppressed).toBe(false)
+      expect(first.optOutNotRecorded).toBe(true)
+      const again = await handleInboundEmail(db, mail)
+      if (again.matched === 'none') throw new Error(again.why)
+      expect(again.duplicate).toBe(true)
+      expect(again.optOutNotRecorded).toBe(false)
+    })
+
+    it('is false when the opt-out was recorded, and for an ordinary reply', async () => {
+      const stop = await handleInboundEmail(db, { from: 'priya@rentman.io', subject: 'Re', text: 'unsubscribe', now: NOON })
+      if (stop.matched === 'none') throw new Error(stop.why)
+      expect(stop.suppressed).toBe(true)
+      expect(stop.optOutNotRecorded).toBe(false)
+      const yes = await handleInboundEmail(db, { from: 'priya@rentman.io', subject: 'Re', text: 'yes please', messageId: '<y@r>', now: NOON })
+      if (yes.matched === 'none') throw new Error(yes.why)
+      expect(yes.optOutNotRecorded).toBe(false)
+    })
+  })
+
   /**
    * What a mail says about ITSELF — headers and the delivery-status part,
    * never the body (packages/core/src/mail-signals.ts).
@@ -1318,8 +1737,8 @@ describe('the send-path contract', () => {
           .insert(schema.campaigns)
           .values({ orgId, name: 'LinkedIn', channel: 'linkedin', autoSend: true, dailyCap: 10, status: 'active' })
           .returning({ id: schema.campaigns.id })
-        const email = await sendFactsFor(db, { orgId, campaignId, contactId, approvedByHuman: false, now: NOON })
-        const linkedin = await sendFactsFor(db, { orgId, campaignId: li!.id, contactId, approvedByHuman: false, now: NOON })
+        const email = await sendFactsFor(db, { orgId, campaignId, contactId, approvedByHuman: false, evidenceAsOf: NOON, now: NOON })
+        const linkedin = await sendFactsFor(db, { orgId, campaignId: li!.id, contactId, approvedByHuman: false, evidenceAsOf: NOON, now: NOON })
         if ('missing' in email || 'missing' in linkedin) throw new Error('missing')
         expect(email.facts.recipientBounced).toBe(true)
         expect(linkedin.facts.recipientBounced).toBe(false)

@@ -316,9 +316,20 @@ const ENROL_SKIP_WORDS: Readonly<Record<EnrolSkip, string>> = {
   no_address: 'people with no usable address on this channel',
   paused: 'people paused after replying',
   declined: 'people who declined this channel',
+  bounced: 'people whose email address bounced — correct it on /contacts, which clears the mark',
   no_timezone: 'people with no timezone, on them or their company',
-  already_enrolled: 'people who already have a draft in this campaign',
-  already_contacted: 'people this campaign has already written to',
+  already_enrolled: 'people with a draft already waiting',
+  already_contacted: 'people already written to, whose earlier draft a person denied, or who said no',
+}
+
+/**
+ * Where enrolment looked for an earlier row (`enrolPriorScope`): this
+ * campaign's own when a person reads each draft, every campaign's on the
+ * channel when nobody does. `queued` is what an auto-send campaign writes.
+ */
+function priorScopeWords(why: EnrolSkip, status: EnrolPlan['status']): string {
+  if (why !== 'already_enrolled' && why !== 'already_contacted') return ''
+  return status === 'queued' ? ' — in any campaign on this channel, because this one auto-sends' : ' — in this campaign'
 }
 
 /** What the enrol route answers — counts only, never who. */
@@ -343,6 +354,7 @@ function SkipCounts({ plan }: { plan: EnrolPlan }) {
       {rows.map(([why, n]) => (
         <li key={why}>
           <strong>{n}</strong> {ENROL_SKIP_WORDS[why] ?? why.replace(/_/g, ' ')}
+          {priorScopeWords(why, plan.status)}
         </li>
       ))}
     </ul>

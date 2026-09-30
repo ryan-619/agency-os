@@ -277,9 +277,9 @@ for **Production**, marked sensitive — yourself; I do not handle credentials.
 |---|---|---|
 | `CRON_SECRET` | Vercel, Production only | the nightly rescan and the daily digest. `openssl rand -hex 32` |
 | `RESCAN_BATCH_SIZE` | Vercel | companies per night. Leave it unset: 6 |
-| `SLACK_WEBHOOK_URL` | Vercel | Slack messages — a reply, a booking, a deal won or lost, a proposal accepted, an opt-out that could not be recorded, the digest, a silent worker. A Slack incoming-webhook URL, and the URL is the credential |
+| `SLACK_WEBHOOK_URL` | Vercel | Slack messages — a reply, a booking, a deal won or lost, a proposal accepted, an opt-out that could not be recorded, the digest, a campaign that paused itself because its addresses bounced, a silent worker. A Slack incoming-webhook URL, and the URL is the credential |
 | `UNSUBSCRIBE_SECRET` | Vercel **and** the worker — the SAME value | one-click unsubscribe. `openssl rand -base64 32` |
-| `WEB_PUBLIC_URL` | the worker | `https://myagencyos.in` — where the unsubscribe link points |
+| `WEB_PUBLIC_URL` | the worker | `https://myagencyos.in` — where the unsubscribe link points. It must be `https://` on a public host: in production the worker refuses to boot on anything else |
 | `RESEND_WEBHOOK_SECRET`, `RESEND_API_KEY` | Vercel | replies with no worker — Step 9b |
 | `OUTREACH_BOUNCE_PAUSE_PCT` | the worker | leave it unset: a campaign past 5% bounces pauses itself |
 | `SECRETS_KEY` | Vercel **and** the worker — the same value | storing a connector's credential from Settings |
@@ -330,7 +330,10 @@ curl -H "Authorization: Bearer $CRON_SECRET" https://myagencyos.in/api/cron/resc
 ```
 
 It answers `{"orgs":[…]}` with how many companies it scanned, and `/audit` gains
-a line "ran the scheduled rescan". A 503 means the variable did not reach the
+two lines, "started the scheduled rescan" and "ran the scheduled rescan". Run
+it again within five minutes and the org reads `skipped: 'claimed'`: each run
+claims the org until its own ceiling, so two deliveries never scan the same
+companies twice. A 503 means the variable did not reach the
 deployment (redeploy after setting it); a 401 means the value differs; a 403
 means you called a preview URL.
 

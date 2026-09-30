@@ -109,7 +109,8 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'contact.opt_out_not_recorded': { touchId: SUBJECT, channel: 'email', why: 'unparseable' },
   'contact.created': { companyId: SUBJECT, source: 'manual', hasTimeZone: true },
   'contact.paused': { reason: 'asked for Q1', alreadyPaused: false },
-  'contact.resumed': { hadReason: 'asked for Q1' },
+  // The inbox's shape; the contacts route writes `{ pausedFor }` alone.
+  'contact.resumed': { reason: 'answering their reply from the inbox', inboundTouchId: SUBJECT, pausedFor: 'replied' },
   'contact.timezone_set': { timeZone: 'Europe/Amsterdam' },
   'consent.granted': { channel: 'sms', source: 'said yes on the call, 12 Sep' },
   'consent.declined': { channel: 'sms', source: 'said no' },
@@ -166,9 +167,11 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'campaign.enrolled': { campaignId: SUBJECT, queued: 14, skipped: {}, status: 'active', limit: 50, truncated: false },
   'deal.next_action_set': { companyId: SUBJECT, from: null, to: '2026-10-02T09:00:00.000Z' },
   'reply.handled': { contactId: SUBJECT, replyKind: 'interested' },
-  'reply.reclassified': { from: 'other', to: 'interested' },
+  'reply.reclassified': { from: 'auto_reply', to: 'interested', paused: true, cancelledQueued: 1 },
   'reply.answer_drafted': { inboundTouchId: SUBJECT, touchId: SUBJECT, campaignId: SUBJECT, channel: 'email', resumed: true },
-  'note.added': { companyId: SUBJECT, noteId: SUBJECT },
+  // `authorUserId` is written only when the writer is not the author — the
+  // agent's add_note, with actor `agent`.
+  'note.added': { companyId: SUBJECT, noteId: SUBJECT, contactId: SUBJECT, authorUserId: ORG_USER },
   'note.deleted': { companyId: SUBJECT, noteId: SUBJECT, authorUserId: ORG_USER },
   'task.created': { taskId: SUBJECT, kind: 'follow_up', companyId: SUBJECT },
   'task.completed': { taskId: SUBJECT, companyId: SUBJECT },
@@ -183,6 +186,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'credential.rotated': { connectorId: SUBJECT, secretId: SUBJECT, label: 'deepwiki token' },
   'credential.deleted': { label: 'old apollo key' },
   'scan.cron_run': { picked: 6, scanned: 5, unreachable: 1, skipped: 0, remaining: 4, schedule: '17 3 * * *' },
+  'scan.cron_started': { until: '2026-09-30T03:22:00.000Z', schedule: '17 3 * * *' },
   'meeting.outcome_recorded': { outcome: 'held', companyId: SUBJECT },
   'export.companies': { rows: 42, filters: {} },
   'export.findings': { rows: 310, filters: {} },
@@ -213,6 +217,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'linkedin.not_sent': { touchId: SUBJECT, taskId: SUBJECT, campaignId: SUBJECT },
   'linkedin.dismissed': { touchId: SUBJECT, taskId: SUBJECT, campaignId: SUBJECT },
   'send.bounced': { campaignId: SUBJECT, channel: 'email', code: 'bounced' },
+  'send.stale_evidence': { campaignId: SUBJECT, channel: 'email', code: 'stale_evidence' },
   'contact.bounced': { code: '5.1.1', cancelledQueued: 1, touchId: SUBJECT },
   'contact.bounce_transient': { code: '4.2.2', touchId: SUBJECT },
   'contact.bounce_cleared': { code: '5.1.1' },
@@ -221,7 +226,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'contact.unsubscribed': { contactId: SUBJECT, touchId: SUBJECT, addresses: 1, paused: true, cancelledQueued: 0 },
   'unsubscribe.not_recorded': { touchId: SUBJECT, contactId: SUBJECT, why: 'Error', paused: true, cancelledQueued: 0 },
   'contact.exported': { contactId: SUBJECT },
-  'contact.erased': { touchesScrubbed: 4, callsScrubbed: 1, suppressionsAdded: 2 },
+  'contact.erased': { touchesScrubbed: 4, callsScrubbed: 1, suppressionsAdded: 2, suppressedRecipients: { [SUBJECT]: OTHER_USER } },
   'contact.erasure_failed': { why: 'unreadable_phone', paused: true },
   'connector.tools_disabled': {
     name: 'zapier', tools: ['send_email'], before: { source: 'catalog', tools: [], everyTool: true },
@@ -235,6 +240,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
     },
     worker: 'live',
     workerAlert: 'not_needed',
+    campaignPauses: { found: 1, posted: 0 },
   },
 }
 
@@ -279,6 +285,33 @@ describe('sentenceFor', () => {
     }
   })
 
+  /**
+   * A pause reason can hold a teammate's address and the contact's words, and
+   * this log is append-only. Both writers record the reason's CLASS, and the
+   * sentence reads only that — the free-text `hadReason` the contacts route
+   * wrote before is never rendered, and that route no longer writes it.
+   */
+  it('says what paused a resumed contact by its class, and never reads the reason text', () => {
+    expect(sentenceFor(line('contact.resumed', WRITTEN['contact.resumed']), lookups)).toBe(
+      'resumed a contact at rentman.io who had been paused by their reply, to answer their reply',
+    )
+    const free = sentenceFor(line('contact.resumed', { hadReason: 'Jane said stop calling (by sam@agency.test)' }), lookups)
+    expect(free).toBe('resumed a contact at rentman.io')
+    expect(sentenceFor(line('contact.resumed', { pausedFor: 'constructor' }), lookups)).toBe('resumed a contact at rentman.io')
+    const route = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/app/api/contacts/[id]/route.ts'), 'utf8')
+    expect(route).toContain('pausedFor: pauseReasonClass(contact.pausedReason)')
+    expect(route).not.toContain('hadReason')
+  })
+
+  it('says when a reclassification paused somebody and cancelled what was queued', () => {
+    expect(sentenceFor(line('reply.reclassified', WRITTEN['reply.reclassified']), lookups)).toBe(
+      'reclassified a reply from a contact at rentman.io from auto reply to interested: paused them in every campaign; cancelled 1 queued',
+    )
+    expect(sentenceFor(line('reply.reclassified', { from: 'other', to: 'not_now', paused: false, cancelledQueued: 0 }), lookups)).toBe(
+      'reclassified a reply from a contact at rentman.io from other to not now',
+    )
+  })
+
   it('says what happened in the words the page leads with', () => {
     expect(sentenceFor(line('deal.moved', WRITTEN['deal.moved']), lookups)).toBe(
       'moved rentman.io from replied to meeting',
@@ -319,6 +352,9 @@ describe('sentenceFor', () => {
     )
     expect(say('contact.bounced', { code: 'not-a-status' })).not.toContain('not-a-status')
     expect(say('send.bounced')).toBe('refused an email to a contact at rentman.io: address bounced; nothing was sent')
+    expect(say('send.stale_evidence')).toBe(
+      'refused an email to a contact at rentman.io: the evidence it quotes is stale; nothing was sent',
+    )
     expect(say('campaign.auto_paused')).toBe(
       'paused a campaign automatically: 12% of the addresses it wrote to bounced (3 of 25; the limit is 5%); a person re-activates it',
     )
@@ -353,6 +389,24 @@ describe('sentenceFor', () => {
     expect(say('cron.digest', { posted: false, why: 'slack_failed', worker: 'silent', workerAlert: 'failed' })).toBe(
       'built the daily digest and did not post it: Slack did not accept it; the worker was silent, and the alert could NOT be posted',
     )
+  })
+
+  /**
+   * A note must name a person, so the agent's add_note stores it in the name
+   * of the person whose chat it is; this row is the one place that says the
+   * agent wrote it, and the sentence has to say both halves.
+   */
+  it('says a note the agent wrote is in a person’s name, and a teammate’s note plainly', () => {
+    expect(sentenceFor(line('note.added', WRITTEN['note.added'], { actor: 'agent' }), lookups)).toBe(
+      'wrote a note on rentman.io in the name of Priya; it shows as theirs',
+    )
+    expect(sentenceFor(line('note.added', { companyId: SUBJECT, noteId: SUBJECT }), lookups)).toBe(
+      'added a note on rentman.io',
+    )
+    const gone = { companyId: SUBJECT, noteId: SUBJECT, authorUserId: GONE_USER }
+    const s = sentenceFor(line('note.added', gone, { actor: 'agent' }), lookups)
+    expect(s).toBe('wrote a note on rentman.io in the name of a teammate; it shows as theirs')
+    expect(s).not.toContain(GONE_USER)
   })
 
   it('never writes the removed value into the sentence — the list is the place for the value', () => {

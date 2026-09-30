@@ -9,10 +9,24 @@
  *
  * Both writes go through the functions the web routes call — `notesAdd` and
  * `tasksCreate` — so a note the agent adds and a note a person types are the
- * same row, refused for the same reasons in the same sentences. The author of
- * a note and the creator of a task is the person whose chat this is
- * (`ctx.principal.id`), because the agent acts for them; 0018's same-org keys
- * make any other id unstorable.
+ * same row, refused for the same reasons in the same sentences.
+ *
+ * Neither is written as if a person had written it. Any teammate may approve
+ * the card (the decide route asks only `approvals:decide`), so the person
+ * whose chat it is may never have seen the words.
+ *
+ *   - A task's `created_by` is NULL and its `task.created` row names the
+ *     actor `agent` — what 0018's comment on the column and `tasksCreate`'s
+ *     own doc say an agent-created task is. The `agent.create_task` row
+ *     carries the turn.
+ *   - A note has to name a person: `author_user_id` is NOT NULL, and the
+ *     same-org key makes any id but a teammate's unstorable. So it is stored
+ *     in the name of the person whose chat this is (`ctx.principal.id`), and
+ *     its `note.added` row names the actor `agent` with that person as
+ *     `authorUserId`. The note itself carries no mark — `notes` has no column
+ *     for one, and this release adds no migration — so the company page and
+ *     the timeline show it as theirs; the audit log is where it says
+ *     otherwise, and the summary tells the model so.
  *
  * Every address the model hands in is resolved INSIDE this org before
  * anything is written: a contact at the named company, a teammate on this
@@ -135,14 +149,16 @@ export const addNote: AgencyToolSpec<typeof addNoteShape> = {
       contactId,
       authorUserId: ctx.principal.id,
       body: input.body,
+      actor: 'agent',
     })
     if (!r.ok) return fail(r.reason === 'not_found' ? 'not_found' : 'invalid_state', `${r.message} Nothing was written.`)
 
     await ctx.audit('agent.add_note', { noteId: r.note.id, companyId: company.id, contactId })
     return ok(
       { noteId: r.note.id, domain: company.domain, contactId },
-      `Added a note on ${company.domain}${about}, in the name of the person you are helping. It is their ` +
-        `words, not evidence: no proposal or brief reads it. ${NOTHING_SENT}`,
+      `Added a note on ${company.domain}${about}, in the name of the person you are helping: it shows as ` +
+        `theirs, and the audit log records that the agent wrote it. A note is not evidence: no proposal or ` +
+        `brief reads it. ${NOTHING_SENT}`,
     )
   },
 }
@@ -196,7 +212,8 @@ export const createTask: AgencyToolSpec<typeof createTaskShape> = {
       companyId: company?.id ?? null,
       assigneeUserId: assignee?.id ?? null,
       dueAt,
-      createdBy: ctx.principal.id,
+      // The agent has no users row; the audit row's actor says who created it.
+      createdBy: null,
       actor: 'agent',
     })
     if (!r.ok) {

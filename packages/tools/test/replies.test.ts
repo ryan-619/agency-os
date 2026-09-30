@@ -318,6 +318,48 @@ describe('the reply tools', () => {
       expect(audited.map((a) => a.action)).not.toContain('agent.classify_reply')
     })
 
+    /**
+     * The review's case: a pre-0017 "please remove me" has a NULL kind, so
+     * neither the row check above nor the predicate's `IS DISTINCT FROM
+     * 'opted_out'` saw it, and an approved card relabelled it `interested`.
+     * `replyReclassify` now refuses it, and a reply from a suppressed person,
+     * and the tool says which — refused whole, with `handled` too.
+     */
+    it('refuses to relabel an unclassified reply that reads as an opt-out, or one from a suppressed person', async () => {
+      const unclassified = await replyRow({ replyKind: null, body: 'Please remove me' })
+      const out = await run(classifyReply, { touchId: unclassified, kind: 'interested', handled: true })
+      expect(out.ok).toBe(false)
+      if (out.ok) return
+      expect(out.code).toBe('invalid_state')
+      expect(out.message).toContain('never classified')
+      expect(out.message).toContain('Nothing was changed and nothing was sent.')
+      expect((await touch(unclassified)).replyKind).toBeNull()
+      expect((await touch(unclassified)).handledAt).toBeNull()
+
+      const kept = await replyRow({ replyKind: 'interested', body: 'Sounds good.' })
+      await db.insert(schema.suppressions).values({ orgId, kind: 'email', value: 'priya@rentman.io', reason: 'unsubscribed' })
+      const suppressed = await run(classifyReply, { touchId: kept, kind: 'not_now' })
+      expect(suppressed.ok).toBe(false)
+      if (suppressed.ok) return
+      expect(suppressed.message).toContain('suppression list')
+      expect((await touch(kept)).replyKind).toBe('interested')
+      expect(await auditRows('reply.reclassified')).toEqual([])
+      expect(audited.map((a) => a.action)).not.toContain('agent.classify_reply')
+    })
+
+    it('says when moving a reply off auto_reply paused the person — and that nothing was sent', async () => {
+      const id = await replyRow({ replyKind: 'auto_reply', body: 'I am away until Monday.' })
+      const out = await run(classifyReply, { touchId: id, kind: 'interested' })
+      if (!out.ok) throw new Error(out.message)
+      expect(out.summary).toBe(
+        'Recorded. Its kind is now interested (it was auto_reply). Read as a person’s reply, it paused them in ' +
+          'every campaign. Nothing was sent.',
+      )
+      const [contact] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, contactId))
+      expect(contact!.pausedAt).toEqual(NOW)
+      expect(contact!.pausedReason).toMatch(/^replied \d{4}-/)
+    })
+
     it('may mark an opted_out reply as dealt with, and leaves it an opt-out', async () => {
       const id = await reply('unsubscribe')
       const out = await run(classifyReply, { touchId: id, handled: true })

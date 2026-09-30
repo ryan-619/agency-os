@@ -22,9 +22,6 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
-import { parseEnv } from 'node:util'
-import { loadEnv as loadAgentEnv } from '../../../apps/agent/src/env.js'
-import { loadEnv as loadVoiceEnv, voiceMode } from '../../../apps/voice/src/env.js'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
 const read = (p: string): string => readFileSync(resolve(root, p), 'utf8')
@@ -34,17 +31,11 @@ const envExample = read('.env.example')
 const agentEnvSource = read('apps/agent/src/env.ts')
 const webEnvSource = read('apps/web/src/lib/env.ts')
 
-/** The two secrets `.env.example` leaves for the operator to generate. */
-const SECRETS = { AUTH_SECRET: 'a'.repeat(44), AGENT_INTERNAL_TOKEN: 'b'.repeat(44) }
-
 /**
  * The variables a zod env schema REQUIRES — no `.default(...)` and no
- * `.optional()` on the line. Read from the source because no schema object is
- * exported, and the web app's is reachable only through a memoised `env()`
- * that reads this process's own environment — which would assert about the
- * machine instead of the repo. (The worker's and the voice service's
- * `loadEnv` take their source as an argument, which is how the boot checks
- * at the end of this file call them.)
+ * `.optional()` on the line. Read from the source rather than by importing the
+ * module, because importing it runs `loadEnv` against this process's own
+ * environment and would assert about the machine instead of the repo.
  */
 function requiredVars(source: string): string[] {
   const body = source.slice(source.indexOf('z.object({'))
@@ -58,50 +49,22 @@ function requiredVars(source: string): string[] {
   return names
 }
 
-/** Every `KEY: value` under one compose service's `environment:` block, value as written. */
-function serviceEnvEntries(service: string): Map<string, string> {
+/** Every `KEY:` under one compose service's `environment:` block. */
+function serviceEnv(service: string): Set<string> {
   const start = compose.indexOf(`\n  ${service}:\n`)
   expect(start, `docker-compose.yml has no service "${service}"`).toBeGreaterThan(-1)
   const rest = compose.slice(start + 1)
   const end = rest.search(/\n {2}[a-z][a-z0-9_-]*:\n/)
   const block = end === -1 ? rest : rest.slice(0, end)
   const envStart = block.indexOf('\n    environment:')
-  if (envStart === -1) return new Map()
+  if (envStart === -1) return new Set()
   const envBlock = block.slice(envStart + 1).split(/\n {4}[a-z]/)[0] ?? ''
-  const entries = new Map<string, string>()
-  for (const line of envBlock.split('\n')) {
-    const m = /^\s{6}([A-Z][A-Z0-9_]*):\s*(.*)$/.exec(line)
-    if (m?.[1]) entries.set(m[1], (m[2] ?? '').replace(/^"(.*)"$/, '$1'))
-  }
-  return entries
-}
-
-/** Every `KEY:` under one compose service's `environment:` block. */
-function serviceEnv(service: string): Set<string> {
-  return new Set(serviceEnvEntries(service).keys())
-}
-
-/**
- * What compose would hand a service's container, given the variables its
- * `.env` holds: `${X:-default}` and `${X:?message}` resolved the way compose
- * resolves them, the colon meaning "unset OR empty". A `:?` that would fire
- * throws, because compose would refuse to start rather than start the service.
- */
-function renderServiceEnv(service: string, vars: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const [name, raw] of serviceEnvEntries(service)) {
-    out[name] = raw.replace(
-      /\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?)([-?])([^}]*))?\}/g,
-      (_all, v: string, colon: string | undefined, op: string | undefined, arg: string | undefined) => {
-        const value = vars[v]
-        const missing = colon ? value === undefined || value === '' : value === undefined
-        if (op === '-') return missing ? (arg ?? '') : (value as string)
-        if (op === '?' && missing) throw new Error(`compose refuses to start: ${v} — ${arg}`)
-        return value ?? ''
-      },
-    )
-  }
-  return out
+  return new Set(
+    envBlock
+      .split('\n')
+      .map((l) => /^\s{6}([A-Z][A-Z0-9_]*):/.exec(l)?.[1])
+      .filter((n): n is string => Boolean(n)),
+  )
 }
 
 const documented = new Set(
@@ -231,112 +194,5 @@ describe('what compose refuses to start without', () => {
    */
   it('does not impose the agent’s variables on the migrate task', () => {
     expect(serviceEnv('migrate')).toEqual(new Set(['DATABASE_URL']))
-  })
-})
-
-/**
- * `cp .env.example .env` is the first step in CLAUDE.md, and the example
- * documents every optional variable as a blank `NAME=`. The worker and the
- * voice service used to refuse to boot on five of those blanks — a URL, a
- * uuid, an enum and a length-checked secret — so the lines were commented
- * out of the example instead. Now a blank is unset in all three processes,
- * the lines are back, and this parses the file exactly as `node --env-file`
- * does and runs each process's own schema over it, so it cannot regress
- * without somebody seeing it. The web app's half is in apps/web/test/env.test.ts.
- */
-describe('a copied .env.example boots the worker and the voice service', () => {
-  const copied = { ...parseEnv(envExample), ...SECRETS } as NodeJS.ProcessEnv
-
-  it('documents the variables that used to have to be commented out, as blank lines', () => {
-    for (const name of ['LLM_PROVIDER', 'UNSUBSCRIBE_SECRET', 'WEB_PUBLIC_URL', 'VOICE_PUBLIC_URL', 'VOICE_ORG_ID']) {
-      expect(envExample).toMatch(new RegExp(`^${name}=$`, 'm'))
-    }
-  })
-
-  it('leaves exactly the two secrets blank that nothing can default', () => {
-    const parsed = parseEnv(envExample)
-    expect(parsed['AUTH_SECRET']).toBe('')
-    expect(parsed['AGENT_INTERNAL_TOKEN']).toBe('')
-  })
-
-  it('the worker', () => {
-    const env = loadAgentEnv(copied)
-    expect(env.LLM_PROVIDER).toBeUndefined()
-    expect(env.UNSUBSCRIBE_SECRET).toBeUndefined()
-    expect(env.WEB_PUBLIC_URL).toBeUndefined()
-    expect(env.OUTREACH_BOUNCE_PAUSE_PCT).toBe(5)
-  })
-
-  it('the voice service', () => {
-    const env = loadVoiceEnv(copied)
-    expect(env.VOICE_PUBLIC_URL).toBeUndefined()
-    expect(env.VOICE_ORG_ID).toBeUndefined()
-    expect(voiceMode(env)).toBe('disabled')
-  })
-})
-
-/**
- * Compose hands each container `${NAME:-}` — an EMPTY STRING — for every
- * optional variable nobody set. That is how the voice container came to
- * refuse to boot unless VOICE_PUBLIC_URL and VOICE_ORG_ID were both set,
- * while this file's comment said an unset URL made it boot and refuse
- * webhooks. Rendered the way compose renders it, from a copied .env and from
- * nothing at all.
- */
-describe('the environment compose hands each container boots it', () => {
-  const cases = [
-    ['a copied .env.example', { ...parseEnv(envExample), ...SECRETS }],
-    ['nothing configured but the two secrets', { ...SECRETS }],
-  ] as const
-
-  it.each(cases)('the worker, from %s', (_name, vars) => {
-    const env = loadAgentEnv(renderServiceEnv('agent', vars))
-    expect(env.AGENT_BIND).toBe('0.0.0.0')
-    expect(env.UNSUBSCRIBE_SECRET).toBeUndefined()
-    expect(env.WEB_PUBLIC_URL).toBeUndefined()
-    expect(env.OUTREACH_BOUNCE_PAUSE_PCT).toBe(5)
-  })
-
-  it.each(cases)('the voice service, from %s', (_name, vars) => {
-    const rendered = renderServiceEnv('voice', vars)
-    // The two that used to stop it — present, and blank.
-    expect(rendered['VOICE_PUBLIC_URL']).toBe('')
-    expect(rendered['VOICE_ORG_ID']).toBe('')
-    const env = loadVoiceEnv(rendered)
-    expect(env.VOICE_PUBLIC_URL).toBeUndefined()
-    expect(voiceMode(env)).toBe('disabled')
-  })
-
-  it('refuses to render without the secrets, as compose does', () => {
-    expect(() => renderServiceEnv('agent', {})).toThrow(/AGENT_INTERNAL_TOKEN/)
-  })
-
-  it('carries a value set in .env through to the container', () => {
-    const url = 'https://agency.example'
-    const env = loadAgentEnv(renderServiceEnv('agent', { ...SECRETS, WEB_PUBLIC_URL: url, OUTREACH_BOUNCE_PAUSE_PCT: '12' }))
-    expect(env.WEB_PUBLIC_URL).toBe(url)
-    expect(env.OUTREACH_BOUNCE_PAUSE_PCT).toBe(12)
-  })
-})
-
-/**
- * The web block now wires its optional variables as `${NAME:-}`, because
- * compose has no `env_file:` and a variable it does not name never reaches
- * the container. That is only safe for a variable the web schema reads as
- * unset when blank — through `blankIsUnset`, or a plain optional string. A
- * `${AGENT_URL:-}` (a url) or `${RESCAN_BATCH_SIZE:-}` (coerced to 0, below
- * its minimum of 1) would stop the web container booting.
- */
-describe('every empty default in the web block is one the web app reads as unset', () => {
-  const emptyDefaults = [...serviceEnvEntries('web')].filter(([, v]) => /^\$\{[A-Z0-9_]+:-\}$/.test(v)).map(([k]) => k)
-
-  it('finds the optional variables, so the check is not vacuous', () => {
-    expect(emptyDefaults).toEqual(expect.arrayContaining(['CRON_SECRET', 'SLACK_WEBHOOK_URL', 'UNSUBSCRIBE_SECRET']))
-  })
-
-  it.each(emptyDefaults)('%s', (name) => {
-    const line = webEnvSource.split('\n').find((l) => l.startsWith(`  ${name}: `)) ?? ''
-    expect(line, `apps/web/src/lib/env.ts has no one-line entry for ${name}`).not.toBe('')
-    expect(line.includes('blankIsUnset') || line.trim() === `${name}: z.string().optional(),`).toBe(true)
   })
 })

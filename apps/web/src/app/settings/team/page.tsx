@@ -24,6 +24,7 @@ import { icpForOrg } from '@/lib/queries'
  * every sign-in too, through the adapter, so it is shown nowhere.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export default async function TeamPage() {
   const session = await auth()

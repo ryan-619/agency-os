@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server'
 import { DEFAULT_STALE_AFTER_DAYS, parseIcpDefinition } from '@agency/core'
 import {
-  DIGEST_WINDOW_HOURS, activeIcpProfile, appendAudit, digestCounts, digestFacts, digestOnce, digestRecord,
-  heartbeatReport, heartbeatSilentAfter, listOrgIds, readLatestHeartbeat,
+  DIGEST_MAX_PAUSE_NOTICES, DIGEST_WINDOW_HOURS, activeIcpProfile, appendAudit, digestCampaignPauses, digestCounts,
+  digestFacts, digestOnce, digestRecord, heartbeatReport, heartbeatSilentAfter, listOrgIds, readLatestHeartbeat,
   type AgencyDb, type DigestNotPosted, type DigestRecord,
 } from '@agency/db/queries'
 import { cronRequest } from '@/lib/cron-auth'
@@ -13,7 +13,7 @@ import { log } from '@/lib/logger'
 import type { NotificationEvent } from '@/lib/slack-message'
 import { deliverNotification } from '@/lib/slack-post'
 import { workerSilent } from '@/lib/worker-check'
-import { digestNotification, workerSilentNotification } from './notification'
+import { campaignPausedNotification, digestNotification, workerSilentNotification } from './notification'
 
 /**
  * The daily digest, and the alert that the worker has gone quiet (§2.3,
@@ -24,9 +24,15 @@ import { digestNotification, workerSilentNotification } from './notification'
  * needs a person — approvals, unhandled replies, rotting deals, stale
  * evidence, due tasks, the last day's refusals and spend — and, first among
  * them when it is not zero, an opt-out that could not be recorded. And a
- * separate message when a worker is configured and has not been heard from,
- * because that is the one fact that means approved messages are going
- * nowhere, and the worker cannot be the one to say it.
+ * separate message when the worker has gone quiet — a heartbeat that
+ * stopped, or none at all where a worker is configured — because that is
+ * the one fact that means approved messages are going nowhere, and the
+ * worker cannot be the one to say it.
+ *
+ * And one `campaign_paused` message for each campaign that paused itself
+ * because its addresses bounced (`campaign.auto_paused`) since the previous
+ * digest, at most `DIGEST_MAX_PAUSE_NOTICES`: the worker pauses it and has
+ * no Slack path, so this is where the channel hears that outreach stopped.
  *
  * ## Once a day, whatever Vercel delivers
  *
@@ -68,14 +74,15 @@ export const dynamic = 'force-dynamic'
 export const maxDuration = 60
 
 /**
- * What one org may take, worst case: its reads, two Slack posts at their
- * three-second timeout, and the writes. An org is not STARTED with less than
- * this left, because a function killed between the post and the COMMIT
- * leaves a message in the channel and no row saying so — and the next
+ * What one org may take, worst case: its reads, the digest and the worker
+ * alert, up to `DIGEST_MAX_PAUSE_NOTICES` pause notices — each a Slack post
+ * at its three-second timeout — and the writes. An org is not STARTED with
+ * less than this left, because a function killed between the post and the
+ * COMMIT leaves a message in the channel and no row saying so — and the next
  * delivery would send it again. An org passed over has no row, so a re-run
  * picks it up.
  */
-const ORG_BUDGET_MS = 15_000
+const ORG_BUDGET_MS = 15_000 + DIGEST_MAX_PAUSE_NOTICES * 3_000
 
 type Outcome =
   | { readonly posted: true; readonly workerSilent: boolean }
@@ -132,17 +139,27 @@ export async function GET(request: Request): Promise<NextResponse> {
       const run = await digestOnce(db, orgId, since, async (tx): Promise<Outcome> => {
         const facts = await digestFacts(tx, orgId, { now, staleDays: await staleDaysFor(tx, orgId) })
         const counts = digestCounts(facts)
+        // Before digestRecord: the newest cron.digest row must still be the previous run's.
+        const pauses = await digestCampaignPauses(tx, orgId, { now })
         const base = { orgId, counts, worker: report.status } as const
 
         if (!slack) {
           await digestRecord(tx, {
             ...base, posted: false, why: 'no_slack', workerAlert: silence.silent ? 'no_slack' : 'not_needed',
+            campaignPauses: { found: pauses.found, posted: 0 },
           })
           return { posted: false, why: 'no_slack', workerSilent: silence.silent }
         }
 
         const posted = await post(tx, slack, digestNotification({ orgId, facts, worker: report.status }))
-        // After the digest, so the alert is the newest message in the channel.
+        // After the digest, one notice per campaign that paused itself. Inside
+        // this transaction, so a second delivery finds the row and says nothing.
+        let pausesPosted = 0
+        for (const pause of pauses.pauses) {
+          if (await post(tx, slack, campaignPausedNotification({ orgId, pause }))) pausesPosted += 1
+        }
+        const campaignPauses = { found: pauses.found, posted: pausesPosted }
+        // Last, so the alert is the newest message in the channel.
         let workerAlert: NonNullable<DigestRecord['workerAlert']> = 'not_needed'
         if (silence.silent) {
           const alerted = await post(
@@ -153,10 +170,10 @@ export async function GET(request: Request): Promise<NextResponse> {
           workerAlert = alerted ? 'posted' : 'failed'
         }
         if (posted) {
-          await digestRecord(tx, { ...base, posted: true, workerAlert })
+          await digestRecord(tx, { ...base, posted: true, workerAlert, campaignPauses })
           return { posted: true, workerSilent: silence.silent }
         }
-        await digestRecord(tx, { ...base, posted: false, why: 'slack_failed', workerAlert })
+        await digestRecord(tx, { ...base, posted: false, why: 'slack_failed', workerAlert, campaignPauses })
         return { posted: false, why: 'slack_failed', workerSilent: silence.silent }
       })
       orgs.push(run.ran ? { orgId, ...run.value } : { orgId, skipped: 'already_ran' })

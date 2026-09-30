@@ -1,12 +1,20 @@
 # Agency OS — the whole system on one host (PROMPT.md §3).
 #
-#   cp .env.example .env      # then set AUTH_SECRET
+#   cp .env.example .env      # then set AUTH_SECRET and AGENT_INTERNAL_TOKEN
 #   docker compose up --build
 #   docker compose run --rm migrate     # apply migrations
 #   docker compose run --rm seed        # create the org, owner and ICP
 #
 # Lead data stays on the agency's own hardware. Nothing here talks to a managed
 # service.
+#
+# Compose reads .env ONLY to fill the ${…} below. A container receives exactly
+# the variables its `environment:` block names, whatever .env holds — so every
+# optional variable a service reads is named here as `NAME: ${NAME:-}`, and
+# each app reads the resulting blank as unset (the feature behind it stays
+# off, as it would with the line absent). A number the app does not read
+# that way is given its schema's default here instead: zod's coerce reads a
+# blank as 0.
 
 name: agency-os
 
@@ -80,28 +88,28 @@ services:
       # The port is the worker's API (AGENT_PORT + 1), not its health port.
       AGENT_URL: ${AGENT_URL:-http://agent:3002}
       AGENT_INTERNAL_TOKEN: "${AGENT_INTERNAL_TOKEN:?required - generate one with openssl rand -base64 32}"
-      # Optional, all of them: the feature behind each fails closed without
-      # it, and the app reads a blank as unset, so an empty default is the
-      # same as not setting it. They are named here because this file has no
-      # `env_file:` — a variable this block does not name never reaches the
-      # container, whatever .env says.
+      # Optional, all of them, and every feature behind one fails closed
+      # without it: set them in .env when the feature is configured.
       #
-      # The daily rescan and digest are VERCEL crons. Nothing under compose
-      # calls /api/cron/* — there is no scheduler here, and nothing in the
-      # worker rescans on a schedule — so these answer only a caller holding
-      # the bearer, e.g. a host crontab. Without one, re-scan by hand:
-      # `npm run scan -- --stale`.
+      # The daily rescan and the Slack digest (with its worker-silent alert)
+      # are the two /api/cron/* routes. On Vercel the platform calls them;
+      # under compose NOTHING does — the worker neither rescans nor posts a
+      # digest — so set CRON_SECRET and drive them from the host's own
+      # scheduler with the bearer, as CLAUDE.md §3 shows:
+      #   17 3 * * *  curl -fsS -H "Authorization: Bearer $CRON_SECRET" http://localhost:3000/api/cron/rescan
+      #   43 6 * * *  curl -fsS -H "Authorization: Bearer $CRON_SECRET" http://localhost:3000/api/cron/digest
+      # (VERCEL_ENV is unset here, which the routes allow; never set it by hand.)
       CRON_SECRET: ${CRON_SECRET:-}
       RESCAN_BATCH_SIZE: ${RESCAN_BATCH_SIZE:-6}
       # Notifications. The URL is the credential.
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
-      # One-click unsubscribe. The SAME value as the agent's below.
+      # One-click unsubscribe: verifies the click. The SAME value as the agent's.
       UNSUBSCRIBE_SECRET: ${UNSUBSCRIBE_SECRET:-}
-      # Replies through Resend's webhook, and through a plain JSON webhook.
+      # Replies through Resend's webhook (both), or a plain JSON webhook.
       RESEND_WEBHOOK_SECRET: ${RESEND_WEBHOOK_SECRET:-}
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       INBOUND_WEBHOOK_SECRET: ${INBOUND_WEBHOOK_SECRET:-}
-      # Storing connector credentials from the UI. The SAME value as the agent's.
+      # To store connector credentials from the UI. The SAME value as the agent's.
       SECRETS_KEY: ${SECRETS_KEY:-}
     ports:
       - '3000:3000'
@@ -133,6 +141,11 @@ services:
       # worker still boots and still serves health; chat reports itself
       # disabled and the rest of the product is unaffected.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Only for an ORGANISATION-scoped key; a workspace-scoped one needs none.
+      ANTHROPIC_WORKSPACE_ID: ${ANTHROPIC_WORKSPACE_ID:-}
+      # Blank is the SDK's default model; .env.example names Haiku, at a
+      # fraction of the cost (CLAUDE.md §8).
+      AGENT_MODEL: ${AGENT_MODEL:-}
       # §2.3 — third-party credentials are encrypted at rest with this key.
       # Optional until a connector is configured (Phase 3).
       SECRETS_KEY: ${SECRETS_KEY:-}
@@ -175,14 +188,30 @@ services:
       # Bound the blast radius of a subagent fan-out (§7).
       CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: ${CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS:-3}
       CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: ${CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH:-2}
-      # Optional, and a blank is unset. Without BOTH of the first two the
-      # worker adds no List-Unsubscribe header and says so once at boot.
-      # UNSUBSCRIBE_SECRET is the same value as the web app's; WEB_PUBLIC_URL
-      # is where /api/unsubscribe lives, as a mail client reaches it.
+      # One-click unsubscribe. Without BOTH the worker adds no List-Unsubscribe
+      # header and says so once at boot. The secret is the SAME value as the
+      # web app's. The URL is the web app's origin a recipient's mail client
+      # can reach, e.g. https://agency.example — NOT http://web:3000 or
+      # localhost: in production the worker refuses to boot on anything but
+      # https on a public host, because RFC 8058 one-click needs one.
       UNSUBSCRIBE_SECRET: ${UNSUBSCRIBE_SECRET:-}
       WEB_PUBLIC_URL: ${WEB_PUBLIC_URL:-}
-      # A campaign whose bounce rate passes this pauses itself.
-      OUTREACH_BOUNCE_PAUSE_PCT: ${OUTREACH_BOUNCE_PAUSE_PCT:-5}
+      # A campaign whose bounce rate passes this pauses itself. Blank is 5.
+      OUTREACH_BOUNCE_PAUSE_PCT: ${OUTREACH_BOUNCE_PAUSE_PCT:-}
+      # §5.5's reply triage. Blank is the deterministic kind, which is complete.
+      # A remote provider also needs LLM_ALLOW_REMOTE_LEAD_DATA: a reply is a
+      # named person's words.
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+      OLLAMA_IS_LOCAL: ${OLLAMA_IS_LOCAL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LLM_ALLOW_REMOTE_LEAD_DATA: ${LLM_ALLOW_REMOTE_LEAD_DATA:-}
+      # Deliberately NOT passed: AGENT_USE_LOCAL_LOGIN (development only — the
+      # worker refuses it under NODE_ENV=production), CLAUDE_CODE_PATH (a path
+      # on a developer's machine, meaningless inside the image), and
+      # APPROVAL_POLL_MS / APPROVAL_SWEEP_MS (tuning knobs; the schema's
+      # defaults apply).
     volumes:
       # Put a skill at ./skills/.claude/skills/<name>/SKILL.md. The directory
       # may hold NOTHING else under .claude/ — see AGENT_SKILLS_DIR above.
@@ -203,11 +232,8 @@ services:
   # It needs a PUBLIC https origin (Twilio has to reach it, and the request
   # signature is computed over the URL Twilio used, not the one the socket
   # saw), so behind a reverse proxy set VOICE_PUBLIC_URL to the outside
-  # address. With it unset — or blank, which is what `${VOICE_PUBLIC_URL:-}`
-  # passes, and which the service reads as unset — it boots, refuses every
-  # webhook, and answers /readyz 503 `unconfigured`, so `docker compose ps`
-  # shows it unhealthy. That is the correct failure: these endpoints can
-  # write a suppression.
+  # address. With it unset every webhook is refused, which is the correct
+  # failure: these endpoints can write a suppression.
   voice:
     build:
       context: .

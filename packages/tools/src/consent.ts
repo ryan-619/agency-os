@@ -41,6 +41,34 @@ const STANDING_WORDS: Record<ConsentLedger['suppression']['email'], string> = {
   none: 'nothing on file',
 }
 
+/**
+ * A pause, in words the model can act on.
+ *
+ * The send path models a pause as a revoked consent — to this person, right
+ * now, the answer is no — so the DECISION reads `consent_revoked`. Repeated
+ * to the model as it stands, that told the agent an interested prospect who
+ * had simply replied "declined email … nobody may approve past this", which
+ * it then told the user. Found by review. A reply pause is lifted by a
+ * person answering from /inbox or resuming them, and says so; any other
+ * pause (an unsubscribe, an erasure that did not complete, a person's own)
+ * is quoted with its reason and never called "not a refusal", because it
+ * may be exactly that.
+ */
+function pauseWords(reason: string | null, channel: string): string {
+  const why = (reason ?? 'no reason recorded').slice(0, 200)
+  if (why.startsWith('replied')) {
+    return (
+      `paused: they replied (${why}); every campaign stops for them until a person answers from /inbox ` +
+      `(which resumes them) or resumes them on /contacts. This is not a refusal of ${channel}. ` +
+      'get_replies shows what they said.'
+    )
+  }
+  return (
+    `paused (${why}): every campaign stops for them until a person reads why and resumes them on /contacts. ` +
+    'Approving a draft does not lift a pause.'
+  )
+}
+
 /** The campaign by name, in this org. Names are unique per org (`campaigns_org_name_key`). */
 async function campaignNamed(ctx: ToolContext, name: string) {
   const rows = await ctx.db
@@ -72,8 +100,9 @@ const checkSendShape = {
 export const checkSend: AgencyToolSpec<typeof checkSendShape> = {
   name: 'check_send',
   description:
-    'Run the send rules for one person under one campaign — suppression, consent, quiet hours in ' +
-    'their timezone, the daily cap, the campaign status — and report the answer with the reason. ' +
+    'Run the send rules for one person under one campaign — suppression, consent, a paused contact, a ' +
+    'bounced address, stale evidence, quiet hours in their timezone, the daily cap, the campaign status — ' +
+    'and report the answer with the reason, for a message written now. ' +
     'A dry run that queues nothing: nothing is sent, and a "yes" here is not an approval.',
   shape: checkSendShape,
   async handler(input, ctx): Promise<ToolOutcome<unknown>> {
@@ -122,11 +151,20 @@ export const checkSend: AgencyToolSpec<typeof checkSendShape> = {
     const approval = wouldNeedApproval
       ? 'A real message under this campaign would still wait for a person to approve it.'
       : 'This campaign sends without a per-message approval.'
+    // The pause speaks first when it IS the reason: the decision's
+    // consent_revoked is then the pause's stand-in, not a refusal anyone
+    // recorded. A suppression, a recorded refusal or anything else earlier
+    // in the order is reported as itself, with the pause beside it.
+    const pauseIsTheReason =
+      facts.paused && !decision.allowed && decision.code === 'consent_revoked' && facts.consentRecorded?.granted !== false
     const summary = decision.allowed
       ? `send_now: every rule passes for ${email} under "${campaign.name}" right now. ${approval} Nothing was queued.`
-      : `${decision.code}: ${decision.reason.replace(/[.\s]+$/, '')}. ` +
-        (decision.humanCanResolve ? 'A person could resolve this. ' : 'Nobody may approve past this. ') +
-        'Nothing was queued.'
+      : pauseIsTheReason
+        ? `${pauseWords(facts.pausedReason, campaign.channel)} Nothing was queued.`
+        : `${decision.code}: ${decision.reason.replace(/[.\s]+$/, '')}. ` +
+          (decision.humanCanResolve ? 'A person could resolve this. ' : 'Nobody may approve past this. ') +
+          (facts.paused ? `They are also paused (${(facts.pausedReason ?? 'no reason recorded').slice(0, 200)}). ` : '') +
+          'Nothing was queued.'
 
     return ok(
       {
@@ -141,8 +179,12 @@ export const checkSend: AgencyToolSpec<typeof checkSendShape> = {
         facts: {
           suppressed: facts.suppressed,
           recipientReadable: facts.suppressionKeys !== null,
-          consent: facts.consent ? (facts.consent.granted ? 'granted' : 'refused') : 'never_asked',
+          // As RECORDED — a pause is not somebody's answer, and get_consent
+          // (and the /contacts ledger) would say "never asked" of the same person.
+          consent: facts.consentRecorded ? (facts.consentRecorded.granted ? 'granted' : 'refused') : 'never_asked',
           paused: facts.paused,
+          pausedReason: facts.pausedReason,
+          evidenceStale: facts.evidenceStale,
           recipientTimeZone: facts.recipientTimeZone,
           zoneFrom: facts.zoneFrom,
           quietHours: `${facts.quietStart}–${facts.quietEnd}`,

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { assertCan } from '@agency/core'
 import {
-  appendAudit, contactPatchInput, contactsUpdate, pauseContact, readContact, resumeContact,
+  appendAudit, contactPatchInput, contactsUpdate, pauseContact, pauseReasonClass, readContact, resumeContact,
   updateContactTimeZone, type AgencyDb,
 } from '@agency/db/queries'
 import { auth } from '@/auth'
@@ -69,7 +69,10 @@ export async function PATCH(
     await resumeContact(db, user.orgId, id)
     await appendAudit(db, {
       orgId: user.orgId, actor: user.id, action: 'contact.resumed', subjectType: 'contact', subjectId: id,
-      detail: { hadReason: contact.pausedReason },
+      // The CLASS of the pause, never its text: a manual reason carries a
+      // teammate's address and, often, the contact's own words, and the audit
+      // log is append-only — an erasure cannot scrub it.
+      detail: { pausedFor: pauseReasonClass(contact.pausedReason) },
     }).catch(() => {})
     return NextResponse.json({ paused: false })
   }

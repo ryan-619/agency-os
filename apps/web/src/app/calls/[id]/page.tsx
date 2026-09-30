@@ -8,6 +8,8 @@ import { When } from '@/components/when'
 import { getDb } from '@/lib/db'
 import { icpForOrg } from '@/lib/queries'
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 /**
  * One call (PROMPT.md §8.5).
  *
@@ -24,7 +26,7 @@ export default async function CallPage({ params }: { params: Promise<{ id: strin
   if (!session?.user) redirect('/signin')
   const user = session.user
   const { id } = await params
-  if (!/^[0-9a-f-]{36}$/i.test(id)) notFound()
+  if (!UUID.test(id)) notFound()
 
   const db = getDb() as unknown as AgencyDb
   const [call, icpRow] = await Promise.all([readCall(db, user.orgId, id), icpForOrg(user.orgId)])

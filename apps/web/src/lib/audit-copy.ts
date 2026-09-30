@@ -208,6 +208,19 @@ const REPLY_KIND: Readonly<Record<string, string>> = {
   other: 'a reply',
 }
 
+/**
+ * What had paused a contact that was resumed — `pauseReasonClass` in
+ * packages/db, which is all the inbox writes (never the reason's text).
+ */
+const PAUSED_FOR: Readonly<Record<string, string>> = {
+  replied: 'by their reply',
+  unsubscribed: 'by an unsubscribe',
+  erasure: 'by an erasure that could not finish',
+  manual: 'by a teammate',
+  opt_out_not_recorded: 'by an opt-out that could not be recorded',
+  other: 'for another reason',
+}
+
 /** Why `contact.bounce_unmatched` left a report alone — `outreach.ts`'s own four reasons. */
 const BOUNCE_UNMATCHED: Readonly<Record<string, string>> = {
   no_recorded_recipient: 'the returned message has no recorded recipient',
@@ -481,7 +494,14 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     const reason = text(c.d, 'reason', 80)
     return `paused a contact at ${c.co}${reason ? `: ${quoted(reason)}` : ''}${flag(c.d, 'alreadyPaused') ? ' (already paused)' : ''}`
   },
-  'contact.resumed': (c) => `resumed a contact at ${c.co}`,
+  // Two writers: the contacts route (a person pressing Resume) and the inbox,
+  // which resumes only the pause a reply caused and records its CLASS.
+  'contact.resumed': (c) => {
+    const why = own(PAUSED_FOR, word(c.d, 'pausedFor'))
+    return `resumed a contact at ${c.co}${why ? ` who had been paused ${why}` : ''}${
+      has(c.d, 'inboundTouchId') ? ', to answer their reply' : ''
+    }`
+  },
   'contact.timezone_set': (c) => {
     const zone = text(c.d, 'timeZone', 64)
     return zone ? `set the timezone of a contact at ${c.co} to ${zone}` : `cleared the timezone of a contact at ${c.co}`
@@ -598,7 +618,12 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   'reply.reclassified': (c) => {
     const from = word(c.d, 'from')
     const to = word(c.d, 'to') ?? word(c.d, 'kind')
-    return `reclassified a reply from a contact at ${c.co}${from && to ? ` from ${spaced(from)} to ${spaced(to)}` : to ? ` as ${spaced(to)}` : ''}`
+    const cancelled = num(c.d, 'cancelledQueued')
+    // Moving a reply off `auto_reply` does what the reply would have done.
+    return `reclassified a reply from a contact at ${c.co}${from && to ? ` from ${spaced(from)} to ${spaced(to)}` : to ? ` as ${spaced(to)}` : ''}${tail([
+      flag(c.d, 'paused') && 'paused them in every campaign',
+      cancelled !== null && cancelled > 0 && `cancelled ${cancelled} queued`,
+    ])}`
   },
   'reply.answer_drafted': (c) =>
     `drafted an answer to a reply from a contact at ${c.co}; it waits for approval and nothing was sent`,
@@ -732,7 +757,14 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     const fields = words(c.d, 'fields')
     return `edited ${c.co}${fields ? ` (${fields.map(spaced).join(', ')})` : ''}`
   },
-  'note.added': (c) => `added a note on ${c.co}`,
+  // The agent's `add_note` stores the note in the name of the person whose
+  // chat it is (the row must name a person); this row, with actor `agent`
+  // and that person as `authorUserId`, is the only place that says so.
+  'note.added': (c) => {
+    if (c.row.actor !== 'agent') return `added a note on ${c.co}`
+    const author = c.person(detailValue(c.d, 'authorUserId'))
+    return `wrote a note on ${c.co} in the name of ${author ?? 'a teammate'}; it shows as theirs`
+  },
   'note.deleted': (c) => `deleted a note on ${c.co}`,
   'task.created': (c) => `created a task${c.hasCo ? ` for ${c.co}` : ''}`,
   'task.completed': (c) => `completed a task${c.hasCo ? ` for ${c.co}` : ''}`,
@@ -785,6 +817,8 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     const status = num(c.d, 'status')
     return `could not post ${event ? `a ${spaced(event)}` : 'a'} notification to Slack${status ? ` (HTTP ${status})` : ''}`
   },
+  // The claim a delivery takes before it selects anything (rescan.ts); the run's own row follows.
+  'scan.cron_started': () => 'started the scheduled rescan; a duplicate delivery before it ends is skipped',
   'scan.cron_run': (c) => {
     const n = (k: string): number | null => num(c.d, k)
     return `ran the scheduled rescan${tail([

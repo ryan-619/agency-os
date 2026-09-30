@@ -25,6 +25,14 @@
  * rather than promoted. And only while the evidence is fresh: stale findings
  * are re-verified before they appear in anything outbound.
  *
+ * Fresh is not enough on its own. A proposal quotes the scan it was generated
+ * from, and once a newer SUCCESSFUL scan of the company exists that scan is
+ * SUPERSEDED — `quotableFindings` will not quote it, because the newer one
+ * may say a gap the proposal prices is closed. So a link is not minted from a
+ * superseded proposal (regenerate it), and the read and the accept treat a
+ * superseded scan exactly as a stale one: the buyer is told the proposal is
+ * being re-verified, and Accept is refused.
+ *
  * Freshness is checked at mint AND on every read. A link lives up to thirty
  * days and a scan goes stale after the ICP's `stale_after_days` (fourteen by
  * default), so a link minted on day 13 would otherwise show — and accept — a
@@ -132,6 +140,41 @@ async function scanRanAt(db: AgencyDb, orgId: string, scanId: string): Promise<D
 }
 
 /**
+ * Whether the company has a SUCCESSFUL scan newer than the one a proposal was
+ * generated from — the rule `quotableFindings` applies to an outbound draft:
+ * only the most recent successful scan is quoted. A newer scan that did not
+ * reach the site observed nothing and supersedes nothing.
+ */
+async function scanSuperseded(db: AgencyDb, orgId: string, companyId: string, ranAt: Date): Promise<boolean> {
+  const [newer] = await db
+    .select({ id: schema.scans.id })
+    .from(schema.scans)
+    .where(and(
+      eq(schema.scans.orgId, orgId),
+      eq(schema.scans.companyId, companyId),
+      eq(schema.scans.ok, true),
+      gt(schema.scans.ranAt, ranAt),
+    ))
+    .limit(1)
+  return newer !== undefined
+}
+
+/**
+ * Whether a proposal's evidence has been superseded by a newer successful
+ * scan — for the team's proposal page, so the Create button can say why
+ * before it is pressed. False for an unknown proposal.
+ */
+export async function shareEvidenceSuperseded(db: AgencyDb, orgId: string, proposalId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ companyId: schema.proposals.companyId, ranAt: schema.scans.ranAt })
+    .from(schema.proposals)
+    .innerJoin(schema.scans, and(eq(schema.scans.id, schema.proposals.scanId), eq(schema.scans.orgId, orgId)))
+    .where(and(eq(schema.proposals.orgId, orgId), eq(schema.proposals.id, proposalId)))
+    .limit(1)
+  return row ? scanSuperseded(db, orgId, row.companyId, row.ranAt) : false
+}
+
+/**
  * A typed name, as it may be stored: control characters out, runs of
  * whitespace collapsed, trimmed, and cut at a code point rather than a
  * UTF-16 unit, so the bound never leaves half a character behind.
@@ -147,7 +190,7 @@ export function shareNormaliseName(raw: unknown): string | null {
 // The team's side
 // ---------------------------------------------------------------------------
 
-export type ShareMintRefusal = 'not_found' | 'not_sent' | 'stale' | 'decided'
+export type ShareMintRefusal = 'not_found' | 'not_sent' | 'stale' | 'superseded' | 'decided'
 export type ShareMintResult =
   | {
       ok: true
@@ -163,8 +206,9 @@ export type ShareMintResult =
  * Create a link for a proposal a person has already sent.
  *
  * Refuses a draft (`not_sent` — the link is not the send), a proposal that
- * has been decided (`decided`), and one whose evidence has aged out
- * (`stale`). The link expires after `ttlDays` or when the evidence goes
+ * has been decided (`decided`), one whose evidence has aged out (`stale`),
+ * and one a newer successful scan has superseded (`superseded` — regenerate
+ * the proposal from it). The link expires after `ttlDays` or when the evidence goes
  * stale, whichever is first. The row and its audit line are written in one
  * transaction: a credential nobody can account for is not handed out.
  */
@@ -223,6 +267,14 @@ export async function shareMint(
       reason: 'stale',
       message:
         'The evidence under this proposal has aged out: re-verify before it appears in anything outbound (§2.2). Re-scan the company and generate a fresh proposal; no link was created.',
+    }
+  }
+  if (await scanSuperseded(db, args.orgId, proposal.companyId, ranAt!)) {
+    return {
+      ok: false,
+      reason: 'superseded',
+      message:
+        'A newer scan exists — regenerate the proposal. The scan it quotes is no longer the latest observation of the site, and only the latest is quoted in anything outbound (§2.2). Generate a fresh proposal from the newer scan, mark it sent, and link that one; no link was created.',
     }
   }
 
@@ -345,7 +397,10 @@ export type ShareView =
       readonly evidenceAsOf: Date
     }
   | {
-      /** The evidence aged out after the link was minted. No document; no view counted. */
+      /**
+       * The evidence aged out after the link was minted, or a newer scan of the
+       * company superseded it. No document; no view counted.
+       */
       readonly state: 'reverifying'
       readonly org: { readonly name: string }
     }
@@ -375,8 +430,9 @@ async function shareByToken(db: AgencyDb, token: string, lock = false): Promise<
  *
  * Counts the view in one UPDATE whose predicate repeats the liveness check,
  * so a link revoked between the read and the count is not counted and not
- * shown. A link whose evidence has aged out shows no document and counts
- * nothing: nobody saw the proposal.
+ * shown. A link whose evidence has aged out, or been superseded by a newer
+ * successful scan, shows no document and counts nothing: nobody saw the
+ * proposal.
  */
 export async function shareReadByToken(db: AgencyDb, token: string, now: Date = new Date()): Promise<ShareView | null> {
   const row = await shareByToken(db, token)
@@ -405,7 +461,11 @@ export async function shareReadByToken(db: AgencyDb, token: string, now: Date = 
   if (!company || !org) return null
 
   const ranAt = await scanRanAt(db, row.orgId, proposal.scanId)
-  if (!ranAt || isStale(ranAt, await staleAfterDaysFor(db, row.orgId), now)) {
+  if (
+    !ranAt ||
+    isStale(ranAt, await staleAfterDaysFor(db, row.orgId), now) ||
+    (await scanSuperseded(db, row.orgId, proposal.companyId, ranAt))
+  ) {
     return { state: 'reverifying', org: { name: org.name } }
   }
 
@@ -466,7 +526,8 @@ const refuse = (reason: ShareAcceptRefusal): Extract<ShareAcceptResult, { ok: fa
  *
  *  1. the share row and then the proposal are locked, and the refusals are
  *     read off them — revoked, expired, already accepted, a proposal that is
- *     no longer `sent`, evidence that has aged out since the link was made;
+ *     no longer `sent`, evidence that has aged out since the link was made or
+ *     that a newer successful scan has superseded;
  *  2. ONE UPDATE records the typed name, and its predicate is the liveness
  *     check itself (`accepted_at IS NULL AND revoked_at IS NULL AND
  *     expires_at > now`), so two clicks produce one acceptance;
@@ -506,7 +567,13 @@ export async function shareAccept(
       if (proposal.status !== 'sent') throw new Refused('decided')
 
       const ranAt = await scanRanAt(txDb, row.orgId, proposal.scanId)
-      if (!ranAt || isStale(ranAt, await staleAfterDaysFor(txDb, row.orgId), now)) throw new Refused('reverifying')
+      if (
+        !ranAt ||
+        isStale(ranAt, await staleAfterDaysFor(txDb, row.orgId), now) ||
+        (await scanSuperseded(txDb, row.orgId, proposal.companyId, ranAt))
+      ) {
+        throw new Refused('reverifying')
+      }
 
       const [accepted] = await txDb
         .update(schema.proposalShares)

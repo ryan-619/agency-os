@@ -93,6 +93,8 @@ interface HttpResult {
   readonly headers: Readonly<Record<string, string>>
   /** Every Set-Cookie, value redacted — see `setCookieHeaders`. */
   readonly setCookies: readonly string[]
+  /** Every Content-Security-Policy value — see `headerValues`. */
+  readonly cspHeaders: readonly string[]
   readonly body: string
   /** The response hit MAX_ENCODED_BYTES, so the body is a prefix of the page. */
   readonly truncated: boolean
@@ -139,6 +141,22 @@ export function setCookieHeaders(raw: readonly string[]): string[] {
     const eq = pair.indexOf('=')
     const name = eq === -1 ? '' : pair.slice(0, eq)
     out.push(`${name}=<redacted>${semi === -1 ? '' : value.slice(semi)}`)
+  }
+  return out
+}
+
+/**
+ * Every value of one header in `rawHeaders` (name/value pairs, any case), in
+ * order. Another second read of the same pairs beside `firstHeaders`, like
+ * `setCookieHeaders`: the map keeps the first value for parity, and a rule
+ * that must see every value — a browser enforces every Content-Security-Policy
+ * it is sent — reads this instead.
+ */
+export function headerValues(raw: readonly string[], name: string): string[] {
+  const want = name.toLowerCase()
+  const out: string[] = []
+  for (let i = 0; i + 1 < raw.length; i += 2) {
+    if (raw[i]!.toLowerCase() === want) out.push(raw[i + 1]!)
   }
   return out
 }
@@ -296,6 +314,7 @@ async function get(startUrl: string, timeoutMs: number): Promise<HttpResult> {
       // From the FINAL response only. A cookie set on a redirect hop belongs to
       // that hop's host, which is not the page being described.
       setCookies: setCookieHeaders(res.rawHeaders),
+      cspHeaders: headerValues(res.rawHeaders, 'content-security-policy'),
       body: decodeBody(raw, headers['content-encoding'] ?? ''),
       truncated,
     }
@@ -384,6 +403,7 @@ export async function capture(domain: string, opts: FetchOptions = {}): Promise<
       finalUrl: res.finalUrl,
       headers: res.headers,
       setCookies: res.setCookies,
+      cspHeaders: res.cspHeaders,
       body: res.body,
       truncated: res.truncated,
       ...(ok ? {} : { error: `HTTP ${res.status}` }),

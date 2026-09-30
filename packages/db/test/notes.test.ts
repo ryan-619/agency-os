@@ -219,6 +219,36 @@ describe('notes', () => {
     })
   })
 
+  describe('who wrote it', () => {
+    const addedRows = () =>
+      db.select().from(schema.auditLog).where(and(eq(schema.auditLog.orgId, orgId), eq(schema.auditLog.action, 'note.added')))
+
+    it('names the author as the actor when they wrote it, and adds nothing to the detail', async () => {
+      const r = await add('Their CISO left in June.')
+      if (!r.ok) throw new Error(r.message)
+      const [row] = await addedRows()
+      expect(row).toMatchObject({ actor: author })
+      expect(row!.detail).toEqual({ companyId, noteId: r.note.id })
+    })
+
+    /**
+     * The agent writes a note in a person's name — `author_user_id` must
+     * name one — and nothing on the note row can say otherwise. So the
+     * audit row does: its actor is the agent, and its detail names the
+     * person the note is filed under.
+     */
+    it('names another writer as the actor, and the author in the detail', async () => {
+      const r = await add('Their CISO left in June.', { actor: 'agent', contactId })
+      if (!r.ok) throw new Error(r.message)
+      expect(r.note.authorUserId).toBe(author)
+      const [row] = await addedRows()
+      expect(row).toMatchObject({ actor: 'agent', subjectType: 'note', subjectId: r.note.id })
+      expect(row!.detail).toEqual({ companyId, noteId: r.note.id, contactId, authorUserId: author })
+      const [n] = await notesFor(db, orgId, companyId)
+      expect(n!.authorName).toBe('Priya')
+    })
+  })
+
   it('never puts the body in the audit log', async () => {
     const r = await add(SECRET_WORDS, { contactId })
     if (!r.ok) throw new Error(r.message)

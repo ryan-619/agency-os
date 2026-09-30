@@ -48,8 +48,11 @@ AGENT_INTERNAL_TOKEN=$(openssl rand -base64 32)
 SEED_OWNER_EMAIL=you@youragency.com
 ```
 
-Everything else in `.env.example` is optional and fails closed: unset, the
-feature behind it is off and the screens that need it say so.
+Everything else in `.env.example` is optional and fails closed: unset or
+blank, the feature behind it is off and the screens that need it say so.
+`docker-compose.yml` names the optional variables each app reads, so a value
+set in `.env` reaches its container; the few it deliberately does not pass
+are listed there with the reason.
 
 Then:
 
@@ -87,7 +90,8 @@ writes what it observed. Then **Companies** lists them by fit, and each company
 page shows every finding beside the evidence that produced it — the header that
 was checked, the URL fetched, the library version served. On Vercel a nightly
 cron does the same for never-scanned and stale companies once `CRON_SECRET` is
-set; nothing under compose schedules it.
+set; nothing under compose schedules it — drive it from the host's crontab
+with `curl` and the bearer, as `docker-compose.yml` shows.
 
 ---
 
@@ -96,7 +100,7 @@ set; nothing under compose schedules it.
 ```bash
 npm install
 npm run typecheck     # packages and tests, strict
-npm test              # 3506 tests, no Docker required
+npm test              # 3875 tests, no Docker required
 npx vitest run --maxWorkers=1 --minWorkers=1   # the same, on a machine short of memory
 ```
 

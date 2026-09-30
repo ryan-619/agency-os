@@ -23,7 +23,12 @@ export const SHARE_VIEWS_NOTE =
   'A view is one load of the page — the buyer’s, yours, or a link preview a mail client fetched. It says the link was opened, not that a person read it. No address or browser is recorded.'
 
 /** Why the Create button is not offered, in the order the route would refuse. */
-export function shareCreateBlocked(input: { readonly status: string; readonly evidenceStale: boolean }): string | null {
+export function shareCreateBlocked(input: {
+  readonly status: string
+  readonly evidenceStale: boolean
+  /** A newer successful scan of the company exists, so this proposal's is no longer the one quoted. */
+  readonly evidenceSuperseded?: boolean
+}): string | null {
   if (input.status === 'draft') {
     return 'Mark the proposal as sent first. A link is a copy of what you sent, not the send.'
   }
@@ -32,6 +37,9 @@ export function shareCreateBlocked(input: { readonly status: string; readonly ev
   }
   if (input.evidenceStale) {
     return 'Not while the evidence under this proposal is stale: re-verify before it appears in anything outbound. Re-scan the company and generate a fresh proposal.'
+  }
+  if (input.evidenceSuperseded) {
+    return 'A newer scan exists — regenerate the proposal. Only the latest scan is quoted in anything outbound; generate a fresh proposal from it, mark it sent, and link that one.'
   }
   return null
 }

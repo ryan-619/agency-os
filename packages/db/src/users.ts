@@ -13,8 +13,7 @@
  * `resolvePrincipal` — each of which reads `revoked_at` for itself.
  *
  * Two rules are in the STATEMENT rather than in a check before it, because a
- * check before it is a race: two owners removing each other at once each see
- * "one other owner" and both succeed, and the org has none.
+ * check before it is a race:
  *
  *   - the last owner cannot be demoted or revoked. A revoked owner does not
  *     count: `revoked_at IS NULL` is in the EXISTS, so revoking the last LIVE
@@ -22,6 +21,20 @@
  *   - a person cannot revoke themselves. The page cannot lock its own viewer
  *     out mid-request, and the last-owner rule alone would allow it whenever
  *     there are two.
+ *
+ * The statement alone does NOT close the race between two owners removing
+ * each other, and an earlier version of this comment said it did. Under READ
+ * COMMITTED each UPDATE locks only its own target row, and each EXISTS reads
+ * a snapshot in which the OTHER owner is still live — write skew: A revokes
+ * B while B revokes A, both statements match, and the org has no owner. It
+ * was reproduced on a real Postgres 16 with two sessions running exactly
+ * that predicate. So every write that can take a live owner away — a revoke
+ * and a demotion — runs in a transaction that first takes one advisory lock
+ * per org (`lockOwners`). The second writer waits for the first to commit,
+ * and its UPDATE then takes a fresh snapshot in which the first one's change
+ * is visible, so the EXISTS answers the question it was written to ask.
+ * Adding an owner (a grant, a promotion, a restore) can never leave the org
+ * with none, and takes no lock.
  *
  * Zero rows back means the predicate refused, and the caller re-reads to say
  * WHICH clause did — the precedent is `decideApproval` and `advanceDeal`: one
@@ -75,7 +88,8 @@ export const USERS_GRANT_REFUSED = 'That address cannot be added here.'
 /**
  * "Some other owner of this org is still live." Correlated to the row being
  * updated, so it is evaluated by the same statement that writes — never by a
- * SELECT a moment earlier.
+ * SELECT a moment earlier. Only sound after `lockOwners`: on its own it reads
+ * a snapshot that a concurrent removal of the other owner is not yet in.
  */
 const anotherLiveOwner = sql`EXISTS (
   SELECT 1 FROM ${schema.users} o
@@ -83,6 +97,21 @@ const anotherLiveOwner = sql`EXISTS (
      AND o.id <> ${schema.users.id}
      AND o.role = 'owner'
      AND o.revoked_at IS NULL)`
+
+/**
+ * Serialise, per org, every write that could take a live owner away (see the
+ * module comment). Transaction-scoped, so it is released by COMMIT or
+ * ROLLBACK and a crashed request cannot leave it held. The key is the org, not
+ * the target row: the two writes that race are on DIFFERENT rows.
+ *
+ * PGlite runs one session, so the suite cannot interleave two; what it pins
+ * is that both writers take this lock, inside their transaction, before the
+ * UPDATE (`users.test.ts`, by tracing the statements and by reading this
+ * file).
+ */
+async function lockOwners(tx: AgencyDb, orgId: string): Promise<void> {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('users.owners'), hashtext(${orgId}))`)
+}
 
 /**
  * Every member of ONE org: the live ones first, owners before members, then
@@ -205,8 +234,10 @@ async function sameOrgMember(
 
 /**
  * Change a role. One UPDATE whose predicate refuses demoting the last live
- * owner; promoting never needs the guard. The same role again is a no-op
- * that writes nothing and audits nothing.
+ * owner, after `lockOwners` (two owners demoting each other at once is the
+ * same write skew as two revoking each other); promoting never needs the
+ * guard. The same role again is a no-op that writes nothing and audits
+ * nothing.
  *
  * A role change reaches the web on the next request (`auth.ts`'s session
  * callback re-reads `users.role` every time) and the worker on the next turn
@@ -229,11 +260,15 @@ export async function usersSetRole(
   const guard = args.role === 'owner'
     ? undefined
     : sql`(${schema.users.role} <> 'owner' OR ${schema.users.revokedAt} IS NOT NULL OR ${anotherLiveOwner})`
-  const rows = await db
-    .update(schema.users)
-    .set({ role: args.role })
-    .where(and(eq(schema.users.orgId, args.orgId), eq(schema.users.id, args.userId), guard))
-    .returning({ id: schema.users.id })
+  const rows = await db.transaction(async (tx) => {
+    const t = tx as unknown as AgencyDb
+    await lockOwners(t, args.orgId)
+    return t
+      .update(schema.users)
+      .set({ role: args.role })
+      .where(and(eq(schema.users.orgId, args.orgId), eq(schema.users.id, args.userId), guard))
+      .returning({ id: schema.users.id })
+  })
 
   if (rows.length === 0) {
     // The row was there a moment ago. Either it is gone, or the guard refused.
@@ -255,11 +290,11 @@ export async function usersSetRole(
 /**
  * Revoke access: stamp `revoked_at`, end every live session, keep the row.
  *
- * Self and the last owner are refused IN the statement (see the module
- * comment). The session delete is in the same transaction as the stamp, so
- * there is no moment where the row says revoked and a browser still holds a
- * session that would carry it for thirty days — Auth.js reads `sessions`,
- * not `users.revoked_at`, on every request.
+ * Self and the last owner are refused IN the statement, which runs after
+ * `lockOwners` (see the module comment). The session delete is in the same
+ * transaction as the stamp, so there is no moment where the row says revoked
+ * and a browser still holds a session that would carry it for thirty days —
+ * Auth.js reads `sessions`, not `users.revoked_at`, on every request.
  *
  * An already-revoked person is left as they are and reported as done with no
  * sessions ended: the state asked for is the state they are in.
@@ -279,6 +314,7 @@ export async function usersRevoke(
   const now = args.now ?? new Date()
 
   const outcome = await db.transaction(async (tx) => {
+    await lockOwners(tx as unknown as AgencyDb, args.orgId)
     const rows = await tx
       .update(schema.users)
       .set({ revokedAt: now })

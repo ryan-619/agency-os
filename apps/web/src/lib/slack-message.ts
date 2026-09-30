@@ -51,9 +51,11 @@ export type NotificationEvent =
   | {
       kind: 'opt_out_not_recorded'
       orgId: string
+      /** The touch the request arrived on: the clicked message, or the inbound reply. */
       touchId: string
       contactId: string | null
-      path: 'unsubscribe' | 'erasure'
+      /** Which way the person asked: the unsubscribe link, an erasure, or a reply that said stop. */
+      path: 'unsubscribe' | 'erasure' | 'reply'
     }
   | { kind: 'worker_silent'; orgId: string; lastTickAt: string | null; ageSeconds: number | null }
   | {
@@ -165,7 +167,7 @@ export function slackMessage(event: NotificationEvent, origin: string): SlackPay
     case 'opt_out_not_recorded': {
       lines.push(
         `OPT-OUT NOT RECORDED. Somebody asked to be left alone through ${
-          event.path === 'unsubscribe' ? 'the unsubscribe link' : 'an erasure request'
+          event.path === 'unsubscribe' ? 'the unsubscribe link' : event.path === 'reply' ? 'a reply' : 'an erasure request'
         } and no suppression row could be written. A person has to record it now.`,
       )
       lines.push(`touch ${event.touchId} · contact ${event.contactId ?? 'unknown'}`)

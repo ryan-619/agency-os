@@ -70,11 +70,6 @@ export function MeetingActions({
   }
 
   const record = async (to: string): Promise<void> => {
-    // Correcting a reschedule does not undo the meeting it recorded.
-    if (
-      outcome === 'rescheduled'
-      && !window.confirm('The meeting this was moved to stays on the books. Cancel it from its own page if it is not happening.')
-    ) return
     if (await patch({ action: 'outcome', outcome: to })) window.location.reload()
   }
 
@@ -107,23 +102,28 @@ export function MeetingActions({
 
       {mode === 'idle' ? (
         <div className="row-actions" style={{ marginTop: 6 }}>
-          {started ? (
+          {started && outcome === 'rescheduled' ? (
+            // The route refuses to overwrite a reschedule: the replacement it
+            // recorded would be orphaned, and a second reschedule would make
+            // another. What happened is recorded on the new meeting.
+            <span className="hint" style={{ alignSelf: 'center', marginTop: 0 }}>
+              Rescheduled — record what happened on the new meeting.
+            </span>
+          ) : started ? (
             <>
               {OUTCOMES.filter((o) => o.outcome !== outcome).map((o) => (
                 <button key={o.outcome} type="button" disabled={busy} title={o.note} onClick={() => void record(o.outcome)}>
                   {o.label}
                 </button>
               ))}
-              {outcome !== 'rescheduled' ? (
-                <button
-                  type="button"
-                  disabled={busy}
-                  title="It happened, or will, at another time. Records the new meeting and links the two."
-                  onClick={() => { setError(null); setMode('reschedule') }}
-                >
-                  Rescheduled…
-                </button>
-              ) : null}
+              <button
+                type="button"
+                disabled={busy}
+                title="It happened, or will, at another time. Records the new meeting and links the two."
+                onClick={() => { setError(null); setMode('reschedule') }}
+              >
+                Rescheduled…
+              </button>
             </>
           ) : null}
           {outcome === null ? (

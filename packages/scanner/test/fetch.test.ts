@@ -4,7 +4,7 @@ import { gzipSync, deflateRawSync } from 'node:zlib'
 import { describe, it, expect } from 'vitest'
 import {
   MAX_ENCODED_BYTES, capture, decodeBody, firstHeaders, readCapped, redirectTarget,
-  RedirectRefused, UnscannableHostError, setCookieHeaders,
+  RedirectRefused, UnscannableHostError, headerValues, setCookieHeaders,
 } from '../src/fetch.js'
 import { ALL_PUBLIC_PATHS, PUBLIC_PATHS } from '../src/types.js'
 
@@ -113,6 +113,24 @@ describe('the reference engine\'s wire semantics', () => {
     // reads it, so it never reaches scans.raw.
     expect(all.join('\n')).not.toContain('abc123')
     expect(all.join('\n')).not.toContain('zzz')
+  })
+
+  /**
+   * A browser enforces EVERY Content-Security-Policy it is sent, and the map
+   * keeps one, so csp_quality needs a second read of the pairs — beside the
+   * map, which parity still reads.
+   */
+  it('records every value of one header beside the first-value map, in order', () => {
+    const raw = [
+      'Content-Security-Policy', "frame-ancestors 'self'",
+      'Content-Type', 'text/html',
+      'content-security-policy', "script-src 'self'",
+      'Content-Security-Policy-Report-Only', "default-src 'none'",
+    ]
+    expect(firstHeaders(raw)['content-security-policy']).toBe("frame-ancestors 'self'")
+    expect(headerValues(raw, 'content-security-policy')).toEqual(["frame-ancestors 'self'", "script-src 'self'"])
+    expect(headerValues(raw, 'Content-Security-Policy')).toHaveLength(2)
+    expect(headerValues(raw, 'x-absent')).toEqual([])
   })
 
   it('gunzips and inflates, and keeps the raw bytes when it cannot', () => {

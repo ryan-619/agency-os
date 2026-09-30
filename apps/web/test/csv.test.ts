@@ -145,6 +145,19 @@ describe('findingsCsvRows', () => {
     expect(col(inPlace, 'weight')).toBe('0')
   })
 
+  // additive.ts stores "not applicable" as observed with no gap; a `no` in
+  // the gap column is a pass somebody filters on.
+  it('writes "not applicable" in the gap column for a not-applicable row, never "no"', () => {
+    const na = {
+      signalKey: 'csp_quality', observed: true, gap: false, scored: false, weight: 0,
+      detail: 'not applicable — no enforced Content-Security-Policy to judge', evidence: { seen: 'absent' },
+    }
+    const clean = { ...na, signalKey: 'hsts_quality', detail: 'max-age=31536000' }
+    const rows = findingsCsvRows([{ ...group, findings: [na, clean] }], CLOCK)
+    expect(col(rows.find((r) => col(r, 'signal_key') === 'csp_quality')!, 'gap')).toBe('not applicable')
+    expect(col(rows.find((r) => col(r, 'signal_key') === 'hsts_quality')!, 'gap')).toBe('no')
+  })
+
   it('writes stale per row from the scan time, and the evidence as JSON', () => {
     const rows = findingsCsvRows([group], CLOCK)
     expect(rows.map((r) => col(r, 'stale'))).toEqual(['yes', 'yes', 'yes'])

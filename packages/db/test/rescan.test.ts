@@ -21,8 +21,8 @@ import { SEED_DIR } from '../src/paths.js'
 import { recordScan, type AgencyDb, type CompanyListRow } from '../src/repository.js'
 import {
   RESCAN_MARGIN_MS, RESCAN_MIN_AGE_HOURS, RESCAN_SCAN_TIMEOUTS,
-  listOrgIds, rescanQueue, rescanWorstCaseMs, runRescan, selectRescanTargets,
-  type RescanDeps, type RescanScan,
+  claimRescan, listOrgIds, rescanQueue, rescanWorstCaseMs, runRescan, selectRescanTargets,
+  type RescanDeps, type RescanScan, type RescanResult,
 } from '../src/rescan.js'
 
 const icp: IcpDefinition = parseIcpDefinition(
@@ -426,6 +426,114 @@ describe('runRescan', () => {
     const seen: string[] = []
     await runRescan(db, deps({ scan: async (d, n) => { seen.push(d); return answers(d, n) } }))
     expect(seen).toEqual(['acme.test'])
+  })
+
+  // -------------------------------------------------------------------------
+  // Two deliveries at once
+  // -------------------------------------------------------------------------
+
+  const claims = () =>
+    db.select().from(schema.auditLog)
+      .where(and(eq(schema.auditLog.orgId, orgId), eq(schema.auditLog.action, 'scan.cron_started')))
+
+  /** What the route does per org: claim, and run only if the claim was won. */
+  async function deliver(over: Partial<RescanDeps> = {}): Promise<RescanResult | 'claimed'> {
+    const d = deps(over)
+    const claim = await claimRescan(db, { orgId, now: d.now(), budgetMs: d.budgetMs, schedule: d.schedule ?? null })
+    return claim.claimed ? runRescan(db, d) : 'claimed'
+  }
+
+  /**
+   * The floor cannot see a scan that has not been recorded yet. A second
+   * delivery arriving while the first is mid-scan read the same queue head,
+   * and every company was scanned twice. PGlite runs one transaction at a
+   * time, so the overlap is driven the only way it can be: the second
+   * delivery starts from inside the first one's scan, before that scan is
+   * recorded.
+   */
+  it('skips an org another delivery is running, rather than scanning its companies twice', async () => {
+    await companies('a.test', 'b.test', 'c.test')
+    const seen: string[] = []
+    let second: RescanResult | 'claimed' | null = null
+    const first = await deliver({
+      scan: async (domain, company) => {
+        seen.push(domain)
+        if (second === null) second = await deliver({ scan: async (d, n) => { seen.push(`again:${d}`); return answers(d, n) } })
+        return answers(domain, company)
+      },
+    })
+    expect(second).toBe('claimed')
+    expect(seen).toEqual(['a.test', 'b.test', 'c.test'])
+    expect(first).toMatchObject({ scanned: 3 })
+    expect(await allScans()).toHaveLength(3)
+    expect(await claims()).toHaveLength(1)
+    expect(await cronRuns()).toHaveLength(1)
+  })
+
+  it('holds its claim until the run’s own ceiling: its budget plus the margin, and no longer', async () => {
+    const t0 = new Date('2026-09-30T03:17:00.000Z')
+    const budgetMs = 240_000
+    expect(await claimRescan(db, { orgId, now: t0, budgetMs, schedule: '17 3 * * *' })).toEqual({ claimed: true })
+    const until = new Date(t0.getTime() + budgetMs + RESCAN_MARGIN_MS)
+    const [row] = await claims()
+    expect(row!.actor).toBe('system')
+    expect(row!.detail).toEqual({ until: until.toISOString(), schedule: '17 3 * * *' })
+
+    // A duplicate a minute later — with less budget of its own — still reads the first claim's until.
+    expect(await claimRescan(db, { orgId, now: new Date(t0.getTime() + 60_000), budgetMs: 10_000 }))
+      .toEqual({ claimed: false, heldUntil: until })
+    expect(await claimRescan(db, { orgId, now: new Date(until.getTime() - 1), budgetMs })).toMatchObject({ claimed: false })
+    expect(await claims()).toHaveLength(1)
+
+    // Past it, a delivery claims afresh.
+    expect(await claimRescan(db, { orgId, now: until, budgetMs })).toEqual({ claimed: true })
+    expect(await claims()).toHaveLength(2)
+  })
+
+  it('lets a manual curl later in the day run, and the floor still decides what it picks', async () => {
+    await companies('a.test', 'b.test')
+    const c = clock()
+    expect(await deliver({ now: c.now, batch: 1 })).toMatchObject({ scanned: 1, remaining: 1 })
+    c.advance(6 * HOUR)
+    const later = await deliver({ now: c.now, batch: 5 })
+    // b was never scanned; a is inside the twenty-hour floor.
+    expect(later).toMatchObject({ picked: 1, scanned: 1, remaining: 0 })
+    expect(await claims()).toHaveLength(2)
+    expect(await cronRuns()).toHaveLength(2)
+  })
+
+  it('claims per org: another org’s run holds nothing here', async () => {
+    const [other] = await db.insert(schema.orgs).values({ name: 'Other' }).returning({ id: schema.orgs.id })
+    const now = new Date()
+    expect(await claimRescan(db, { orgId: other!.id, now, budgetMs: 240_000 })).toEqual({ claimed: true })
+    expect(await claimRescan(db, { orgId, now, budgetMs: 240_000 })).toEqual({ claimed: true })
+  })
+
+  it('reads a claim whose until cannot be read as holding nothing', async () => {
+    for (const detail of [{}, { until: 'soon' }, { until: 42 }]) {
+      await db.insert(schema.auditLog).values({ orgId, actor: 'system', action: 'scan.cron_started', detail })
+    }
+    expect(await claimRescan(db, { orgId, now: new Date(), budgetMs: 240_000 })).toEqual({ claimed: true })
+  })
+
+  /**
+   * PGlite runs one transaction at a time, so no test here can show two
+   * claims racing; the lock is what makes them wait on real Postgres. It is
+   * pinned by reading the source, like the digest's.
+   */
+  it('takes the two-key transaction lock before it reads, and the route claims before it runs', () => {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const source = readFileSync(join(here, '..', 'src', 'rescan.ts'), 'utf8')
+    const body = source.slice(source.indexOf('export async function claimRescan'))
+    const lock = body.indexOf("pg_advisory_xact_lock(hashtext('cron.rescan'), hashtext(")
+    expect(lock).toBeGreaterThan(-1)
+    expect(lock).toBeLessThan(body.indexOf('.from(schema.auditLog)'))
+    expect(body.indexOf('db.transaction(')).toBeLessThan(lock)
+
+    const route = readFileSync(join(here, '..', '..', '..', 'apps', 'web', 'src', 'app', 'api', 'cron', 'rescan', 'route.ts'), 'utf8')
+    const claimAt = route.indexOf('await claimRescan(')
+    expect(claimAt).toBeGreaterThan(-1)
+    expect(claimAt).toBeLessThan(route.indexOf('await runRescan('))
   })
 
   it('listOrgIds returns every org', async () => {

@@ -13,11 +13,17 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { drizzle } from 'drizzle-orm/pglite'
 import { and, eq } from 'drizzle-orm'
+import { draftInputFromFindings, parseIcpDefinition } from '@agency/core'
 import {
-  addSuppression, dispatchTouch, enrolCampaign, pendingDrafts, schema,
+  addSuppression, denyDraft, dispatchTouch, enrolCampaign, latestScanWithFindings, pendingDrafts, recordScan, schema,
   type AgencyDb, type EnrolOutcome, type MessageProvider,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
+// The scanner's own extractor and recordings, by path, as repository.test.ts
+// reads them: packages/db does not depend on the scanner, and only the
+// real-rows test below needs a REAL profile.
+import { extractProfile } from '../../scanner/src/extract.js'
+import { loadFixture } from '../../scanner/test/fixtures.js'
 
 const ICP = JSON.parse(readFileSync(fileURLToPath(new URL('../seed/icp-security-gap-saas.json', import.meta.url)), 'utf8')) as {
   signals: Record<string, { weight: number; why: string }>
@@ -332,16 +338,67 @@ describe('enrolling a campaign', () => {
     expect(r.queued.map((q) => q.contactId)).toEqual([refusedOnce])
   })
 
-  it('does not let a refused or failed earlier row block a draft a person will read', async () => {
+  it('does not let a failed row, or a refusal a correction resolves, block a draft a person will read', async () => {
     await scan()
     const a = await contact()
     const b = await contact({ email: 'sam@rentman.io' })
     await db.insert(schema.touches).values([
-      { orgId, campaignId, contactId: a, companyId, channel: 'email', direction: 'out', status: 'refused', refusalCode: 'needs_approval', decisionNote: 'denied' },
+      { orgId, campaignId, contactId: a, companyId, channel: 'email', direction: 'out', status: 'refused', refusalCode: 'unparseable_recipient' },
       { orgId, campaignId, contactId: b, companyId, channel: 'email', direction: 'out', status: 'failed', error: '421 try later' },
     ])
     const r = ok(await enrol())
     expect(r.queued.map((q) => q.contactId).sort()).toEqual([a, b].sort())
+  })
+
+  /**
+   * The review's case, end to end. A campaign runs supervised and a person
+   * denies a draft (`denyDraft`: `refused`, `needs_approval`). Enrolling again
+   * must not put the same words back in front of them — and once the
+   * campaign is switched to auto-send, must not queue them for the worker to
+   * mail with nobody reading, which is what it used to do.
+   */
+  it('never brings back a draft a person denied, supervised or after switching to auto-send', async () => {
+    await scan()
+    const jane = await contact()
+    const first = ok(await enrol())
+    const denied = await denyDraft(db, { orgId, touchId: first.queued[0]!.touchId!, decidedBy: userId, note: 'not this one' })
+    expect(denied.ok).toBe(true)
+
+    const again = ok(await enrol())
+    expect(again.queued).toEqual([])
+    expect(again.skipped).toEqual([{ companyId, contactId: jane, why: 'already_contacted' }])
+
+    await db.update(schema.campaigns).set({ autoSend: true }).where(eq(schema.campaigns.id, campaignId))
+    const auto = ok(await enrol())
+    expect(auto.status).toBe('queued')
+    expect(auto.queued).toEqual([])
+    expect(auto.skipped).toEqual([{ companyId, contactId: jane, why: 'already_contacted' }])
+    expect((await outbound()).map((t) => [t.status, t.refusalCode])).toEqual([['refused', 'needs_approval']])
+  })
+
+  /**
+   * The recipient's own no: a reply that cancelled what was queued
+   * (`consent_revoked`) and an opt-out (`suppressed`). A bounce refused
+   * earlier is about an address, and its mark has since been cleared — so
+   * that person IS drafted again, to the corrected address.
+   */
+  it('does not re-queue after a reply cancelled the row or the person opted out, under auto-send', async () => {
+    const auto = await campaign({ name: 'Auto', autoSend: true })
+    await scan()
+    const replied = await contact()
+    const optedOut = await contact({ email: 'sam@rentman.io' })
+    const corrected = await contact({ email: 'lee@rentman.io' })
+    await db.insert(schema.touches).values([
+      { orgId, campaignId: auto, contactId: replied, companyId, channel: 'email', direction: 'out', status: 'refused', refusalCode: 'consent_revoked' },
+      { orgId, campaignId: auto, contactId: optedOut, companyId, channel: 'email', direction: 'out', status: 'refused', refusalCode: 'suppressed' },
+      { orgId, campaignId: auto, contactId: corrected, companyId, channel: 'email', direction: 'out', status: 'refused', refusalCode: 'bounced' },
+    ])
+    const r = ok(await enrol({ campaignId: auto }))
+    expect(Object.fromEntries(r.skipped.map((s) => [s.contactId, s.why]))).toEqual({
+      [replied]: 'already_contacted',
+      [optedOut]: 'already_contacted',
+    })
+    expect(r.queued.map((q) => q.contactId)).toEqual([corrected])
   })
 
   /**
@@ -368,6 +425,109 @@ describe('enrolling a campaign', () => {
     const other = await campaign({ name: 'Other' })
     const r = ok(await enrol({ campaignId: other }))
     expect(r.queued).toHaveLength(1)
+  })
+
+  /**
+   * Under auto-send nobody reads the words, and they depend only on the
+   * company, the ICP, the agency and the sender — so campaign B would mail
+   * exactly what campaign A already sent. An auto-send enrolment reads every
+   * campaign's rows on its channel; a supervised one still reads its own,
+   * because a person reads each draft before anything leaves.
+   */
+  it('under auto-send, skips a person any campaign on the channel already wrote to', async () => {
+    await scan()
+    const sentTo = await contact()
+    const sending = await contact({ email: 'sam@rentman.io' })
+    const waiting = await contact({ email: 'lee@rentman.io' })
+    const onLinkedIn = await contact({ email: 'kim@rentman.io' })
+    const other = await campaign({ name: 'Other' })
+    const li = await campaign({ name: 'LinkedIn', channel: 'linkedin' })
+    await db.insert(schema.touches).values([
+      { orgId, campaignId: other, contactId: sentTo, companyId, channel: 'email', direction: 'out', status: 'sent', sentAt: FRESH_AT, providerId: 'p-1' },
+      { orgId, campaignId: other, contactId: sending, companyId, channel: 'email', direction: 'out', status: 'sending' },
+      { orgId, campaignId: other, contactId: waiting, companyId, channel: 'email', direction: 'out', status: 'awaiting_approval' },
+      { orgId, campaignId: li, contactId: onLinkedIn, companyId, channel: 'linkedin', direction: 'out', status: 'sent', sentAt: FRESH_AT, providerId: 'human:x' },
+    ])
+
+    const auto = await campaign({ name: 'Auto', autoSend: true })
+    const r = ok(await enrol({ campaignId: auto }))
+    expect(Object.fromEntries(r.skipped.map((s) => [s.contactId, s.why]))).toEqual({
+      [sentTo]: 'already_contacted',
+      [sending]: 'already_contacted',
+      [waiting]: 'already_enrolled',
+    })
+    // A message on another channel is not the same opener.
+    expect(r.queued.map((q) => q.contactId)).toEqual([onLinkedIn])
+
+    const supervised = ok(await enrol())
+    expect(supervised.queued.map((q) => q.contactId).sort()).toEqual([sentTo, sending, waiting, onLinkedIn].sort())
+  })
+
+  /**
+   * The read names the skip; the INSERT's own NOT EXISTS is what a race
+   * cannot get past. Each row here lands AFTER the read and before the insert
+   * — the wrapper writes it on the way into `execute` — so only the statement
+   * can stop the draft, and the second read names why.
+   */
+  it('stops a draft in the insert itself when a row that counts lands after the read', async () => {
+    const auto = await campaign({ name: 'Auto', autoSend: true })
+    const other = await campaign({ name: 'Other' })
+    await scan()
+    const denied = await contact()
+    const sentElsewhere = await contact({ email: 'sam@rentman.io' })
+    const clockOnly = await contact({ email: 'lee@rentman.io' })
+    const landing: Record<string, typeof schema.touches.$inferInsert> = {
+      [denied]: { orgId, campaignId: auto, contactId: denied, companyId, channel: 'email', direction: 'out', status: 'refused', refusalCode: 'needs_approval' },
+      [sentElsewhere]: { orgId, campaignId: other, contactId: sentElsewhere, companyId, channel: 'email', direction: 'out', status: 'sent', sentAt: FRESH_AT, providerId: 'p-9' },
+      [clockOnly]: { orgId, campaignId: auto, contactId: clockOnly, companyId, channel: 'email', direction: 'out', status: 'refused', refusalCode: 'quiet_hours' },
+    }
+    const inserted: number[] = []
+    const watched = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== 'execute') return Reflect.get(target, prop, receiver)
+        return async (query: Parameters<AgencyDb['execute']>[0]) => {
+          const text = JSON.stringify(query)
+          const who = Object.keys(landing).find((id) => text.includes(id))
+          if (who) {
+            await target.insert(schema.touches).values(landing[who]!)
+            delete landing[who]
+          }
+          const res = await target.execute(query)
+          inserted.push((res as unknown as { rows: unknown[] }).rows.length)
+          return res
+        }
+      },
+    })
+    const r = ok(await enrolCampaign(watched, { orgId, campaignId: auto, actor: userId, now: NOW }))
+    expect(Object.keys(landing)).toEqual([])
+    expect(Object.fromEntries(r.skipped.map((s) => [s.contactId, s.why]))).toEqual({
+      [denied]: 'already_contacted',
+      [sentElsewhere]: 'already_contacted',
+    })
+    // A deferral nobody said no to does not stop it.
+    expect(r.queued.map((q) => q.contactId)).toEqual([clockOnly])
+    expect(inserted.sort()).toEqual([0, 0, 1])
+  })
+
+  /**
+   * The sender refuses a bounced address on sight, so a draft to one is a
+   * card nobody can approve — or, under auto-send, a row refused at once.
+   * The mark is about the address, so it does not follow the person to
+   * LinkedIn.
+   */
+  it('skips an email address that bounced, on the email channel only', async () => {
+    await scan()
+    const bounced = await contact({
+      emailBouncedAt: FRESH_AT,
+      emailBounceCode: '5.1.1',
+      linkedinUrl: 'https://www.linkedin.com/in/priya-rentman',
+    })
+    const r = ok(await enrol())
+    expect(r.skipped).toEqual([{ companyId, contactId: bounced, why: 'bounced' }])
+    expect(await outbound()).toEqual([])
+
+    const li = await campaign({ name: 'LinkedIn', channel: 'linkedin' })
+    expect(ok(await enrol({ campaignId: li })).queued.map((q) => q.contactId)).toEqual([bounced])
   })
 
   /**
@@ -491,6 +651,61 @@ describe('enrolling a campaign', () => {
     expect(row!.body).not.toContain('session cookie without Secure')
     // The ICP's own outreach rule: never send a numeric score.
     expect(row!.body).not.toMatch(/\b71\b/)
+  })
+
+  /**
+   * §2.2, from REAL rows: the recorded rentman.io capture through the real
+   * extractor and `recordScan`. Its trust_page, security_txt and
+   * compliance_claim gaps are all stored with a NULL detail, and none of them
+   * is a header — the opener used to say "header absent on homepage
+   * response" beside each, in a body auto-send mails unread.
+   */
+  it('words the evidence of a real scan from what the scanner did', async () => {
+    const fixture = loadFixture('rentman.io')
+    const icp = parseIcpDefinition(ICP)
+    const recorded = await recordScan(db, {
+      orgId,
+      companyId,
+      icpProfile: { id: icpProfileId, definition: icp },
+      raw: fixture,
+      profile: extractProfile(fixture, fixture.company),
+    })
+    await db.update(schema.scans).set({ ranAt: FRESH_AT }).where(eq(schema.scans.id, recorded.scanId))
+
+    const found = await latestScanWithFindings(db, orgId, companyId)
+    const stored = new Map(found!.findings.map((f) => [f.signalKey, f]))
+    for (const key of ['trust_page', 'security_txt', 'compliance_claim']) {
+      expect(stored.get(key), key).toMatchObject({ observed: true, gap: true, detail: null })
+    }
+    const input = draftInputFromFindings({
+      company: { domain: 'rentman.io', name: 'Rentman' },
+      icp,
+      findings: found!.findings.map((f) => ({ ...f, evidence: (f.evidence ?? {}) as Record<string, unknown> })),
+      scan: { ranAt: FRESH_AT, ok: true, stale: false },
+      score: found!.score,
+    })
+    const observed = new Map(input.evidence.map((e) => [e.claim, e.observed]))
+    expect(observed.get(why('trust_page'))).toBe(
+      'no security or trust page found at /security, /trust, /trust-center or /security-and-privacy',
+    )
+    expect(observed.get(why('security_txt'))).toBe('no security.txt found at /.well-known/security.txt or /security.txt')
+    expect(observed.get(why('compliance_claim'))).toBe('no SOC 2 or ISO 27001 claim found on the homepage')
+    const headers = ['csp', 'hsts', 'frame_protection', 'content_type_options', 'referrer_policy', 'permissions_policy'].map(why)
+    for (const e of input.evidence) {
+      if (e.observed === 'header absent on homepage response') expect(headers, e.claim).toContain(e.claim)
+    }
+
+    // And the draft enrolment writes from those rows says the same.
+    await contact()
+    ok(await enrol())
+    const [row] = await outbound()
+    expect(row!.body).toContain(
+      `• ${why('trust_page')} — no security or trust page found at /security, /trust, /trust-center or /security-and-privacy`,
+    )
+    expect(row!.body).toContain(`• ${why('compliance_claim')} — no SOC 2 or ISO 27001 claim found on the homepage`)
+    for (const line of row!.body!.split('\n').filter((l) => l.includes('header absent'))) {
+      expect(headers.some((h) => line === `• ${h} — header absent on homepage response`), line).toBe(true)
+    }
   })
 
   it('audits counts only — never who, and never what was said', async () => {

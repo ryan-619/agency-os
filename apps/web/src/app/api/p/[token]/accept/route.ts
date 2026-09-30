@@ -20,9 +20,9 @@ import { shareAcceptedNotification } from './notification'
  *  - nothing enumerable is returned: `{ ok: true }` and nothing else, never
  *    the proposal's, the share's or the org's id;
  *  - 404 for a token that is unknown or revoked, the same answer for both;
- *    410 for an expired one, and for one whose evidence has aged out since
- *    it was made (§2.2) — told to the buyer as "being re-verified", never
- *    "stale".
+ *    410 for an expired one, and for one whose evidence has aged out, or
+ *    been superseded by a newer successful scan, since it was made (§2.2) —
+ *    told to the buyer as "being re-verified", never "stale".
  *
  * Accepting is `setProposalStatus(accepted)` inside `shareAccept`, the call
  * the team's button makes, so the deal closes `won` exactly as it does

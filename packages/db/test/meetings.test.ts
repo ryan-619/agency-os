@@ -424,14 +424,38 @@ describe('meetings', () => {
         expect(await openDealFor(db, orgId, companyId)).toBeNull()
       })
 
-      it('lets a mis-clicked reschedule be corrected to held', async () => {
-        const r = await book()
-        if (!r.ok) throw new Error(r.message)
-        await rescheduleMeeting(db, { orgId, id: r.meeting.id, startsAt: LATER, timeZone: 'Europe/London', actor: 'test', now: AFTER })
-        const out = await setMeetingOutcome(db, { orgId, id: r.meeting.id, outcome: 'held', actor: 'test', now: AFTER })
-        expect(out.ok).toBe(true)
-        expect((await readMeeting(db, orgId, r.meeting.id))!.outcome).toBe('held')
-      })
+      /**
+       * "Held" over "rescheduled" used to be allowed as a correction, and it
+       * reopened the guard above: the meeting became reschedulable again, a
+       * second reschedule recorded a second new meeting, and the first was
+       * left on the books with nothing pointing at it.
+       */
+      it.each(['held', 'no_show'] as const)(
+        'refuses to record %s over a reschedule, so the meeting cannot be rescheduled twice',
+        async (outcome) => {
+          const r = await book()
+          if (!r.ok) throw new Error(r.message)
+          const first = await rescheduleMeeting(db, { orgId, id: r.meeting.id, startsAt: LATER, timeZone: 'Europe/London', actor: 'test', now: AFTER })
+          if (!first.ok) throw new Error(first.message)
+          const before = await audits('meeting.outcome_recorded')
+
+          const out = await setMeetingOutcome(db, { orgId, id: r.meeting.id, outcome, actor: 'test', now: AFTER })
+          expect(out).toMatchObject({ ok: false, reason: 'already_rescheduled' })
+          if (out.ok) return
+          expect(out.message).toMatch(/already rescheduled/)
+          expect((await readMeeting(db, orgId, r.meeting.id))!.outcome).toBe('rescheduled')
+          expect(await audits('meeting.outcome_recorded')).toHaveLength(before.length)
+
+          const again = await rescheduleMeeting(db, { orgId, id: r.meeting.id, startsAt: LATER, timeZone: 'Europe/London', actor: 'test', now: AFTER })
+          expect(again).toMatchObject({ ok: false, reason: 'already_rescheduled' })
+          expect(await meetingsForCompany(db, orgId, companyId)).toHaveLength(2)
+          expect((await meetingRescheduleLinks(db, orgId, r.meeting.id)).to?.id).toBe(first.replacement.id)
+
+          // The replacement is where the outcome goes, and it takes one.
+          const onNew = await setMeetingOutcome(db, { orgId, id: first.replacement.id, outcome, actor: 'test', now: new Date(LATER.getTime() + 60_000) })
+          expect(onNew.ok).toBe(true)
+        },
+      )
     })
   })
 

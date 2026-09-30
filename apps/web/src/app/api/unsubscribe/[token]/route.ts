@@ -9,8 +9,9 @@ import { notify } from '@/lib/slack'
  * carries in `List-Unsubscribe` when the worker holds the secret.
  *
  * A click IS the opt-out, so this route has exactly three honest answers:
- * the suppression row is written (200), the link is not one this deployment
- * sent (404), or the row could NOT be written — and then it is loud: the
+ * the suppression row is written — or provably already there, as for a
+ * message whose person was erased — (200), the link is not one this
+ * deployment sent (404), or the row could NOT be written — and then it is loud: the
  * audit row and the `OPT-OUT NOT RECORDED` log line are already written by
  * `recordUnsubscribe`, this route adds the Slack notification, and the
  * person is told the truth with a 500. Never a "done" over a row that is not
@@ -46,7 +47,7 @@ export const runtime = 'nodejs'
 const MAX_BODY = 1024
 
 /** A token's shape, without the secret: enough to tell a real click from a probe in a log. */
-const TOKEN_SHAPE = /^[0-9a-f-]{36}\.[0-9a-f]{64}$/
+const TOKEN_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.[0-9a-f]{64}$/
 
 const COPY = {
   done: 'Done. You will not be emailed again.',
@@ -119,6 +120,9 @@ export async function POST(
       touchId: outcome.touchId,
       contactId: outcome.contactId,
       alreadyPresent: outcome.alreadyPresent,
+      // A message whose person was erased: the erasure already kept this
+      // address on the list, so the click is honoured and nothing is raised.
+      erased: outcome.erased,
     })
     return page(200, 'Unsubscribed', COPY.done)
   }

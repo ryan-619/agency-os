@@ -34,9 +34,26 @@
  * Only a touch with NO recipient — erased, or a worker that died between the
  * provider and the write — cannot say what to suppress, and that is the
  * loud path, not a refusal: somebody clicked, and a person has to look.
+ *
+ * Except when the erasure is the reason AND the address is provably on the
+ * list. An erasure suppresses every recipient before it scrubs them, and its
+ * `contact.erased` row names, per message, the suppression row that now holds
+ * that message's recipient (`suppressedRecipients`). A click on such a
+ * message's old link is answered "done" — idempotent, no alarm — when that
+ * row names this touch AND the suppression row it names still exists. Any
+ * other missing recipient, or a kept row an owner has since removed, stays
+ * loud: "certain" is the bar, because a quiet "done" over a row that is not
+ * there is the one failure this module exists to prevent.
+ *
+ * ## A failure pauses them with the failure as the reason
+ *
+ * On the loud path the pause OVERWRITES an earlier reason. `pauseContact`
+ * keeps the first on purpose (a second reply must not replace the first),
+ * but here an older `replied …` left in place let answering that reply in
+ * /inbox resume a person whose opt-out was never recorded.
  */
 import { timingSafeEqual, createHmac } from 'node:crypto'
-import { and, eq, inArray } from 'drizzle-orm'
+import { and, eq, inArray, sql } from 'drizzle-orm'
 import { normaliseEmail } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
@@ -101,6 +118,11 @@ export type UnsubscribeOutcome =
       readonly addresses: number
       readonly paused: boolean
       readonly cancelled: number
+      /**
+       * True when the touch was scrubbed by an erasure that kept its recipient
+       * on the list, and that row is still there — nothing was written now.
+       */
+      readonly erased: boolean
     }
   | { readonly ok: false; readonly reason: 'not_found'; readonly message: string }
   | {
@@ -190,6 +212,24 @@ export async function recordUnsubscribe(
   const { orgId, contactId } = touch
   const reason = `unsubscribed by one-click link, ${now.toISOString().slice(0, 10)}`
 
+  // An erased message names nobody and no address. When the erasure provably
+  // kept its recipient on the list, the click was already honoured.
+  if (touch.recipient === null && contactId === null) {
+    let kept = false
+    try {
+      kept = await erasureKeptRecipient(db, orgId, args.touchId)
+    } catch (err) {
+      // Not provable, so the loud path below: `no_recipient` is still true.
+      log.error('unsubscribe could not read the erasure record', { touchId: args.touchId, orgId, error: errorName(err) })
+    }
+    if (kept) {
+      return {
+        ok: true, touchId: args.touchId, orgId, contactId, alreadyPresent: true, addresses: 1, paused: false, cancelled: 0,
+        erased: true,
+      }
+    }
+  }
+
   const suppress = async (value: string): Promise<{ ok: true; alreadyPresent: boolean } | { ok: false; why: string }> => {
     try {
       const r = await addSuppression(db, { orgId, kind: 'email', value, reason, source: 'unsubscribe' })
@@ -213,11 +253,19 @@ export async function recordUnsubscribe(
     ...(currentEmail !== null && !same ? [await suppress(currentEmail)] : []),
   ]
 
+  const failed = results.find((r): r is { ok: false; why: string } => !r.ok)
+
   let paused = false
   let cancelled = 0
   if (contactId) {
     try {
-      paused = await pauseContact(db, orgId, contactId, `unsubscribed ${now.toISOString()}`, now)
+      // Recorded: the idempotent pause, which keeps an earlier reason. Not
+      // recorded: THIS reason, over any earlier one (see the header).
+      paused = failed
+        ? await pauseOverriding(
+            db, orgId, contactId, `opt-out not recorded: one-click unsubscribe ${now.toISOString()} (${failed.why})`, now,
+          )
+        : await pauseContact(db, orgId, contactId, `unsubscribed ${now.toISOString()}`, now)
     } catch (err) {
       log.error('unsubscribe could not pause the contact', { touchId: args.touchId, contactId, error: errorName(err) })
     }
@@ -242,7 +290,6 @@ export async function recordUnsubscribe(
     }
   }
 
-  const failed = results.find((r): r is { ok: false; why: string } => !r.ok)
   if (failed) {
     // §2.1's Phase 4 obligation, for a click: an opt-out that failed to
     // store fails loudly to a human and never falls through. The audit row
@@ -275,7 +322,53 @@ export async function recordUnsubscribe(
     }).catch(() => {})
   }
 
-  return { ok: true, touchId: args.touchId, orgId, contactId, alreadyPresent, addresses: results.length, paused, cancelled }
+  return {
+    ok: true, touchId: args.touchId, orgId, contactId, alreadyPresent, addresses: results.length, paused, cancelled,
+    erased: false,
+  }
+}
+
+/**
+ * Did an erasure keep this message's recipient on the suppression list, and
+ * is that row still there? The `contact.erased` row names the suppression row
+ * per message (`suppressedRecipients`); an owner may have removed it since,
+ * and then the click has not been honoured and must say so.
+ */
+async function erasureKeptRecipient(db: AgencyDb, orgId: string, touchId: string): Promise<boolean> {
+  const marks = await db
+    .select({ suppressionId: sql<string | null>`${schema.auditLog.detail}->'suppressedRecipients'->>${touchId}` })
+    .from(schema.auditLog)
+    .where(
+      and(
+        eq(schema.auditLog.orgId, orgId),
+        eq(schema.auditLog.action, 'contact.erased'),
+        sql`${schema.auditLog.detail}->'suppressedRecipients'->>${touchId} IS NOT NULL`,
+      ),
+    )
+  const ids = marks.map((m) => m.suppressionId).filter((id): id is string => typeof id === 'string' && TOUCH_ID.test(id))
+  if (ids.length === 0) return false
+  const held = await db
+    .select({ id: schema.suppressions.id })
+    .from(schema.suppressions)
+    .where(
+      and(eq(schema.suppressions.orgId, orgId), eq(schema.suppressions.kind, 'email'), inArray(schema.suppressions.id, ids)),
+    )
+    .limit(1)
+  return held.length === 1
+}
+
+/**
+ * Pause them with THIS reason, whether or not they were already paused — the
+ * failure path's pause (see the header). Written here rather than as a
+ * parameter on `pauseContact`, which outreach.ts owns.
+ */
+async function pauseOverriding(db: AgencyDb, orgId: string, contactId: string, reason: string, now: Date): Promise<boolean> {
+  const rows = await db
+    .update(schema.contacts)
+    .set({ pausedAt: now, pausedReason: reason.slice(0, 500) })
+    .where(and(eq(schema.contacts.orgId, orgId), eq(schema.contacts.id, contactId)))
+    .returning({ id: schema.contacts.id })
+  return rows.length === 1
 }
 
 const stderrLog: InboundLog = {

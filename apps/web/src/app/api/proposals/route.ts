@@ -4,14 +4,17 @@ import { generateProposal, type AgencyDb } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 /**
  * Generate a proposal from a company's findings (PROMPT.md §8.6).
  *
  * The scope is derived from the latest scan — nothing is typed in here but
  * the day rate. The generator refuses when there is nothing honest to write
- * from (no scan, an unreachable site, a stale scan, no gaps), and the refusal
- * comes back as the sentence to show, with the reason code so the UI can
- * offer the fix (re-scan) rather than a dead end.
+ * from (no scan, an unreachable site, a stale scan, a scan scored under a
+ * different ICP profile — `rescore` — or no gaps), and the refusal comes back
+ * as the sentence to show, with the reason code so the UI can offer the fix
+ * (re-scan) rather than a dead end.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -33,7 +36,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     return NextResponse.json({ error: 'invalid_json' }, { status: 400 })
   }
   const { companyId, dayRate, currency } = (body ?? {}) as { companyId?: unknown; dayRate?: unknown; currency?: unknown }
-  if (typeof companyId !== 'string' || !/^[0-9a-f-]{36}$/i.test(companyId)) {
+  if (typeof companyId !== 'string' || !UUID.test(companyId)) {
     return NextResponse.json({ error: 'companyId is required' }, { status: 400 })
   }
   if (dayRate !== undefined && dayRate !== null && (typeof dayRate !== 'number' || !Number.isFinite(dayRate) || dayRate <= 0)) {

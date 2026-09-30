@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { assertCan } from '@agency/core'
-import { appendAudit, readConnector, type AgencyDb } from '@agency/db/queries'
+import { LEGACY_AGENCY_CONNECTOR_MESSAGE, appendAudit, readConnector, type AgencyDb } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
 import { agentConfigured, probeConnector } from '@/lib/agent'
@@ -45,6 +45,14 @@ export async function POST(
   const db = getDb() as unknown as AgencyDb
   const row = await readConnector(db, user.orgId, id)
   if (!row) return NextResponse.json({ error: 'No such connector.' }, { status: 404 })
+  // Only a row from before 0018 can carry this name (the CHECK refuses it on
+  // insert), and the name CHECK refuses every UPDATE of it — so the worker's
+  // record of the result would fail (logged there, and swallowed), and a
+  // probe that "passed" would leave Enable refusing forever for want of a
+  // test. The name is read here because that write happens on the worker.
+  if (row.name === 'agency') {
+    return NextResponse.json({ error: LEGACY_AGENCY_CONNECTOR_MESSAGE }, { status: 409 })
+  }
 
   const result = await probeConnector(user.orgId, id)
   if (!result) {

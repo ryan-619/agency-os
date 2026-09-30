@@ -168,6 +168,8 @@ describe('the team’s side', () => {
     expect(shareCreateBlocked({ status: 'accepted', evidenceStale: false })).toMatch(/accepted/)
     expect(shareCreateBlocked({ status: 'sent', evidenceStale: true })).toMatch(/stale/)
     expect(shareCreateBlocked({ status: 'sent', evidenceStale: false })).toBeNull()
+    expect(shareCreateBlocked({ status: 'sent', evidenceStale: false, evidenceSuperseded: false })).toBeNull()
+    expect(shareCreateBlocked({ status: 'sent', evidenceStale: false, evidenceSuperseded: true })).toMatch(/newer scan exists/)
   })
 
   it('names an accepted link accepted even after it was revoked or ran out', () => {

@@ -116,6 +116,21 @@ export function isInformationalSignal(key: string): boolean {
  */
 export type InformationalStatus = 'gap' | 'observed' | 'not applicable' | 'not observed'
 
+/**
+ * The scanner's "not applicable" convention, recognised in ONE place:
+ * observed, not a gap, and a detail that begins "not applicable". The
+ * company page's section, the diff and the findings export all read it
+ * through this, so none of them can call a question the page gave no
+ * occasion to ask "in place" — or, in a diff, call its disappearance a fix.
+ */
+export function isNotApplicable(f: {
+  readonly observed: boolean
+  readonly gap: boolean | null
+  readonly detail: string | null
+}): boolean {
+  return f.observed && f.gap !== true && (f.detail ?? '').startsWith('not applicable')
+}
+
 export function informationalStatus(f: {
   readonly observed: boolean
   readonly gap: boolean | null
@@ -123,7 +138,7 @@ export function informationalStatus(f: {
 }): InformationalStatus {
   if (!f.observed) return 'not observed'
   if (f.gap === true) return 'gap'
-  if ((f.detail ?? '').startsWith('not applicable')) return 'not applicable'
+  if (isNotApplicable(f)) return 'not applicable'
   return 'observed'
 }
 

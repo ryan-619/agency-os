@@ -15,7 +15,8 @@
  *  - A signal a scan could not observe is "not assessed", never "fixed".
  *    `diffFindings` decides the change and this file only words it — and the
  *    summary states the rule in so many words, because the model repeats
- *    summaries to people.
+ *    summaries to people. Nor is a signal whose subject went away (a CSP
+ *    removed, an HSTS header dropped): that is "no longer applicable".
  *  - Freshness is derived from the scan's `ran_at` by `isStale`, never read
  *    from the cached `findings.stale`, which is current only as of the last
  *    time anybody ran a scan.
@@ -26,7 +27,7 @@
  */
 import { z } from 'zod'
 import {
-  DEFAULT_STALE_AFTER_DAYS, isStale, parseIcpDefinition, type DiffInput, type FindingDiffRow,
+  DEFAULT_STALE_AFTER_DAYS, isNotApplicable, isStale, parseIcpDefinition, type DiffInput, type FindingDiffRow,
   type SignalChange,
 } from '@agency/core'
 import {
@@ -179,15 +180,34 @@ const evidenceChangesShape = {
 /** One side of a comparison. Unobserved carries nothing: there was nothing to carry. */
 function side(d: DiffInput) {
   return d.observed && d.gap !== null
-    ? { observed: true as const, gap: d.gap, detail: d.detail, evidence: d.evidence }
+    ? { observed: true as const, gap: d.gap, notApplicable: isNotApplicable(d), detail: d.detail, evidence: d.evidence }
     : { observed: false as const }
 }
 
-/** How one observed side reads, in words the model can repeat. */
+/**
+ * How one observed side reads, in words the model can repeat. A side with
+ * nothing to judge is "not applicable" in the scanner's own words, and an
+ * informational side that raised nothing is "observed" — the company page's
+ * words for both. Neither is "in place".
+ */
 function reads(d: DiffInput): string {
   if (!d.observed || d.gap === null) return 'not observed'
   const detail = clip(d.detail, 100)
-  return `${d.gap ? 'a gap' : 'in place'}${detail ? ` (${detail})` : ''}`
+  if (isNotApplicable(d)) return detail || 'not applicable'
+  const word = d.gap ? 'a gap' : d.scored === false ? 'observed' : 'in place'
+  return `${word}${detail ? ` (${detail})` : ''}`
+}
+
+/** A change as the context line words it: never the enum, never a fix it was not. */
+const CHANGE_PHRASE: Readonly<Record<SignalChange, string>> = {
+  fixed: 'fixed',
+  regressed: 'regressed',
+  not_assessed_this_time: 'not assessed this time',
+  now_observed: 'observed this time',
+  no_longer_applicable: 'no longer applicable (nothing to judge now; not a fix)',
+  now_applicable: 'now applicable (a first reading; not a regression)',
+  new_signal: 'new',
+  unchanged: 'unchanged',
 }
 
 const weighted = (r: FindingDiffRow): string => `  ${String(r.weight).padStart(2)}  ${r.signalKey}`
@@ -235,6 +255,8 @@ export const getEvidenceChanges: AgencyToolSpec<typeof evidenceChangesShape> = {
     const regressed = of('regressed')
     const nowObserved = of('now_observed')
     const notAssessed = of('not_assessed_this_time')
+    const noLonger = of('no_longer_applicable')
+    const nowApplicable = of('now_applicable')
     const added = of('new_signal')
     const unchanged = of('unchanged')
 
@@ -263,11 +285,23 @@ export const getEvidenceChanges: AgencyToolSpec<typeof evidenceChangesShape> = {
         (r) => `  ${r.signalKey}`,
       ),
       ...section(
+        noLonger,
+        `No longer applicable (${noLonger.length}) — judged on the older scan; on the newer one there is ` +
+          'nothing to judge (the header or policy is gone). Not a fix:',
+        (r) => `${weighted(r)} — was ${reads(r.older!)}; now ${reads(r.newer)}`,
+      ),
+      ...section(
+        nowApplicable,
+        `Now applicable (${nowApplicable.length}) — nothing to judge on the older scan, so this is a first ` +
+          'reading, not a regression:',
+        (r) => `${weighted(r)} — ${reads(r.newer)}`,
+      ),
+      ...section(
         added,
         `New signals (${added.length}) — not on the older scan at all, so there is nothing to compare:`,
         (r) => `${weighted(r)} — ${reads(r.newer)}`,
       ),
-      ...(fixed.length + regressed.length === 0
+      ...(fixed.length + regressed.length + noLonger.length + nowApplicable.length === 0
         ? ['Nothing observed on both scans changed.']
         : []),
       ...(unchanged.length > 0
@@ -276,7 +310,7 @@ export const getEvidenceChanges: AgencyToolSpec<typeof evidenceChangesShape> = {
       ...(informational.length > 0
         ? [
             `Also changed, not scored (${informational.length}) — context only, never a finding to quote: ` +
-              informational.map((r) => `${r.signalKey} ${r.change}`).join(', '),
+              informational.map((r) => `${r.signalKey} ${CHANGE_PHRASE[r.change]}`).join(', '),
           ]
         : []),
     ]
