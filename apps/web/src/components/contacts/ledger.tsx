@@ -202,7 +202,11 @@ export function ContactsLedger({
                     <button type="button" className="linkish" onClick={() => toggle(r.id, 'check')}>
                       Why can’t I reach them?
                     </button>
-                    <a href={`/api/contacts/${r.id}/record`} className="linkish" download>
+                    <a
+                      href={`/api/contacts/${r.id}/record`}
+                      className="linkish"
+                      title="Everything held about them, as JSON. The download is recorded in the audit log."
+                    >
                       Download record
                     </a>
                     {canWrite ? (
@@ -479,7 +483,7 @@ function EraseContact({ contactId, name, onCancel }: { contactId: string; name: 
       <p className="muted" style={{ margin: '0 0 6px', fontSize: 12.5 }}>
         Not scrubbed: chat transcripts and audit detail (which never held their words), and a call recording stored at
         Twilio — the result lists the call SIDs to delete there by hand. It cannot be undone:{' '}
-        <a href={`/api/contacts/${contactId}/record`} download>download their record</a> first if they asked for a copy.
+        <a href={`/api/contacts/${contactId}/record`}>download their record</a> first if they asked for a copy.
       </p>
       <label>
         Type the contact id <code>{contactId}</code> to confirm
