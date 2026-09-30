@@ -207,10 +207,32 @@ refreshes the scan and never the words. So `sendFactsFor` takes a REQUIRED
 `evidenceAsOfFor(touch)`, null for an answer to a reply, which quotes no scan
 — and sets the required `SendFacts.evidenceStale` from the latest `ok = true`
 scan of the contact's company at or before that moment, judged by `isStale`
-on its `ran_at` at the moment of sending, at the active ICP's
-`stale_after_days` or 14. A re-scan after the words were written does not
-freshen them; a new draft does. `decideSend` refuses it `stale_evidence`
-(§2, "The send path").
+on its `ran_at` at the moment of sending, at the threshold
+`staleAfterDaysOf` reads from the active ICP. A re-scan after the words were
+written does not freshen them; a new draft does. `decideSend` refuses it
+`stale_evidence` (§2, "The send path"). One gap is known and left: the
+sender compares `ran_at` with `created_at` read back as a millisecond
+`Date`, so a successful scan inside the same millisecond before the words
+were written is not seen by it (the compliance count compares in SQL, and
+does see it).
+
+**The threshold has one reader.** `staleAfterDaysOf(definition)` in
+`packages/core/src/freshness.ts` is how every caller reads
+`freshness.stale_after_days` — the sender, enrolment, the proposal and the
+share link, the meeting brief, the rescan, the digest, `tools/scan.ts`, the
+agent's tools and every page (the web's `readIcp` delegates to it): the
+value when it is a finite positive number, and 14 for no profile, a
+definition `parseIcpDefinition` refuses, no `freshness` block, or anything
+else. `isStale` throws on a non-positive threshold, and readers that passed
+the raw value made a hand-edited `0` a 500 on the proposal and company
+pages, the share link and two agent tools while `/compliance` fell back to
+the default — the page and the tool that must agree did not.
+`/settings/icp` names a refused value ("this profile sets 0, which is not a
+positive number of days, so every reader uses the product default") rather
+than displaying it as the threshold, and the company page reads a profile
+that does not parse as no profile rather than answering 500. A source pin,
+`stale-threshold-readers.test.ts` in `packages/db/test` and `apps/web/test`,
+keeps every reader on the helper.
 
 Two more §2.2 links, both added in 0006 and after:
 - **A score names the scan it was computed from.** It used to record a company
@@ -513,12 +535,17 @@ The fourteen added with 0018, one line each:
 - **`check_send` and `get_consent`** make the gate's rule visible to the
   model; both queue nothing. `get_consent` reports a suppression match by kind
   and recording path, never the value. `check_send`'s data carries the
-  consent row AS RECORDED, as `get_consent` reads it, and its summary leads
-  with a reply pause when that is the reason — "paused: they replied (…); …
-  This is not a refusal of <channel>. get_replies shows what they said." —
-  because the send path models a pause as `consent_revoked`, and repeating
-  that told the model an interested prospect had declined. Any other pause
-  is quoted with its reason and never called "not a refusal".
+  consent row AS RECORDED, as `get_consent` reads it, and `pausedFor`, the
+  pause's class. When the send path's own `paused` code is the reason, the
+  summary leads with words for that class (`pauseReasonClass`, the inbox's
+  exact reading): only `replied` — exactly `replied <ISO instant>` —
+  promises an /inbox answer and is called "not a refusal of <channel>";
+  `manual` says answering a reply does not lift it; `unsubscribed` is their
+  opt-out; `opt_out_not_recorded` and `erasure` say to record the opt-out or
+  finish the erasure, and never to resume them. A prefix test used to call a
+  teammate's "replied on the phone (by …)" a reply pause, promising an
+  answer the inbox then refused. A suppression or a recorded refusal
+  outranks the pause and is reported as itself, with the pause beside it.
 - **`get_scan_history`** lists every scan newest first with the score whose
   `scan_id` names it; an unreachable scan is "unreachable", never a 0.
 - **`get_evidence_changes`** compares the two newest scans that reached the
@@ -677,7 +704,7 @@ quiet stretch. Every panel dates evidence from `scans.ran_at` through
 | 4 ✅ | consent, suppression, quiet hours, daily caps — the one send path |
 | 5 ✅ | `proposalFromFindings` and `meetingBrief` — the two documents the pipeline writes, pure, refusing stale evidence |
 | 6 ✅ | the AI disclosure, the opt-out/handoff/sentiment readers, the scripted turn, and §5.5's `decideLlmCall` |
-| 0018 release ✅ | the informational signals' words, `diffFindings`, rotting and `pipelineMetrics`, enrolment's gate and draft, the kickoff and renewal templates, the bounce and auto-reply readers, the connector catalog as data, suppression sources |
+| 0018 release ✅ | the informational signals' words, `diffFindings`, rotting and `pipelineMetrics`, enrolment's gate and draft, the kickoff and renewal templates, the bounce and auto-reply readers, the connector catalog as data, suppression sources; from review, the one stale-threshold reader (`staleAfterDaysOf`) and the pause as its own refusal, with its class and words (`pauseReasonClass`, `pausedSentence`, re-exported by `packages/db`'s inbox) |
 
 ---
 
@@ -692,14 +719,19 @@ the function at all. `dispatchTouch` in `packages/db` is the only function
 that reaches a provider, and both an auto-send message and a human-approved
 draft go through it. The order is §8.4's, with the steps it does not name
 put where they belong — cold channel → unparseable recipient → suppressed →
-consent (`no_consent`, `consent_revoked`) → **bounced → stale evidence** →
-zone and quiet hours → daily cap → campaign inactive → approval — and
-`packages/core/test/send.test.ts` asserts the ORDER, not just the outcomes —
-the refusal code is what somebody reads six months later. The bounce and
-stale evidence sit after consent because neither is a person asking to be
-left alone, so neither may outrank one in the log, and before the clock
-because a message held until morning would still bounce, and would still
-quote something no longer known to be true.
+consent (`no_consent`, `consent_revoked`) → **paused → stale evidence →
+bounced** → zone and quiet hours → daily cap → campaign inactive → approval —
+and `packages/core/test/send.test.ts` asserts the ORDER, not just the
+outcomes — the refusal code is what somebody reads six months later. The
+pause, stale evidence and the bounce sit after consent because none of them
+is a person asking to be left alone, so none may outrank one in the log; the
+pause comes right after consent. Stale evidence, which nobody may approve
+past, comes before the bounce, which a person resolves, because a stale
+draft whose address also bounced read as "fix this first" with Approve
+enabled and turned into a blocked `stale_evidence` once the address was
+corrected. All three come before the clock, because a message held until
+morning would still be to somebody paused, would still quote something no
+longer known to be true, and would still bounce.
 
 **A person approves the words, not the moment.** Approving a draft names the
 recipient, the campaign and the approver (0011: a row may not say "approved"
@@ -716,13 +748,19 @@ and the shortcut (the sender's zone) is the mistake §2.1 names. An address
 that cannot be normalised is a refusal, because no suppression row could
 ever have matched it: `suppressed: false` there means unknown, not clear.
 
-**Four refusals nobody can approve past.** A suppression (somebody asking
+**Five refusals nobody can approve past.** A suppression (somebody asking
 to be left alone), a recorded refusal, cold voice/SMS/WhatsApp, and — added
 by review — `stale_evidence` (§2.2): the words quote a scan that is past its
 re-verification deadline at the moment of sending, and approving them does
-not make them current; the fix is a re-scan and a new draft. §2.1 says cold
-SMS must be "structurally impossible"; an approver offered enough impossible
-things learns to click yes.
+not make them current; the fix is a re-scan and a new draft. And `paused`:
+a person held from every campaign — they replied, a teammate is holding
+them, or an opt-out or an erasure could not be completed — whom a person
+lifts by answering the reply from `/inbox` or resuming them on `/contacts`,
+never by approving one message past the hold; `pausedSentence` words each
+class, and never says "resume" for an opt-out nobody could record or an
+erasure that did not finish. §2.1 says cold SMS must be "structurally
+impossible"; an approver offered enough impossible things learns to click
+yes.
 
 **The clock is not a refusal.** Quiet hours, the cap and a paused campaign
 DEFER a message (`scheduled_for`, same status, approver kept); everything
@@ -804,17 +842,22 @@ takes an optional `writtenAt` for the stale-evidence step: omitted means a
 message written now (the send-check route, `check_send`, enrolment's dry
 run); a Date means a stored draft (`/approvals` and the `/tasks` LinkedIn
 steps pass `evidenceAsOfFor(touch)`); null means an answer to a reply (the
-inbox). Beside the facts it reports `pausedReason`, `consentRecorded` (the row
-as stored, whatever a pause stands in for) and `evidenceStale`, for a screen
-to say; the decision does not read them.
+inbox). Beside the facts it reports `pausedReason`, `pausedFor` (the
+reason's class), `consentRecorded` (the row as stored — the same value as
+`facts.consent`) and `evidenceStale`, for a screen to say.
 
-**A paused contact's facts are gathered like anybody's.** The paused branch
-of `sendFactsFor` used to short-circuit, so a paused AND suppressed person
-read as "not suppressed" on every preview and was logged as a revoked
-consent rather than as the opt-out. Suppression, consent and the cap are
-gathered for them too, and `decideSend` orders the refusals: a suppression
-still wins, and a refusal they recorded outranks the pause's stand-in
-consent.
+**A pause is its own fact, never a consent.** `SendFacts` carries a required
+`paused` and an optional `pausedFor` — a `pauseReasonClass`, never the
+reason's text, which can carry a teammate's address or the contact's words
+— and `facts.consent` is the row as recorded, for a paused person as for
+anybody. `decideSend` refuses `paused` (`humanCanResolve: false`) right
+after consent. It used to model a pause as a revoked consent, so a
+teammate's hold was logged `consent_revoked` — the recipient's own no — and
+enrolment read it that way for ever after the hold was lifted. The paused
+branch of `sendFactsFor` also used to short-circuit, so a paused AND
+suppressed person read as "not suppressed" on every preview; suppression,
+consent and the cap are gathered for them too, and `decideSend` orders the
+refusals: a suppression and a recorded refusal outrank the pause.
 
 **The ledger says never-asked, refused and granted are three facts.**
 `/contacts` shows each person's consent and suppression answer from
@@ -845,27 +888,42 @@ would be stored garbled. Company edit (`PATCH /api/companies/[id]`) changes
 the name, the country and the IANA zone, through `isKnownTimeZone`.
 
 **Enrolment is the first production caller of `draftOpener`.** It checks a
-usable address, pause, consent for the channel, a bounce and the recipient's
-zone, in the send path's order — a contact whose email bounced
-(`email_bounced_at` set) is skipped `bounced` on the email channel only,
-after the consent questions and before the zone, and the panel says to
-correct the address on `/contacts`. It does NOT read the suppression table:
-a suppressed contact is enrolled and then refused `suppressed` by
-`dispatchTouch`, the one place that rule lives (a dry run reports a hint
-count through `previewSend`); what it reads is its own earlier touches'
-`refusal_code`, so a `suppressed` refusal there blocks a re-draft.
+usable address, consent for the channel, a pause, a bounce and the
+recipient's zone, in the send path's order — a person who declined AND is
+paused is skipped `declined`, the stronger statement; a contact whose email
+bounced (`email_bounced_at` set) is skipped `bounced` on the email channel
+only, after the consent and pause questions and before the zone, and the
+panel says to correct the address on `/contacts`. It does NOT read the
+suppression table: a suppressed contact is enrolled and then refused
+`suppressed` by `dispatchTouch`, the one place that rule lives (a dry run
+reports a hint count through `previewSend`); what it reads is its own
+earlier touches' `refusal_code`, so a `suppressed` refusal there blocks a
+re-draft.
 
 **The duplicate guard is one rule, applied by the read and by the INSERT's
 own NOT EXISTS.** A `refused` row counts unless its code is one a correction
 or a re-scan resolves (`REFUSALS_A_CORRECTION_RESOLVES`: `bounced`,
-`unparseable_recipient`, `unknown_timezone`, `stale_evidence`) or one the
-clock resolves (`REFUSALS_THE_CLOCK_RESOLVES`: `quiet_hours`, `daily_cap`,
+`unparseable_recipient`, `unknown_timezone`, `stale_evidence`, and `paused`
+— a hold, not a no, which stops nothing once a person has lifted it; a
+contact paused NOW is skipped before any row is read) or one the clock
+resolves (`REFUSALS_THE_CLOCK_RESOLVES`: `quiet_hours`, `daily_cap`,
 `campaign_inactive`, which the sender defers rather than refuses, so a row
 still refused with one is a deferral a dying worker never restored). A
 person's deny (`needs_approval`), the recipient's refusal
 (`consent_revoked`, `suppressed`), and any other or unknown code block a new
 draft whether or not the campaign auto-sends — the first version ignored
-every `refused` row, and re-enrolling must not quietly ask again. `failed`
+every `refused` row, and re-enrolling must not quietly ask again. A reply's,
+an unsubscribe's and an erasure's cancel of queued messages still writes
+`consent_revoked`, so those still block; a row in flight when a reply lands
+is refused `paused` by the sender's last look, and alone does not. A deny is
+`needs_approval` unless the draft's own facts refuse it `stale_evidence`
+(judged by `sendFactsFor` and `decideSend` at the deny, from the words'
+written-at moment): then the row records `stale_evidence`, which a re-scan
+resolves, because the approver's no was about aged evidence and not the
+person; a suppression, a recorded refusal or a pause that outranks it
+leaves the deny `needs_approval`. The `draft.denied` audit detail carries
+the `refusalCode`, and `/audit` says "(its evidence was stale — a re-scan
+lets it be drafted again)" for one. `failed`
 is ignored only where a person approves each draft; under auto-send it
 blocks, because `recoverStuckSends` leaves `failed` on a send that may have
 gone. And under auto-send the read and the NOT EXISTS look at every
@@ -894,15 +952,31 @@ quoted — it stays in `gaps`.
 
 **The approvals page shows the same facts the sender reads**, from
 `previewSend` at the moment the draft's words were written
-(`evidenceAsOfFor`), and the evidence the draft quotes with its date —
-exactly `quotableFindings`, so a stale scan lists no lines and says why.
-Approve is disabled only for a `humanCanResolve: false` decision, and the
-page says so; everything else stays approvable, because the worker re-checks
-at sending. A draft written from a scan that is stale now is blocked as
-`stale_evidence` with its own sentence — deny, re-scan, draft again —
-because "choose someone else" fixes nothing when every person at the company
-gets the same aged words; `STALE_EVIDENCE_NOTE` says "re-scan, then draft
-it again" where it said "re-scan, then approve".
+(`evidenceAsOfFor`), and the evidence behind THAT draft
+(`draftEvidenceFrom`): the latest successful scan at or before its
+`created_at`, aged at now — the scan the sender judges the words by. It used
+to be the company's latest scan on every card, so after a re-scan the panel
+listed the new scan's lines under words written from the old one. Lines
+(still exactly `quotableFindings`) are listed only when that scan is the
+company's latest and fresh; a newer scan gets a plain note pointing at the
+company page; stale words with a fresh re-scan since say "deny this draft
+and draft it again from that scan"; a draft written before any successful
+scan gets `MISSING_EVIDENCE_NOTE` ("No successful scan of this company had
+run when this draft was written"), because "never scanned" is false once it
+has been scanned since. An answer to a reply never gets
+`STALE_EVIDENCE_NOTE` — the sender does not judge it by a scan, and the
+warning steered approvers to deny legitimate answers — but
+`ANSWER_EVIDENCE_NOTE`, the person's own check that it repeats no finding
+that is no longer known to be true. Approve is disabled only for a
+`humanCanResolve: false` decision, and the page says so; everything else
+stays approvable, because the worker re-checks at sending. A draft written
+from a scan that is stale now is blocked as `stale_evidence` with its own
+sentence — deny, re-scan, draft again — because "choose someone else" fixes
+nothing when every person at the company gets the same aged words;
+`STALE_EVIDENCE_NOTE` says "re-scan, then draft it again" where it said
+"re-scan, then approve". A `paused` candidate's block says the draft can
+wait until the pause is lifted, never to deny it: a denial is a person's no,
+and blocks re-enrolment.
 From the keyboard approving is two steps: `a` arms the focused card and Enter
 on that same card approves; any other key or a change of focus disarms it
 (§2.4). A page load is bounded to 80 previews, four at a time, because
@@ -933,11 +1007,16 @@ on the From the reply came from, a recorded refusal of the channel, or a
 `unsubscribe.not_recorded` audit row naming them (by subject or
 `detail.contactId`), however old, is a 409 — the last is
 `opt_out_not_recorded`, because an opt-out that failed to store left no
-suppression row for the check before it to see — and nobody is resumed. The
-check is the sender's own dry run, inside the draft's
-transaction after the resume, so a refusal nobody may approve past rolls back
-both; one a person can resolve (quiet hours, the cap, a zone, a paused
-campaign) comes back beside the draft as `wouldHold`. Two people answering
+suppression row for the check before it to see — and nobody is resumed.
+`opt_out_not_recorded` is also answered when any inbound row of theirs has
+`reply_kind = 'opted_out'` and its From's keys (`suppressionKeysFor`; an
+unreadable From counts) match no suppression row today — the compliance
+page's own predicate, which survives a fault that failed the suppression
+AND the audit row beside it, since that write is `.catch(() => {})`. Past
+those, the check is the sender's own dry run, inside the draft's transaction
+after the resume, so a refusal nobody may approve past rolls back both; one
+a person can resolve (quiet hours, the cap, a zone, a paused campaign) comes
+back beside the draft as `wouldHold`. Two people answering
 one reply are serialised by locking the reply row — an `INSERT … WHERE NOT
 EXISTS` does not serialise under READ COMMITTED.
 
@@ -964,7 +1043,13 @@ any Precedence, because reading a mail as human-written is the direction that
 pauses; with no headers at all the behaviour is byte-for-byte what it was. An
 opt-out whose suppression cannot be written is audited
 `contact.opt_out_not_recorded`, logged `OPT-OUT NOT RECORDED — follow up by
-hand`, and returned as `optOutNotRecorded` — on the matched branch of
+hand`, pauses the contact OVERWRITING any earlier reason with `opt-out not
+recorded: reply <ISO> (<why>)` (class `opt_out_not_recorded`), as the
+unsubscribe and erasure paths do — all three through one exported helper,
+`pauseContactOverriding` in `packages/db/src/outreach.ts`, because the
+ordinary `pauseContact` keeps the first reason and an older `replied …` left
+in place let answering that reply resume them — and is returned as
+`optOutNotRecorded` — on the matched branch of
 `InboundOutcome` too (false on a duplicate), so `/api/inbound/email` and
 `/api/inbound/resend` send the `opt_out_not_recorded` Slack event (`path:
 'reply'`) AWAITED, in place of the ordinary reply message, and still answer
@@ -972,14 +1057,15 @@ hand`, and returned as `optOutNotRecorded` — on the matched branch of
 path still has no Slack path.
 
 **A bounce is evidence about an address, not a person asking to be left
-alone.** It is a column and a refusal — `bounced`, ordered after consent
-with the order asserted, and `humanCanResolve: true`: correct the address —
-never a suppression row. It used to sit right after `suppressed`, and moved
-because a person who had declined, or was paused, and whose address ALSO
-bounced read as `bounced` — resolvable — so `/approvals` enabled Approve and
-the inbox resumed them. A delivery report of any kind is never filed as a
-reply; before, a DSN from a server that sets References was recorded as the
-contact replying, which paused them and moved the deal to `replied`. The
+alone.** It is a column and a refusal — `bounced`, ordered after consent,
+the pause and stale evidence with the order asserted, and
+`humanCanResolve: true`: correct the address — never a suppression row. It
+used to sit right after `suppressed`, and moved because a person who had
+declined, or was paused, and whose address ALSO bounced read as `bounced` —
+resolvable — so `/approvals` enabled Approve and the inbox resumed them. A
+delivery report of any kind is never filed as a reply; before, a DSN from
+a server that sets References was recorded as the contact replying, which
+paused them and moved the deal to `replied`. The
 IMAP parser reads a report only when the mail's ROOT Content-Type is
 `multipart/report`: a delivery report nested inside an inline-forwarded
 message is read as the reply that wraps it, so a prospect's "please
@@ -991,14 +1077,24 @@ to, and that address is still the contact's; otherwise it is audited
 `contact.bounce_unmatched` and nothing changes. `5.2.2` (mailbox full) is
 transient although its class is 5, per RFC 3463, and a transient failure is
 recorded and changes nothing. `dispatchTouch`'s last look before the provider
-re-reads the mark, and re-checks suppression by address and domain — an
-unsubscribe or a "stop" landing in that window writes nothing else the look
-would see — and refuses a contact deleted or erased in between as
-`consent_revoked`, without calling the provider or writing the recipient back
-(the erasure blanked it on purpose). The final `sent` UPDATE matches only a
-row still in flight — `sending`, or the status a direct caller handed in — so
-a row somebody else settled meanwhile is not overwritten, and neither it nor
-a refusal's settle writes `recipient` back to a row whose `contact_id` is now
+refuses a contact deleted or erased in between as `consent_revoked`, without
+calling the provider or writing the recipient back (the erasure blanked it
+on purpose); then, in `decideSend`'s order, it re-checks suppression by
+address and domain BEFORE the pause, because an unsubscribe landing in that
+window writes a suppression and a pause, and is the opt-out; refuses a fresh
+pause as `paused` ("This contact was paused a moment ago." plus the class's
+`pausedSentence`), where it wrote `consent_revoked` "This contact replied a
+moment ago"; and re-reads the bounce mark. The final `sent` UPDATE matches
+only a row still in flight — `sending`, or the status a direct caller handed
+in — so a row somebody else settled meanwhile is not overwritten, with one
+exception: a row a stuck-send recovery marked `failed` while the provider
+had it (`failed`, `sent_at` and `refusal_code` NULL) is recorded `sent` with
+its `provider_id`, `sent_at` and recipient, and the recovery's "re-approve
+to send it again" error is cleared — the provider's acceptance is better
+evidence than "may or may not have gone", and left `failed` the row could
+not be tied to a reply or a bounce by its Message-ID and a supervised
+re-enrolment drafted the same opener again. Neither that UPDATE nor a
+refusal's settle writes `recipient` back to a row whose `contact_id` is now
 NULL. A campaign that bounces past `OUTREACH_BOUNCE_PAUSE_PCT` (default 5;
 30 days, at least 20 people written to) pauses itself — the existing
 `campaign_inactive` deferral is the stop — and its window restarts after the
@@ -1074,7 +1170,8 @@ past 30 minutes; `recoverStuckSends` is untouched and still covers them.
 **Erasure keeps the suppression.** Suppression rows first, everything in one
 transaction, and a suppression that cannot be stored aborts the erasure and
 fails loudly (§2.1's Phase 4 obligation) — rolled back, the contact paused
-with the reason (OVERWRITING any earlier one, as the unsubscribe path does),
+with the reason (OVERWRITING any earlier one through
+`pauseContactOverriding`, as the unsubscribe and reply paths do),
 `contact.erasure_failed` audited, `OPT-OUT NOT RECORDED` logged, the Slack
 notice awaited, 500. A completed erasure's `contact.erased` detail carries
 `suppressedRecipients` — `{touchId: suppressionId}`, ids only — which is how
@@ -1262,9 +1359,10 @@ banner, taken from `scans.ran_at`. `GET /api/proposals/[id]/markdown`
 — plus the stale banner, because Markdown is the form most likely to be pasted
 into a mail and removing the banner should take a deliberate edit; it refuses
 a DRAFT whose evidence is stale (409). Both write `proposal.exported`, and
-both read the stale threshold through `readIcp` (`lib/company-list.ts`), so
-an unparseable or non-positive `stale_after_days` falls back to the default
-rather than making `isStale` throw.
+both read the stale threshold through `readIcp` (`lib/company-list.ts`),
+which delegates to `staleAfterDaysOf` (§1), so an unparseable or
+non-positive `stale_after_days` falls back to the default rather than making
+`isStale` throw.
 `ProposalDocument` carries an `audience`: the buyer copy omits score, tier,
 weights and the word "stale"; both keep the "not the case here (…)" and "not
 assessed" sentences verbatim.
@@ -1282,11 +1380,19 @@ quotes is superseded — the newer one may say a priced gap is closed — so
 mint refuses `superseded` ("A newer scan exists — regenerate the proposal"),
 and the read and the accept treat a superseded scan as stale (the buyer is
 told it is being re-verified, no view is counted, accept is 410). An
-unreachable newer scan supersedes nothing. `shareEvidenceSuperseded` lets
-the proposal page's Create button say why before it is pressed. A view is a
-count and two
-timestamps. The public page returns 404 for an unknown, revoked or expired
-token alike (a page cannot answer 410; the accept route does).
+unreachable newer scan supersedes nothing. Supersession is compared in SQL
+against the STORED `ran_at` of the proposal's own scan, and that scan is
+excluded by id: `ran_at` is `DEFAULT now()`, stored to the microsecond, and
+a comparison against the same instant read back as a millisecond `Date`
+matched the proposal's own scan — on real Postgres every proposal was
+superseded by itself, no link could be minted, and every live one read
+"being re-verified". `shareEvidenceSuperseded` lets the proposal page's
+Create button say why before it is pressed, and each link in the team's
+list says what its buyer sees: `stale — the buyer sees “being re-verified”`
+or `superseded — the buyer sees “being re-verified”`, never `live` for a
+link whose buyer cannot accept. A view is a count and two timestamps. The
+public page returns 404 for an unknown, revoked or expired token alike (a
+page cannot answer 410; the accept route does).
 
 **Notes and tasks are internal state with no outbound side.** Kickoff and
 renewal templates are created by a click, never by a stage change — the board
@@ -1500,9 +1606,10 @@ breach, because `decideApproval` allows it on purpose (§1). Freshness comes
 from the latest scan's `ran_at` through `isStale`, and the page shows how many
 stale companies `findings.stale` still calls fresh. The threshold is read
 through `readIcp` (`lib/company-list.ts`), like the proposal print view and
-the Markdown export: an unparseable or non-positive `stale_after_days` falls
-back to the default instead of making `isStale` throw, and the page says so
-in a note.
+the Markdown export, and `readIcp` delegates to `staleAfterDaysOf`, the
+helper `get_compliance_summary` and every other reader take (§1): an
+unparseable or non-positive `stale_after_days` falls back to the default
+instead of making `isStale` throw, and the page says so in a note.
 
 The must-be-zero checks: `callsThatDidNotDisclose()`, which leads the page;
 opted-out replies and calls with no matching suppression row today (keys from
@@ -1518,12 +1625,23 @@ unsubscribe or erasure); voice/SMS/WhatsApp touches that WENT OUT with no
 granted consent row today, with the send path's own refusals counted apart as
 "stopped by the send path"; and every outbound row not yet sent
 (`COMPLIANCE_UNSENT_STATUSES`: `awaiting_approval`, `approved`, `queued`,
-`sending`) whose company's latest successful scan is stale or missing,
-tagged by status with `byStatus` and `unsent` beside `awaiting` — a queued
-auto-send row or an approved, deferred one goes out with nobody looking
-again, so those are the ones the count most needs to see. Refusing such a
-row at sending is the send path's (`stale_evidence`); this is the reporting
-half. The auto-send check prints its predicate and its zero, and its
+`sending`) on stale or missing evidence, with its reason in `byWhy`:
+`stale` or `no_evidence` (the company's latest successful scan is stale, or
+there is none), or `rescanned_since` — the latest scan is fresh, but the
+words were written from an older one that is stale now. The third was
+missed before, so the page could say zero while a blocked draft sat in
+`/approvals`. Rows are tagged by status (`byStatus`, `unsent` beside
+`awaiting`), and each carries `writtenFromScanAt` — the scan the send path
+judges the words by, found in SQL against the stored values as
+`sendFactsFor` finds it, null for an answer to a reply — and
+`refusedAtSending`. The listed rows split into `refusedAtSending` (the send
+path refuses them `stale_evidence`, whoever approved them; the fix is a
+re-scan and a new draft), `notJudgedAtSending` (no successful scan behind
+the words, or an answer to a reply, which go as written unless another rule
+stops them — answers are counted here now, with no card of their own) and,
+of those, `notJudgedNoFurtherLook`: the approved, queued and sending ones,
+which go with nobody looking again. Refusing is the send path's; this is the
+reporting half. The auto-send check prints its predicate and its zero, and its
 test runs the same predicate over rows that would match. Every zero says
 "none recorded" and names the recorder `deployment()` reports absent — no
 worker, no reply path, no `UNSUBSCRIBE_SECRET`, a voice service the page
@@ -1585,12 +1703,28 @@ and erasure paths, which are already answering 500, and on the two inbound
 routes, which answer 200 because a retry would be a duplicate and record
 nothing more. **`campaign_paused` comes from the digest cron**, because the
 pause happens in the worker, which has no Slack path: `digestOnce` posts one
-notice for each `campaign.auto_paused` row written since the previous
-digest, inside its 24-hour lookback, at most `DIGEST_MAX_PAUSE_NOTICES` (3),
-and the `cron.digest` row records `campaignPauses { found, posted }`, so a
-cut list is counted rather than dropped silently. The worker still logs a
-warn line per pause. **Not built:** retries, a per-org webhook, and a
-worker-side notifier.
+notice for each `campaign.auto_paused` row read after the previous run's
+mark, at most `DIGEST_MAX_PAUSE_NOTICES` (3), and the `cron.digest` row
+records `campaignPauses { found, posted, readThrough }`. `readThrough` is
+`{ at, id }`: the stored `created_at` of the last pause read, as
+microsecond UTC ISO TEXT — never a JS `Date`, the /audit cursor's trap —
+and its id; the next run reads strictly after it, the marked row's
+timestamp compared in SQL by id. The window's lower end used to be the
+previous `cron.digest` row's own `created_at`, Postgres `now()` on another
+clock from the `now` the run had read up to, so a pause stamped between the
+two was read by neither run, or by both. The previous row is looked for
+across `DIGEST_MARK_LOOKBACK_DAYS` (7), not 24 hours, because Vercel fires a
+cron anywhere inside its minute — on about half of days the previous run is
+a little over a day old — and a failed day makes it two; a run that reads
+nothing carries the mark forward; with no mark, a run reads the 24-hour
+lookback, started no earlier than a mark-less previous row, and a run that
+reads nothing and had no mark records `{ at: <its now>, id: null }`. Past
+the cap the digest says so — "Campaign pauses: N announced below, and M
+more campaigns paused themselves — see <origin>/campaigns" — and the
+`/audit` sentence for `cron.digest` says how many pauses got no notice of
+their own (`found > posted`: past the cap, a refused post, or no Slack). The
+worker still logs a warn line per pause. **Not built:** retries, a per-org
+webhook, and a worker-side notifier.
 
 **The alert that the worker is silent cannot come from the worker.** The daily
 digest cron reads `worker_heartbeats` and posts a separate `worker_silent`
@@ -1602,9 +1736,23 @@ configuration — or when there is no row and a worker is configured. It used
 to require `AGENT_URL`, and the documented production shape (Vercel without
 it, the worker on Fly) is exactly the one where the digest's own line said
 "Worker: SILENT" while the alert was recorded `not_needed`; `workerSilent`
-now agrees with `heartbeatReport` on every cell. Once a day, because that is
-how often the cron runs; with several orgs it posts once per org, which one
-agency with one org does not need engineered around.
+now agrees with `heartbeatReport` on every cell, retired included. **A row
+does not beat configuration forever, though.** Only a running worker's own
+write prunes the table, so `./tools/run-worker.sh` run once against
+production and closed left a row that raised the alert every morning, for
+good — the daily noise that teaches a channel to ignore the one alert that
+matters. Where no worker is configured (`deployment().worker` false), a
+silent row older than `HEARTBEAT_RETIRED_AFTER_DAYS` (7,
+`packages/db/src/heartbeat-read.ts`, the one place the number lives) is
+RETIRED: no `worker_silent` alert, a digest
+line "retired — last seen <YYYY-MM-DD>; no worker is configured, so nothing
+is sending or reading replies", and `worker: 'retired'`, `workerAlert:
+'not_needed'` on the `cron.digest` row. A configured worker is silent
+however long it stays so, and an unconfigured row between the silent
+threshold and a week still alerts — a worker that was running and stopped
+is worth a week of notices. Once a day, because that is how often the cron
+runs; with several orgs it posts once per org, which one agency with one org
+does not need engineered around.
 
 **A silent worker is a number in `/api/health`, not an inference.**
 `worker_heartbeats` is a SYSTEM table with no `org_id` — the worker serves
@@ -1621,8 +1769,13 @@ What the row says comes from `healthInputs()`, the same object `/readyz`
 answers from, so the two cannot disagree about the halt or the lock. On the
 web side a row decides `live` or `silent` whatever the configuration says — an
 observation beats configuration — `never` is a configured worker with no row,
-and `not_configured` is neither. `worker` never changes `/api/health`'s status
-or code, even under `?strict=1`.
+and `not_configured` is neither; the one exception is the retired row above.
+`/api/health`'s `worker.status` is `heartbeatReportedStatus`, which says
+`retired` for it, beside `retired: true|false`. `retired` is not a fifth
+value of `HeartbeatReport['status']`, which stays `silent`, so the dashboard
+and `/settings/deployment` still call such a row silent — true, since
+nothing sends, but not the digest's word. `worker` never changes
+`/api/health`'s status or code, even under `?strict=1`.
 
 ### Search, exports and records
 
@@ -1662,7 +1815,9 @@ suppression** — see the send path above.
 ### The settings pages and the dashboard
 
 **`/settings` is five read-mostly pages.** `/settings/icp` shows the stored
-definition with no editor (§4). `/settings/spend` reads only Postgres sums of
+definition with no editor (§4); a stored `stale_after_days` that is not a
+positive number of days is named as refused, beside the default every
+reader uses in its place (§1). `/settings/spend` reads only Postgres sums of
 `chat_messages.cost_usd` — per UTC day and per person, revoked people
 included — gated on `audit:read` like `/compliance`. `/settings/deployment`
 names every variable and never shows a value or a URL, beside the heartbeat

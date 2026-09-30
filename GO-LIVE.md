@@ -317,7 +317,10 @@ curl -s https://myagencyos.in/api/health | python3 -m json.tool
 ```
 
 `schema.state` must be `"ok"` with `applied: "0018"`. `worker.status` reads
-`not_configured` until Part 5 — that is the honest answer, not a fault.
+`not_configured` until Part 5 — that is the honest answer, not a fault. If
+somebody once ran `./tools/run-worker.sh` against this database and closed
+it, it reads `silent` for a week after that row's last tick and `retired`
+after — the daily digest alerts in the first case and not the second.
 
 **YOU:** open **https://myagencyos.in/settings/deployment**. It lists which
 variables are set, by name only, and answers "why would nothing send?".

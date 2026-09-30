@@ -218,7 +218,7 @@ route in the web app, and neither needs the worker.
 | path | schedule (UTC) | what it does | ceiling |
 |---|---|---|---|
 | `/api/cron/rescan` | `17 3 * * *` | re-scans up to `RESCAN_BATCH_SIZE` companies per org — never-scanned first, then the oldest stale scan — through the same `recordScan` the CLI uses | `maxDuration = 300` |
-| `/api/cron/digest` | `43 6 * * *` | builds the daily digest, posts it to Slack when `SLACK_WEBHOOK_URL` is set, then one notice per campaign that paused itself since the previous digest (at most three), then a separate alert if the worker has gone silent | `maxDuration = 60` |
+| `/api/cron/digest` | `43 6 * * *` | builds the daily digest, posts it to Slack when `SLACK_WEBHOOK_URL` is set, then one notice per campaign that paused itself since the previous run's recorded mark (at most three; the digest counts the rest), then a separate alert if the worker has gone silent (never for a retired row: no worker configured and none heard from in a week) | `maxDuration = 60` |
 
 Both at minutes off the hour, because most schedules run at `:00`.
 
@@ -278,10 +278,17 @@ under "Scheduled rescans" and "Scheduled jobs":
   a `cron.digest` row in the last 20 hours is skipped, and duplicate
   deliveries serialise on a transaction-scoped advisory lock, so one message
   is sent. After the digest it posts one `campaign_paused` notice for each
-  `campaign.auto_paused` row written since the previous digest, at most three
-  — the worker pauses a campaign whose addresses bounce and has no Slack path
-  of its own — and `cron.digest` records `campaignPauses { found, posted }`,
-  so a cut list is counted rather than dropped. A failed Slack post is
+  `campaign.auto_paused` row written since the previous run's recorded mark,
+  at most three — the worker pauses a campaign whose addresses bounce and has
+  no Slack path of its own. The mark is `campaignPauses.readThrough`
+  (`{ at, id }`: the last pause read, its stored `created_at` kept as
+  microsecond text rather than a JavaScript `Date`), so every pause is read
+  by exactly one run whatever the web's and the database's clocks say; with
+  no mark in the last seven days a run reads the last 24 hours. `cron.digest`
+  records `campaignPauses { found, posted, readThrough }`, and past the cap
+  the digest itself says "Campaign pauses: N announced below, and M more
+  campaigns paused themselves — see …/campaigns", so a cut list is counted
+  rather than dropped. A failed Slack post is
   recorded and not retried until the next day's run. With no
   `SLACK_WEBHOOK_URL` nothing is fetched and the answer is 200 with
   `posted: false, why: 'no_slack'`.
@@ -303,6 +310,16 @@ digest and any campaign-paused notices, so it is the newest in the channel.
 It is checked
 once a day, because that is how often the cron runs. With no Slack, the
 `cron.digest` row is highlighted in `/audit` instead.
+
+**A heartbeat row where no worker is configured retires after a week.** If
+you ran `./tools/run-worker.sh` once against production and closed it, its
+row stays — only a running worker prunes the table. Where no worker is
+configured, a row more than `HEARTBEAT_RETIRED_AFTER_DAYS` (7) old is
+retired: no alert, and the digest's Worker line reads "retired — last seen
+<date>; no worker is configured, so nothing is sending or reading replies".
+Before that week it alerts every morning, as a worker that stopped should.
+A configured worker (`AGENT_URL` and `AGENT_INTERNAL_TOKEN` set here) never
+retires.
 
 ---
 
@@ -659,11 +676,15 @@ prefer the script.)
 
    Read `worker` in the same answer. `worker.status` is `live`, `silent` (not
    heard from for more than max(600 s, three of the worker's own ticks)),
-   `never` (a worker is configured and none has ever written a row) or
-   `not_configured` (no row, and no `AGENT_URL`/`AGENT_INTERNAL_TOKEN` here);
-   `worker.ageSeconds` is how long ago the newest heartbeat landed. A live row
-   reads `live` even where this deployment has no `AGENT_URL` — a worker
-   writing to the database is an observation, and it beats configuration.
+   `never` (a worker is configured and none has ever written a row),
+   `not_configured` (no row, and no `AGENT_URL`/`AGENT_INTERNAL_TOKEN` here)
+   or `retired` (no worker configured here, and the newest row is more than
+   a week old — a session somebody ran by hand and closed; `worker.retired`
+   is `true`); `worker.ageSeconds` is how long ago the newest heartbeat
+   landed. A live row reads `live` even where this deployment has no
+   `AGENT_URL` — a worker writing to the database is an observation, and it
+   beats configuration. The dashboard and Settings → Deployment still call a
+   retired row `silent`, which is true — nothing is sending.
    `worker: null` with a `workerError` means the table could not be read —
    almost always 0018 not applied, which `schema` will already say. None of
    this changes the status code, not even under `?strict=1`: strict asks

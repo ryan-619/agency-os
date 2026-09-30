@@ -261,8 +261,9 @@ curl -s https://myagencyos.in/api/health
 `schema.state` is `ok | behind | ahead | unknown`. It returns 200 even when it
 disagrees — deliberately, because the container healthcheck would otherwise
 restart-loop the app. `?strict=1` turns a disagreement into a 503. `worker`
-reports the newest heartbeat — `live`, `silent`, `never` or
-`not_configured`, and its age in seconds — and never changes the status code.
+reports the newest heartbeat — `live`, `silent`, `never`, `not_configured`
+or `retired` (no worker configured and a row over a week old), and its age
+in seconds — and never changes the status code.
 
 ### What does not work live, and why
 
@@ -302,7 +303,7 @@ compose.
 | where | what | when |
 |---|---|---|
 | Vercel, with `CRON_SECRET` | the rescan: never-scanned first, then the stalest, `RESCAN_BATCH_SIZE` per org. Each org is claimed first, so an overlapping delivery skips it rather than scanning the same companies twice | 03:17 UTC daily |
-| Vercel, with `CRON_SECRET` | the digest to Slack (recorded in `/audit` even with no Slack), a notice for each campaign that paused itself since the previous digest (at most three), and the worker-silent alert | 06:43 UTC daily |
+| Vercel, with `CRON_SECRET` | the digest to Slack (recorded in `/audit` even with no Slack), a notice for each campaign that paused itself since the previous run's recorded mark (at most three; the digest counts the rest), and the worker-silent alert (not for a retired row: no worker configured, none heard from in a week) | 06:43 UTC daily |
 | the worker | the bounce auto-pause, then the send tick; the heartbeat and its 30-day prune | every `OUTREACH_TICK_MS` (15 s) |
 | the worker | IMAP reply detection | IDLE, as mail arrives |
 | the worker | the restart reconciler (which also prunes expired sign-in links) and stuck-send recovery | at boot |
