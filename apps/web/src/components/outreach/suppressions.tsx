@@ -13,13 +13,24 @@ import { When } from '@/components/when'
  * The add form's error is the important text on the page. A value that cannot
  * be normalised is refused, and the message says what the consequence of
  * storing it as typed would have been: an opt-out that never matches.
+ *
+ * Each row carries its source as a tag — how it came to be on the list — in
+ * words the page mapped on the server. "unrecorded" is a row from before the
+ * source was tracked, and says so rather than borrowing another tag.
  */
+
+export interface SourceView {
+  readonly tag: string
+  readonly explain: string
+}
 
 export interface SuppressionView {
   readonly id: string
   readonly kind: string
   readonly value: string
   readonly reason: string
+  /** How the row got here, already in words: `manual`, `reply`, …, or `unrecorded`. */
+  readonly source: SourceView
   readonly createdAt: string
 }
 
@@ -32,11 +43,14 @@ export interface PausedView {
 
 export function SuppressionsPanel({
   suppressions,
+  sources,
   paused,
   canWrite,
   canRemove,
 }: {
   suppressions: readonly SuppressionView[]
+  /** Every tag a row can carry, for the legend. */
+  sources: readonly SourceView[]
   paused: readonly PausedView[]
   canWrite: boolean
   canRemove: boolean
@@ -86,7 +100,7 @@ export function SuppressionsPanel({
     if (
       !window.confirm(
         `Remove ${s.value} from the suppression list?\n\nThis means they can be contacted again. ` +
-          `It was added because: ${s.reason}`,
+          `It was added because: ${s.reason}\nHow it got here: ${s.source.explain}`,
       )
     ) {
       return
@@ -157,7 +171,8 @@ export function SuppressionsPanel({
             <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Replied asking us to stop, 12 Sep" />
             <span className="hint">
               Required. A suppression nobody can explain gets removed by whoever finds it, and removing one means
-              contacting somebody who asked not to be.
+              contacting somebody who asked not to be. It is recorded as <code>manual</code>, with your name on the
+              audit line.
             </span>
           </label>
           {error ? <div className="err-line">{error}</div> : null}
@@ -171,6 +186,15 @@ export function SuppressionsPanel({
       ) : null}
 
       <h2 style={{ fontSize: 15, margin: '18px 0 8px' }}>Suppressed</h2>
+      <p className="muted" style={{ fontSize: 12.5, marginTop: 0 }}>
+        How each row got here:{' '}
+        {sources.map((src, i) => (
+          <span key={src.tag}>
+            {i > 0 ? ' · ' : null}
+            <span className="tag" style={{ marginLeft: 0 }}>{src.tag}</span> {src.explain}
+          </span>
+        ))}
+      </p>
       {suppressions.length === 0 ? (
         <p className="muted" style={{ fontSize: 13 }}>Nobody is suppressed.</p>
       ) : (
@@ -181,6 +205,9 @@ export function SuppressionsPanel({
                 <div>
                   <code>{s.value}</code>
                   <span className="tag">{s.kind}</span>
+                  <span className="tag" title={s.source.explain}>
+                    {s.source.tag}
+                  </span>
                 </div>
                 {canRemove ? (
                   <button type="button" className="deny" disabled={busy === s.id} onClick={() => void remove(s)}>
@@ -190,6 +217,7 @@ export function SuppressionsPanel({
               </div>
               <div className="muted" style={{ fontSize: 12.5 }}>
                 {s.reason} · <When iso={s.createdAt} mode="date" />
+                {s.source.tag === 'unrecorded' ? <> · {s.source.explain}</> : null}
               </div>
             </div>
           ))}
