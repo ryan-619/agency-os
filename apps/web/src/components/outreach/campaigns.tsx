@@ -1,6 +1,7 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import type { EnrolSkip } from '@agency/core'
 import { REFUSAL_WORDS } from '@/lib/refusal-words'
 
 /**
@@ -15,6 +16,12 @@ import { REFUSAL_WORDS } from '@/lib/refusal-words'
  * Auto-send is the one control with a sentence next to it, because it is the
  * one §2.4 names: on, and mail leaves the building with no person per
  * message. Owner-only to turn on; anyone may turn it off.
+ *
+ * Enrolment fills a campaign: one draft per person at every qualifying,
+ * freshly scanned company. It is previewed before anything is written, and
+ * the preview says the one thing people assume it does and it does not —
+ * read the suppression list. That check belongs to the send path (§2.1), so
+ * a suppressed person IS enrolled and then refused at sending.
  */
 
 export interface CampaignView {
@@ -38,16 +45,23 @@ export function CampaignsPanel({
   campaigns,
   canWrite,
   canAutoSend,
+  canEnrol = false,
   senderConnected = true,
+  noSenderNote = null,
 }: {
   campaigns: readonly CampaignView[]
   canWrite: boolean
   canAutoSend: boolean
+  /** May this person enrol contacts into a campaign (`campaigns:write`). */
+  canEnrol?: boolean
   /** False when no worker exists to drain the queue — see lib/deployment.ts. */
   senderConnected?: boolean
+  /** `nothingWillSendNote()`, or null when a worker will drain the queue. */
+  noSenderNote?: string | null
 }) {
   const [editing, setEditing] = useState<string | null>(null)
   const [adding, setAdding] = useState(false)
+  const [enrolling, setEnrolling] = useState<string | null>(null)
 
   return (
     <>
@@ -71,11 +85,18 @@ export function CampaignsPanel({
                   <span className={`tag${c.status === 'active' ? ' on' : ''}`}>{c.status}</span>
                   {c.autoSend ? <span className="tag warn">auto-send</span> : <span className="tag">approval per message</span>}
                 </div>
-                {canWrite ? (
+                {canWrite || canEnrol ? (
                   <div className="row-actions">
-                    <button type="button" onClick={() => setEditing(c.id)}>
-                      Edit
-                    </button>
+                    {canEnrol && c.status !== 'done' && enrolling !== c.id ? (
+                      <button type="button" onClick={() => setEnrolling(c.id)}>
+                        Enrol qualifying contacts (preview)
+                      </button>
+                    ) : null}
+                    {canWrite ? (
+                      <button type="button" onClick={() => setEditing(c.id)}>
+                        Edit
+                      </button>
+                    ) : null}
                   </div>
                 ) : null}
               </div>
@@ -99,6 +120,9 @@ export function CampaignsPanel({
                   </span>
                 ))}
               </div>
+              {enrolling === c.id ? (
+                <EnrolPanel campaign={c} noSenderNote={noSenderNote} onClose={() => setEnrolling(null)} />
+              ) : null}
             </div>
           ),
         )}
@@ -246,6 +270,207 @@ function CampaignForm({
         </button>
         <button type="button" onClick={onCancel} disabled={busy}>
           Cancel
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Why somebody was left out, in front of a person. The code is what the audit
+ * row keeps; these say which way to look — the company's scan, or the person.
+ */
+const ENROL_SKIP_WORDS: Readonly<Record<EnrolSkip, string>> = {
+  unreachable: 'companies whose site did not answer at the last scan',
+  stale: 'companies with no fresh scan — re-scan them first',
+  disqualified: 'companies the profile disqualifies',
+  not_qualified: 'companies below the qualifying score',
+  no_evidence: 'companies with nothing observed to quote',
+  no_contact: 'qualifying companies with nobody on file',
+  no_address: 'people with no usable address on this channel',
+  paused: 'people paused after replying',
+  declined: 'people who declined this channel',
+  no_timezone: 'people with no timezone, on them or their company',
+  already_enrolled: 'people who already have a draft in this campaign',
+  already_contacted: 'people this campaign has already written to',
+}
+
+/** What the enrol route answers — counts only, never who. */
+interface EnrolPlan {
+  readonly dryRun: boolean
+  readonly status: 'queued' | 'awaiting_approval'
+  readonly queued: number
+  readonly skipped: Partial<Record<EnrolSkip, number>>
+  readonly skippedTotal: number
+  readonly truncated: boolean
+  readonly limit: number
+  readonly suppressedHint: number | null
+}
+
+const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`
+
+function SkipCounts({ plan }: { plan: EnrolPlan }) {
+  const rows = (Object.entries(plan.skipped) as [EnrolSkip, number][]).filter(([, n]) => n > 0)
+  if (rows.length === 0) return null
+  return (
+    <ul>
+      {rows.map(([why, n]) => (
+        <li key={why}>
+          <strong>{n}</strong> {ENROL_SKIP_WORDS[why] ?? why.replace(/_/g, ' ')}
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+/**
+ * Preview first, then queue. The preview is the same plan with nothing
+ * written, so what the confirm button says is what it will do — give or
+ * take somebody else enrolling in between, which the answer reports.
+ */
+function EnrolPanel({
+  campaign,
+  noSenderNote,
+  onClose,
+}: {
+  campaign: CampaignView
+  noSenderNote: string | null
+  onClose: () => void
+}) {
+  const [plan, setPlan] = useState<EnrolPlan | null>(null)
+  const [done, setDone] = useState<EnrolPlan | null>(null)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const enrol = async (dryRun: boolean): Promise<void> => {
+    setBusy(true)
+    setError('')
+    try {
+      const res = await fetch(`/api/campaigns/${campaign.id}/enrol`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ dryRun }),
+      })
+      const body = (await res.json().catch(() => ({}))) as Partial<EnrolPlan> & { error?: string }
+      if (!res.ok) {
+        setError(body.error ?? 'That did not work.')
+        return
+      }
+      if (dryRun) setPlan(body as EnrolPlan)
+      else setDone(body as EnrolPlan)
+    } catch {
+      setError('The request did not complete. Try again.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // The preview is asked for as the panel opens. It writes nothing, so a
+  // second run (React's development double-invoke) costs a read and no more.
+  useEffect(() => {
+    void enrol(true)
+  }, [])
+
+  const linkedInWarning =
+    campaign.channel === 'linkedin' ? (
+      <p className="note note-warn" style={{ marginTop: 8 }}>
+        No provider can send on LinkedIn; approved rows will wait for the LinkedIn step.
+      </p>
+    ) : null
+  const noSender = noSenderNote ? (
+    <p className="note note-warn" style={{ marginTop: 8 }}>
+      {noSenderNote}
+    </p>
+  ) : null
+
+  if (done) {
+    return (
+      <div style={{ marginTop: 12 }}>
+        <div className="note">
+          <p style={{ margin: 0 }}>
+            {done.status === 'queued' ? (
+              <>
+                Queued <strong>{plural(done.queued, 'message', 'messages')}</strong> for the worker to send. Nothing was
+                sent yet — each one is checked against every rule at the moment it is sent.
+              </>
+            ) : (
+              <>
+                Queued <strong>{plural(done.queued, 'draft', 'drafts')}</strong> for approval. Nothing was sent.
+              </>
+            )}
+            {done.skippedTotal > 0 ? ` ${done.skippedTotal} skipped:` : ''}
+          </p>
+          <SkipCounts plan={done} />
+          {done.truncated ? (
+            <p style={{ margin: '8px 0 0' }}>
+              It stopped at the limit of {done.limit}. Enrol again to continue with the rest — everyone queued this time
+              is skipped next time.
+            </p>
+          ) : null}
+        </div>
+        {linkedInWarning}
+        {noSender}
+        <div className="row-actions" style={{ marginTop: 10 }}>
+          <button type="button" onClick={() => window.location.reload()}>
+            Done
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      {plan ? (
+        <>
+          <div className="note">
+            <p style={{ margin: 0 }}>
+              <strong>{plural(plan.queued, 'person', 'people')}</strong> would get a draft;{' '}
+              {plan.skippedTotal} skipped{plan.skippedTotal > 0 ? ':' : '.'}
+            </p>
+            <SkipCounts plan={plan} />
+            <p style={{ margin: '8px 0 0' }}>
+              The send path will refuse anyone on the suppression list — enrolment does not read it, on purpose.
+              {plan.suppressedHint ? ` Checked just now, ${plan.suppressedHint} of these would be.` : ''}
+            </p>
+            {plan.truncated ? (
+              <p style={{ margin: '8px 0 0' }}>
+                This stops at the limit of {plan.limit}, highest-scoring companies first. Enrol again afterwards to
+                continue with the rest.
+              </p>
+            ) : null}
+            <p style={{ margin: '8px 0 0' }}>
+              {plan.status === 'queued'
+                ? 'This campaign auto-sends: these go to the worker without a person reading each one. Every rule is still checked at the moment of sending.'
+                : 'Each draft waits in Approvals for a person to read it and choose to send it.'}
+              {campaign.status !== 'active'
+                ? ` The campaign is ${campaign.status}, so nothing in it is sent until it is active.`
+                : ''}
+            </p>
+          </div>
+          {linkedInWarning}
+          {noSender}
+        </>
+      ) : busy ? (
+        <p className="muted" style={{ fontSize: 13 }}>
+          Working out who qualifies…
+        </p>
+      ) : null}
+
+      {error ? <div className="err-line">{error}</div> : null}
+
+      <div className="row-actions" style={{ marginTop: 10 }}>
+        {plan && plan.queued > 0 ? (
+          <button type="button" disabled={busy} onClick={() => void enrol(false)}>
+            {busy
+              ? 'Queuing…'
+              : plan.status === 'queued'
+                ? `Queue ${plural(plan.queued, 'message', 'messages')} to send`
+                : `Queue ${plural(plan.queued, 'draft', 'drafts')} for approval`}
+          </button>
+        ) : null}
+        <button type="button" onClick={onClose} disabled={busy}>
+          {plan && plan.queued === 0 ? 'Close' : 'Cancel'}
         </button>
       </div>
     </div>
