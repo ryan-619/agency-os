@@ -199,7 +199,7 @@ function stoppedBecause(step: LinkedinStep): string {
   }
   if (step.status === 'failed') return step.error ?? 'This message failed.'
   if (step.status === 'awaiting_approval') {
-    return 'Sent back for approval: its campaign no longer sends without one. It is in Approvals.'
+    return 'Waiting for approval in Approvals. It comes back here as a step once somebody approves it.'
   }
   return `This message is ${step.status}, so there is nothing to send.`
 }

@@ -557,7 +557,9 @@ export async function linkedinFinishStep(
         reason: 'still_live',
         message: state === 'handed'
           ? 'Somebody was handed this message. Say whether it was sent instead.'
-          : 'This message can still be sent. Deny it in Approvals if it should not go.',
+          : state === 'sending'
+            ? 'Somebody is starting this step right now.'
+            : 'This message is approved and can still be sent. Pause its campaign if it should not go; Start will then hold it.',
       }
     }
   }
