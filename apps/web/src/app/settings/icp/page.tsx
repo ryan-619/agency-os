@@ -186,7 +186,11 @@ function Definition({ v }: { v: IcpView }) {
       <h3 style={{ fontSize: 14, margin: '20px 0 8px' }}>Freshness</h3>
       <p style={{ margin: '0 0 6px' }}>
         A finding is stale after <span className="mono">{v.staleAfterDays}</span> days
-        {v.staleAfterDaysIsDefault ? ' — this profile sets none, so the product default applies' : ''}. Stale
+        {v.staleAfterDaysRefused !== null
+          ? ` — this profile sets ${v.staleAfterDaysRefused}, which is not a positive number of days, so every reader uses the product default`
+          : v.staleAfterDaysIsDefault
+            ? ' — this profile sets none, so the product default applies'
+            : ''}. Stale
         evidence is never quoted in a draft or a proposal until the company is re-scanned.
       </p>
       {v.freshnessNote ? <p className="muted" style={{ fontSize: 13 }}>{v.freshnessNote}</p> : null}
