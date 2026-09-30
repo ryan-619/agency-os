@@ -398,7 +398,7 @@ function inboundBullet(d: Deployment, w: WorkerStatusLike): HonestyBullet {
       id: 'inbound-webhook',
       lead: 'Replies can arrive through an inbound webhook.',
       rest:
-        'A provider posts them here, so a reply pauses its contact, moves the deal and records an opt-out even with no worker running.' +
+        'A provider posts them here, so a reply pauses its contact and moves the deal — and one that says stop suppresses the address — even with no worker running.' +
         (workerReceives(w) ? ' The worker reads the mailbox as well.' : ''),
     }
   }
@@ -412,7 +412,7 @@ function inboundBullet(d: Deployment, w: WorkerStatusLike): HonestyBullet {
   return {
     id: 'inbound-none',
     lead: 'Nothing here can learn that somebody replied.',
-    rest: `${capital(notReadingBecause(w) ?? 'no mailbox is being read')} and no inbound webhook is configured, so the inbox stays as it is.`,
+    rest: `${capital(notReadingBecause(w) ?? 'no mailbox is being read')} and no inbound webhook is configured, so no reply can reach the inbox.`,
   }
 }
 

@@ -233,7 +233,7 @@ export default async function Dashboard() {
         ) : null}
         {look.clear.length > 0 ? (
           <p className="muted" style={{ fontSize: 13, margin: look.waiting.length > 0 ? '10px 0 0' : 0 }}>
-            {look.waiting.length > 0 ? 'Nothing waiting among ' : 'Nothing is waiting on anybody: no '}
+            {look.waiting.length > 0 ? 'No ' : 'Nothing is waiting on anybody: no '}
             {look.clear.map((i, n) => (
               <span key={i.id}>
                 {n === 0 ? '' : n === look.clear.length - 1 ? ' or ' : ', '}
