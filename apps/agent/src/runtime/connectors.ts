@@ -42,9 +42,10 @@
  * ## A stdio child and the CLI's own environment
  *
  * The `env` this module emits is exactly `config.env` plus the credential, and
- * that is what the tests below it assert. It is NOT what the child receives.
- * The CLI spawns a stdio server with `{ ...its own environment, ...env }` —
- * read from the installed binary, not assumed — and its own environment is
+ * that is what `test/connectors.test.ts` asserts of the object. It is NOT what
+ * the child receives. The CLI spawns a stdio server with
+ * `{ ...its own environment, ...env }` — read from the installed binary, not
+ * assumed — and its own environment is
  * `childEnv()`, which on the api_key path carries ANTHROPIC_API_KEY. So every
  * stdio connector was being handed the key that bills the agency, one process
  * down from the place this file was careful not to put it.
