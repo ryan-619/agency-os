@@ -27,12 +27,16 @@ export default async function ImportCompanies({
   const icp = icpRow ? parseIcpDefinition(icpRow.definition) : null
   const { inserted, present, error } = await searchParams
   // Which of the things that can scan an imported company exist HERE: a
-  // terminal always does; the nightly rescan only with a cron secret, and the
-  // agent's scan_company only with a worker (§2.2 — a page does not promise
-  // a scan nothing on this deployment will run).
+  // terminal always does; the daily rescan route only with a cron secret, and
+  // the agent's scan_company only with a worker (§2.2 — a page does not
+  // promise a scan nothing on this deployment will run). A secret says the
+  // route will accept a call, not that anything calls it — Vercel's cron does,
+  // compose has no scheduler — so the sentence says "when".
   const live = deployment()
   const scanWays: ReactNode[] = [<><code>npm run scan</code> from a terminal</>]
-  if (live.cron) scanWays.push('the nightly rescan (never-scanned companies first, a few a night)')
+  if (live.cron) {
+    scanWays.push('the daily rescan when a scheduler calls it (never-scanned companies first, a few per run)')
+  }
   if (live.worker) scanWays.push(<><code>scan_company</code> from the agent in chat</>)
 
   const signOutAction = async () => {

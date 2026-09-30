@@ -91,7 +91,8 @@ async function main(): Promise<void> {
    * This used to say the worker had no ANTHROPIC_API_KEY, which was the
    * wrong question for the whole build: a key is one of TWO ways a worker
    * reaches a model, and the one that spends credit. Blaming the key sent
-   * whoever read it to buy some. Name both, and name the free one first.
+   * whoever read it to buy some. Name both, and the one that spends no
+   * credit first.
    */
   if (ready.chat === 'disabled') {
     fail(
