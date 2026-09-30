@@ -688,7 +688,9 @@ function dealEvent(m: DealMove, input: TimelineInputs): TimelineEvent {
     text: capital(sentence),
     facts: [
       m.from ? `${m.from} → ${m.to}` : `→ ${m.to}`,
-      ...(m.cause ? [CAUSE_WORDS[m.cause]] : []),
+      // A companion's cause, inherited by the first-class row it repeated.
+      // When the embedded row IS the record, its own sentence names the cause.
+      ...(m.cause && m.firstClass ? [CAUSE_WORDS[m.cause]] : []),
     ],
     by: `by ${actorLabel(m.row.actor, input.actors ?? new Map()).label}`,
     href: null,

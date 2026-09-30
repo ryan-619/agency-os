@@ -256,7 +256,9 @@ describe('deal moves', () => {
     const reply = audit({ id: 'a-reply', action: 'contact.replied', subjectType: 'contact', detail: { deal: 'created:replied' } })
     const [event] = mergeTimeline({ ...base, audit: [reply] })
     expect(event).toMatchObject({ kind: 'deal_move', id: 'a-reply', label: 'deal' })
-    expect(event?.facts).toEqual(['→ replied', 'after a reply'])
+    // The reply's own sentence says what caused it; the fact is the move.
+    expect(event?.text).toBe('Recorded a reply from a contact at rentman.io: opened a deal at replied')
+    expect(event?.facts).toEqual(['→ replied'])
   })
 
   it('folds the two rows one acceptance writes into one won', () => {
