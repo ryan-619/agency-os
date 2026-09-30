@@ -34,8 +34,20 @@ async function importAction(_prev: ContactImportState, formData: FormData): Prom
   }
 
   const file = formData.get('file')
-  const text = file instanceof File && file.size > 0 ? await file.text() : String(formData.get('csv') ?? '')
+  const fromFile = file instanceof File && file.size > 0
+  const text = fromFile ? await file.text() : String(formData.get('csv') ?? '')
   if (!text.trim()) return { kind: 'error', message: 'Nothing to import — choose a file or paste the rows.' }
+  // `File.text()` decodes as UTF-8 and replaces what it cannot read with
+  // U+FFFD. Excel's plain "CSV" is Windows-1252, so every accented name in it
+  // would be stored with a replacement character where the letter was.
+  if (fromFile && text.includes('�')) {
+    return {
+      kind: 'error',
+      message:
+        'That file is not UTF-8, so accented names in it would be stored garbled. Save it as "CSV UTF-8" ' +
+        '(Excel lists it separately from plain CSV) and import again.',
+    }
+  }
 
   let rows: ContactSeedRow[]
   try {
