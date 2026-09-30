@@ -139,7 +139,9 @@ describe('the consent tools', () => {
       const out = await check()
       if (!out.ok) throw new Error(out.message)
       expect(out.data).toMatchObject({
-        code: 'consent_revoked', facts: { paused: true, pausedReason: reason, consent: 'never_asked', suppressed: false },
+        code: 'paused',
+        humanCanResolve: false,
+        facts: { paused: true, pausedReason: reason, pausedFor: 'replied', consent: 'never_asked', suppressed: false },
       })
       expect(out.summary).toBe(
         `paused: they replied (${reason}); every campaign stops for them until a person answers from /inbox ` +
@@ -149,14 +151,68 @@ describe('the consent tools', () => {
       expect(out.summary).not.toMatch(/declined/)
     })
 
-    it('quotes any other pause with its reason, and never calls it "not a refusal"', async () => {
-      const reason = 'unsubscribed 2026-09-15T11:00:00.000Z'
+    /**
+     * Which pause it is decides what lifts it, read the way the inbox reads
+     * it (`pauseReasonClass`, an exact `replied <ISO>` match). Found by
+     * review: a prefix test promised an /inbox answer for a teammate's
+     * "replied on the phone (by …)", which the inbox refuses, and told the
+     * model to resume somebody whose opt-out was never recorded.
+     */
+    const pausedAs = async (reason: string) => {
       await db.update(schema.contacts).set({ pausedAt: NOON_UTC, pausedReason: reason }).where(eq(schema.contacts.id, priyaId))
       const out = await check()
       if (!out.ok) throw new Error(out.message)
+      expect(out.data).toMatchObject({ code: 'paused', humanCanResolve: false })
+      expect(out.summary).toMatch(/Nothing was queued\.$/)
+      return out
+    }
+
+    it('calls a teammate’s pause a teammate’s, even one that starts with "replied", and never promises an /inbox answer', async () => {
+      const reason = 'replied on the phone, call in October (by sam@agency.test)'
+      const out = await pausedAs(reason)
+      expect(out.data).toMatchObject({ facts: { pausedFor: 'manual' } })
       expect(out.summary).toBe(
-        `paused (${reason}): every campaign stops for them until a person reads why and resumes them on /contacts. ` +
+        `paused by a teammate (${reason}): every campaign stops for them until a person resumes them on /contacts. ` +
+          'Answering a reply from /inbox does not lift this pause. Approving a draft does not lift a pause. Nothing was queued.',
+      )
+      expect(out.summary).not.toMatch(/not a refusal/)
+      expect(out.summary).not.toMatch(/they replied/)
+    })
+
+    it('never suggests resuming an opt-out that was not recorded — it says to record it', async () => {
+      const out = await pausedAs('opt-out not recorded: one-click unsubscribe 2026-09-15T11:00:00.000Z (Error)')
+      expect(out.data).toMatchObject({ facts: { pausedFor: 'opt_out_not_recorded' } })
+      expect(out.summary).toMatch(/record the opt-out by hand on \/suppressions/)
+      expect(out.summary).toMatch(/do not suggest resuming them/)
+      expect(out.summary).not.toMatch(/resumes? them (on|there)/)
+      expect(out.summary).not.toMatch(/not a refusal/)
+    })
+
+    it('never suggests resuming an erasure that did not finish — it says to complete it', async () => {
+      const out = await pausedAs('erasure requested 2026-09-15; not completed (unreadable_phone)')
+      expect(out.data).toMatchObject({ facts: { pausedFor: 'erasure' } })
+      expect(out.summary).toMatch(/complete the erasure from their record on \/contacts/)
+      expect(out.summary).toMatch(/do not suggest resuming them/)
+      expect(out.summary).not.toMatch(/resumes? them (on|there)/)
+    })
+
+    it('calls an unsubscribe an opt-out, never something to resume', async () => {
+      const reason = 'unsubscribed 2026-09-15T11:00:00.000Z'
+      const out = await pausedAs(reason)
+      expect(out.summary).toBe(
+        `paused: they unsubscribed (${reason}). That is their opt-out — do not suggest resuming them. ` +
           'Approving a draft does not lift a pause. Nothing was queued.',
+      )
+      expect(out.summary).not.toMatch(/not a refusal/)
+    })
+
+    it('quotes any other pause with its reason, and never calls it "not a refusal"', async () => {
+      const reason = 'waiting on legal'
+      const out = await pausedAs(reason)
+      expect(out.data).toMatchObject({ facts: { pausedFor: 'other' } })
+      expect(out.summary).toBe(
+        `paused (${reason}): every campaign stops for them until a person reads why on /contacts and resumes them ` +
+          'there if that is right. Approving a draft does not lift a pause. Nothing was queued.',
       )
       expect(out.summary).not.toMatch(/not a refusal/)
     })

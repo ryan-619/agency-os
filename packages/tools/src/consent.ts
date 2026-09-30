@@ -17,7 +17,7 @@
  */
 import { z } from 'zod'
 import { and, eq, sql } from 'drizzle-orm'
-import { normaliseEmail } from '@agency/core'
+import { normaliseEmail, type PauseReasonClass } from '@agency/core'
 import { consentLedgerFor, findCompanyByDomain, previewSend, type ConsentLedger } from '@agency/db'
 import * as schema from '@agency/db/schema'
 import { normaliseDomain } from '@agency/scanner'
@@ -42,31 +42,57 @@ const STANDING_WORDS: Record<ConsentLedger['suppression']['email'], string> = {
 }
 
 /**
- * A pause, in words the model can act on.
+ * A pause, in words the model can act on, by what paused them.
  *
- * The send path models a pause as a revoked consent — to this person, right
- * now, the answer is no — so the DECISION reads `consent_revoked`. Repeated
- * to the model as it stands, that told the agent an interested prospect who
- * had simply replied "declined email … nobody may approve past this", which
- * it then told the user. Found by review. A reply pause is lifted by a
- * person answering from /inbox or resuming them, and says so; any other
- * pause (an unsubscribe, an erasure that did not complete, a person's own)
- * is quoted with its reason and never called "not a refusal", because it
- * may be exactly that.
+ * The send path refuses a paused contact as `paused` — its own code, not a
+ * revoked consent — and the summary leads with these words when that is the
+ * reason. Which pause it is decides what lifts it, so the class comes from
+ * `pauseReasonClass`, the same exact reading the inbox uses: only a reason
+ * that is exactly `replied <ISO instant>` is ended by answering the reply. A
+ * prefix test called a teammate's "replied on the phone (by …)" a reply
+ * pause, promising an /inbox answer the inbox then refused; and an opt-out
+ * that could not be recorded, or an erasure that did not finish, was told
+ * "resumes them on /contacts". Found by review. Neither of those two is ever
+ * a thing to resume: the fix is to record the opt-out, or finish the
+ * erasure. Only a reply pause is called "not a refusal" — any other is
+ * quoted with its reason, because it may be exactly that.
  */
-function pauseWords(reason: string | null, channel: string): string {
+function pauseWords(pausedFor: PauseReasonClass, reason: string | null, channel: string): string {
   const why = (reason ?? 'no reason recorded').slice(0, 200)
-  if (why.startsWith('replied')) {
-    return (
-      `paused: they replied (${why}); every campaign stops for them until a person answers from /inbox ` +
-      `(which resumes them) or resumes them on /contacts. This is not a refusal of ${channel}. ` +
-      'get_replies shows what they said.'
-    )
+  const noApprove = 'Approving a draft does not lift a pause.'
+  switch (pausedFor) {
+    case 'replied':
+      return (
+        `paused: they replied (${why}); every campaign stops for them until a person answers from /inbox ` +
+        `(which resumes them) or resumes them on /contacts. This is not a refusal of ${channel}. ` +
+        'get_replies shows what they said.'
+      )
+    case 'manual':
+      return (
+        `paused by a teammate (${why}): every campaign stops for them until a person resumes them on /contacts. ` +
+        `Answering a reply from /inbox does not lift this pause. ${noApprove}`
+      )
+    case 'unsubscribed':
+      return (
+        `paused: they unsubscribed (${why}). That is their opt-out — do not suggest resuming them. ${noApprove}`
+      )
+    case 'opt_out_not_recorded':
+      return (
+        `paused: they asked to stop, and the opt-out could not be recorded (${why}), so there is no suppression ` +
+        'row yet. A person must first record the opt-out by hand on /suppressions — do not suggest resuming ' +
+        `them. ${noApprove}`
+      )
+    case 'erasure':
+      return (
+        `paused: they asked to be erased, and the erasure did not complete (${why}). A person must first ` +
+        `complete the erasure from their record on /contacts — do not suggest resuming them. ${noApprove}`
+      )
+    case 'other':
+      return (
+        `paused (${why}): every campaign stops for them until a person reads why on /contacts and resumes them ` +
+        `there if that is right. ${noApprove}`
+      )
   }
-  return (
-    `paused (${why}): every campaign stops for them until a person reads why and resumes them on /contacts. ` +
-    'Approving a draft does not lift a pause.'
-  )
 }
 
 /** The campaign by name, in this org. Names are unique per org (`campaigns_org_name_key`). */
@@ -151,16 +177,14 @@ export const checkSend: AgencyToolSpec<typeof checkSendShape> = {
     const approval = wouldNeedApproval
       ? 'A real message under this campaign would still wait for a person to approve it.'
       : 'This campaign sends without a per-message approval.'
-    // The pause speaks first when it IS the reason: the decision's
-    // consent_revoked is then the pause's stand-in, not a refusal anyone
-    // recorded. A suppression, a recorded refusal or anything else earlier
-    // in the order is reported as itself, with the pause beside it.
-    const pauseIsTheReason =
-      facts.paused && !decision.allowed && decision.code === 'consent_revoked' && facts.consentRecorded?.granted !== false
+    // The pause speaks first when it IS the reason — the send path's own
+    // `paused` code. A suppression or a recorded refusal outranks it and is
+    // reported as itself, with the pause beside it.
+    const pauseIsTheReason = !decision.allowed && decision.code === 'paused'
     const summary = decision.allowed
       ? `send_now: every rule passes for ${email} under "${campaign.name}" right now. ${approval} Nothing was queued.`
       : pauseIsTheReason
-        ? `${pauseWords(facts.pausedReason, campaign.channel)} Nothing was queued.`
+        ? `${pauseWords(facts.pausedFor ?? 'other', facts.pausedReason, campaign.channel)} Nothing was queued.`
         : `${decision.code}: ${decision.reason.replace(/[.\s]+$/, '')}. ` +
           (decision.humanCanResolve ? 'A person could resolve this. ' : 'Nobody may approve past this. ') +
           (facts.paused ? `They are also paused (${(facts.pausedReason ?? 'no reason recorded').slice(0, 200)}). ` : '') +
@@ -184,6 +208,7 @@ export const checkSend: AgencyToolSpec<typeof checkSendShape> = {
           consent: facts.consentRecorded ? (facts.consentRecorded.granted ? 'granted' : 'refused') : 'never_asked',
           paused: facts.paused,
           pausedReason: facts.pausedReason,
+          pausedFor: facts.pausedFor,
           evidenceStale: facts.evidenceStale,
           recipientTimeZone: facts.recipientTimeZone,
           zoneFrom: facts.zoneFrom,
