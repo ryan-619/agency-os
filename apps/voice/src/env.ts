@@ -1,6 +1,16 @@
 import { z } from 'zod'
 
 /**
+ * A blank value is UNSET — the web app's rule, and the worker's. `node
+ * --env-file` reads `NAME=` as the empty string, and compose's `NAME:
+ * ${NAME:-}` hands a variable nobody set to the container the same way, so a
+ * blank URL, uuid or enum here stopped the service booting over a feature
+ * nobody had turned on. Blank still means what unset means: with no
+ * `VOICE_PUBLIC_URL` every webhook is refused.
+ */
+const blankIsUnset = (v: unknown): unknown => (typeof v === 'string' && v.trim() === '' ? undefined : v)
+
+/**
  * Validated at startup (PROMPT.md §10). Never logged.
  *
  * Most of this is OPTIONAL on purpose, the way the agent worker's mail
@@ -25,7 +35,7 @@ const schema = z.object({
    * hand Twilio a `wss://` URL for the relay. Optional only so the process
    * can boot and report itself unconfigured on /readyz.
    */
-  VOICE_PUBLIC_URL: z.string().url().optional(),
+  VOICE_PUBLIC_URL: z.preprocess(blankIsUnset, z.string().url().optional()),
 
   /** Twilio. Unset means every webhook is refused and nothing is dialled. */
   TWILIO_ACCOUNT_SID: z.string().optional(),
@@ -38,13 +48,13 @@ const schema = z.object({
    * optional and the service uses the only org when exactly one exists;
    * with more than one it refuses to guess.
    */
-  VOICE_ORG_ID: z.string().uuid().optional(),
+  VOICE_ORG_ID: z.preprocess(blankIsUnset, z.string().uuid().optional()),
 
   /** Where a warm handoff goes: a TaskRouter workflow, or a person's number. */
   TASKROUTER_WORKFLOW_SID: z.string().optional(),
   VOICE_HANDOFF_NUMBER: z.string().optional(),
   /** The team member a handoff is recorded against (`calls.handoff_to_user_id`). */
-  VOICE_HANDOFF_USER_EMAIL: z.string().email().optional(),
+  VOICE_HANDOFF_USER_EMAIL: z.preprocess(blankIsUnset, z.string().email().optional()),
 
   /**
    * The model behind the conversation. Optional: without it the scripted
@@ -71,9 +81,9 @@ const schema = z.object({
    * remote ones additionally need LLM_ALLOW_REMOTE_LEAD_DATA, because a
    * call transcript is a named person's words.
    */
-  LLM_PROVIDER: z.enum(['ollama', 'openai', 'anthropic']).optional(),
-  LLM_MODEL: z.string().optional(),
-  OLLAMA_BASE_URL: z.string().url().default('http://127.0.0.1:11434'),
+  LLM_PROVIDER: z.preprocess(blankIsUnset, z.enum(['ollama', 'openai', 'anthropic']).optional()),
+  LLM_MODEL: z.preprocess(blankIsUnset, z.string().optional()),
+  OLLAMA_BASE_URL: z.preprocess(blankIsUnset, z.string().url().default('http://127.0.0.1:11434')),
   /**
    * Declared, never inferred from the URL: an Ollama on a rented box is not
    * the agency's hardware, and guessing would turn §5.5's rule off for the
