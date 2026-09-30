@@ -231,8 +231,9 @@ export function parseContactSeeds(csv: string): ContactSeedRow[] {
   const out: ContactSeedRow[] = []
   for (const record of records.slice(1)) {
     const cells = record.cells
-    // A trailing comma or two is a spreadsheet's habit, not a shifted value.
-    while (cells.length > width && (cells[cells.length - 1] ?? '').trim() === '') cells.pop()
+    // No allowance for "just a trailing comma": `VP, Security,,,` is one
+    // value too many with an empty last cell, and trimming that cell would
+    // read `Security` as the phone number.
     const at = (c: ImportColumn): string | undefined => cells[index.get(c) as number]
     const problem =
       cells.length === width
