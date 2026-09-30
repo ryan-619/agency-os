@@ -49,6 +49,7 @@ import { DEFAULT_STALE_AFTER_DAYS, isStale, rottingState } from '@agency/core'
 import * as schema from './schema.js'
 import { appendAudit } from './approvals.js'
 import { complianceRefusalsByCode } from './compliance.js'
+import type { HeartbeatReportedStatus } from './heartbeat-read.js'
 import { inboxUnhandledCount } from './inbox.js'
 import { tasksCounts } from './tasks.js'
 import type { AgencyDb } from './repository.js'
@@ -530,8 +531,12 @@ export function digestCounts(facts: DigestFacts): DigestCounts {
 /** Why a digest that ran did not reach Slack. */
 export type DigestNotPosted = 'no_slack' | 'slack_failed'
 
-/** The worker's status as the digest reported it — `HeartbeatReport['status']`. */
-export type DigestWorker = 'never' | 'live' | 'silent' | 'not_configured'
+/**
+ * The worker's status as the digest reported it — `heartbeatReportedStatus`:
+ * `HeartbeatReport['status']`, or `retired` for a closed session nobody is
+ * alerted about.
+ */
+export type DigestWorker = HeartbeatReportedStatus
 
 export type DigestRecord = {
   readonly orgId: string

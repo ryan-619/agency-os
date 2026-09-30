@@ -833,16 +833,36 @@ const SENTENCES: Readonly<Record<string, Template>> = {
       ? 'posted the daily digest to Slack'
       : `built the daily digest and did not post it${why ? `: ${own(DIGEST_NOT_POSTED, why) ?? spaced(why)}` : ''}`
     // The alert that the worker is silent cannot come from the worker; this row says whether it went.
-    switch (word(c.d, 'workerAlert')) {
-      case 'posted':
-        return `${digest}; the worker was silent, and a separate alert was posted`
-      case 'failed':
-        return `${digest}; the worker was silent, and the alert could NOT be posted`
-      case 'no_slack':
-        return `${digest}; the worker was silent, and nobody was alerted`
-      default:
-        return digest
+    const alert = ((): string | null => {
+      switch (word(c.d, 'workerAlert')) {
+        case 'posted':
+          return 'the worker was silent, and a separate alert was posted'
+        case 'failed':
+          return 'the worker was silent, and the alert could NOT be posted'
+        case 'no_slack':
+          return 'the worker was silent, and nobody was alerted'
+        default:
+          // A closed session somebody ran by hand: named in the digest, alerted about by nobody, on purpose.
+          return word(c.d, 'worker') === 'retired'
+            ? 'no worker is configured and the last one reported in more than a week ago, so it counts as retired and nobody was alerted'
+            : null
+      }
+    })()
+    // `found > posted`: pauses past the cap, a notice Slack refused, or no Slack — said, not left in the raw detail.
+    const pauses = detailValue(c.d, 'campaignPauses')
+    const found = num(pauses, 'found')
+    const posted = num(pauses, 'posted')
+    let unannounced: string | null = null
+    if (found !== null && posted !== null && found > posted) {
+      const missed = found - Math.max(0, posted)
+      unannounced =
+        found === 1
+          ? 'a campaign paused itself and got no notice of its own — /campaigns lists it'
+          : `${found} campaigns paused themselves and ${
+              missed === found ? 'none got a notice of its own' : `${missed} got no notice of their own`
+            } — /campaigns lists them`
     }
+    return join([digest, alert, unannounced])
   },
 }
 

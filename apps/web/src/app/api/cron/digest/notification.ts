@@ -17,9 +17,19 @@ import type { NotificationEvent } from '../../../../lib/slack-message'
 export function digestNotification(args: {
   readonly orgId: string
   readonly facts: DigestFacts
+  /** `heartbeatReportedStatus` — `retired` for a closed session nobody is alerted about. */
   readonly worker: DigestWorker
+  /** The newest heartbeat's instant: a retired worker's line is dated by it. */
+  readonly workerLastSeenAt: Date | null
+  /**
+   * The pauses `digestCampaignPauses` read and how many get a notice of
+   * their own after the digest — so the digest can say how many more there
+   * were past the cap.
+   */
+  readonly campaignPauses: { readonly found: number; readonly notices: number }
 }): Extract<NotificationEvent, { kind: 'digest' }> {
   const f = args.facts
+  const seen = args.workerLastSeenAt?.getTime()
   return {
     kind: 'digest',
     orgId: args.orgId,
@@ -34,6 +44,9 @@ export function digestNotification(args: {
     optOutsNotRecorded24h: f.optOutsNotRecorded24h,
     spend24hUsd: f.spend24hUsd,
     worker: args.worker,
+    // An unreadable instant is no date at all, never "Invalid Date" in a channel.
+    workerLastSeenAt: seen !== undefined && Number.isFinite(seen) ? new Date(seen).toISOString() : null,
+    campaignPauses: { found: args.campaignPauses.found, notices: args.campaignPauses.notices },
     topRotting: [...f.topRotting],
   }
 }

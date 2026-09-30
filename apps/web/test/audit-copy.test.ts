@@ -240,7 +240,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
     },
     worker: 'live',
     workerAlert: 'not_needed',
-    campaignPauses: { found: 1, posted: 0 },
+    campaignPauses: { found: 1, posted: 0, readThrough: { at: '2026-09-30T06:40:12.123456Z', id: SUBJECT } },
   },
 }
 
@@ -382,13 +382,41 @@ describe('sentenceFor', () => {
       'was refused mcp__zapier__send_email: it is turned off in Settings → Connectors, so nobody was asked',
     )
     expect(disabled).not.toContain('owner')
-    expect(say('cron.digest')).toBe('built the daily digest and did not post it: no Slack webhook is configured')
+    expect(say('cron.digest')).toBe(
+      'built the daily digest and did not post it: no Slack webhook is configured; a campaign paused itself and got no notice of its own — /campaigns lists it',
+    )
     expect(say('cron.digest', { posted: true, counts: {}, worker: 'silent', workerAlert: 'posted' })).toBe(
       'posted the daily digest to Slack; the worker was silent, and a separate alert was posted',
     )
     expect(say('cron.digest', { posted: false, why: 'slack_failed', worker: 'silent', workerAlert: 'failed' })).toBe(
       'built the daily digest and did not post it: Slack did not accept it; the worker was silent, and the alert could NOT be posted',
     )
+  })
+
+  /**
+   * `found > posted` is a pause that got no Slack notice of its own — past
+   * the cap, a refused post, or no Slack. It lived only in the raw detail
+   * behind <details>; the sentence says it, as a count and where to look.
+   */
+  it('says how many campaign pauses got no notice of their own, and none when every one did', () => {
+    const digest = (found: number, posted: number): string =>
+      sentenceFor(line('cron.digest', {
+        posted: true, worker: 'live', workerAlert: 'not_needed',
+        campaignPauses: { found, posted, readThrough: { at: '2026-09-30T06:40:12.123456Z', id: SUBJECT } },
+      }, { actor: 'system' }), lookups)
+    expect(digest(5, 3)).toBe('posted the daily digest to Slack; 5 campaigns paused themselves and 2 got no notice of their own — /campaigns lists them')
+    expect(digest(3, 0)).toBe('posted the daily digest to Slack; 3 campaigns paused themselves and none got a notice of its own — /campaigns lists them')
+    expect(digest(2, 2)).toBe('posted the daily digest to Slack')
+    expect(digest(0, 0)).toBe('posted the daily digest to Slack')
+  })
+
+  /** A session somebody ran by hand and closed a week ago is not a worker that went quiet: no alert, and the row says why. */
+  it('says a retired worker was not alerted about, and why', () => {
+    const retired = line('cron.digest', { posted: true, counts: {}, worker: 'retired', workerAlert: 'not_needed' }, { actor: 'system' })
+    expect(sentenceFor(retired, lookups)).toBe(
+      'posted the daily digest to Slack; no worker is configured and the last one reported in more than a week ago, so it counts as retired and nobody was alerted',
+    )
+    expect(isAlarm(retired)).toBe(false)
   })
 
   /**
