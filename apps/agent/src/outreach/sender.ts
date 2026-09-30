@@ -33,7 +33,7 @@
  * provider was reached and sending it again.
  */
 import { and, eq, inArray } from 'drizzle-orm'
-import { dispatchTouch, dueTouches, schema, type AgencyDb, type MessageProvider } from '@agency/db'
+import { dispatchTouch, dueTouches, schema, type AgencyDb, type MessageProvider, type TouchRow } from '@agency/db'
 import type { Logger } from '../logger.js'
 
 export interface SenderDeps {
@@ -42,6 +42,15 @@ export interface SenderDeps {
   readonly log: Logger
   readonly batch: number
   readonly now?: () => Date
+  /**
+   * Headers this deployment adds to an outbound message — the RFC 8058
+   * `List-Unsubscribe` pair, built by `outreachOptions` when the worker can
+   * name a link the web app will verify. Handed to `dispatchTouch`, which
+   * merges it over the threading headers AFTER every §2.1 rule has passed;
+   * it is never consulted for the decision. Absent, or null for a touch,
+   * adds nothing.
+   */
+  readonly headersFor?: (touch: TouchRow) => Readonly<Record<string, string>> | null
 }
 
 export interface TickSummary {
@@ -93,7 +102,10 @@ export async function runSenderTick(deps: SenderDeps): Promise<TickSummary> {
     if (claimed.length === 0) continue
 
     try {
-      const result = await dispatchTouch(deps.db, deps.provider, touch, { now })
+      const result = await dispatchTouch(deps.db, deps.provider, touch, {
+        now,
+        ...(deps.headersFor ? { headersFor: deps.headersFor } : {}),
+      })
       if (result.sent) {
         summary.sent += 1
         continue

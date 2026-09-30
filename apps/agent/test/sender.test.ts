@@ -13,8 +13,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
-import { createDryRunProvider, schema, type AgencyDb } from '@agency/db'
+import { createDryRunProvider, schema, type AgencyDb, type MessageProvider } from '@agency/db'
+import { verifyUnsubscribeToken } from '@agency/db/queries'
 import { migratedDb,type TestDb } from '../../../packages/db/test/helpers.js'
+import type { loadEnv } from '../src/env.js'
+import { outreachOptions } from '../src/outreach/options.js'
 import { runSenderTick } from '../src/outreach/sender.js'
 
 const silent = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} }
@@ -22,6 +25,34 @@ const silent = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {
 const NOON = new Date('2026-09-15T12:00:00.000Z')
 /** 23:30 UTC: quiet hours in London. */
 const NIGHT = new Date('2026-09-15T23:30:00.000Z')
+
+const UNSUBSCRIBE_SECRET = 'u'.repeat(32) + '-sender-test'
+/** Just the two variables `outreachOptions` reads; the rest of the env is not its business. */
+const envWith = (vars: { UNSUBSCRIBE_SECRET?: string; WEB_PUBLIC_URL?: string }) =>
+  vars as unknown as ReturnType<typeof loadEnv>
+
+/** Records what each send carried — headers included — and never sends. */
+function recordingProvider(): MessageProvider & {
+  seen: { to: string; subject: string; body: string; headers: Readonly<Record<string, string>> | undefined }[]
+} {
+  const seen: { to: string; subject: string; body: string; headers: Readonly<Record<string, string>> | undefined }[] = []
+  return {
+    name: 'recording',
+    channels: ['email', 'linkedin'],
+    seen,
+    async send(m) {
+      seen.push({ to: m.to, subject: m.subject, body: m.body, headers: m.headers })
+      return { providerId: `recording-${seen.length}` }
+    },
+  }
+}
+
+/** A logger that keeps its lines, to assert what boot said. */
+function keepingLog() {
+  const lines: { level: string; msg: string; fields: Record<string, unknown> | undefined }[] = []
+  const at = (level: string) => (msg: string, fields?: Record<string, unknown>) => void lines.push({ level, msg, fields })
+  return { lines, debug: at('debug'), info: at('info'), warn: at('warn'), error: at('error') }
+}
 
 describe('the sender tick', () => {
   let test: TestDb
@@ -271,4 +302,99 @@ describe('the sender tick', () => {
     expect((await reread(t.id)).status).toBe('approved')
   })
 
+  /**
+   * RFC 8058 (§2.1). The headers ride inside `dispatchTouch`, after every
+   * rule has passed, and only when the deployment can name a link the web
+   * app will verify. The message itself is not touched.
+   */
+  describe('the one-click unsubscribe headers', () => {
+    const on = () =>
+      outreachOptions(envWith({ UNSUBSCRIBE_SECRET, WEB_PUBLIC_URL: 'https://agency.example/' }), keepingLog())
+
+    it('are absent when no headersFor is given', async () => {
+      const recording = recordingProvider()
+      await approved()
+      await runSenderTick({ db, provider: recording, log: silent, batch: 20, now: () => NOON })
+      expect(recording.seen).toHaveLength(1)
+      expect(recording.seen[0]!.headers ?? {}).not.toHaveProperty('List-Unsubscribe')
+      expect(recording.seen[0]!.headers ?? {}).not.toHaveProperty('List-Unsubscribe-Post')
+    })
+
+    it('are on an email touch when headersFor is given, naming THAT touch, with the body unchanged', async () => {
+      const recording = recordingProvider()
+      const t = await approved({ subject: 'A gap on your security page', body: 'Hello.\n\nThe words a person approved.' })
+      await runSenderTick({ db, provider: recording, log: silent, batch: 20, now: () => NOON, ...on() })
+
+      expect(recording.seen).toHaveLength(1)
+      const m = recording.seen[0]!
+      expect(m.subject).toBe('A gap on your security page')
+      expect(m.body).toBe('Hello.\n\nThe words a person approved.')
+      expect(m.headers?.['List-Unsubscribe-Post']).toBe('List-Unsubscribe=One-Click')
+
+      const link = /^<https:\/\/agency\.example\/api\/unsubscribe\/([^>]+)>$/.exec(m.headers?.['List-Unsubscribe'] ?? '')
+      expect(link).not.toBeNull()
+      const token = link![1]!
+      // The web app, holding the same secret, reads back exactly this touch.
+      expect(verifyUnsubscribeToken(UNSUBSCRIBE_SECRET, token)).toEqual({ ok: true, touchId: t.id })
+      // §2.3: the link names a row, never the person.
+      expect(m.headers?.['List-Unsubscribe']).not.toContain('priya')
+      expect(m.headers?.['List-Unsubscribe']).not.toContain('%40')
+      expect((await reread(t.id)).status).toBe('sent')
+    })
+
+    it('are absent on a LinkedIn touch, even with headersFor given', async () => {
+      await db.update(schema.contacts).set({ linkedinUrl: 'https://linkedin.com/in/priya' }).where(eq(schema.contacts.id, contactId))
+      const [li] = await db
+        .insert(schema.campaigns)
+        .values({ orgId, name: 'LinkedIn', channel: 'linkedin', autoSend: true, dailyCap: 10, status: 'active' })
+        .returning({ id: schema.campaigns.id })
+      await approved({ campaignId: li!.id, channel: 'linkedin', status: 'queued', approvedBy: null, approvedAt: null })
+
+      const recording = recordingProvider()
+      await runSenderTick({ db, provider: recording, log: silent, batch: 20, now: () => NOON, ...on() })
+      expect(recording.seen).toHaveLength(1)
+      expect(recording.seen[0]!.headers ?? {}).not.toHaveProperty('List-Unsubscribe')
+      expect(recording.seen[0]!.headers ?? {}).not.toHaveProperty('List-Unsubscribe-Post')
+    })
+
+    it('never reach a message the rules refused', async () => {
+      await db.insert(schema.suppressions).values({ orgId, kind: 'email', value: 'priya@rentman.io', reason: 'opted out' })
+      const recording = recordingProvider()
+      await approved()
+      await runSenderTick({ db, provider: recording, log: silent, batch: 20, now: () => NOON, ...on() })
+      expect(recording.seen).toEqual([])
+    })
+  })
+})
+
+/** No database: this is the boot-time decision, and what it logs. */
+describe('outreachOptions', () => {
+  it('turns the headers on only when both the secret and the public origin are set, and says so once', () => {
+    const log = keepingLog()
+    const opts = outreachOptions(envWith({ UNSUBSCRIBE_SECRET, WEB_PUBLIC_URL: 'https://agency.example' }), log)
+    expect(typeof opts.headersFor).toBe('function')
+    expect(log.lines).toEqual([{ level: 'info', msg: 'unsubscribe: headers on', fields: undefined }])
+  })
+
+  it('is off, naming what is missing and never a value, when either is unset', () => {
+    for (const [vars, missing] of [
+      [{}, ['UNSUBSCRIBE_SECRET', 'WEB_PUBLIC_URL']],
+      [{ UNSUBSCRIBE_SECRET }, ['WEB_PUBLIC_URL']],
+      [{ WEB_PUBLIC_URL: 'https://agency.example' }, ['UNSUBSCRIBE_SECRET']],
+    ] as const) {
+      const log = keepingLog()
+      const opts = outreachOptions(envWith(vars), log)
+      expect(opts).toEqual({})
+      expect(log.lines).toEqual([{ level: 'warn', msg: 'unsubscribe: headers off', fields: { missing: [...missing] } }])
+      expect(JSON.stringify(log.lines)).not.toContain(UNSUBSCRIBE_SECRET)
+      expect(JSON.stringify(log.lines)).not.toContain('agency.example')
+    }
+  })
+
+  it('answers null for anything that is not an email', () => {
+    const { headersFor } = outreachOptions(envWith({ UNSUBSCRIBE_SECRET, WEB_PUBLIC_URL: 'https://agency.example' }), keepingLog())
+    const touch = { id: '0b8f5a8e-2f1c-4b7e-9a4b-3c2d1e0f9a8b', channel: 'linkedin' } as Parameters<NonNullable<typeof headersFor>>[0]
+    expect(headersFor!(touch)).toBeNull()
+    expect(headersFor!({ ...touch, channel: 'email' })).toHaveProperty('List-Unsubscribe')
+  })
 })
