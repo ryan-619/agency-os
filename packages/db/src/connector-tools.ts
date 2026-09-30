@@ -189,8 +189,18 @@ export function connectorToolsCheck(
     }
   }
   const value = [...new Set(tools)].sort()
-  const merged = parseConnectorConfig(row.kind, { ...(row.config as Record<string, unknown>), disabledTools: value })
-  if (!merged.ok) return { ok: false, message: merged.message }
+  const withList = (list: readonly string[]) =>
+    parseConnectorConfig(row.kind, { ...(row.config as Record<string, unknown>), disabledTools: list })
+  const merged = withList(value)
+  if (!merged.ok) {
+    // The schema names an index into a list the person never saw sorted;
+    // name the tool instead, when one on its own is the problem.
+    const culprit = value.find((tool) => !withList([tool]).ok)
+    return {
+      ok: false,
+      message: culprit !== undefined ? `"${culprit}" cannot be stored as a tool name. ${merged.message}` : merged.message,
+    }
+  }
   return { ok: true, value }
 }
 
