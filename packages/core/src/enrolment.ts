@@ -185,6 +185,8 @@ export const REFUSALS_THE_CLOCK_RESOLVES: ReadonlySet<string> = new Set(['quiet_
  *  - `consent_revoked`: the recipient declined the channel, or their reply,
  *    their unsubscribe or their erasure cancelled what was queued.
  *  - `suppressed`: they asked to be left alone.
+ *  - `cold_channel_forbidden` and `no_consent`, which only a channel
+ *    enrolment never writes on can produce — read as a no if one appears.
  *  - and a code this list does not know, read the safe way — as a no.
  */
 export const ENROL_IGNORED_REFUSALS: readonly string[] = Object.freeze([
@@ -375,7 +377,7 @@ function orList(items: readonly string[]): string {
  * reach a prospect; `draftOpener` does not read it, and this does not give it
  * anything to not read. The headline is the first claim — the outdated-library
  * headline needs the scanner's profile, which the rows do not keep, so the
- * subject line falls back to the heaviest observed gap.
+ * subject line falls back to the heaviest gap it quotes.
  */
 export function draftInputFromFindings(input: {
   readonly company: { readonly domain: string; readonly name: string | null }
