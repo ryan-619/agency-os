@@ -356,6 +356,7 @@ describe('the compliance counts', () => {
       expect(r.touches).toBe(2)
       expect(r.contacts).toBe(2)
       expect(r.stoppedBySendPath).toBe(1)
+      expect(r.stoppedRows.map((x) => [x.code, x.channel, x.companyDomain])).toEqual([['cold_channel_forbidden', 'sms', 'fresh.test']])
       const row = new Map(r.rows.map((x) => [x.touchId, x]))
       expect(row.get(listed)).toMatchObject({ consentNow: 'never_asked', companyDomain: 'fresh.test', channel: 'sms' })
       // Said no AFTER the message: the ledger keeps today's answer, and the row shows when.

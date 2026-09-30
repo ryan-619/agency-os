@@ -612,10 +612,22 @@ export interface ComplianceColdOptIn {
   readonly rows: readonly ComplianceColdOptInRow[]
   /** Opt-in-only messages the send path REFUSED — the gate working. */
   readonly stoppedBySendPath: number
+  /** The newest of those, for the page to link. */
+  readonly stoppedRows: readonly ComplianceRefusalRow[]
 }
 
-export async function complianceColdOptInTouches(db: AgencyDb, orgId: string): Promise<ComplianceColdOptIn> {
-  const [rows, stopped] = await Promise.all([
+export async function complianceColdOptInTouches(
+  db: AgencyDb,
+  orgId: string,
+  stoppedLimit = 50,
+): Promise<ComplianceColdOptIn> {
+  const stoppedWhere = and(
+    eq(schema.touches.orgId, orgId),
+    eq(schema.touches.direction, 'out'),
+    eq(schema.touches.status, 'refused'),
+    inArray(schema.touches.refusalCode, ['cold_channel_forbidden', 'no_consent']),
+  )
+  const [rows, stopped, stoppedRows] = await Promise.all([
     db
       .select({
         touchId: schema.touches.id,
@@ -657,17 +669,24 @@ export async function complianceColdOptInTouches(db: AgencyDb, orgId: string): P
         ),
       )
       .orderBy(desc(schema.touches.createdAt)),
+    db.select({ n: sql<number>`count(*)::int` }).from(schema.touches).where(stoppedWhere),
     db
-      .select({ n: sql<number>`count(*)::int` })
+      .select({
+        touchId: schema.touches.id,
+        code: schema.touches.refusalCode,
+        channel: schema.touches.channel,
+        companyDomain: schema.companies.domain,
+        createdAt: schema.touches.createdAt,
+        updatedAt: schema.touches.updatedAt,
+      })
       .from(schema.touches)
-      .where(
-        and(
-          eq(schema.touches.orgId, orgId),
-          eq(schema.touches.direction, 'out'),
-          eq(schema.touches.status, 'refused'),
-          inArray(schema.touches.refusalCode, ['cold_channel_forbidden', 'no_consent']),
-        ),
-      ),
+      .leftJoin(
+        schema.companies,
+        and(eq(schema.companies.id, schema.touches.companyId), eq(schema.companies.orgId, orgId)),
+      )
+      .where(stoppedWhere)
+      .orderBy(desc(sql`coalesce(${schema.touches.updatedAt}, ${schema.touches.createdAt})`))
+      .limit(stoppedLimit),
   ])
 
   const out: ComplianceColdOptInRow[] = rows.map((r) => ({
@@ -681,7 +700,19 @@ export async function complianceColdOptInTouches(db: AgencyDb, orgId: string): P
     consentRecordedAt: r.consentRecordedAt ?? null,
   }))
   const contacts = new Set(out.map((r) => r.contactId).filter((id): id is string => id !== null))
-  return { contacts: contacts.size, touches: out.length, rows: out, stoppedBySendPath: stopped[0]?.n ?? 0 }
+  return {
+    contacts: contacts.size,
+    touches: out.length,
+    rows: out,
+    stoppedBySendPath: stopped[0]?.n ?? 0,
+    stoppedRows: stoppedRows.map((r) => ({
+      touchId: r.touchId,
+      code: r.code ?? 'unexplained',
+      channel: r.channel,
+      companyDomain: r.companyDomain ?? null,
+      at: r.updatedAt ?? r.createdAt,
+    })),
+  }
 }
 
 // ---------------------------------------------------------------------------
