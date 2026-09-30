@@ -45,6 +45,23 @@ function when(d: Date): string {
   return `${d.toISOString().slice(0, 16).replace('T', ' ')} UTC`
 }
 
+/**
+ * A meeting's time as its own zone tells it, with the instant in UTC beside
+ * it. A meeting is a wall-clock commitment somewhere; printing the UTC time
+ * next to the zone's NAME is how a 15:00 London call once read as 14:00.
+ */
+function inZone(d: Date, zone: string): string {
+  try {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(d)
+    const get = (type: Intl.DateTimeFormatPartTypes): string => parts.find((p) => p.type === type)?.value ?? '??'
+    return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')} ${zone} (${when(d)})`
+  } catch {
+    return when(d)
+  }
+}
+
 function day(d: Date): string {
   return d.toISOString().slice(0, 10)
 }
@@ -197,7 +214,6 @@ function byNewest(a: TimelineEvent, b: TimelineEvent): number {
 
 const LITERAL_ACTORS: Readonly<Record<string, string>> = {
   agent: 'the agent',
-  system: 'automatically',
   voice: 'the phone line',
   booking_page: 'the booking page',
   share_link: 'a shared link',
@@ -216,10 +232,12 @@ async function actorNames(ctx: ToolContext, rows: readonly AuditRow[]): Promise<
   return new Map(users.map((u) => [u.id, notesAuthorLabel({ authorName: u.name, authorEmail: u.email })]))
 }
 
+/** " by Priya", ", automatically" — appended straight onto the line. */
 function byActor(actor: string, names: ReadonlyMap<string, string>): string {
-  if (LITERAL_ACTORS[actor]) return actor === 'system' ? 'automatically' : `by ${LITERAL_ACTORS[actor]}`
-  if (UUID.test(actor)) return `by ${names.get(actor) ?? 'a former teammate'}`
-  return `by ${actor}`
+  if (actor === 'system') return ', automatically'
+  if (Object.prototype.hasOwnProperty.call(LITERAL_ACTORS, actor)) return ` by ${LITERAL_ACTORS[actor]}`
+  if (UUID.test(actor)) return ` by ${names.get(actor) ?? 'a former teammate'}`
+  return ` by ${actor}`
 }
 
 /** A deal's audit row as one line. Only the stages are read out of `detail`; a lost reason or a next action is somebody's words. */
@@ -230,9 +248,9 @@ function dealLine(row: AuditRow, names: ReadonlyMap<string, string>): string {
   const from = typeof d.from === 'string' ? d.from : null
   const to = typeof d.to === 'string' ? d.to : null
   const who = byActor(row.actor, names)
-  if (to && from && from !== to) return `deal moved from ${from} to ${to} ${who}`
-  if (to && row.action === 'deal.created') return `deal opened at ${to} ${who}`
-  return `deal ${row.action.replace(/^deal\./, '').replace(/_/g, ' ')} ${who}`
+  if (to && from && from !== to) return `deal moved from ${from} to ${to}${who}`
+  if (to && row.action === 'deal.created') return `deal opened at ${to}${who}`
+  return `deal ${row.action.replace(/^deal\./, '').replace(/_/g, ' ')}${who}`
 }
 
 export const getCompanyTimeline: AgencyToolSpec<typeof companyTimelineShape> = {
@@ -301,7 +319,7 @@ export const getCompanyTimeline: AgencyToolSpec<typeof companyTimelineShape> = {
     for (const m of meetings) {
       const state = m.cancelledAt ? 'cancelled' : m.outcome ? m.outcome.replace(/_/g, ' ') : m.startsAt.getTime() > ctx.now().getTime() ? 'upcoming' : 'no outcome recorded'
       const title = m.title ? ` “${oneLine(m.title, 120)}”` : ''
-      events.push({ at: m.createdAt, kind: 'meeting', id: m.id, text: `meeting${title} booked for ${when(m.startsAt)} (${m.timeZone}) — ${state}` })
+      events.push({ at: m.createdAt, kind: 'meeting', id: m.id, text: `meeting${title} booked for ${inZone(m.startsAt, m.timeZone)} — ${state}` })
     }
     for (const p of proposals) {
       const range = p.totalLow !== null && p.totalHigh !== null ? `, ${p.currency} ${p.totalLow.toLocaleString('en-US')}–${p.totalHigh.toLocaleString('en-US')}` : ''
