@@ -75,6 +75,9 @@ export default async function SharedProposalPage({ params }: { params: Promise<{
 
   const doc = view.proposal.document as Proposal
   const evidenceAsOf = view.evidenceAsOf.toISOString()
+  // Freshness was decided above: a document reaching this line is not stale,
+  // so `evidenceStale` is false — and the buyer's copy never says the word
+  // either way.
   return (
     <Frame wide>
       <ProposalDocument
@@ -83,8 +86,6 @@ export default async function SharedProposalPage({ params }: { params: Promise<{
         agency={view.org}
         status={view.proposal.status}
         evidenceAsOf={evidenceAsOf}
-        // Freshness was decided above: a document reaching this line is not
-        // stale, and the buyer's copy never says the word either way.
         evidenceStale={false}
         audience="buyer"
       />
