@@ -16,6 +16,12 @@ import { sendCheckSentence, type SendCheckView } from '@/lib/consent-view'
  * itself is "Why can't I reach them?", which calls the sender's own dry run
  * (`/api/contacts/[id]/send-check`) and prints the answer in the words every
  * other screen uses. That call queues nothing; the page says so beside it.
+ *
+ * Two more per row. "Download record" is everything held about the person,
+ * as JSON (`/api/contacts/[id]/record`, any member, audited). "Erase…" is
+ * owners only, and asks for the contact's id typed back before it will send
+ * anything: an erasure cannot be undone, and it keeps the suppression — the
+ * panel says exactly what goes, what stays, and what is not scrubbed.
  */
 
 export interface LedgerChannelView {
@@ -65,6 +71,8 @@ export interface LedgerCampaign {
 
 const KEY_WORDS: Record<LedgerSuppressionView['key'], string> = { email: 'email', phone: 'phone', linkedin: 'LinkedIn' }
 
+type Panel = 'check' | 'edit' | 'erase'
+
 /** Only a URL that is plainly a LinkedIn page becomes a link; anything else is shown as text. */
 function linkedinHref(url: string): string | null {
   if (/^https:\/\/([a-z]{2,3}\.)?linkedin\.com\//i.test(url)) return url
@@ -83,11 +91,11 @@ export function ContactsLedger({
   canWrite: boolean
   isOwner: boolean
 }) {
-  const [open, setOpen] = useState<{ id: string; panel: 'check' | 'edit' } | null>(null)
+  const [open, setOpen] = useState<{ id: string; panel: Panel } | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
 
-  const toggle = (id: string, panel: 'check' | 'edit') =>
+  const toggle = (id: string, panel: Panel) =>
     setOpen((o) => (o && o.id === id && o.panel === panel ? null : { id, panel }))
 
   const patch = async (id: string, body: Record<string, unknown>): Promise<void> => {
@@ -194,6 +202,9 @@ export function ContactsLedger({
                     <button type="button" className="linkish" onClick={() => toggle(r.id, 'check')}>
                       Why can’t I reach them?
                     </button>
+                    <a href={`/api/contacts/${r.id}/record`} className="linkish" download>
+                      Download record
+                    </a>
                     {canWrite ? (
                       <>
                         <button type="button" className="linkish" onClick={() => toggle(r.id, 'edit')}>
@@ -218,6 +229,11 @@ export function ContactsLedger({
                         )}
                       </>
                     ) : null}
+                    {isOwner ? (
+                      <button type="button" className="linkish" style={{ color: 'var(--warn)' }} onClick={() => toggle(r.id, 'erase')}>
+                        Erase…
+                      </button>
+                    ) : null}
                   </div>
                   {errors[r.id] ? <div className="err-line">{errors[r.id]}</div> : null}
                 </td>
@@ -227,6 +243,8 @@ export function ContactsLedger({
                   <td colSpan={6} style={{ background: 'var(--bg)' }}>
                     {panel === 'check' ? (
                       <SendCheck contactId={r.id} campaigns={campaigns} />
+                    ) : panel === 'erase' ? (
+                      <EraseContact contactId={r.id} name={r.name} onCancel={() => setOpen(null)} />
                     ) : (
                       <ContactEdit
                         contact={{
@@ -340,6 +358,147 @@ function SendCheck({ contactId, campaigns }: { contactId: string; campaigns: rea
           </div>
         </div>
       ) : null}
+    </div>
+  )
+}
+
+interface EraseResponse {
+  readonly erased: true
+  readonly touchesScrubbed: number
+  readonly callsScrubbed: number
+  readonly suppressionsAdded: number
+  readonly suppressionsNew: number
+  readonly meetingsScrubbed: number
+  readonly notesDeleted: number
+  readonly tasksDeleted: number
+  readonly cancelled: number
+  readonly companyRenamed: boolean
+  readonly skipped: readonly { readonly from: 'contact' | 'message' | 'call' | 'opt_out'; readonly why: 'company_page' | 'unreadable' }[]
+  readonly recordingsAtCarrier: readonly string[]
+}
+
+const SKIP_WORDS: Record<EraseResponse['skipped'][number]['from'], string> = {
+  contact: 'the LinkedIn URL on their row',
+  message: 'the address on a message that went out',
+  call: 'the number on a call',
+  opt_out: 'the address or number an opt-out was recorded against',
+}
+
+function plural(n: number, one: string, many = `${one}s`): string {
+  return `${n} ${n === 1 ? one : many}`
+}
+
+/**
+ * The erasure panel (owners only). Says what goes, what stays and what is
+ * not scrubbed BEFORE the button, and will not send until the contact's id
+ * is typed back — the same check the route makes.
+ */
+function EraseContact({ contactId, name, onCancel }: { contactId: string; name: string; onCancel: () => void }) {
+  const [typed, setTyped] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [done, setDone] = useState<EraseResponse | null>(null)
+  const confirmed = typed.trim().toLowerCase() === contactId.toLowerCase()
+
+  const erase = async (): Promise<void> => {
+    setBusy(true)
+    setError('')
+    try {
+      const res = await fetch(`/api/contacts/${contactId}/erase`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ confirm: typed.trim() }),
+      })
+      const b = (await res.json().catch(() => ({}))) as Partial<EraseResponse> & { error?: string }
+      if (!res.ok || b.erased !== true) {
+        setError(b.error ?? 'The erasure did not complete. Nothing was erased.')
+        return
+      }
+      setDone(b as EraseResponse)
+    } catch {
+      setError('The request did not complete. Reload the page to see whether they are still listed before trying again.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (done) {
+    return (
+      <div className="row-card slim" style={{ fontSize: 13 }}>
+        <div className="ok-line" style={{ fontSize: 13, marginTop: 0 }}>
+          Erased. {plural(done.touchesScrubbed, 'message')} and {plural(done.callsScrubbed, 'call')} scrubbed;{' '}
+          {plural(done.suppressionsAdded, 'key')} kept on the suppression list
+          {done.suppressionsAdded > done.suppressionsNew ? ` (${done.suppressionsAdded - done.suppressionsNew} already there)` : ''}.
+        </div>
+        <div className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
+          {plural(done.meetingsScrubbed, 'meeting')} lost title and notes · {plural(done.notesDeleted, 'note')} and{' '}
+          {plural(done.tasksDeleted, 'task')} deleted
+          {done.cancelled > 0 ? ` · ${plural(done.cancelled, 'queued message')} refused` : ''}
+          {done.companyRenamed ? ' · the company the booking page named after them was renamed' : ''}
+        </div>
+        {done.recordingsAtCarrier.length > 0 ? (
+          <div className="note warn" style={{ fontSize: 12.5 }}>
+            <strong>One more step, by hand.</strong> The link to {plural(done.recordingsAtCarrier.length, 'call recording')} was
+            removed here, but the recording itself is stored at Twilio, the voice provider, and nothing here can delete
+            it. Delete it in the Twilio console, where it is found by its call SID: {done.recordingsAtCarrier.map((sid, i) => (
+              <Fragment key={sid}>{i > 0 ? ', ' : ''}<code>{sid}</code></Fragment>
+            ))}
+          </div>
+        ) : null}
+        {done.skipped.length > 0 ? (
+          <div className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>
+            Not put on the suppression list:{' '}
+            {done.skipped
+              .map((s) => `${SKIP_WORDS[s.from]} (${s.why === 'company_page' ? 'a company page, not a person — suppressing it would silence the whole company' : 'it cannot be read as an address or number, so nothing can be sent to it either'})`)
+              .join('; ')}
+            .
+          </div>
+        ) : null}
+        <div className="row-actions" style={{ marginTop: 10 }}>
+          <button type="button" onClick={() => window.location.reload()}>
+            Refresh the list
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="row-card slim" style={{ fontSize: 13 }}>
+      <h3 style={{ margin: '0 0 6px', fontSize: 14 }}>Erase {name}</h3>
+      <p style={{ margin: '0 0 6px' }}>
+        <strong>Erasure keeps the suppression:</strong> the person’s address, number and profile go on the suppression
+        list first, so a re-import can never contact them again. If any of them cannot be stored, nothing is erased.
+      </p>
+      <ul style={{ margin: '0 0 6px', paddingLeft: 18, fontSize: 12.5 }}>
+        <li>Messages they sent lose their subject, body and address. Messages sent to them keep the agency’s words and lose the address.</li>
+        <li>Calls lose both numbers, the transcript, the summary and the recording link. Meetings stay, without title or notes.</li>
+        <li>Notes about them and tasks on their messages are deleted, then the contact and their consents. Anything still queued to them is refused.</li>
+        <li>An opt-out keeps the one address or number it was recorded against — it is on the suppression list anyway, and the compliance page checks it.</li>
+      </ul>
+      <p className="muted" style={{ margin: '0 0 6px', fontSize: 12.5 }}>
+        Not scrubbed: chat transcripts and audit detail (which never held their words), and a call recording stored at
+        Twilio — the result lists the call SIDs to delete there by hand. It cannot be undone:{' '}
+        <a href={`/api/contacts/${contactId}/record`} download>download their record</a> first if they asked for a copy.
+      </p>
+      <label>
+        Type the contact id <code>{contactId}</code> to confirm
+        <input value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" spellCheck={false} maxLength={64} />
+      </label>
+      {error ? <div className="err-line">{error}</div> : null}
+      <div className="row-actions" style={{ marginTop: 10 }}>
+        <button
+          type="button"
+          disabled={busy || !confirmed}
+          onClick={() => void erase()}
+          style={{ background: 'var(--panel)', color: 'var(--warn)', border: '1px solid var(--warn)' }}
+        >
+          {busy ? 'Erasing…' : 'Erase permanently'}
+        </button>
+        <button type="button" onClick={onCancel} disabled={busy}>
+          Cancel
+        </button>
+      </div>
     </div>
   )
 }
