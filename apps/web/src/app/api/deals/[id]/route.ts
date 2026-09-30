@@ -1,9 +1,12 @@
-import { NextResponse } from 'next/server'
+import { NextResponse, after } from 'next/server'
 import { and, eq } from 'drizzle-orm'
 import { assertCan } from '@agency/core'
 import { DEAL_STAGES, appendAudit, schema, setDealStage, setDealOwner, type AgencyDb, type DealStage } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
+import { log } from '@/lib/logger'
+import { notify } from '@/lib/slack'
+import { closedStage, dealClosedNotification } from './notification'
 
 /**
  * Move a deal on the board (PROMPT.md §8.6).
@@ -14,6 +17,11 @@ import { getDb } from '@/lib/db'
  * lost deal — and the board asks before it calls here. Every move writes
  * an audit row naming the person, the stage it left and the stage it
  * reached: the pipeline's history is the audit log, not a column.
+ *
+ * A move that CLOSES the deal — to `won` or `lost` — also posts one Slack
+ * message when `SLACK_WEBHOOK_URL` is set, from `after()`, once the board has
+ * its answer. The company's domain is read inside that callback, so neither
+ * the read nor the post can change the status of a move already written.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -146,6 +154,31 @@ export async function PATCH(
       ...(ownerUserId !== undefined ? { ownerUserId: owned.ownerUserId } : {}),
     },
   }).catch(() => {})
+
+  const closed = closedStage(current, moved)
+  if (closed) {
+    const orgId = user.orgId
+    try {
+      after(async () => {
+        try {
+          const [company] = await db
+            .select({ domain: schema.companies.domain })
+            .from(schema.companies)
+            .where(and(eq(schema.companies.orgId, orgId), eq(schema.companies.id, current.companyId)))
+            .limit(1)
+          if (!company) return
+          await notify(dealClosedNotification({ orgId, dealId: current.id, stage: closed, companyDomain: company.domain }))
+        } catch (err) {
+          // Caught here, not left to `after()`: Next prints an escaping
+          // Error whole — message and cause — past the logger's redaction.
+          log.warn('deal_closed notification failed', { error: err instanceof Error ? err.name : 'UnknownError' })
+        }
+      })
+    } catch (err) {
+      log.warn('deal_closed notification not scheduled', { error: err instanceof Error ? err.name : 'UnknownError' })
+    }
+  }
+
   return NextResponse.json({
     id: current.id,
     stage: moved.stage,
