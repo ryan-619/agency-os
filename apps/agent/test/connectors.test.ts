@@ -47,6 +47,7 @@ function row(over: Partial<ConnectorRow> = {}): ConnectorRow {
 /**
  * The smallest thing that answers the two queries this module makes:
  * `enabledConnectors` (a select) and `revealSecret` (a select with a limit).
+ * The first keeps only enabled rows, as its WHERE clause does.
  */
 function fakeDb(rows: ConnectorRow[], secret?: { id: string; ciphertext: string }) {
   const chain = (result: unknown): Record<string, unknown> => {
@@ -60,7 +61,7 @@ function fakeDb(rows: ConnectorRow[], secret?: { id: string; ciphertext: string 
   return {
     select: (cols?: Record<string, unknown>) =>
       // `revealSecret` selects named columns; `enabledConnectors` selects all.
-      chain(cols && 'ciphertext' in cols ? (secret ? [secret] : []) : rows),
+      chain(cols && 'ciphertext' in cols ? (secret ? [secret] : []) : rows.filter((r) => r.enabled)),
   } as never
 }
 
@@ -516,6 +517,92 @@ describe('a connector it refuses to build', () => {
     expect(await buildMcpServers(fakeDb([]), 'org-1', KEY, silent)).toEqual({
       servers: {},
       skipped: [],
+      disabledTools: new Set(),
     })
+  })
+})
+
+/**
+ * What the gate is handed to refuse (connector-tool-disable). Names in the
+ * form the gate sees them, from the servers this turn will actually have —
+ * and never an allow of any kind: nothing here reaches `allowedTools`.
+ */
+describe('the tools a turn refuses', () => {
+  const second = '44444444-4444-4444-8444-444444444444'
+
+  it('is exactly mcp__<name>__<tool> for each tool an owner turned off on an enabled server', async () => {
+    const { disabledTools } = await buildMcpServers(
+      fakeDb([
+        row({ config: { url: 'https://mcp.apollo.example/v1', headers: {}, disabledTools: ['send_email', 'add_to_sequence'] } }),
+        row({ id: second, name: 'crm', config: { url: 'https://crm.example/mcp', headers: {}, disabledTools: ['delete_record'] } }),
+      ]),
+      'org-1',
+      KEY,
+      silent,
+    )
+    expect([...disabledTools].sort()).toEqual([
+      'mcp__apollo__add_to_sequence',
+      'mcp__apollo__send_email',
+      'mcp__crm__delete_record',
+    ])
+  })
+
+  it('is empty for a server nobody turned anything off on', async () => {
+    const { disabledTools } = await buildMcpServers(fakeDb([row()]), 'org-1', KEY, silent)
+    expect(disabledTools.size).toBe(0)
+  })
+
+  /**
+   * The catalog's default for a server nobody has reviewed: Zapier's entry is
+   * `'*'`, which no tool name can store, so it crosses as the server's `*`.
+   */
+  it('carries a catalog server’s default until an owner saves a list, and the list after', async () => {
+    const zapier = { url: 'https://mcp.zapier.com/api/v1/connect', headers: {} }
+    const before = await buildMcpServers(fakeDb([row({ name: 'zaps', config: zapier })]), 'org-1', KEY, silent)
+    expect([...before.disabledTools]).toEqual(['mcp__zaps__*'])
+    const after = await buildMcpServers(
+      fakeDb([row({ name: 'zaps', config: { ...zapier, disabledTools: ['gmail_send_email'] } })]),
+      'org-1',
+      KEY,
+      silent,
+    )
+    expect([...after.disabledTools]).toEqual(['mcp__zaps__gmail_send_email'])
+  })
+
+  it('takes nothing from a disabled row — its tools are not in the turn at all', async () => {
+    const { servers, disabledTools } = await buildMcpServers(
+      fakeDb([row({ enabled: false, config: { url: 'https://a.example/v1', headers: {}, disabledTools: ['x'] } })]),
+      'org-1',
+      KEY,
+      silent,
+    )
+    expect(servers).toEqual({})
+    expect(disabledTools.size).toBe(0)
+  })
+
+  it('takes nothing from a row it could not build', async () => {
+    const { skipped, disabledTools } = await buildMcpServers(
+      fakeDb([row({ config: { url: 'http://169.254.169.254/', headers: {}, disabledTools: ['x'] } })]),
+      'org-1',
+      KEY,
+      silent,
+    )
+    expect(skipped).toHaveLength(1)
+    expect(disabledTools.size).toBe(0)
+  })
+
+  /**
+   * The session spreads the in-process `agency` server last, so a connector
+   * row by that name never runs. Its tool list must not switch off the
+   * agency's own tools by the back door.
+   */
+  it('takes nothing from a row named agency, which the in-process server displaces', async () => {
+    const { disabledTools } = await buildMcpServers(
+      fakeDb([row({ name: 'agency', config: { url: 'https://a.example/v1', headers: {}, disabledTools: ['queue_touch'] } })]),
+      'org-1',
+      KEY,
+      silent,
+    )
+    expect(disabledTools.size).toBe(0)
   })
 })

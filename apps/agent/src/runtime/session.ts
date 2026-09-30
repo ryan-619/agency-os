@@ -147,6 +147,35 @@ export async function buildTurnRuntime(
     log: deps.log,
   })
 
+  /**
+   * §6 and §7's promise, kept literally: read on every turn, never cached.
+   *
+   * "The owner adds an MCP server through the UI and the agent uses one of its
+   * tools in the very next chat message, with no restart." A cache with any
+   * TTL at all breaks that in a way nobody can debug from the outside — the
+   * connector works, the row is right, and the agent cannot see it.
+   *
+   * Both builders SKIP a row they cannot use rather than throwing: one broken
+   * connector must not take the whole chat down.
+   */
+  const [connectors, agentRows] = await Promise.all([
+    buildMcpServers(deps.db, args.orgId, deps.secretsKey, deps.log),
+    enabledAgentDefs(deps.db, args.orgId),
+  ])
+  const subagents = buildAgents(agentRows, deps.log)
+  if (Object.keys(connectors.servers).length > 0 || Object.keys(subagents.agents).length > 0) {
+    deps.log.info('runtime assembled from the database', {
+      // Names and transports only. A connector URL can carry a token in a
+      // query string despite every instruction not to put one there (§2.3).
+      connectors: describeServers(connectors.servers),
+      subagents: Object.keys(subagents.agents),
+      ...(connectors.skipped.length > 0 ? { skippedConnectors: connectors.skipped } : {}),
+      // Tool NAMES — what the gate will refuse this turn, and nothing else.
+      ...(connectors.disabledTools.size > 0 ? { disabledTools: [...connectors.disabledTools] } : {}),
+      ...(subagents.skipped.length > 0 ? { skippedSubagents: subagents.skipped } : {}),
+    })
+  }
+
   const canUseTool = makeCanUseTool({
     orgId: args.orgId,
     chatSessionId: args.chatSessionId,
@@ -164,6 +193,10 @@ export async function buildTurnRuntime(
       }),
     waiter,
     ledger,
+    // Read with the connectors, on this turn: a tool an owner turns off is
+    // refused from the very next message, the same promise §6 makes for a
+    // server that is turned on.
+    disabledTools: connectors.disabledTools,
     audit,
     emit: args.emit,
     markGated: () => {},
@@ -200,34 +233,9 @@ export async function buildTurnRuntime(
     log: deps.log,
   })
 
-  const hookDeps = { audit, log: deps.log }
-
-  /**
-   * §6 and §7's promise, kept literally: read on every turn, never cached.
-   *
-   * "The owner adds an MCP server through the UI and the agent uses one of its
-   * tools in the very next chat message, with no restart." A cache with any
-   * TTL at all breaks that in a way nobody can debug from the outside — the
-   * connector works, the row is right, and the agent cannot see it.
-   *
-   * Both builders SKIP a row they cannot use rather than throwing: one broken
-   * connector must not take the whole chat down.
-   */
-  const [connectors, agentRows] = await Promise.all([
-    buildMcpServers(deps.db, args.orgId, deps.secretsKey, deps.log),
-    enabledAgentDefs(deps.db, args.orgId),
-  ])
-  const subagents = buildAgents(agentRows, deps.log)
-  if (Object.keys(connectors.servers).length > 0 || Object.keys(subagents.agents).length > 0) {
-    deps.log.info('runtime assembled from the database', {
-      // Names and transports only. A connector URL can carry a token in a
-      // query string despite every instruction not to put one there (§2.3).
-      connectors: describeServers(connectors.servers),
-      subagents: Object.keys(subagents.agents),
-      ...(connectors.skipped.length > 0 ? { skippedConnectors: connectors.skipped } : {}),
-      ...(subagents.skipped.length > 0 ? { skippedSubagents: subagents.skipped } : {}),
-    })
-  }
+  // The same set both rings refuse: the hook denies first, and canUseTool
+  // denies again if the hook was ever not consulted.
+  const hookDeps = { audit, log: deps.log, disabledTools: connectors.disabledTools }
 
   const icpRow = await activeIcpProfile(deps.db, args.orgId)
   let icpLabel: string | null = null

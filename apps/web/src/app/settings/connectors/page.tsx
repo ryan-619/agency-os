@@ -1,7 +1,7 @@
 import { redirect } from 'next/navigation'
 import { can, CONNECTOR_CATALOG, parseIcpDefinition } from '@agency/core'
 import {
-  listConnectors, parseConnectorConfig, secretsKeyFromEnv, type AgencyDb, type ConnectorRow,
+  connectorToolsState, listConnectors, parseConnectorConfig, secretsKeyFromEnv, type AgencyDb, type ConnectorRow,
 } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
@@ -62,7 +62,8 @@ export default async function ConnectorsPage() {
         Each of these is an MCP server. The agent builds its tool set from the enabled ones at the
         start of every message, so a server added here is usable immediately — no restart. Its tools
         are not pre-approved: a third-party tool nobody here has reviewed asks a person every time
-        the agent calls it.
+        the agent calls it. An owner can also turn a tool off, and then it is refused without asking
+        anyone.
       </p>
       <ConnectorsPanel
         connectors={rows.map(toView)}
@@ -92,6 +93,10 @@ function toView(row: ConnectorRow): ConnectorView {
     lastOkAt: row.lastOkAt ? row.lastOkAt.toISOString() : null,
     lastError: row.lastError,
     summary: summarise(row),
+    // Tool NAMES and who turned them off — derived from the row by the same
+    // function the worker's gate uses, so this page cannot show a list the
+    // gate is not enforcing. The config it reads never crosses.
+    disabledTools: connectorToolsState(row),
   }
 }
 
