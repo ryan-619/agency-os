@@ -34,7 +34,7 @@
  *
  * ## A campaign that bounces pauses itself
  *
- * After each pass, every active email campaign that has written to at least
+ * Before each pass, every active email campaign that has written to at least
  * twenty people in the last thirty days is checked: if more than
  * `OUTREACH_BOUNCE_PAUSE_PCT` of their addresses have bounced since, the
  * campaign is set `paused` — once, audited, and said in one log line. There
@@ -42,6 +42,19 @@
  * a paused campaign, and a person sets it active again after fixing the
  * list. A mailbox that keeps writing to dead addresses stops being one that
  * reaches anybody, and that is the whole agency's outreach, not one list's.
+ *
+ * BEFORE, not after: the bounces that cross the threshold arrive between
+ * ticks (the IMAP listener records them), and `dispatchTouch` re-reads the
+ * campaign's status for every row — so a pause taken first defers this
+ * tick's messages in that campaign, where a pause taken after the pass let
+ * up to a whole batch more go to a list already known to be bouncing.
+ *
+ * ## What is deferred, and what is not
+ *
+ * The deferrals are listed by name below — `quiet_hours`, `daily_cap`,
+ * `campaign_inactive`: the clock and a person's switch. Every other refusal
+ * code is terminal (`refused`), including any added later, so a new rule
+ * that time will not fix — stale evidence among them — needs no change here.
  */
 import { and, eq, inArray } from 'drizzle-orm'
 import {
@@ -68,7 +81,7 @@ export interface SenderDeps {
   /**
    * `OUTREACH_BOUNCE_PAUSE_PCT`: a campaign whose addresses bounce past this
    * percentage — strictly more than it, once it has written to at least
-   * `BOUNCE_PAUSE_MIN_SENT_TO` people — is paused after the tick. Absent
+   * `BOUNCE_PAUSE_MIN_SENT_TO` people — is paused before the tick's pass. Absent
    * turns the check off; `100` can never be exceeded, so it is off too.
    */
   readonly bouncePausePct?: number
@@ -152,6 +165,9 @@ export async function runSenderTick(deps: SenderDeps): Promise<TickSummary> {
   const now = deps.now?.() ?? new Date()
   const summary = { picked: 0, sent: 0, refused: 0, deferred: 0, failed: 0, autoPaused: 0 }
 
+  // Before the pass (see the top of this file). It never throws.
+  summary.autoPaused = await pauseBouncingCampaigns(deps, now)
+
   let due
   try {
     due = await dueTouches(deps.db, deps.batch, now, deps.provider.channels)
@@ -159,6 +175,7 @@ export async function runSenderTick(deps: SenderDeps): Promise<TickSummary> {
     deps.log.warn('sender could not read the queue', {
       error: err instanceof Error ? err.name : 'UnknownError',
     })
+    if (summary.autoPaused > 0) deps.log.info('sender tick', summary)
     return summary
   }
   summary.picked = due.length
@@ -223,10 +240,6 @@ export async function runSenderTick(deps: SenderDeps): Promise<TickSummary> {
       })
     }
   }
-
-  // After the pass, not before: a campaign paused here defers from the next
-  // tick on, and nothing this tick already decided is second-guessed.
-  summary.autoPaused = await pauseBouncingCampaigns(deps, deps.now?.() ?? new Date())
 
   if (summary.picked > 0 || summary.autoPaused > 0) deps.log.info('sender tick', summary)
   return summary

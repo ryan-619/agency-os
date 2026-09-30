@@ -304,8 +304,8 @@ describe('the sender tick', () => {
   })
 
   /**
-   * A campaign whose addresses bounce past the threshold pauses itself after
-   * a tick — once, audited, one log line — and the existing
+   * A campaign whose addresses bounce past the threshold pauses itself at the
+   * start of a tick — once, audited, one log line — and the existing
    * `campaign_inactive` deferral is what stops it. Only a person re-activates.
    */
   describe('pausing a campaign that bounces', () => {
@@ -385,6 +385,21 @@ describe('the sender tick', () => {
       expect(row.status).toBe('approved')
       expect(row.approvedBy).toBe(userId)
       expect(provider.sent).toEqual([])
+    })
+
+    /**
+     * The bounces that cross the threshold arrive between ticks. Paused AFTER
+     * the pass, the tick that first saw them still sent up to a batch into
+     * the bouncing list; paused BEFORE it, the same tick defers them.
+     */
+    it('pauses before the pass, so the tick that finds the threshold crossed sends nothing more in it', async () => {
+      await history(20, 2)
+      const t = await approved()
+      const s = await tickAt5()
+      expect(s).toMatchObject({ autoPaused: 1, picked: 1, sent: 0, deferred: 1, refused: 0 })
+      expect(provider.sent).toEqual([])
+      expect((await reread(t.id)).status).toBe('approved')
+      expect(await status()).toBe('paused')
     })
 
     it('leaves another org’s campaign alone', async () => {
