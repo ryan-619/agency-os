@@ -232,8 +232,10 @@ function referencesFrom(headers: Map<string, string>): string[] {
   const chain = split(headers.get('references'))
   const ids = [...new Set([...parents, ...chain])]
   if (ids.length <= MAX_REFERENCES) return ids
+  // Over the bound: every parent, then the NEWEST of the chain.
   const kept = new Set(parents.slice(0, MAX_REFERENCES))
-  for (const id of chain.slice(-(MAX_REFERENCES - kept.size))) kept.add(id)
+  const room = MAX_REFERENCES - kept.size
+  if (room > 0) for (const id of chain.slice(-room)) kept.add(id)
   return [...kept].slice(0, MAX_REFERENCES)
 }
 
