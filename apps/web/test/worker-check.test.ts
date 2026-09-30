@@ -266,6 +266,18 @@ describe('GET /api/cron/digest, from its source', () => {
     expect(route).toMatch(/const ORG_BUDGET_MS = 15_000 \+ DIGEST_MAX_PAUSE_NOTICES \* 3_000/)
   })
 
+  /**
+   * The next run reads strictly after the mark this one records, so a
+   * `cron.digest` row without it would send the next run back to the
+   * timestamp comparison that read some pauses twice and others never.
+   */
+  it('records the mark the pauses were read through on every path, posted or not', () => {
+    const records = [...route.matchAll(/digestRecord\(tx, \{[\s\S]*?\}\)/g)].map((m) => m[0])
+    expect(records.length).toBeGreaterThanOrEqual(3)
+    for (const r of records) expect(r, r).toContain('campaignPauses')
+    expect(route.match(/readThrough: pauses\.readThrough/g)).toHaveLength(2)
+  })
+
   it('builds events by name, never by spreading the facts', () => {
     // `...f` or `...args` as a whole object; copying one array (`[...f.topRotting]`) is fine.
     expect(builders).not.toMatch(/\.\.\.\s*(args\.facts|args|facts|f)\s*[,}\n]/)

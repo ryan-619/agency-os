@@ -33,6 +33,9 @@ import { campaignPausedNotification, digestNotification, workerSilentNotificatio
  * because its addresses bounced (`campaign.auto_paused`) since the previous
  * digest, at most `DIGEST_MAX_PAUSE_NOTICES`: the worker pauses it and has
  * no Slack path, so this is where the channel hears that outreach stopped.
+ * "Since the previous digest" is the mark that run recorded — the stored
+ * `created_at` and id of the last pause it read — never this route's `now`
+ * against the previous row's timestamp, which are two different clocks.
  *
  * ## Once a day, whatever Vercel delivers
  *
@@ -139,14 +142,14 @@ export async function GET(request: Request): Promise<NextResponse> {
       const run = await digestOnce(db, orgId, since, async (tx): Promise<Outcome> => {
         const facts = await digestFacts(tx, orgId, { now, staleDays: await staleDaysFor(tx, orgId) })
         const counts = digestCounts(facts)
-        // Before digestRecord: the newest cron.digest row must still be the previous run's.
+        // Before digestRecord: the newest cron.digest row must still be the previous run's, whose mark this reads after.
         const pauses = await digestCampaignPauses(tx, orgId, { now })
         const base = { orgId, counts, worker: report.status } as const
 
         if (!slack) {
           await digestRecord(tx, {
             ...base, posted: false, why: 'no_slack', workerAlert: silence.silent ? 'no_slack' : 'not_needed',
-            campaignPauses: { found: pauses.found, posted: 0 },
+            campaignPauses: { found: pauses.found, posted: 0, readThrough: pauses.readThrough },
           })
           return { posted: false, why: 'no_slack', workerSilent: silence.silent }
         }
@@ -158,7 +161,8 @@ export async function GET(request: Request): Promise<NextResponse> {
         for (const pause of pauses.pauses) {
           if (await post(tx, slack, campaignPausedNotification({ orgId, pause }))) pausesPosted += 1
         }
-        const campaignPauses = { found: pauses.found, posted: pausesPosted }
+        // The mark is recorded whatever Slack did: a notice that failed is counted, not retried tomorrow.
+        const campaignPauses = { found: pauses.found, posted: pausesPosted, readThrough: pauses.readThrough }
         // Last, so the alert is the newest message in the channel.
         let workerAlert: NonNullable<DigestRecord['workerAlert']> = 'not_needed'
         if (silence.silent) {
