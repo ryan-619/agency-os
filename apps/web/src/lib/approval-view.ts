@@ -89,12 +89,23 @@ export function candidateLine(decision: CandidateDecision | null): string {
  * Why Approve is disabled for this candidate, or null when it is not.
  *
  * Only `humanCanResolve: false` blocks — a suppression, a recorded refusal,
- * a paused contact, a cold SMS. Everything else leaves Approve enabled,
- * because the send path re-checks at sending and a person approving past
- * quiet hours is doing exactly what the design expects.
+ * a paused contact, a cold SMS, and words written from a scan that is past
+ * its re-verification deadline now (§2.2). Everything else leaves Approve
+ * enabled, because the send path re-checks at sending and a person
+ * approving past quiet hours is doing exactly what the design expects.
+ *
+ * Stale evidence has its own sentence, because "choose someone else" is no
+ * fix for it: every person at the company gets the same words, and the
+ * words are what aged.
  */
 export function approveBlock(decision: CandidateDecision | null): string | null {
   if (decision === null || decision.humanCanResolve) return null
+  if (decision.code === 'stale_evidence') {
+    return (
+      `Approving is pointless: ${decision.words} — the scan it was written from is past its re-verification ` +
+      'deadline, and nobody may approve past that. Deny it, re-scan the company, then draft it again.'
+    )
+  }
   return (
     `Approving is pointless: ${decision.words}, and nobody may approve past that — the worker would refuse it. ` +
     'Deny the draft, or choose someone else.'
@@ -209,9 +220,15 @@ export interface DraftEvidence {
   readonly lines: readonly string[]
 }
 
-/** §2.2, verbatim from the brief: the sentence a stale card leads with. */
+/**
+ * §2.2: the sentence a stale card leads with. It used to end "re-scan, then
+ * approve", which stopped being true when the send path started refusing
+ * stale evidence: a draft is judged by the scan that was current when it was
+ * WRITTEN, so a re-scan freshens the company and never this draft's words.
+ */
 export const STALE_EVIDENCE_NOTE =
-  'This draft is about a company whose findings are stale; §2.2 says re-verify before anything outbound — re-scan, then approve.'
+  'This draft is about a company whose findings are stale; §2.2 says re-verify before anything outbound — ' +
+  're-scan, then draft it again. The send path refuses a draft written from a stale scan, and approving does not change that.'
 
 export const MISSING_EVIDENCE_NOTE =
   'This draft is about a company this product has never scanned successfully, so nothing it says about them ' +
@@ -238,10 +255,13 @@ export type EvidenceNote =
 /**
  * What the card says about the evidence behind the draft.
  *
- * Stale and missing are warnings; the Approve button stays enabled, because
- * freshness is a fact about the words a person is reading and they are the
- * one deciding whether the words are still true. A fresh scan with no gaps
- * is plain: nothing is wrong, but a draft claiming a gap has nothing behind it.
+ * Stale and missing are warnings. This note decides nothing: whether Approve
+ * is enabled comes from the candidates' `previewSend` answers, and those ask
+ * the sender's own question — is the scan these words were WRITTEN from past
+ * its deadline now? — so a draft written from a stale scan is blocked there,
+ * as `stale_evidence`, and a draft about a never-scanned company is not (no
+ * scan could have been quoted). A fresh scan with no gaps is plain: nothing
+ * is wrong, but a draft claiming a gap has nothing behind it.
  */
 export function evidenceNote(evidence: DraftEvidence | null, hasCompany: boolean): EvidenceNote | null {
   if (!hasCompany) {

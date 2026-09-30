@@ -38,6 +38,7 @@ const SEND_CODES = {
   daily_cap: true,
   campaign_inactive: true,
   needs_approval: true,
+  stale_evidence: false,
 } satisfies Record<SendRefusalCode, boolean>
 
 const refusal = (code: string, humanCanResolve: boolean): CandidateDecision =>
@@ -102,9 +103,20 @@ describe('approveBlock', () => {
       } else {
         expect(block).toContain('Approving is pointless')
         expect(block).toContain(refusal(code, resolvable).words)
-        expect(block).toContain('choose someone else')
+        // Another person at the company gets the same aged words, so stale
+        // evidence names its own fix instead.
+        expect(block).toContain(code === 'stale_evidence' ? 're-scan the company, then draft it again' : 'choose someone else')
       }
     }
+  })
+
+  it('names the fix for stale evidence — a re-scan and a new draft — never another person', () => {
+    const block = approveBlock(refusal('stale_evidence', false))
+    expect(block).toBe(
+      'Approving is pointless: the evidence it quotes is stale — the scan it was written from is past its ' +
+        're-verification deadline, and nobody may approve past that. Deny it, re-scan the company, then draft it again.',
+    )
+    expect(candidateLine(refusal('stale_evidence', false))).toBe('the evidence it quotes is stale — nobody may approve past this')
   })
 
   it('leaves Approve enabled when nothing stops the message', () => {
@@ -180,10 +192,18 @@ describe('who addressed the draft', () => {
 describe('the evidence', () => {
   const asOf = '2026-09-12T09:30:00.000Z'
 
-  it('leads a stale card with the §2.2 sentence, verbatim, and the scan date', () => {
+  /**
+   * It used to end "re-scan, then approve". Since the send path refuses
+   * stale evidence, judged by the scan current when the draft was WRITTEN,
+   * a re-scan freshens the company and never this draft — so the sentence
+   * says to draft it again, and never to approve.
+   */
+  it('leads a stale card with the §2.2 sentence and the scan date, and never says to approve', () => {
     expect(STALE_EVIDENCE_NOTE).toBe(
-      'This draft is about a company whose findings are stale; §2.2 says re-verify before anything outbound — re-scan, then approve.',
+      'This draft is about a company whose findings are stale; §2.2 says re-verify before anything outbound — ' +
+        're-scan, then draft it again. The send path refuses a draft written from a stale scan, and approving does not change that.',
     )
+    expect(STALE_EVIDENCE_NOTE).not.toMatch(/then approve/)
     const note = evidenceNote({ asOf, stale: true, lines: [] }, true)
     expect(note?.tone).toBe('warn')
     expect(note?.text.startsWith(STALE_EVIDENCE_NOTE)).toBe(true)

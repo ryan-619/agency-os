@@ -30,6 +30,8 @@ const EVENTS: readonly NotificationEvent[] = [
     optOutsNotRecorded24h: 0, spend24hUsd: '0.12', worker: 'live', topRotting: ['acme.example', 'b.example'],
   },
   { kind: 'campaign_paused', orgId: ORG, campaignId: '00000000-0000-4000-8000-000000000006', bouncePct: 7.5, threshold: 5 },
+  // A reply that said stop and could not be suppressed (the inbound routes).
+  { kind: 'opt_out_not_recorded', orgId: ORG, touchId: '00000000-0000-4000-8000-000000000007', contactId: '00000000-0000-4000-8000-000000000001', path: 'reply' },
 ]
 
 /** The lines of a payload that are not the deep link. */
@@ -177,6 +179,18 @@ describe('slackMessage', () => {
     expect(payload.text).toContain('not being sent')
     expect(payload.text).toContain('900s ago')
     expect(slackMessage({ kind: 'worker_silent', orgId: ORG, lastTickAt: null, ageSeconds: null }, ORIGIN).text).toContain('never ticked')
+  })
+
+  it('says which way an unrecorded opt-out arrived — the link, an erasure, or a reply — and that a person must act', () => {
+    const words = (path: 'unsubscribe' | 'erasure' | 'reply') =>
+      slackMessage({ kind: 'opt_out_not_recorded', orgId: ORG, touchId: '00000000-0000-4000-8000-000000000007', contactId: null, path }, ORIGIN).text
+    expect(words('unsubscribe')).toContain('through the unsubscribe link')
+    expect(words('erasure')).toContain('through an erasure request')
+    expect(words('reply')).toContain('through a reply')
+    for (const path of ['unsubscribe', 'erasure', 'reply'] as const) {
+      expect(words(path)).toMatch(/^OPT-OUT NOT RECORDED\./)
+      expect(words(path)).toContain('A person has to record it now.')
+    }
   })
 
   it('says why a campaign paused itself', () => {

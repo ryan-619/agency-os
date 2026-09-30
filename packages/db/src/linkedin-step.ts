@@ -52,7 +52,7 @@ import { normaliseLinkedIn, type Channel, type SendRefusalCode } from '@agency/c
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
-import { dispatchTouch, type MessageProvider, type TouchRow } from './outreach.js'
+import { dispatchTouch, evidenceAsOfFor, type MessageProvider, type TouchRow } from './outreach.js'
 import { previewSend, type SendPreview } from './send-preview.js'
 import { tasksComplete, tasksCreate, tasksOpenForTouch } from './tasks.js'
 
@@ -283,7 +283,7 @@ export async function linkedinStepsDue(
     const t = r.touch
     const state = stateOf(t)
     const preview = state === 'ready' && t.contactId && t.campaignId
-      ? await previewSend(db, { orgId, contactId: t.contactId, campaignId: t.campaignId, now })
+      ? await previewSend(db, { orgId, contactId: t.contactId, campaignId: t.campaignId, now, writtenAt: evidenceAsOfFor(t) })
       : null
     const handedUser = state === 'handed' ? t.providerId!.slice(HUMAN_PREFIX.length) : null
     steps.push({

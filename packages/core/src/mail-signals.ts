@@ -32,6 +32,21 @@
  * "unsubscribe" is an opt-out that happens to be automatic, and it is
  * suppressed, not filed as an auto-reply.
  *
+ * ## The one body reader here, and the one thing it may decide
+ *
+ * `mentionsRemovalOrDeparture` DOES read the body — the person's own words,
+ * above any quote — and it is deliberately broad where `looksLikeOptOut` is
+ * deliberately narrow, because the two guard opposite mistakes. The narrow
+ * reader writes a SUPPRESSION, the strongest thing this system does, so its
+ * bar is a clear statement. The broad one decides only whether an automatic
+ * mail may skip the PAUSE: a header saying "automatic" is not permission to
+ * keep writing to somebody whose out-of-office says "I have left — remove me
+ * from your list". Found by review — before, every such mail skipped the
+ * pause whenever the narrow reader missed it. A hit costs a pause, which is
+ * what every inbound did before auto-replies were read at all; a miss would
+ * cost a follow-up to somebody who asked to be taken off. It never writes a
+ * suppression, and nothing else reads it.
+ *
  * ## What a signal is NOT evidence of
  *
  * Anyone who can send mail to the agency's inbox can write these headers and
@@ -248,6 +263,53 @@ export function mailSignalInput(raw: { readonly headers?: unknown; readonly dsn?
   }
   const dsn = typeof raw.dsn === 'string' && raw.dsn.trim() ? raw.dsn.slice(0, MAIL_SIGNAL_LIMITS.dsnChars) : null
   return { headers, dsn }
+}
+
+/**
+ * The person's own words: everything above the first quoted reply.
+ *
+ * A reply quotes the message it answers, and the message it answers is
+ * OURS — footer, unsubscribe line and all. Reading the quote as theirs would
+ * put our own "unsubscribe" in their mouth. The markers are a `>`-quoted
+ * line, an "On … wrote:" attribution and Outlook's "-----Original Message"
+ * rule; the first one ends what they wrote.
+ */
+export function ownWords(body: string | null | undefined): string {
+  if (!body) return ''
+  return body.split(/\r?\n(?:>|On .+ wrote:|-{2,}\s*Original Message)/)[0] ?? body
+}
+
+const REMOVAL_OR_DEPARTURE = new RegExp(
+  [
+    String.raw`\bremove\s+(?:me|my\s+(?:address|e-?mail|name|details))\b`,
+    String.raw`\btake\s+me\s+off\b`,
+    String.raw`\bunsubscrib\w*`,
+    String.raw`\bopt(?:\s+me)?[\s-]?out\b`,
+    String.raw`\b(?:do\s+not|don['’]?t)\s+(?:contact|e-?mail)\b`,
+    String.raw`\bstop\s+(?:e-?mailing|contacting)\b`,
+    String.raw`\bno\s+longer\s+(?:with|at|working)\b`,
+    String.raw`(?:\bhas|\bhave|['’]ve)\s+left\b`,
+    String.raw`\bleft\s+the\s+(?:company|organi[sz]ation|business)\b`,
+  ].join('|'),
+  'i',
+)
+
+/**
+ * Removal, or departure, in so many words — BROAD on purpose (see this
+ * file's header): "remove me", "take me off", "unsubscribe", "opt out", "do
+ * not / don't contact / email", "stop emailing / contacting", "no longer
+ * with / at / working", "has / have left", "left the company /
+ * organisation / business". Case-insensitive, over `ownWords` only.
+ *
+ * It decides ONE thing: whether a mail whose headers say it is automatic
+ * may skip the pause. A hit makes it an ordinary reply — pause, cancel,
+ * advance. It never decides an opt-out and never writes a suppression; that
+ * is `looksLikeOptOut`, and only that.
+ */
+export function mentionsRemovalOrDeparture(body: string | null | undefined): boolean {
+  const own = ownWords(body)
+  if (!own.trim()) return false
+  return REMOVAL_OR_DEPARTURE.test(own)
 }
 
 // ---------------------------------------------------------------------------

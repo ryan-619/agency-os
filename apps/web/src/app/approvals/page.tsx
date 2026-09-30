@@ -2,8 +2,8 @@ import { redirect } from 'next/navigation'
 import { DEFAULT_STALE_AFTER_DAYS, can, isStale, parseIcpDefinition, type IcpDefinition } from '@agency/core'
 import { and, desc, eq } from 'drizzle-orm'
 import {
-  listCampaigns, listContactsForCompany, pendingApprovals, pendingDrafts, previewSend, quotableFindings, readContact,
-  schema, type AgencyDb,
+  evidenceAsOfFor, listCampaigns, listContactsForCompany, pendingApprovals, pendingDrafts, previewSend, quotableFindings,
+  readContact, schema, type AgencyDb,
 } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
@@ -156,30 +156,41 @@ export default async function ApprovalsPage() {
   })
 
   /**
-   * The previews, one per distinct (person, campaign): two drafts about one
-   * company share their answers. The preselected people go first, so the
-   * limit never costs the card the one person it was addressed to.
+   * The previews, one per distinct (person, campaign, moment the words were
+   * written): two drafts about one company written together share their
+   * answers. The moment is part of the question since stale evidence is a
+   * rule (§2.2): the sender judges a draft's words by the scan current when
+   * they were WRITTEN, so a preview "as if written now" would call fresh a
+   * draft the worker will refuse. An answer to a reply quotes no scan
+   * (`evidenceAsOfFor`). The preselected people go first, so the limit never
+   * costs the card the one person it was addressed to.
    */
-  const key = (contactId: string, campaignId: string) => `${contactId}:${campaignId}`
-  const wanted: { contactId: string; campaignId: string }[] = []
+  const key = (contactId: string, campaignId: string, writtenAt: Date | null) =>
+    `${contactId}:${campaignId}:${writtenAt ? writtenAt.toISOString() : 'answer'}`
+  const wanted: { contactId: string; campaignId: string; writtenAt: Date | null }[] = []
   const seen = new Set<string>()
-  const want = (contactId: string, campaignId: string) => {
-    const k = key(contactId, campaignId)
+  const want = (contactId: string, campaignId: string, writtenAt: Date | null) => {
+    const k = key(contactId, campaignId, writtenAt)
     if (seen.has(k)) return
     seen.add(k)
-    wanted.push({ contactId, campaignId })
+    wanted.push({ contactId, campaignId, writtenAt })
   }
-  for (const p of planned) if (p.checked && p.d.touch.contactId) want(p.d.touch.contactId, p.checked.id)
-  for (const p of planned) if (p.checked) for (const c of p.people) want(c.id, p.checked.id)
+  for (const p of planned) {
+    if (p.checked && p.d.touch.contactId) want(p.d.touch.contactId, p.checked.id, evidenceAsOfFor(p.d.touch))
+  }
+  for (const p of planned) if (p.checked) for (const c of p.people) want(c.id, p.checked.id, evidenceAsOfFor(p.d.touch))
 
   const previewed = await mapLimit(wanted.slice(0, PREVIEW_LIMIT), PREVIEW_CONCURRENCY, async (w) => {
+    const k = key(w.contactId, w.campaignId, w.writtenAt)
     try {
-      const preview = await previewSend(db, { orgId: user.orgId, contactId: w.contactId, campaignId: w.campaignId, now })
-      return [key(w.contactId, w.campaignId), preview.ok ? decisionView(preview.decision) : uncheckedDecision(preview.message)] as const
+      const preview = await previewSend(db, {
+        orgId: user.orgId, contactId: w.contactId, campaignId: w.campaignId, now, writtenAt: w.writtenAt,
+      })
+      return [k, preview.ok ? decisionView(preview.decision) : uncheckedDecision(preview.message)] as const
     } catch (err) {
       // Named, never the driver's message (it can carry the DSN — §2.3).
       const name = err instanceof Error ? err.name : 'UnknownError'
-      return [key(w.contactId, w.campaignId), uncheckedDecision(`The check did not run (${name}).`)] as const
+      return [k, uncheckedDecision(`The check did not run (${name}).`)] as const
     }
   })
   const decisions = new Map<string, CandidateDecision>(previewed)
@@ -260,7 +271,7 @@ export default async function ApprovalsPage() {
         return {
           id: c.id,
           label: address ? `${name} <${address}>` : `${name} (no ${d.touch.channel === 'linkedin' ? 'LinkedIn profile' : 'address'})`,
-          decision: checked ? decisions.get(key(c.id, checked.id)) ?? notChecked : null,
+          decision: checked ? decisions.get(key(c.id, checked.id, evidenceAsOfFor(d.touch))) ?? notChecked : null,
         }
       }),
       evidence: d.company ? evidenceByCompany.get(d.company.id) ?? null : null,

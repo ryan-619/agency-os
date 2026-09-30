@@ -272,7 +272,7 @@ describe('receiveResendWebhook — the route, with the network and the database 
 
   const MATCHED: InboundOutcome = {
     matched: 'contact', contactId: 'c1', orgId: 'o1', touchId: 't1', paused: true, suppressed: false,
-    replyKind: 'interested', duplicate: false, companyId: 'co1', companyDomain: 'acme.example',
+    replyKind: 'interested', duplicate: false, companyId: 'co1', companyDomain: 'acme.example', optOutNotRecorded: false,
   }
 
   function event(type = 'email.received', data: Record<string, unknown> = { email_id: EMAIL_ID }): string {
@@ -454,6 +454,16 @@ describe('receiveResendWebhook — the route, with the network and the database 
     expect(all).not.toContain('db.internal')
   })
 
+  /** The route raises the alarm from `outcome`; the answer is still 200, since a retry would record nothing more. */
+  it('hands an unrecorded opt-out through to the route, answers 200, and says so in the log', async () => {
+    const notRecorded: InboundOutcome = { ...MATCHED, replyKind: 'opted_out', optOutNotRecorded: true }
+    const h = harness({ outcome: notRecorded })
+    const r = await receiveResendWebhook(signed(event()), h.deps)
+    expect(r.status).toBe(200)
+    expect(r.outcome).toEqual(notRecorded)
+    expect(logged.join('\n')).toContain('"optOutNotRecorded":true')
+  })
+
   it('hands a redelivery through unchanged — handleInboundEmail is what recognises it', async () => {
     const duplicate: InboundOutcome = { ...MATCHED, duplicate: true, paused: false }
     const h = harness({ outcome: duplicate })
@@ -501,7 +511,7 @@ describe('apps/web/src/app/api/inbound/resend/route.ts (read from the source)', 
   })
 
   it('announces with the generic route’s builder, after the delivery is handled, and only inside a try', () => {
-    expect(code).toContain(`import { replyNotification } from '../email/notification'`)
+    expect(code).toContain(`import { optOutNotRecordedNotification, replyNotification } from '../email/notification'`)
     expect(code).toContain(`from '@/lib/slack'`)
     expect(code.indexOf('after(')).toBeGreaterThan(code.indexOf('await receiveResendWebhook('))
     const calls = code.match(/\bafter\(/g) ?? []

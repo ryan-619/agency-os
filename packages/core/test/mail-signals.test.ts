@@ -1,14 +1,19 @@
 /**
  * What an inbound mail says about itself (RFC 3834, RFC 3464, RFC 3463).
  *
- * The readers are pure over headers and the delivery-status part, and they
- * never look at the body. What is tested here is the reading; what is DONE
+ * The header readers are pure over headers and the delivery-status part, and
+ * they never look at the body; the one body reader, the broad removal reader,
+ * decides only whether an automatic mail may skip the pause. What is tested
+ * here is the reading; what is DONE
  * with it — tying a bounce to a message this system sent, marking the
  * contact, letting an opt-out win over an auto-reply — is in
  * packages/db/test/outreach.test.ts, against a real engine.
  */
 import { describe, expect, it } from 'vitest'
-import { MAIL_SIGNAL_HEADERS, MAIL_SIGNAL_LIMITS, mailSignalInput, parseDsn, readMailSignals } from '../src/index.js'
+import {
+  MAIL_SIGNAL_HEADERS, MAIL_SIGNAL_LIMITS, mailSignalInput, mentionsRemovalOrDeparture, ownWords, parseDsn,
+  readMailSignals,
+} from '../src/index.js'
 
 /** A delivery-status part the way Postfix writes one. */
 const dsn = (recipient: string[], perMessage: string[] = ['Reporting-MTA: dns; mx.rentman.io']): string =>
@@ -228,5 +233,82 @@ describe('mailSignalInput — what a webhook body may hand the readers', () => {
     }
     expect(mailSignalInput({ dsn: '   ' }).dsn).toBeNull()
     expect(mailSignalInput({ dsn: 12 }).dsn).toBeNull()
+  })
+})
+
+/**
+ * The broad reader. Found by review: a mail whose headers said "automatic"
+ * skipped the pause whenever the NARROW opt-out reader missed it, and that
+ * reader misses the very example the send path's own comment gives. The
+ * broad one decides only that an automatic mail is handled like any reply —
+ * paused — and never writes a suppression (packages/db/test/outreach.test.ts).
+ */
+describe('mentionsRemovalOrDeparture — the broad reader', () => {
+  it.each([
+    // The send path's own example, which the narrow reader misses.
+    'I have left — remove me from your list',
+    'remove me from your list',
+    // An out-of-office whose last line asks to be removed.
+    'Thank you for your message. I am out of the office until 21 September with no access to email.\n\n' +
+      'Please remove me from your mailing list.',
+    'Please take me off this list.',
+    'UNSUBSCRIBE',
+    'I would like to opt out.',
+    'Please opt-out my address.',
+    "Please don't email me again.",
+    'Do not contact me.',
+    'Stop emailing me, thanks.',
+    'Priya is no longer with Rentman.',
+    'I am no longer working on security.',
+    'Priya has left the company; please contact Sam.',
+    'I’ve left Rentman.',
+    'She left the organisation in August.',
+    'He left the organization last year.',
+    'Please remove my address from your records.',
+  ])('reads %j as removal or departure', (body) => {
+    expect(mentionsRemovalOrDeparture(body)).toBe(true)
+  })
+
+  it.each([
+    // An ordinary out-of-office: nothing in it asks for anything.
+    'Thank you for your email. I am currently out of the office with limited access to email and will ' +
+      'return on 21 September. For urgent matters please contact support@rentman.io.',
+    'Automatic reply: I am on annual leave until Monday.',
+    'Thanks — interested, can we book a call next week?',
+    '',
+  ])('reads %j as saying nothing of the kind', (body) => {
+    expect(mentionsRemovalOrDeparture(body)).toBe(false)
+  })
+
+  it('reads nothing into an empty or missing body', () => {
+    expect(mentionsRemovalOrDeparture(null)).toBe(false)
+    expect(mentionsRemovalOrDeparture(undefined)).toBe(false)
+    expect(mentionsRemovalOrDeparture('   \n  ')).toBe(false)
+  })
+
+  /**
+   * The message they are replying to is ours, footer and all. Our own
+   * "unsubscribe" line, quoted back, is not theirs.
+   */
+  it('reads only their own words, never the message they quote', () => {
+    const quoted = [
+      'I am out of the office until Monday.',
+      '',
+      'On Tue, 15 Sep 2026 at 12:00, Agency <hello@agency.test> wrote:',
+      '> A gap on your security page.',
+      '> Reply "unsubscribe" to stop hearing from us.',
+    ].join('\n')
+    expect(mentionsRemovalOrDeparture(quoted)).toBe(false)
+    expect(mentionsRemovalOrDeparture('Out of office.\n> unsubscribe')).toBe(false)
+    expect(mentionsRemovalOrDeparture('Out of office.\n-----Original Message-----\nunsubscribe')).toBe(false)
+  })
+})
+
+describe('ownWords', () => {
+  it('keeps everything above the first quote marker, and all of a body with none', () => {
+    expect(ownWords('Stop\n> quoted')).toBe('Stop')
+    expect(ownWords('Thanks!\r\nOn Mon, Priya wrote:\r\n> hi')).toBe('Thanks!')
+    expect(ownWords('Line one\nLine two')).toBe('Line one\nLine two')
+    expect(ownWords(null)).toBe('')
   })
 })
