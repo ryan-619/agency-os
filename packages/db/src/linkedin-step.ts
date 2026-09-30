@@ -116,11 +116,17 @@ export const LINKEDIN_STEP_STUCK_MINUTES = 30
 
 /**
  * The stuck-claim sentence. `recoverStuckSends` (apps/agent/src/boot/
- * reconcile.ts) says the same thing about a worker; this says it about a
- * request, and names the conversation to check instead of a mailbox.
+ * reconcile.ts) says the same thing about a worker, in the same shape — what
+ * happened, what to check, re-approve — and it is not copied verbatim because
+ * two of its words would be false here. No worker restarted, and "it may or
+ * may not have gone" is not what this flow knows: the words leave the server
+ * only in Start's SUCCESS response, which is written after the row says
+ * `sent`, so a row still `sending` was never shown to anybody from here. The
+ * draft could still have been read on another screen, so the conversation is
+ * still the thing to check.
  */
 export const LINKEDIN_STEP_STUCK_ERROR =
-  'The request that was sending this was interrupted. It may or may not have gone; check the LinkedIn conversation, then re-approve to send it again.'
+  'The request that was starting this step was interrupted before the rules finished, so the message was never shown to anybody here. Check the LinkedIn conversation in case it went some other way, then re-approve to send it again.'
 
 /** What `failed` says when the person handed a message could not send it. */
 export const LINKEDIN_STEP_NOT_SENT_ERROR =
@@ -580,6 +586,11 @@ export async function linkedinFinishStep(
     // `sent_at` is cleared because nothing went: the daily cap counts it,
     // and so does anyone reading the row. `provider_id` stays — it names who
     // was handed the message, which is still true.
+    //
+    // The deal is NOT moved back. Start moved it to `contacted` through
+    // `advanceDeal`, which only goes forward, and it may have been there
+    // already for a message that did go; guessing which is how a booked
+    // meeting gets knocked back. Moving it is the board's job, by a person.
     await db
       .update(schema.touches)
       .set({ status: 'failed', sentAt: null, error: LINKEDIN_STEP_NOT_SENT_ERROR })

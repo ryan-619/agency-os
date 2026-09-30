@@ -368,6 +368,10 @@ describe('the LinkedIn step', () => {
       expect(row.error).toMatch(/not sent/)
       expect(await openTasks(t.id)).toHaveLength(0)
       expect(await linkedinStepsDue(db, orgId, NOON)).toEqual([])
+      // The deal is left where Start's forward-only move put it; moving it
+      // back is a person's call on the board, not a guess made here.
+      const [deal] = await db.select().from(schema.deals).where(eq(schema.deals.companyId, companyId))
+      expect(deal!.stage).toBe('contacted')
       // Once decided, the other answer is not available.
       expect(await finish(t.id, 'sent')).toMatchObject({ ok: false, reason: 'not_handed' })
     })
@@ -421,7 +425,11 @@ describe('the LinkedIn step', () => {
       expect(failed).toMatchObject({ state: 'stopped', error: LINKEDIN_STEP_STUCK_ERROR })
       const row = await reread(stuck.id)
       expect(row.status).toBe('failed')
-      expect(row.error).toMatch(/may or may not have gone/)
+      expect(row.error).toBe(LINKEDIN_STEP_STUCK_ERROR)
+      // True about this flow: a claim that never settled never handed anything over.
+      expect(row.error).toMatch(/never shown to anybody here/)
+      expect(row.providerId).toBeNull()
+      expect(row.sentAt).toBeNull()
     })
 
     it('leaves an email row the worker is sending to the worker', async () => {
