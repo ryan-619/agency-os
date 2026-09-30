@@ -125,8 +125,19 @@ export async function credentialsList(db: AgencyDb, orgId: string): Promise<Cred
 }
 
 export type CredentialsReplaceResult =
-  | { readonly ok: true; readonly secretId: string; readonly previousDeleted: boolean }
-  | { readonly ok: false; readonly message: string }
+  | {
+      readonly ok: true
+      readonly secretId: string
+      /** What the new row is called — the caller's, or `<connector> credential`. For the audit row. */
+      readonly label: string
+      readonly previousDeleted: boolean
+    }
+  | {
+      readonly ok: false
+      /** `not_found` is a 404 to a route; `invalid` is something the person can fix on the form. */
+      readonly reason: 'not_found' | 'invalid'
+      readonly message: string
+    }
 
 /**
  * Give a connector a new credential, and remove the one it replaced.
@@ -160,15 +171,19 @@ export async function credentialsReplaceForConnector(
   },
   key: Buffer,
 ): Promise<CredentialsReplaceResult> {
-  if (!UUID.test(args.connectorId)) return { ok: false, message: 'No such connector.' }
+  if (!UUID.test(args.connectorId)) return { ok: false, reason: 'not_found', message: 'No such connector.' }
 
   const plaintext = args.plaintext
   if (typeof plaintext !== 'string' || plaintext.trim() === '') {
-    return { ok: false, message: 'Enter the new credential.' }
+    return { ok: false, reason: 'invalid', message: 'Enter the new credential.' }
   }
   const label = (args.label ?? '').trim()
   if (label.length > MAX_LABEL) {
-    return { ok: false, message: `Keep the label under ${MAX_LABEL} characters — it describes the credential, it does not hold it.` }
+    return {
+      ok: false,
+      reason: 'invalid',
+      message: `Keep the label under ${MAX_LABEL} characters — it describes the credential, it does not hold it.`,
+    }
   }
   const core = plaintext.trim()
   if (label && core.length >= PASTE_CHECK_MIN && label.includes(core)) {
@@ -176,6 +191,7 @@ export async function credentialsReplaceForConnector(
     // exactly where §2.3 says a credential may never be.
     return {
       ok: false,
+      reason: 'invalid',
       message: 'The label is shown on this page and in the audit log. Describe the credential there; do not paste it.',
     }
   }
@@ -193,13 +209,14 @@ export async function credentialsReplaceForConnector(
       .limit(1)
       .for('update')
     const connector = rows[0]
-    if (!connector) return { ok: false as const, message: 'No such connector.' }
+    if (!connector) return { ok: false as const, reason: 'not_found' as const, message: 'No such connector.' }
 
+    const storedLabel = label || `${connector.name} credential`
     const secretId = await putSecret(
       txDb,
       {
         orgId: args.orgId,
-        label: label || `${connector.name} credential`,
+        label: storedLabel,
         plaintext,
         createdBy: args.createdBy ?? null,
       },
@@ -219,7 +236,7 @@ export async function credentialsReplaceForConnector(
         previousDeleted = false
       }
     }
-    return { ok: true as const, secretId, previousDeleted }
+    return { ok: true as const, secretId, label: storedLabel, previousDeleted }
   })
 }
 

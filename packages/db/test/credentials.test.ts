@@ -120,6 +120,7 @@ describe('Settings → Credentials', () => {
       expect(r.ok).toBe(true)
       if (!r.ok) return
       expect(r.secretId).not.toBe(apollo.secretRef)
+      expect(r.label).toBe('Apollo key (rotated)')
       expect(await revealSecret(db, orgId, r.secretId, KEY)).toBe(NEW_TOKEN)
 
       const after = await readConnector(db, orgId, apollo.id)
@@ -185,6 +186,7 @@ describe('Settings → Credentials', () => {
       expect(r.ok).toBe(true)
       if (!r.ok) return
       expect(r.previousDeleted).toBe(false)
+      expect(r.label).toBe('deepwiki credential')
       const listed = await credentialsList(db, orgId)
       expect(listed.map((l) => l.label)).toEqual(['deepwiki credential'])
     })
@@ -192,7 +194,7 @@ describe('Settings → Credentials', () => {
     it('treats another org’s connector as one that does not exist, and stores nothing', async () => {
       const theirs = await liveConnector('rival-crm', OLD_TOKEN, otherOrgId)
       const r = await credentialsReplaceForConnector(db, { orgId, connectorId: theirs.id, plaintext: NEW_TOKEN }, KEY)
-      expect(r).toEqual({ ok: false, message: 'No such connector.' })
+      expect(r).toEqual({ ok: false, reason: 'not_found', message: 'No such connector.' })
       expect(await secretCount()).toBe(0)
       const untouched = await readConnector(db, otherOrgId, theirs.id)
       expect(untouched?.secretRef).toBe(theirs.secretRef)
@@ -201,14 +203,14 @@ describe('Settings → Credentials', () => {
 
     it('answers a malformed id as not found rather than a cast error', async () => {
       const r = await credentialsReplaceForConnector(db, { orgId, connectorId: 'not-a-uuid', plaintext: NEW_TOKEN }, KEY)
-      expect(r).toEqual({ ok: false, message: 'No such connector.' })
+      expect(r).toEqual({ ok: false, reason: 'not_found', message: 'No such connector.' })
     })
 
     it('refuses an empty or blank credential and leaves the connector as it was', async () => {
       const apollo = await liveConnector()
       for (const plaintext of ['', '   \n']) {
         const r = await credentialsReplaceForConnector(db, { orgId, connectorId: apollo.id, plaintext }, KEY)
-        expect(r.ok).toBe(false)
+        expect(r.ok === false && r.reason).toBe('invalid')
       }
       const after = await readConnector(db, orgId, apollo.id)
       expect(after?.secretRef).toBe(apollo.secretRef)
