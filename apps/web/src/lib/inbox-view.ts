@@ -155,7 +155,11 @@ export function personName(
 
 export const ANSWER_SUBJECT_MAX = 200
 export const ANSWER_BODY_MAX = 4000
-/** Both routes refuse a request body larger than this before parsing it. */
+/**
+ * Both routes refuse a request body longer than this before parsing it —
+ * measured as the book route measures, in string length, which is also what
+ * the two maxima above count. The largest valid answer is about 4,300.
+ */
 export const INBOX_MAX_REQUEST_BYTES = 8 * 1024
 
 /** "Re: " once, however many the thread has collected, clipped to the limit. */
