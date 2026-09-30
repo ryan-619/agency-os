@@ -1,10 +1,11 @@
 /**
- * The read tools: what the agent is allowed to know about the CRM.
+ * The first read tools: the ICP, the company list, and one company's findings.
  *
- * All five are classified `low` in `AGENCY_TOOL_RISK` because §5.4 puts reads
- * there in so many words. That makes the §2.2 discipline in this file the only
- * thing standing between a stale or unobserved finding and the model's
- * context — nobody is going to be asked to approve a read.
+ * All three are classified `low` in `AGENCY_TOOL_RISK`, like every read tool
+ * in the other modules, because §5.4 puts reads there in so many words. That
+ * makes the §2.2 discipline in this file the only thing standing between a
+ * stale or unobserved finding and the model's context — nobody is going to be
+ * asked to approve a read.
  */
 import { z } from 'zod'
 import {

@@ -20,7 +20,7 @@ import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import { z } from 'zod'
 import {
-  AGENCY_TOOL_NAMES, parseIcpDefinition, type IcpDefinition, type Observation, type SiteProfile,
+  AGENCY_TOOL_NAMES, AGENCY_TOOL_RISK, parseIcpDefinition, type IcpDefinition, type Observation, type SiteProfile,
 } from '@agency/core'
 import {
   SEED_DIR, importCompanies, recordScan, type AgencyDb,
@@ -153,6 +153,18 @@ describe('the agency tools', () => {
     it('gives the model a description long enough to choose by', () => {
       for (const t of AGENCY_TOOLS) {
         expect(t.description.length, t.name).toBeGreaterThan(80)
+      }
+    })
+
+    /**
+     * read.ts's header says every read tool is `low`, and that is what makes
+     * the §2.2 discipline inside the handlers the only guard on a read.
+     * Pinned here so the sentence cannot outlive the fact.
+     */
+    it('classifies every read as low risk', () => {
+      for (const t of AGENCY_TOOLS) {
+        const [risk, rule] = AGENCY_TOOL_RISK[t.name as keyof typeof AGENCY_TOOL_RISK]
+        if (rule === 'read_only') expect(risk, t.name).toBe('low')
       }
     })
 
@@ -428,6 +440,20 @@ describe('the agency tools', () => {
         ).toThrow()
       },
     )
+
+    /**
+     * The description is what the model reads when it decides to draft, so
+     * it has to be true of the product it runs in. It used to say nothing in
+     * the system could send anything yet, which stopped being so in Phase 4:
+     * a model told that treats approval as the end of the road, and tells the
+     * person so.
+     */
+    it('says the draft is not sent now, and what has to happen before it is', () => {
+      expect(queueTouch.description).toMatch(/NOT sent now/)
+      expect(queueTouch.description).toMatch(/names the recipient and the campaign/)
+      expect(queueTouch.description).toMatch(/re-checked/)
+      expect(queueTouch.description).not.toMatch(/can send anything yet/i)
+    })
 
     it('refuses a company that is not in the CRM', async () => {
       const out = await run(queueTouch, {
