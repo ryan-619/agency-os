@@ -11,7 +11,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import {
-  INFORMATIONAL_SIGNALS, informationalStatus, isInformationalSignal, parseIcpDefinition,
+  INFORMATIONAL_SIGNALS, informationalSection, informationalStatus, isInformationalSignal, parseIcpDefinition,
 } from '../src/index.js'
 // By path: core must not depend on the scanner, and only the test needs it.
 import { ADDITIVE_SIGNAL_KEYS } from '../../scanner/src/additive.js'
@@ -71,5 +71,52 @@ describe('informationalStatus', () => {
       informationalStatus({ observed: true, gap: false, detail: 'not applicable — x' }),
     ]
     for (const s of all) expect(s).not.toMatch(/place|ok|pass|strength/i)
+  })
+})
+
+/**
+ * The company page's section, decided with a fixed clock. Nothing quotes
+ * these rows, but they are statements about somebody's site: one read off a
+ * scan that aged out is shown as aged out, from the scan's `ran_at` — the
+ * same rule as the scored table above it, not the `findings.stale` cache.
+ */
+describe('informationalSection', () => {
+  const RAN = new Date('2026-09-01T08:00:00.000Z')
+  const findings = [
+    { signalKey: 'reporting_endpoints', observed: true, gap: false, detail: 'NEL sent', evidence: { url: 'u', nel: 'x' } },
+    { signalKey: 'cookie_flags', observed: false, gap: null, detail: 'not captured', evidence: { url: 'u', reason: 'r' } },
+    { signalKey: 'hsts_quality', observed: true, gap: true, detail: 'max-age=3600 is under 180 days', evidence: { url: 'u', maxAge: 3600 } },
+    { signalKey: 'csp_quality', observed: true, gap: false, detail: 'not applicable — no enforced Content-Security-Policy to judge', evidence: { url: 'u' } },
+    { signalKey: 'csp_report_only', observed: true, gap: true, detail: 'report-only policy with no enforced policy', evidence: { url: 'u' } },
+  ]
+
+  it('is fresh inside the threshold and stale past it, measured from the scan', () => {
+    const fresh = informationalSection({ scan: { ranAt: RAN }, findings, staleAfterDays: 14, now: new Date('2026-09-10T08:00:00.000Z') })
+    expect(fresh.stale).toBe(false)
+    const aged = informationalSection({ scan: { ranAt: RAN }, findings, staleAfterDays: 14, now: new Date('2026-09-20T08:00:00.000Z') })
+    expect(aged.stale).toBe(true)
+  })
+
+  it('puts what was flagged first, then the catalogue order, with the catalogue’s words', () => {
+    const { rows } = informationalSection({ scan: { ranAt: RAN }, findings, staleAfterDays: 14, now: RAN })
+    expect(rows.map((r) => [r.key, r.status])).toEqual([
+      ['csp_report_only', 'gap'],
+      ['hsts_quality', 'gap'],
+      ['reporting_endpoints', 'observed'],
+      ['csp_quality', 'not applicable'],
+      ['cookie_flags', 'not observed'],
+    ])
+    expect(rows[1]).toMatchObject({ label: 'HSTS max-age', evidence: { maxAge: 3600 } })
+    expect(rows[1]!.why).toBe(INFORMATIONAL_SIGNALS.hsts_quality!.why)
+  })
+
+  it('shows a key the catalogue does not know by name rather than dropping it', () => {
+    const { rows } = informationalSection({
+      scan: { ranAt: RAN },
+      findings: [{ signalKey: 'something_new', observed: true, gap: false, detail: 'x', evidence: null }],
+      staleAfterDays: 14,
+      now: RAN,
+    })
+    expect(rows).toEqual([{ key: 'something_new', label: 'something_new', why: null, status: 'observed', detail: 'x', evidence: {} }])
   })
 })

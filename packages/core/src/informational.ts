@@ -21,6 +21,8 @@
  * Pure, like everything in packages/core.
  */
 
+import { isStale } from './freshness.js'
+
 export interface InformationalSignal {
   /** A short name for a table row. */
   readonly label: string
@@ -123,4 +125,69 @@ export function informationalStatus(f: {
   if (f.gap === true) return 'gap'
   if ((f.detail ?? '').startsWith('not applicable')) return 'not applicable'
   return 'observed'
+}
+
+export interface InformationalRow {
+  readonly key: string
+  readonly label: string
+  /** Null for a key the catalogue does not know — shown by name, never dropped. */
+  readonly why: string | null
+  readonly status: InformationalStatus
+  readonly detail: string | null
+  readonly evidence: Readonly<Record<string, unknown>>
+}
+
+export interface InformationalSection {
+  /**
+   * Derived from the scan's `ran_at` with `isStale`, never read from the
+   * `findings.stale` cache — the rule every other reader of findings follows.
+   * Nothing quotes these rows, but they are still statements about somebody's
+   * site, and one that aged out is shown as aged out.
+   */
+  readonly stale: boolean
+  readonly rows: readonly InformationalRow[]
+}
+
+const STATUS_ORDER: Readonly<Record<InformationalStatus, number>> = {
+  gap: 0, observed: 1, 'not applicable': 2, 'not observed': 3,
+}
+
+/**
+ * Everything the company page's "Also observed (not scored)" section shows,
+ * decided here so it can be tested with a fixed clock: the rows in a stable
+ * order (what was flagged first, then the catalogue's order), each with its
+ * label, why and status, and whether the scan they came from has aged out.
+ */
+export function informationalSection(input: {
+  readonly scan: { readonly ranAt: Date | string }
+  readonly findings: readonly {
+    readonly signalKey: string
+    readonly observed: boolean
+    readonly gap: boolean | null
+    readonly detail: string | null
+    readonly evidence: unknown
+  }[]
+  readonly staleAfterDays: number
+  readonly now?: Date
+}): InformationalSection {
+  const catalogue = Object.keys(INFORMATIONAL_SIGNALS)
+  const place = (key: string): number => {
+    const i = catalogue.indexOf(key)
+    return i === -1 ? catalogue.length : i
+  }
+  const rows: InformationalRow[] = input.findings.map((f) => ({
+    key: f.signalKey,
+    label: INFORMATIONAL_SIGNALS[f.signalKey]?.label ?? f.signalKey,
+    why: INFORMATIONAL_SIGNALS[f.signalKey]?.why ?? null,
+    status: informationalStatus(f),
+    detail: f.detail,
+    evidence: f.evidence && typeof f.evidence === 'object' ? (f.evidence as Record<string, unknown>) : {},
+  }))
+  rows.sort(
+    (a, b) =>
+      STATUS_ORDER[a.status] - STATUS_ORDER[b.status] ||
+      place(a.key) - place(b.key) ||
+      (a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
+  )
+  return { stale: isStale(input.scan.ranAt, input.staleAfterDays, input.now ?? new Date()), rows }
 }
