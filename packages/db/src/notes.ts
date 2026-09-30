@@ -68,6 +68,16 @@ export async function notesAdd(
     readonly contactId?: string | null
     readonly authorUserId: string
     readonly body: string
+    /**
+     * Who is writing it, when that is not the author: `'agent'` for a note
+     * the agent writes in the name of the person whose chat it is. The note
+     * row can only name a person — `author_user_id` is NOT NULL (0018) and
+     * nothing else on the row could say "the agent wrote this" — so the audit
+     * row is where the difference is kept: its actor is this, and its detail
+     * names the author the note is attributed to (`authorUserId`). Defaults
+     * to the author, and then the row is what it always was.
+     */
+    readonly actor?: string
   },
 ): Promise<NotesAddResult> {
   const body = input.body.trim()
@@ -114,14 +124,20 @@ export async function notesAdd(
   }
   if (!note) throw new Error('note insert returned no row')
 
+  const actor = input.actor ?? input.authorUserId
   await appendAudit(db, {
     orgId: input.orgId,
-    actor: input.authorUserId,
+    actor,
     action: 'note.added',
     subjectType: 'note',
     subjectId: note.id,
     // Ids only. The body is a person's words and never goes in the log.
-    detail: { companyId: input.companyId, noteId: note.id, ...(contactId ? { contactId } : {}) },
+    detail: {
+      companyId: input.companyId,
+      noteId: note.id,
+      ...(contactId ? { contactId } : {}),
+      ...(actor !== input.authorUserId ? { authorUserId: input.authorUserId } : {}),
+    },
   })
   return { ok: true, note }
 }

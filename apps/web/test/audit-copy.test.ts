@@ -168,7 +168,9 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'reply.handled': { contactId: SUBJECT, replyKind: 'interested' },
   'reply.reclassified': { from: 'other', to: 'interested' },
   'reply.answer_drafted': { inboundTouchId: SUBJECT, touchId: SUBJECT, campaignId: SUBJECT, channel: 'email', resumed: true },
-  'note.added': { companyId: SUBJECT, noteId: SUBJECT },
+  // `authorUserId` is written only when the writer is not the author — the
+  // agent's add_note, with actor `agent`.
+  'note.added': { companyId: SUBJECT, noteId: SUBJECT, contactId: SUBJECT, authorUserId: ORG_USER },
   'note.deleted': { companyId: SUBJECT, noteId: SUBJECT, authorUserId: ORG_USER },
   'task.created': { taskId: SUBJECT, kind: 'follow_up', companyId: SUBJECT },
   'task.completed': { taskId: SUBJECT, companyId: SUBJECT },
@@ -353,6 +355,24 @@ describe('sentenceFor', () => {
     expect(say('cron.digest', { posted: false, why: 'slack_failed', worker: 'silent', workerAlert: 'failed' })).toBe(
       'built the daily digest and did not post it: Slack did not accept it; the worker was silent, and the alert could NOT be posted',
     )
+  })
+
+  /**
+   * A note must name a person, so the agent's add_note stores it in the name
+   * of the person whose chat it is; this row is the one place that says the
+   * agent wrote it, and the sentence has to say both halves.
+   */
+  it('says a note the agent wrote is in a person’s name, and a teammate’s note plainly', () => {
+    expect(sentenceFor(line('note.added', WRITTEN['note.added'], { actor: 'agent' }), lookups)).toBe(
+      'wrote a note on rentman.io in the name of Priya; it shows as theirs',
+    )
+    expect(sentenceFor(line('note.added', { companyId: SUBJECT, noteId: SUBJECT }), lookups)).toBe(
+      'added a note on rentman.io',
+    )
+    const gone = { companyId: SUBJECT, noteId: SUBJECT, authorUserId: GONE_USER }
+    const s = sentenceFor(line('note.added', gone, { actor: 'agent' }), lookups)
+    expect(s).toBe('wrote a note on rentman.io in the name of a teammate; it shows as theirs')
+    expect(s).not.toContain(GONE_USER)
   })
 
   it('never writes the removed value into the sentence — the list is the place for the value', () => {

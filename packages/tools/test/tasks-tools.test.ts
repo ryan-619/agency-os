@@ -115,6 +115,24 @@ describe('the notes and tasks tools', () => {
       expect(summary.endsWith('Nothing was sent.')).toBe(true)
     })
 
+    /**
+     * Any teammate may approve the card, so the person the note is filed
+     * under may never have seen it. `author_user_id` must name a person and
+     * `notes` has no column to mark the note, so the audit row is where the
+     * agent is named: before, `note.added` named the chat's owner as actor
+     * and nothing but the separate `agent.add_note` row said otherwise.
+     */
+    it('records the agent as the note’s writer in the audit log, beside who it is filed under', async () => {
+      const summary = summaryOf(await run(addNote, { domain: 'rentman.io', body: 'They have no CSP.' }))
+      const log = await db.select().from(schema.auditLog).where(eq(schema.auditLog.action, 'note.added'))
+      expect(log).toHaveLength(1)
+      expect(log[0]).toMatchObject({ actor: 'agent', subjectType: 'note' })
+      expect(log[0]!.detail).toEqual({ companyId, noteId: log[0]!.subjectId, authorUserId: userId })
+      expect(JSON.stringify(log)).not.toContain('CSP')
+      expect(summary).toContain('shows as theirs')
+      expect(summary).toContain('the agent wrote it')
+    })
+
     it('audits ids only — never the body', async () => {
       await run(addNote, { domain: 'rentman.io', body: 'PRIVATE WORDS about the call' })
       expect(audited.map((a) => a.action)).toEqual(['agent.add_note'])
@@ -154,7 +172,7 @@ describe('the notes and tasks tools', () => {
 
   // -------------------------------------------------------------------------
   describe('create_task', () => {
-    it('creates a task for a teammate in this org, created by the person you are helping', async () => {
+    it('creates a task for a teammate in this org, created by the agent rather than by a person', async () => {
       const out = await run(createTask, {
         domain: 'rentman.io', title: 'Send the scope', detail: 'They want it by Friday.',
         dueAt: '2026-09-18T09:00:00Z', assigneeEmail: 'Sam@Agency.test',
@@ -164,8 +182,12 @@ describe('the notes and tasks tools', () => {
       expect(rows).toHaveLength(1)
       expect(rows[0]).toMatchObject({
         orgId, kind: 'todo', title: 'Send the scope', detail: 'They want it by Friday.', companyId,
-        assigneeUserId: teammateId, createdBy: userId, dueAt: new Date('2026-09-18T09:00:00Z'), doneAt: null,
+        assigneeUserId: teammateId, createdBy: null, dueAt: new Date('2026-09-18T09:00:00Z'), doneAt: null,
       })
+      // 0018: "the agent creates tasks and has no users row, so created_by is
+      // nullable and the audit row names the actor". It used to be the chat's owner.
+      const log = await db.select().from(schema.auditLog).where(eq(schema.auditLog.action, 'task.created'))
+      expect(log.map((l) => l.actor)).toEqual(['agent'])
       expect(summary).toContain('assigned to Sam Okafor')
       expect(summary).toContain('no email, message or calendar event')
       expect(summary.endsWith('Nothing was sent.')).toBe(true)
@@ -207,7 +229,7 @@ describe('the notes and tasks tools', () => {
 
     it('leaves a task unassigned and about no company when asked for neither', async () => {
       const summary = summaryOf(await run(createTask, { title: 'Tidy the pipeline', domain: '' }))
-      expect((await tasks())[0]).toMatchObject({ companyId: null, assigneeUserId: null, createdBy: userId })
+      expect((await tasks())[0]).toMatchObject({ companyId: null, assigneeUserId: null, createdBy: null })
       expect(summary).toContain('unassigned')
     })
 

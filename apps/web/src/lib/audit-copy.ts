@@ -732,7 +732,14 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     const fields = words(c.d, 'fields')
     return `edited ${c.co}${fields ? ` (${fields.map(spaced).join(', ')})` : ''}`
   },
-  'note.added': (c) => `added a note on ${c.co}`,
+  // The agent's `add_note` stores the note in the name of the person whose
+  // chat it is (the row must name a person); this row, with actor `agent`
+  // and that person as `authorUserId`, is the only place that says so.
+  'note.added': (c) => {
+    if (c.row.actor !== 'agent') return `added a note on ${c.co}`
+    const author = c.person(detailValue(c.d, 'authorUserId'))
+    return `wrote a note on ${c.co} in the name of ${author ?? 'a teammate'}; it shows as theirs`
+  },
   'note.deleted': (c) => `deleted a note on ${c.co}`,
   'task.created': (c) => `created a task${c.hasCo ? ` for ${c.co}` : ''}`,
   'task.completed': (c) => `completed a task${c.hasCo ? ` for ${c.co}` : ''}`,
