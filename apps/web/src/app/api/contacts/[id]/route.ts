@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server'
 import { assertCan } from '@agency/core'
 import {
-  appendAudit, pauseContact, readContact, resumeContact, updateContactTimeZone, type AgencyDb,
+  appendAudit, contactPatchInput, contactsUpdate, pauseContact, readContact, resumeContact,
+  updateContactTimeZone, type AgencyDb,
 } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
@@ -9,7 +10,7 @@ import { getDb } from '@/lib/db'
 /**
  * Change a contact (PROMPT.md §8.4).
  *
- * Three edits, each with a reason to exist on its own:
+ * Four edits, each with a reason to exist on its own:
  *
  *  - `pause` with a reason. What a reply does automatically, done by hand —
  *    "they emailed me directly", "out of office until March".
@@ -17,6 +18,12 @@ import { getDb } from '@/lib/db'
  *    Deliberate, audited, and the ONLY way a pause ends.
  *  - `timeZone`. The thing that unblocks a contact the send path has been
  *    refusing as `unknown_timezone`.
+ *  - `update`: name, title and addresses (`contactPatchInput`). The email is
+ *    folded, a duplicate is refused with a sentence, and an address a
+ *    suppression row matches cannot be edited away (`contactsUpdate` says
+ *    why). The audit row names the fields that changed and never their
+ *    values — an address in an audit detail is an address in every export
+ *    of the audit log (§2.3).
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -78,5 +85,29 @@ export async function PATCH(
     return NextResponse.json({ timeZone: zone })
   }
 
-  return NextResponse.json({ error: 'action must be pause, resume or timeZone' }, { status: 400 })
+  if (action === 'update') {
+    const parsed = contactPatchInput.safeParse(body)
+    if (!parsed.success) {
+      const first = parsed.error.issues[0]
+      return NextResponse.json(
+        { error: `${first?.path.join('.') ?? 'input'}: ${first?.message ?? 'Invalid.'}` },
+        { status: 400 },
+      )
+    }
+    const r = await contactsUpdate(db, user.orgId, id, parsed.data)
+    if (!r.ok) {
+      const status =
+        r.reason === 'no_such_contact' ? 404 : r.reason === 'duplicate' || r.reason === 'changed_meanwhile' || r.reason === 'suppressed' ? 409 : 400
+      return NextResponse.json({ error: r.message, reason: r.reason }, { status })
+    }
+    if (r.changed.length > 0) {
+      await appendAudit(db, {
+        orgId: user.orgId, actor: user.id, action: 'contact.updated', subjectType: 'contact', subjectId: id,
+        detail: { fields: r.changed },
+      }).catch(() => {})
+    }
+    return NextResponse.json({ changed: r.changed })
+  }
+
+  return NextResponse.json({ error: 'action must be pause, resume, timeZone or update' }, { status: 400 })
 }
