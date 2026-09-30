@@ -10,7 +10,8 @@ import { CHANGE_WORDS, readingWords } from '@/lib/timeline'
  * The labels are `diffFindings`' state machine read aloud, and the rule is on
  * the panel, not only in a comment: a signal the newer scan could not observe
  * is "not assessed this time", never "fixed". A timeout on `/security` is not
- * evidence that somebody wrote a security page.
+ * evidence that somebody wrote a security page. Nor is a policy that went
+ * away: a signal with nothing left to judge is "no longer applicable".
  *
  * Every row shows BOTH scans' evidence, so the label can be checked against
  * what each scan recorded rather than taken on trust. When the newer scan is
@@ -120,6 +121,9 @@ function DiffBody(p: EvidenceDiffProps & { readonly changes: NonNullable<Evidenc
         <span className="diff-not-assessed">{s.notAssessed} not assessed this time</span>
         {' · '}
         {s.nowObserved} observed this time
+        {/* Counted apart from fixed and regressed: one side had nothing to judge. */}
+        {s.noLongerApplicable > 0 ? ` · ${s.noLongerApplicable} no longer applicable` : null}
+        {s.nowApplicable > 0 ? ` · ${s.nowApplicable} now applicable` : null}
       </p>
       {p.latestUnreachable ? (
         <p className="hint">

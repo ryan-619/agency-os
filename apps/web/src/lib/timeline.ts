@@ -1,4 +1,4 @@
-import { isStale, type DiffInput, type SignalChange } from '@agency/core'
+import { informationalStatus, isNotApplicable, isStale, type DiffInput, type SignalChange } from '@agency/core'
 import type { DealStage, ScanHistoryRow } from '@agency/db/queries'
 import { actorLabel, sentenceFor, type AuditCompanyRef, type ResolvedActor } from './audit-copy'
 import { inZone } from './format'
@@ -799,6 +799,16 @@ export const CHANGE_WORDS: Readonly<Record<SignalChange, ChangeWords>> = {
     explain: 'the older scan could not observe it, so there is nothing to compare against',
     className: '',
   },
+  no_longer_applicable: {
+    label: 'no longer applicable',
+    explain: 'what this signal judges was there on the older scan and is gone on the newer one — nothing to judge now, which is not a fix',
+    className: '',
+  },
+  now_applicable: {
+    label: 'now applicable',
+    explain: 'nothing to judge on the older scan; the newer scan found something and judged it — a first reading, not a regression',
+    className: '',
+  },
   new_signal: {
     label: 'new signal',
     explain: 'the older scan did not record this signal at all',
@@ -811,11 +821,22 @@ export const CHANGE_WORDS: Readonly<Record<SignalChange, ChangeWords>> = {
   },
 }
 
-/** One side of a diff row: what that scan recorded, in words. */
+/**
+ * One side of a diff row: what that scan recorded, in words.
+ *
+ * An informational side is worded exactly as the company page's "Also
+ * observed" section words it (`informationalStatus`): a signal that raised
+ * nothing is "observed", never "in place" — it is not a strength — and a
+ * question the page gave no occasion to ask is "not applicable". The scanner
+ * stores that as observed with no gap, and reading it as "in place" had the
+ * diff call a removed CSP a working one.
+ */
 export function readingWords(d: DiffInput | null): string {
   if (!d) return 'not recorded'
   if (!d.observed || d.gap === null) return 'not observed'
-  return d.gap ? 'gap' : 'in place'
+  if (d.scored === false) return informationalStatus(d)
+  if (d.gap) return 'gap'
+  return isNotApplicable(d) ? 'not applicable' : 'in place'
 }
 
 /**

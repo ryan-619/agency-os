@@ -7,7 +7,8 @@
  * before it reads `gap`. Every test below that says "never" is about that.
  */
 import { describe, it, expect } from 'vitest'
-import { diffFindings, diffInputOf, type DiffInput, type SignalChange } from '../src/diff.js'
+import { SIGNAL_CHANGES, diffFindings, diffInputOf, type DiffInput, type SignalChange } from '../src/diff.js'
+import { informationalStatus } from '../src/informational.js'
 
 const gap = (signalKey: string, weight = 10, evidence: Record<string, unknown> = { header: signalKey, seen: 'absent' }): DiffInput =>
   ({ signalKey, observed: true, gap: true, detail: 'absent', evidence, weight })
@@ -15,6 +16,15 @@ const clear = (signalKey: string, evidence: Record<string, unknown> = { header: 
   ({ signalKey, observed: true, gap: false, detail: 'present', evidence, weight: 0 })
 const unobserved = (signalKey: string, evidence: Record<string, unknown> = { outcome: 'timeout' }): DiffInput =>
   ({ signalKey, observed: false, gap: null, detail: 'timeout', evidence, weight: 0 })
+/**
+ * The scanner's "not applicable" row, exactly as additive.ts's
+ * `notApplicable()` writes it: observed, no gap, and a detail that says so.
+ */
+const notApplicable = (signalKey: string, why = 'no enforced Content-Security-Policy to judge'): DiffInput =>
+  ({ signalKey, observed: true, gap: false, detail: `not applicable — ${why}`, evidence: { seen: 'absent' }, weight: 0, scored: false })
+const info = (d: DiffInput): DiffInput => ({ ...d, scored: false })
+
+const NO_CHANGES = { fixed: 0, regressed: 0, notAssessed: 0, nowObserved: 0, noLongerApplicable: 0, nowApplicable: 0 }
 
 /** The one row for `key`, and its change. */
 function changeFor(older: DiffInput[], newer: DiffInput[], key: string): SignalChange {
@@ -84,13 +94,82 @@ describe('diffFindings — a blocked fetch is never a fix (§2.2)', () => {
       [gap('csp', 20), gap('hsts', 15), gap('tls', 10)],
       [unobserved('csp'), unobserved('hsts'), clear('tls')],
     )
-    expect(summary).toEqual({ fixed: 1, regressed: 0, notAssessed: 2, nowObserved: 0 })
+    expect(summary).toEqual({ ...NO_CHANGES, fixed: 1, notAssessed: 2 })
   })
 
   it('a signal that was unobserved and is now clear is not a fix either', () => {
     const { summary } = diffFindings([unobserved('csp')], [clear('csp')])
     expect(summary.fixed).toBe(0)
     expect(summary.nowObserved).toBe(1)
+  })
+})
+
+// additive.ts writes "not applicable" as observed with no gap, which a
+// two-way reading takes for "clear" — and then a CSP with 'unsafe-inline' that
+// was later removed entirely, or an HSTS max-age=300 that was later dropped,
+// reads as FIXED. Nothing was fixed: the thing being judged went away.
+describe('diffFindings — not applicable is neither clear nor a gap', () => {
+  const unsafeInline = info({ ...gap('csp_quality', 0), detail: "'unsafe-inline' without a nonce or hash" })
+  const shortHsts = info({ ...gap('hsts_quality', 0), detail: 'max-age=300 is under 180 days' })
+  const cleanPolicy = info(clear('csp_quality'))
+
+  it('gap → not applicable is no longer applicable, never fixed', () => {
+    expect(changeFor([unsafeInline], [notApplicable('csp_quality')], 'csp_quality')).toBe('no_longer_applicable')
+    const hsts = notApplicable('hsts_quality', 'no Strict-Transport-Security header')
+    expect(changeFor([shortHsts], [hsts], 'hsts_quality')).toBe('no_longer_applicable')
+    // A clean policy that went away is not a regression either.
+    expect(changeFor([cleanPolicy], [notApplicable('csp_quality')], 'csp_quality')).toBe('no_longer_applicable')
+  })
+
+  it('not applicable → gap is now applicable, never regressed', () => {
+    expect(changeFor([notApplicable('csp_quality')], [unsafeInline], 'csp_quality')).toBe('now_applicable')
+    expect(changeFor([notApplicable('csp_quality')], [cleanPolicy], 'csp_quality')).toBe('now_applicable')
+  })
+
+  it('not applicable twice is unchanged — both scans observed the same thing', () => {
+    expect(changeFor([notApplicable('csp_quality')], [notApplicable('csp_quality')], 'csp_quality')).toBe('unchanged')
+  })
+
+  it('keeps the unobserved rules first on either side', () => {
+    expect(changeFor([notApplicable('csp_quality')], [info(unobserved('csp_quality'))], 'csp_quality')).toBe('not_assessed_this_time')
+    expect(changeFor([info(unobserved('csp_quality'))], [notApplicable('csp_quality')], 'csp_quality')).toBe('now_observed')
+  })
+
+  it('counts them apart, so neither the fixed nor the regressed total includes one', () => {
+    const { summary } = diffFindings(
+      [unsafeInline, shortHsts, notApplicable('referrer_policy_quality')],
+      [notApplicable('csp_quality'), notApplicable('hsts_quality'), info(gap('referrer_policy_quality', 0))],
+    )
+    expect(summary).toEqual({ ...NO_CHANGES, noLongerApplicable: 2, nowApplicable: 1 })
+  })
+
+  // One recogniser, shared with the company page's section: the diff and the
+  // "Also observed" table cannot disagree about which rows are not applicable.
+  it('reads a row as not applicable exactly when informationalStatus does', () => {
+    const rows: DiffInput[] = [
+      notApplicable('csp_quality'), unsafeInline, cleanPolicy, info(unobserved('csp_quality')),
+      info({ ...clear('csp_quality'), detail: 'script sources carry no unsafe-inline — not applicable to eval' }),
+    ]
+    for (const r of rows) {
+      const change = changeFor([unsafeInline], [r], 'csp_quality')
+      expect(change === 'no_longer_applicable', `${r.detail}`).toBe(informationalStatus(r) === 'not applicable')
+    }
+  })
+
+  it('never produces fixed or regressed with a not-applicable side, whatever the other side is', () => {
+    const others = [unsafeInline, cleanPolicy, notApplicable('csp_quality'), info(unobserved('csp_quality'))]
+    for (const o of others) {
+      for (const [a, b] of [[o, notApplicable('csp_quality')], [notApplicable('csp_quality'), o]] as const) {
+        expect(['fixed', 'regressed']).not.toContain(changeFor([a], [b], 'csp_quality'))
+      }
+    }
+  })
+
+  it('lists every change in SIGNAL_CHANGES, the list a renderer must cover', () => {
+    expect([...SIGNAL_CHANGES].sort()).toEqual([
+      'fixed', 'new_signal', 'no_longer_applicable', 'not_assessed_this_time', 'now_applicable', 'now_observed',
+      'regressed', 'unchanged',
+    ])
   })
 })
 
@@ -126,7 +205,7 @@ describe('diffFindings — what a row carries', () => {
   it('drops a key present only in the older scan', () => {
     const { rows, summary } = diffFindings([gap('csp', 20), gap('retired_signal', 30)], [gap('csp', 20)])
     expect(rows.map((r) => r.signalKey)).toEqual(['csp'])
-    expect(summary).toEqual({ fixed: 0, regressed: 0, notAssessed: 0, nowObserved: 0 })
+    expect(summary).toEqual(NO_CHANGES)
   })
 
   it('uses the first row for a repeated key rather than reporting it twice', () => {

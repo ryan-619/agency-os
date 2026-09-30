@@ -16,7 +16,7 @@
  *   * "not assessed this time" is never worded as a fix.
  */
 import { describe, expect, it } from 'vitest'
-import { diffFindings, type DiffInput } from '@agency/core'
+import { SIGNAL_CHANGES, diffFindings, type DiffInput } from '@agency/core'
 import {
   CHANGE_WORDS, SAME_MOVE_WINDOW_MS, compareTimeline, completeSince, dealMovesFrom, extractEmbeddedDealMove,
   mergeTimeline, newestOkScanId, readDealRowMove, readingWords, scanScoreWords, unreachableBetween,
@@ -479,8 +479,32 @@ describe("the diff's words", () => {
     expect(readingWords(null)).toBe('not recorded')
   })
 
+  // The scanner's "not applicable" is observed with no gap. Read as "in
+  // place", a CSP that was removed entirely showed as a working one beside the
+  // word "fixed" — and contradicted the company page's own section.
+  it('reads an informational side the way the "Also observed" section does — never "in place"', () => {
+    const na = input({ signalKey: 'csp_quality', scored: false, gap: false, weight: 0, detail: 'not applicable — no enforced Content-Security-Policy to judge' })
+    expect(readingWords(na)).toBe('not applicable')
+    expect(readingWords(input({ signalKey: 'csp_quality', scored: false, gap: false, weight: 0, detail: 'script sources carry no unsafe-inline' }))).toBe('observed')
+    expect(readingWords(input({ signalKey: 'csp_quality', scored: false, weight: 0 }))).toBe('gap')
+    expect(readingWords(input({ signalKey: 'csp_quality', scored: false, observed: false, gap: null }))).toBe('not observed')
+  })
+
+  it('words gap → not applicable as no longer applicable, never as a fix', () => {
+    const was = input({ signalKey: 'csp_quality', scored: false, weight: 0, detail: "'unsafe-inline' without a nonce or hash" })
+    const now = input({ signalKey: 'csp_quality', scored: false, gap: false, weight: 0, detail: 'not applicable — no enforced Content-Security-Policy to judge' })
+    const [row] = diffFindings([was], [now]).rows
+    expect(row?.change).toBe('no_longer_applicable')
+    const words = CHANGE_WORDS.no_longer_applicable
+    expect(words.label).not.toMatch(/fix/i)
+    expect(words.className).not.toBe(CHANGE_WORDS.fixed.className)
+    expect(words.explain).toMatch(/not a fix/)
+    expect(CHANGE_WORDS.now_applicable.explain).toMatch(/not a regression/)
+    expect(CHANGE_WORDS.now_applicable.className).not.toBe(CHANGE_WORDS.regressed.className)
+  })
+
   it('has words for every change the diff can produce', () => {
-    for (const change of ['fixed', 'regressed', 'not_assessed_this_time', 'now_observed', 'new_signal', 'unchanged'] as const) {
+    for (const change of SIGNAL_CHANGES) {
       expect(CHANGE_WORDS[change].label).toBeTruthy()
     }
   })
