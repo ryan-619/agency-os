@@ -1,20 +1,27 @@
 import { redirect } from 'next/navigation'
 import { can, parseIcpDefinition } from '@agency/core'
-import { tasksAssignableUsers, tasksIsOverdue, tasksList, type AgencyDb, type TaskListRow } from '@agency/db/queries'
+import {
+  linkedinStepsDue, tasksAssignableUsers, tasksIsOverdue, tasksList,
+  type AgencyDb, type LinkedinStep, type TaskListRow,
+} from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
+import { LinkedinSteps, type LinkedinStepItem } from '@/components/tasks/linkedin-steps'
 import { NewTaskForm, TaskList, type TaskItem } from '@/components/tasks/list'
 import { getDb } from '@/lib/db'
 import { icpForOrg } from '@/lib/queries'
+import { refusalWords } from '@/lib/refusal-words'
 
 /**
  * Every task in the org: mine, all open, overdue, and recently done.
  *
- * A task is a reminder to a person and nothing here sends anything — the
- * kickoff and renewal sets are created from a company page by a click, and
- * a to-do is typed here or there. LinkedIn steps are listed apart, because
- * finishing one is not ticking a box: it is sending a message, which goes
- * through the send rules at the moment it is sent.
+ * A task is a reminder to a person — the kickoff and renewal sets are
+ * created from a company page by a click, and a to-do is typed here or
+ * there. LinkedIn steps are listed apart, because finishing one is not
+ * ticking a box: the person IS the LinkedIn provider, and Start runs the
+ * message through the one send path before they are shown a word of it.
+ * Reading this page is also what gives each approved LinkedIn message its
+ * step, so it works with no worker running.
  *
  * "Overdue" is decided here, on the server, by the same rule `tasksCounts`
  * uses for the dashboard and the digest, so the three never disagree about
@@ -38,12 +45,16 @@ export default async function TasksPage({ searchParams }: { searchParams: Promis
   const user = session.user
   const principal = { id: user.id, orgId: user.orgId, role: user.role }
   const canWrite = can(principal, 'deals:write')
+  const canSend = can(principal, 'approvals:decide')
 
   const { view: requested } = await searchParams
   const view: View = (VIEWS as readonly string[]).includes(requested ?? '') ? (requested as View) : 'mine'
 
   const db = getDb() as unknown as AgencyDb
   const now = new Date()
+  // The steps first: reading them materialises their tasks, and the counts
+  // below should not be one read behind them.
+  const steps = await linkedinStepsDue(db, user.orgId, now)
   const [open, done, team, icpRow] = await Promise.all([
     tasksList(db, user.orgId, { open: true, limit: OPEN_LIMIT }),
     view === 'done' ? tasksList(db, user.orgId, { open: false, limit: 100 }) : Promise.resolve([] as TaskListRow[]),
@@ -60,7 +71,6 @@ export default async function TasksPage({ searchParams }: { searchParams: Promis
     }
   }
 
-  const steps = open.filter((t) => t.kind === 'linkedin_send')
   const work = open.filter((t) => t.kind !== 'linkedin_send')
   const lists: Readonly<Record<View, TaskListRow[]>> = {
     mine: work.filter((t) => t.assigneeUserId === user.id),
@@ -99,9 +109,9 @@ export default async function TasksPage({ searchParams }: { searchParams: Promis
     <Shell user={user} orgName={orgLabel} current="tasks" signOut={signOutAction}>
       <h1>Tasks</h1>
       <p className="lede">
-        Nothing here sends anything; a task is a reminder to a person. The kickoff and renewal sets are
-        created from a company page when somebody presses the button — a deal reaching won creates
-        nothing on its own.
+        A task is a reminder to a person. The kickoff and renewal sets are created from a company page when
+        somebody presses the button — a deal reaching won creates nothing on its own. The one thing here that
+        sends is a LinkedIn step, below, and it goes through the same rules as every email.
       </p>
 
       <p className="row-actions" style={{ margin: '0 0 14px' }}>
@@ -131,16 +141,83 @@ export default async function TasksPage({ searchParams }: { searchParams: Promis
       <section className="card" style={{ marginTop: 18 }}>
         <h2 style={{ marginTop: 0 }}>LinkedIn steps</h2>
         <p className="hint" style={{ marginTop: 0 }}>
-          An approved LinkedIn message is sent by a person, from their own account — nothing here automates
-          LinkedIn. These are listed read-only for now: the step&apos;s control lives here from the next revision.
+          The LinkedIn provider is you. Press Start: every rule is checked at that moment, exactly as the worker
+          does for email, and the message is shown only if they all pass. Copy it, send it from your own
+          account, then press I sent it. Nothing here automates LinkedIn.
         </p>
-        <TaskList
-          tasks={steps.map(item)}
-          team={members}
-          canWrite={false}
-          empty="No LinkedIn steps are waiting."
-        />
+        <LinkedinSteps steps={steps.map(stepItem)} canAct={canSend} />
       </section>
     </Shell>
   )
+}
+
+/** "08:00" from Postgres's "08:00:00". */
+function clock(t: string): string {
+  return t.slice(0, 5)
+}
+
+function capitalise(s: string): string {
+  return s ? s[0]!.toUpperCase() + s.slice(1) : s
+}
+
+/**
+ * The send path's dry run, in words, for the line above Start. A clock
+ * refusal leaves Start enabled — by the time it is pressed the clock may have
+ * moved, and a deferral hands nothing over. Anything else disables it.
+ */
+function checkOf(step: LinkedinStep): LinkedinStepItem['check'] {
+  const p = step.preview
+  if (!p) {
+    return { kind: 'blocked', text: 'This message has no recipient or no campaign, so the rules cannot be checked — Start would refuse it.' }
+  }
+  if (!p.ok) return { kind: 'blocked', text: p.message }
+  const d = p.decision
+  if (d.allowed) return { kind: 'clear', text: 'Every rule passes right now.' }
+  switch (d.code) {
+    case 'suppressed':
+      return { kind: 'blocked', text: 'On the suppression list — do not send.' }
+    case 'quiet_hours':
+      return {
+        kind: 'clock',
+        text: `Inside their quiet hours — after ${clock(p.facts.quietEnd)} their time (${p.facts.recipientTimeZone ?? 'their zone'}).`,
+      }
+    case 'daily_cap':
+      return { kind: 'clock', text: `This campaign has used today's cap of ${p.facts.dailyCap} — Start would wait for tomorrow.` }
+    case 'campaign_inactive':
+      return { kind: 'clock', text: `The campaign is ${p.facts.campaignStatus} — Start would wait until it is active.` }
+    default:
+      return { kind: 'blocked', text: `${capitalise(refusalWords(d.code))} — Start would refuse it.` }
+  }
+}
+
+/** Why a stopped step stopped, in a person's words. */
+function stoppedBecause(step: LinkedinStep): string {
+  if (step.status === 'refused' && step.refusalCode) {
+    return step.refusalCode === 'suppressed'
+      ? 'Refused: on the suppression list — do not send. Nothing was sent.'
+      : `Refused: ${refusalWords(step.refusalCode)}. Nothing was sent.`
+  }
+  if (step.status === 'failed') return step.error ?? 'This message failed.'
+  if (step.status === 'awaiting_approval') {
+    return 'Waiting for approval in Approvals. It comes back here as a step once somebody approves it.'
+  }
+  return `This message is ${step.status}, so there is nothing to send.`
+}
+
+function stepItem(step: LinkedinStep): LinkedinStepItem {
+  return {
+    touchId: step.touchId,
+    state: step.state,
+    contactName: step.contactName,
+    companyDomain: step.companyDomain,
+    companyName: step.companyName,
+    campaignName: step.campaignName,
+    profileUrl: step.profileUrl,
+    scheduledFor: step.scheduledFor ? step.scheduledFor.toISOString() : null,
+    check: step.state === 'ready' ? checkOf(step) : null,
+    words: step.words ? { subject: step.words.subject, body: step.words.body } : null,
+    handedTo: step.handedTo ? (step.handedTo.label ?? 'a former teammate') : null,
+    handedAt: step.handedAt ? step.handedAt.toISOString() : null,
+    stoppedBecause: step.state === 'stopped' ? stoppedBecause(step) : null,
+  }
 }
