@@ -63,9 +63,9 @@ const lookups = { company: COMPANY, person: (id: string) => people[id] ?? null }
  * it writes (research §6.4, and the writers since). A new writer is added
  * HERE, and the test fails until audit-copy.ts has its sentence.
  *
- * "Added here" used to be a convention, and the convention failed: eight
- * features wrote new actions from files that were not this one, and /audit
- * showed every one of them as a raw name. So the last describe below reads
+ * "Added here" used to be a convention, and the convention failed: features
+ * built in parallel wrote seven new actions from files that were not this
+ * one, and /audit showed every one of them as a raw name. So the last describe below reads
  * the source tree and fails for an action a writer produces that is missing
  * from this map — and for an entry here that no writer produces, because a
  * test pinned to a name nobody writes proves nothing.
