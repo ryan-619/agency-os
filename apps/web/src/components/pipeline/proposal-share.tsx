@@ -28,9 +28,11 @@ export async function ProposalShareSlot({ orgId, proposalId, status, evidenceSta
     log.warn('proposal share links could not be read', { proposalId, error: err instanceof Error ? err.name : 'UnknownError' })
     return <p className="err-line" style={{ marginTop: 10 }}>The buyer links for this proposal could not be read.</p>
   }
-  // Somebody who cannot create one, looking at a proposal that never had
-  // one, has nothing to read here.
-  if (!canWrite && shares.length === 0) return null
+  // Nothing to read and nothing to do: somebody who cannot create a link,
+  // or a proposal already decided, with no link in its history. A draft
+  // keeps the card, because "mark it sent first" is worth saying before
+  // anybody reaches for a link to send.
+  if (shares.length === 0 && (!canWrite || (status !== 'draft' && status !== 'sent'))) return null
 
   // The state is decided here, on the server's clock, so the first render in
   // the browser agrees with it.

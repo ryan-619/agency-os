@@ -206,7 +206,7 @@ export async function shareMint(
     return {
       ok: false,
       reason: 'decided',
-      message: `This proposal is ${proposal.status}. A new link would offer a decision that has already been made.`,
+      message: `This proposal is ${proposal.status}. A link is only made for a proposal still waiting on the buyer's answer.`,
     }
   }
 
