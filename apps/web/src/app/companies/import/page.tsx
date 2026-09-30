@@ -1,3 +1,4 @@
+import { Fragment, type ReactNode } from 'react'
 import { redirect } from 'next/navigation'
 import { revalidatePath } from 'next/cache'
 import { assertCan, parseIcpDefinition } from '@agency/core'
@@ -6,6 +7,7 @@ import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { icpForOrg } from '@/lib/queries'
 import { getDb } from '@/lib/db'
+import { deployment } from '@/lib/deployment'
 import { log } from '@/lib/logger'
 
 export const dynamic = 'force-dynamic'
@@ -24,6 +26,14 @@ export default async function ImportCompanies({
   const icpRow = await icpForOrg(user.orgId)
   const icp = icpRow ? parseIcpDefinition(icpRow.definition) : null
   const { inserted, present, error } = await searchParams
+  // Which of the things that can scan an imported company exist HERE: a
+  // terminal always does; the nightly rescan only with a cron secret, and the
+  // agent's scan_company only with a worker (§2.2 — a page does not promise
+  // a scan nothing on this deployment will run).
+  const live = deployment()
+  const scanWays: ReactNode[] = [<><code>npm run scan</code> from a terminal</>]
+  if (live.cron) scanWays.push('the nightly rescan (never-scanned companies first, a few a night)')
+  if (live.worker) scanWays.push(<><code>scan_company</code> from the agent in chat</>)
 
   const signOutAction = async () => {
     'use server'
@@ -46,8 +56,11 @@ export default async function ImportCompanies({
           <strong>Imported {inserted} new {Number(inserted) === 1 ? 'company' : 'companies'}.</strong>
           {present && Number(present) > 0 ? <> {present} were already in the pipeline.</> : null}
           <p style={{ margin: '8px 0 0' }}>
-            Nothing has been scanned yet — they have no score and no findings until{' '}
-            <code>npm run scan</code> runs.
+            Nothing has been scanned yet — they have no score and no findings until a scan runs:{' '}
+            {scanWays.map((way, i) => (
+              <Fragment key={i}>{i === 0 ? null : i === scanWays.length - 1 ? ', or ' : ', '}{way}</Fragment>
+            ))}
+            .
           </p>
         </div>
       ) : null}
@@ -96,7 +109,8 @@ export default async function ImportCompanies({
 
       <div className="note" style={{ marginTop: 24 }}>
         Importing a company records only that you intend to look at it. Nothing is fetched, nothing
-        is claimed, and no message can be sent — the send path does not exist until Phase 4.
+        is claimed, and nothing is sent — importing puts nobody in a campaign, and a message leaves
+        only through the send path, which checks every rule at the moment it sends.
       </div>
     </Shell>
   )

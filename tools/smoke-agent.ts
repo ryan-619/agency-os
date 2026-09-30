@@ -5,11 +5,13 @@
  *   npm run smoke:agent -- --draft ...and make it park a draft on a human
  *   npm run smoke:agent -- --connector <name>   Phase 3's Definition of Done
  *
- * This is NOT part of `npm test` and never will be. It costs money, it needs a
- * real ANTHROPIC_API_KEY with credit on the account, and it talks to a running
- * worker and a real database — every one of which is a reason CI must not run
- * it. The rest of the suite proves everything below the model boundary; this
- * proves the boundary itself, and a person runs it deliberately.
+ * This is NOT part of `npm test` and never will be. It needs a worker that can
+ * reach a model, it spends whatever that worker authenticates with — a
+ * developer's own Claude Code login under AGENT_USE_LOCAL_LOGIN, or API
+ * credit under ANTHROPIC_API_KEY — and it talks to a running worker and a real
+ * database, every one of which is a reason CI must not run it. The rest of
+ * the suite proves everything below the model boundary; this proves the
+ * boundary itself, and a person runs it deliberately.
  *
  * What it checks, in order:
  *
@@ -79,11 +81,27 @@ async function main(): Promise<void> {
   try {
     ready = (await (await fetch(`${AGENT_URL}/readyz`)).json()) as typeof ready
   } catch {
-    fail(`no agent worker at ${AGENT_URL}. Start it with: npx tsx --env-file=.env apps/agent/src/index.ts`)
+    fail(
+      `no agent worker at ${AGENT_URL}. Start it with: ` +
+        'AGENT_USE_LOCAL_LOGIN=true npx tsx --env-file=.env apps/agent/src/index.ts',
+    )
   }
   console.log(`  worker    ${ready.status}, chat ${ready.chat}`)
+  /**
+   * This used to say the worker had no ANTHROPIC_API_KEY, which was the
+   * wrong question for the whole build: a key is one of TWO ways a worker
+   * reaches a model, and the one that spends credit. Blaming the key sent
+   * whoever read it to buy some. Name both, and name the free one first.
+   */
+  if (ready.chat === 'disabled') {
+    fail(
+      'chat is disabled on this worker: it resolved no credential at boot. Restart it with ' +
+        'AGENT_USE_LOCAL_LOGIN=true to use your own Claude Code login (development only — the worker ' +
+        'refuses it in production — and it spends no API credit), or with ANTHROPIC_API_KEY set.',
+    )
+  }
   if (ready.chat !== 'enabled') {
-    fail('the worker has no ANTHROPIC_API_KEY, so there is nothing to smoke-test.')
+    fail(`the worker reported no chat state (status ${String(ready.status)}); read ${AGENT_URL}/readyz.`)
   }
 
   const pool = new Pool({ connectionString: process.env['DATABASE_URL'], max: 2 })
