@@ -15,7 +15,8 @@
  *  - A signal a scan could not observe is "not assessed", never "fixed".
  *    `diffFindings` decides the change and this file only words it — and the
  *    summary states the rule in so many words, because the model repeats
- *    summaries to people.
+ *    summaries to people. Nor is a signal whose subject went away (a CSP
+ *    removed, an HSTS header dropped): that is "no longer applicable".
  *  - Freshness is derived from the scan's `ran_at` by `isStale`, never read
  *    from the cached `findings.stale`, which is current only as of the last
  *    time anybody ran a scan.
@@ -300,7 +301,7 @@ export const getEvidenceChanges: AgencyToolSpec<typeof evidenceChangesShape> = {
         `New signals (${added.length}) — not on the older scan at all, so there is nothing to compare:`,
         (r) => `${weighted(r)} — ${reads(r.newer)}`,
       ),
-      ...(fixed.length + regressed.length === 0
+      ...(fixed.length + regressed.length + noLonger.length + nowApplicable.length === 0
         ? ['Nothing observed on both scans changed.']
         : []),
       ...(unchanged.length > 0
