@@ -168,13 +168,20 @@ export function DraftQueue({
    * is bound once; it reads the latest render through this ref, which an
    * effect refreshes after every render.
    */
-  const latest = useRef({
+  const latest = useRef<{
+    drafts: readonly DraftView[]
+    armed: string | null
+    approvableNow: (d: DraftView) => Approvability
+    decide: (d: DraftView, decision: 'approved' | 'denied') => Promise<void>
+    open: (id: string) => boolean
+    deniable: (id: string) => boolean
+  }>({
     drafts,
     armed,
     approvableNow,
     decide,
-    open: (_id: string): boolean => false,
-    deniable: (_id: string): boolean => false,
+    open: () => false,
+    deniable: () => false,
   })
   useEffect(() => {
     latest.current = {
@@ -215,27 +222,35 @@ export function DraftQueue({
         case 'none':
           return
         case 'disarm':
+          s.armed = null
           setArmed(null)
           return
         case 'focus':
           e.preventDefault()
+          s.armed = null
           setArmed(null)
           cards.current.get(action.id)?.focus()
           cards.current.get(action.id)?.scrollIntoView({ block: 'nearest' })
           return
         case 'arm':
           e.preventDefault()
+          // Written through at once as well as into state, so an Enter that
+          // lands before the re-render still finds the card armed — and a
+          // disarm still finds it disarmed.
+          s.armed = action.id
           setArmed(action.id)
           setExplained((x) => ({ ...x, [action.id]: '' }))
           return
         case 'explain':
           e.preventDefault()
+          s.armed = null
           setArmed(null)
           setExplained((x) => ({ ...x, [action.id]: action.why }))
           return
         case 'approve':
         case 'deny': {
           e.preventDefault()
+          s.armed = null
           const d = byId.get(action.id)
           if (d) void s.decide(d, action.kind === 'approve' ? 'approved' : 'denied')
           return
