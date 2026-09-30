@@ -1405,6 +1405,10 @@ npm run scan                  # every company that has never been scanned
 npm run scan -- --all         # re-scan everything
 npm run scan -- rentman.io    # one domain
 npm run scan -- --import f.csv  # import a domain,name CSV, then scan
+# ...and on Vercel, once CRON_SECRET is set, the two daily crons. Run either by
+# hand with the bearer — the dashboard's Run control may not carry it:
+curl -H "Authorization: Bearer $CRON_SECRET" https://<host>/api/cron/rescan   # never-scanned, then stale
+curl -H "Authorization: Bearer $CRON_SECRET" https://<host>/api/cron/digest   # Slack digest + worker-silent alert
 
 # a local Postgres on a machine with neither Postgres nor Docker
 npm run db:local              # PGlite behind a TCP socket; data in .pgdata/
@@ -1416,13 +1420,18 @@ AGENT_USE_LOCAL_LOGIN=true npx tsx --env-file=.env apps/agent/src/index.ts
 npm run smoke:agent              # the Phase 2 gate. SPENDS whatever the worker authenticates with.
 npm run smoke:agent -- --draft   # ...and make it park a draft on a human
 npm run smoke:agent -- --connector deepwiki   # the Phase 3 gate (§6's "no restart")
+# When /readyz reports chat disabled, the smoke test names AGENT_USE_LOCAL_LOGIN=true
+# first (development only, spends no credit) and ANTHROPIC_API_KEY second.
 
 # production operations, all prompt-based so no connection string touches a
 # file, an argument list or shell history (§2.3)
 ./tools/remote-setup.sh       # migrate + seed a remote database
+./tools/remote-status.sh      # read-only schema facts, safe to paste — incl. "0018 is applied"
 ./tools/run-worker.sh         # run the worker here, against production, nothing exposed
-./tools/add-teammate.sh       # grant somebody access — there is no signup flow
+./tools/add-teammate.sh       # grant somebody access — or Settings → Team, in the browser
 ./tools/spend.sh              # what the API has actually cost: per day, per person, run rate
+./tools/mail-dns.sh           # SPF/DKIM/DMARC records for a sending domain
+./tools/dev-login.sh          # a local sign-in link without a mailbox
 
 # the parity harness — regenerate only when re-recording on purpose
 npm run fixtures:capture      # re-record the seed domains' public surface
@@ -1443,10 +1452,26 @@ docker compose run --rm seed
 # magic links http://localhost:8025   (Mailpit — dev only, relays nothing)
 ```
 
+**`cp .env.example .env` boots all three processes**, and that is now checked
+rather than assumed: parsing the file the way `node --env-file` does and
+running each process's `loadEnv` over it found that the worker refused a blank
+`UNSUBSCRIBE_SECRET=`, `WEB_PUBLIC_URL=` or `LLM_PROVIDER=`, and the voice
+service a blank `VOICE_PUBLIC_URL=` or `VOICE_ORG_ID=`. The web app reads a
+blank as unset; those two do not, so those lines are commented out in the
+example with the reason stated at its top. And compose reads `.env` only to
+fill `docker-compose.yml`'s `${…}` — a variable that file does not name never
+reaches a container.
+
+**`next build` does not run in a git worktree whose `node_modules` is
+symlinked into the main checkout** (how parallel work in this repo is set up):
+Turbopack refuses "files outside of the workspace root". `cd apps/web && npx
+next build --webpack` is the equivalent check there, with the same
+server/client boundary rules. The main checkout and Vercel are unaffected.
+
 **The suite's memory cost is per WORKER, and that is what falls over first.**
 vitest forks a worker per CPU and `freshDb()` builds an embedded Postgres in
 each one — and it does that in `beforeEach`, so every individual test gets a
-new PGlite instance and replays all sixteen migrations. On a machine under
+new PGlite instance and replays all eighteen migrations. On a machine under
 memory pressure the workers fight rather than share, and the first thing to
 give is `freshDb()` blowing the 30-second `hookTimeout`, which reads like a
 broken test and is not one. Measured here: `apps/voice` took **945 seconds and
@@ -1471,8 +1496,9 @@ behaving strangely, intermittently, depending on file order. That is exactly
 how a suite starts passing vacuously, so it has its own test rather than an
 argument in a comment. `packages/db/test/harness.test.ts` writes a row named
 `LEAKED FROM THE PREVIOUS TEST` in one test and asserts the next cannot see
-it, checks the migrations really are applied (down to 0017's `reply_kind`),
-and re-checks the UTC pin the snapshot could have lost.
+it, checks the migrations really are applied (down to 0018's
+`findings.scored`, with 0017's `reply_kind` as a second line), and re-checks
+the UTC pin the snapshot could have lost.
 
 `packages/core` and `packages/db` compile to `dist/` and are consumed as
 JavaScript, so **run `npx tsc --build` after changing them** or the web app
