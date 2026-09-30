@@ -4,7 +4,17 @@ Internal operating system for a small application-security agency. Read
 [PROMPT.md](PROMPT.md) for the full build spec; this file is the working
 summary a session should read first.
 
-**Current state: Phases 0–6 are built, and every Definition of Done except Phase 2's and Phase 3's is proved** — see the table below for exactly what "proved" means for each. Phase 6 is built but deliberately NOT switched on: §12 says not to before A2P 10DLC registration clears, so the compose service sits behind a `voice` profile and `docker compose up` does not start it.
+**Current state: Phases 0–6 are built, and every Definition of Done is proved** — see the table below for exactly what "proved" means for each, and what it does not. Phase 6 is built but deliberately NOT switched on: §12 says not to before A2P 10DLC registration clears, so the compose service sits behind a `voice` profile and `docker compose up` does not start it.
+
+**After the phases, one release on migration 0018** added the operating layer
+around the pipeline: an inbox for replies, notes and tasks, a consent ledger,
+compliance and audit pages, search and CSV exports, the settings pages,
+proposal print and buyer share links, LinkedIn steps a person sends, bounce
+handling, one-click unsubscribe, a worker heartbeat, and two Vercel crons (a
+nightly rescan and a Slack digest). The agent's own tools went from nine to
+twenty-three. Everything web-side works with no worker; §2 has a subsection
+for each piece, and DEPLOYING.md carries the release checklist, which starts
+with applying 0018 BEFORE the code that reads it.
 
 **The worker deploys to Fly.io** (`fly.toml` at the repo root), and its
 defaults are the dangerous part: Fly scales a machine to zero between
@@ -15,17 +25,26 @@ off and a floor of one machine are load-bearing. Only `DATABASE_URL` (direct,
 unpooled) and `AGENT_INTERNAL_TOKEN` are required; **`ANTHROPIC_API_KEY` is
 optional and the worker is worth deploying without one** — sending, reply
 detection, stuck-send recovery, the restart reconciler and the sign-in-token
-sweep all run with no model, and only chat reports `chat_disabled`.
+sweep all run with no model, and only chat reports `chat_disabled`. Each
+worker upserts a `worker_heartbeats` row (keyed `hostname:pid`) every
+`OUTREACH_TICK_MS`, so a machine scaled to zero is a growing
+`worker.ageSeconds` in `/api/health` rather than an inference.
 
-**The web half is LIVE on Vercel** at `agency-os-tau-murex.vercel.app`, against
-a Neon Postgres (18.6) with Resend for magic links, migrated through **0016**
-and seeded. Proved live: `/api/health` reports `database: ok`, `/signin`
-renders, `/book/agency` serves the public booking page (it 404'd until the
-seed claimed the slug), and a sign-in request logged `magic link sent`. See [DEPLOYING.md](DEPLOYING.md) — including the two things
+**The web half is LIVE on Vercel** at **https://myagencyos.in** (first
+deployed as `agency-os-tau-murex.vercel.app`), against a Neon Postgres (18.6)
+with Resend for magic links, seeded. The code expects migration **0018**
+(`EXPECTED_MIGRATION`); production was at 0017 when this release was written,
+and 0018 is applied BEFORE this code deploys, never after — DEPLOYING.md,
+"migrate FIRST", and GO-LIVE.md Part 2b. Proved live: `/api/health` reports
+`database: ok`, `/signin` renders, `/book/agency` serves the public booking
+page (it 404'd until the seed claimed the slug), and a sign-in request logged
+`magic link sent`. See [DEPLOYING.md](DEPLOYING.md) — including the two things
 a LOCAL `vercel build` gets wrong (it traces `.env` into the upload; deploying
 from `apps/web` cannot resolve the hoisted `node_modules`). The agent worker is
-NOT deployed and cannot be on serverless, so chat, sending and reply detection
-are absent there and every screen that would promise them says so instead.
+NOT deployed and cannot be on serverless, so chat, email sending and IMAP
+reply detection are absent there and every screen that would promise them says
+so instead. What does NOT need it: replies through Resend's signed webhook,
+LinkedIn steps a person sends from `/tasks`, and the rescan and digest crons.
 
 **Phases 2 and 3's Definitions of Done now PASS.** They were blocked for the
 whole build on "the Anthropic account has no credit", and the diagnosis was
@@ -40,7 +59,7 @@ below. **Phase 4's is proved against a local SMTP sink, not a real mailbox.**
 | | proved | not proved |
 |---|---|---|
 | Phase 2 | **the whole thing, live.** `npm run smoke:agent` PASSED on 2026-09-25: one turn, 22 tool calls, 284 events, a cost reported, and an evidence-backed ranking of the pipeline's top three built from `scan_company`/`score_company`/`get_company` against the real database | nothing outstanding |
-| Phase 3 | **PASSED.** The agent named `mcp__deepwiki__ask_wiki_question`, `read_wiki_contents` and `read_wiki_structure` alongside its own nine, on a worker that had been running since BEFORE the connector row was written — §6's "no restart" promise, in the sequence that actually tests it | the agent *calling* a connector's tool in anger (it enumerates them; the gate asks it to enumerate) |
+| Phase 3 | **PASSED.** The agent named `mcp__deepwiki__ask_wiki_question`, `read_wiki_contents` and `read_wiki_structure` alongside its own nine (the `agency` server has twenty-three tools now), on a worker that had been running since BEFORE the connector row was written — §6's "no restart" promise, in the sequence that actually tests it | the agent *calling* a connector's tool in anger (it enumerates them; the gate asks it to enumerate) |
 | Phase 4 | draft → approved in the UI → deferred for quiet hours (live, 21:50 London) → sent in a real SMTP transaction → deal `contacted` → a reply by Message-ID pauses, ties, moves the deal to `replied` → "unsubscribe" suppresses. One test per §2.1 rule. | deliverability through a real mailbox; IMAP IDLE against a live server; a provider webhook with a real secret |
 | Phase 5 | live, in the browser: a `replied` deal dragged to `meeting` (HTML5 drop → `deal.moved` audit row) → meeting recorded from the company page at 15:00 London, stored as 14:00Z → brief generated from the rows → proposal generated from the scan (8 scope items with evidence, 2 workstreams, USD 9,600–15,600 at a 1,200 day rate) → `sent` → `accepted` closes the deal `won`. A stranger on `/book/agency` became a company, a contact with E.164 phone, three consent rows carrying the form's wording, a meeting, and a deal at `meeting`. | the agent's `book_meeting`/`update_deal` in a live turn (same blocker as Phase 2); a calendar invitation (deliberately not sent from here) |
 | Phase 6 | the whole Definition of Done, end to end against the real service: a SIGNED webhook is answered with `<ConversationRelay>` carrying the disclosure, the relay socket opens against the URL that TwiML handed out, four scripted questions qualify the caller, asking for a person produces the `end` frame whose `HandoffData` makes `/twiml/action` return a `<Dial>`, and the row ends with `answered_at`, `disclosed_ai_at`, an outcome, Twilio's duration and recording URL, a transcript containing the caller's own words, and a summary. `apps/voice/test/service.test.ts`. | Twilio itself — the carrier, the STT and the TTS. A2P 10DLC has not cleared and there are no Twilio credentials, so no real telephone call has been placed to this service |
@@ -84,19 +103,53 @@ one.
   normalised shape a constraint rather than a convention: email and domain must
   be lower-cased and trimmed, phone must be E.164. An unnormalised value cannot
   be stored, so `Stop@Example.com` can never coexist with `stop@example.com` as
-  a second, unsuppressed row. `packages/core` gains the matching `normalise()`
-  helper in Phase 4; until then the database is what enforces it.
+  a second, unsuppressed row. `packages/core`'s `normalise()` helpers produce
+  that shape, and the database refuses anything else.
   **Phase 4 obligation:** a suppression insert that fails is an opt-out that was
   never recorded — worse than the bug this constraint replaced. When
   `normalise()` cannot parse an inbound number or address, the send path must
   fail loudly and route it to a human, and must never fall through to sending.
   Every geo the seeded ICP targets is covered by a test in
   `packages/db/test/invariants.test.ts`.
-- Quiet hours are stored as wall-clock times and must be evaluated in the
-  **recipient's** timezone. *The evaluation lands in Phase 4.*
+- Quiet hours are stored as wall-clock times and evaluated in the
+  **recipient's** timezone, by `decideSend` (§2, "The send path").
+- **Which path recorded an opt-out is a fact (0018).**
+  `suppressions_source_is_known` admits `manual`, `reply`, `voice`,
+  `unsubscribe` and `erasure` — one per writer, and a value nothing writes is
+  not listed. The column is NULLABLE: a row written before it existed was not
+  tracked, and calling it `manual` would be a claim.
+- **A refusal is final until an owner lifts it.** `contactsRecordConsent`
+  refuses a grant over a recorded refusal (`refused_is_final`), and
+  `contactsLiftRefusal` is the one audited way (`consent.refusal_lifted`) a
+  refusal goes — back to NEVER ASKED, never to granted. The route gates the
+  lift to owners.
+- **A bounce is not an opt-out.** `contacts_bounce_has_code` keeps
+  `email_bounced_at` and `email_bounce_code` NULL together; the code must be an
+  RFC 3463 status; the mark is lifted only by `contactsUpdate` changing the
+  address, in the same UPDATE. It is a column and a `bounced` refusal, never a
+  suppression row (§2, "A bounce is evidence about an address").
+- **A reply is handled by a person, and only a reply.**
+  `touches_handled_is_inbound_only` and `touches_handled_has_who` (a handled
+  row names who, RESTRICT). An answer to a reply is OUTBOUND
+  (`touches_answer_is_outbound`), and the trigger
+  `touches_answer_names_an_inbound_row_in_the_same_org` — INSERT and UPDATE,
+  because a CHECK cannot see another row — refuses an answer whose parent is
+  outbound or in another org, which `dispatchTouch` would otherwise thread
+  into a conversation that is not its own.
+- **A LinkedIn step is one task per message.** `tasks_linkedin_send_names_touch`
+  and the partial unique index `tasks_one_open_per_touch`: two callers
+  materialising the same draft produce one open task, and the loser re-reads.
+- **A person in one org can never be named by a row in another.** 0018 gives
+  `users` and `contacts` a `UNIQUE (id, org_id)` and every column it adds that
+  names one — `touches.handled_by`, `notes.contact_id`/`author_user_id`,
+  `tasks.assignee_user_id`/`created_by`/`done_by`, `proposal_shares.created_by`
+  — references the PAIR, the shape 0006 gave `findings` and `scores`. The two
+  nullable user columns use `ON DELETE SET NULL (column)`, which names the
+  column so the NOT NULL `org_id` is never nulled with it; that is Postgres 15+
+  syntax, and CI's `postgres:16` job is what proves the deploy target takes it.
 
 ### Evidence integrity (§2.2)
-**The app must never state a finding it did not observe.** Four separate
+**The app must never state a finding it did not observe.** Five separate
 guards, because one of them alone was not enough:
 
 1. `findings_unobserved_has_no_gap` —
@@ -117,10 +170,20 @@ guards, because one of them alone was not enough:
    off-by-one can file one company's evidence under another's name and every
    constraint still passes.
 
+5. `findings_informational_carries_no_weight` (0018) — `scored OR weight = 0`.
+   The scanner now records thirteen observations the ICP does not score
+   (§2, "Informational signals"). `recordScan` writes `scored` as "is this key
+   an own property of the ICP's signals", so a non-ICP key is stored at weight
+   0 by construction, and `quotableFindings`, the proposal (its scope AND the
+   buyer-facing "Of N signals observed" count) and the meeting brief all leave
+   `scored = false` rows out. "Also observed" can never be read as a gap that
+   counts.
+
 **`findings.stale` is a cache, not the answer.** `markStaleFindings` writes it
 and `npm run scan` calls that on every run, so the column is current as of the
 last scan and no more. A finding that aged past the threshold an hour ago still
-has `stale = false` on it, and there is still no scheduled rescan.
+has `stale = false` on it. The nightly rescan cron keeps the column current
+for the companies it reaches, and it is still a cache.
 
 So **freshness is DERIVED from the scan's `ran_at`**, by `isStale()` in
 `packages/core/src/freshness.ts`, everywhere it decides whether something may
@@ -162,6 +225,19 @@ Two more §2.2 links, both added in 0006 and after:
   pins that limitation as an explicit test.
 - `sendVerificationRequest` deliberately does **not** log the magic-link URL.
   That URL is a bearer credential.
+- **Three more URLs are credentials, and are treated as such.** The Slack
+  webhook URL (never logged, never in an audit row — `redact()` cannot see it,
+  because it is a value in a URL rather than under a key); a proposal share
+  token, of which only the sha256 is stored — `proposal_shares_token_hash_shape`
+  (`^[0-9a-f]{64}$`) makes a raw token unstorable; and an unsubscribe token,
+  which names one message and nothing else.
+- **A session cookie's value is a bearer credential too.** The scanner records
+  each homepage `Set-Cookie` for `cookie_flags` with its VALUE replaced by
+  `<redacted>` — the rule reads names and attributes only.
+- **Where a connector's credential goes is a NAME in its config**
+  (`secretEnv`, `secretHeader`, `secretPrefix`), never the value. A `headers`
+  or `env` entry whose key or value looks like a credential is refused, and
+  `secretEnv` may not be anything in `FORBIDDEN_SECRET_ENV` or start `CLAUDE_`.
 
 ### Irreversible actions need a human (§2.4)
 - Anything leaving the building goes through the `approvals` queue unless a
@@ -177,6 +253,16 @@ Two more §2.2 links, both added in 0006 and after:
   decided instead of showing an error.
 - **Never set `permissionMode: "bypassPermissions"`.** See §8 below — there are
   three ways the gate is skipped, and the spec recommends two of them.
+- **A review of a connector's tools can only DISABLE.** A name in
+  `config.disabledTools` is a deny placed before `classifyRisk` in both gate
+  rings; nothing in the product allows a tool by name, and `allowedTools`
+  stays `[]` (§2, "Connector catalog, credentials and tool disable").
+- **The irreversible acts added since are each a person's.** Sending a
+  LinkedIn message is a person pressing Start and then "I sent it" (§2, "The
+  LinkedIn provider is a person"). A share link is not a send: a person pastes
+  the URL into a message they write, and a link can only be minted from a
+  proposal a person already marked `sent`. Erasing a contact is owner-only and
+  needs the contact's id typed back.
 
 ---
 
