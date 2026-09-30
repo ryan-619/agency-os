@@ -28,6 +28,7 @@ import { icpForOrg } from '@/lib/queries'
  * labels and dates are not credentials — and only an owner sees a control.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export default async function CredentialsPage() {
   const session = await auth()

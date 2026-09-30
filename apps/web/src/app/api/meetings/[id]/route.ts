@@ -25,7 +25,7 @@ import { wallClockToInstant } from '@/lib/wall-clock'
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
 
-const UUID = /^[0-9a-f-]{36}$/i
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const WALL_CLOCK = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/
 
 const REFUSAL_STATUS: Readonly<Record<string, number>> = {

@@ -1,8 +1,9 @@
 import { NextResponse } from 'next/server'
 import { and, eq } from 'drizzle-orm'
-import { DEFAULT_STALE_AFTER_DAYS, assertCan, isStale, parseIcpDefinition, type Proposal } from '@agency/core'
+import { assertCan, isStale, type Proposal } from '@agency/core'
 import { appendAudit, readProposal, schema, type AgencyDb } from '@agency/db/queries'
 import { auth } from '@/auth'
+import { readIcp } from '@/lib/company-list'
 import { getDb } from '@/lib/db'
 import { log } from '@/lib/logger'
 import { proposalMarkdownFilename, proposalToMarkdown, staleDraftRefusal } from '@/lib/proposal-markdown'
@@ -73,15 +74,9 @@ export async function GET(
   ])
   if (!company) return NextResponse.json({ error: 'No such proposal.' }, { status: 404 })
 
-  let staleAfter = DEFAULT_STALE_AFTER_DAYS
-  if (icpRow) {
-    try {
-      staleAfter = parseIcpDefinition(icpRow.definition).freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
-    } catch {
-      staleAfter = DEFAULT_STALE_AFTER_DAYS
-    }
-  }
-  const evidenceStale = isStale(scan?.ranAt, staleAfter)
+  // Guarded: `isStale` throws on a threshold that is not a positive number,
+  // and a malformed ICP is not a reason to fail a download.
+  const evidenceStale = isStale(scan?.ranAt, readIcp(icpRow?.definition).staleAfterDays)
   if (row.status === 'draft' && evidenceStale) {
     return NextResponse.json({ error: staleDraftRefusal(company.domain), reason: 'stale' }, { status: 409 })
   }

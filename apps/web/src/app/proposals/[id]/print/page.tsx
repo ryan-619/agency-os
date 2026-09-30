@@ -2,10 +2,11 @@ import { cache } from 'react'
 import type { Metadata } from 'next'
 import { notFound, redirect } from 'next/navigation'
 import { and, eq } from 'drizzle-orm'
-import { DEFAULT_STALE_AFTER_DAYS, can, isStale, parseIcpDefinition, type Proposal } from '@agency/core'
+import { can, isStale, type Proposal } from '@agency/core'
 import { appendAudit, readProposal, schema, type AgencyDb } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { ProposalDocument } from '@/components/pipeline/proposal-document'
+import { readIcp } from '@/lib/company-list'
 import { getDb } from '@/lib/db'
 import { log } from '@/lib/logger'
 import { isoDate, provenanceSentence, staleBannerText } from '@/lib/proposal-markdown'
@@ -29,6 +30,7 @@ import { icpForOrg } from '@/lib/queries'
  * download's `format: 'markdown'`.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -78,14 +80,8 @@ const load = cache(async (orgId: string, id: string) => {
   // anyway is not a document.
   if (!company) return null
 
-  let staleAfter = DEFAULT_STALE_AFTER_DAYS
-  if (icpRow) {
-    try {
-      staleAfter = parseIcpDefinition(icpRow.definition).freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
-    } catch {
-      staleAfter = DEFAULT_STALE_AFTER_DAYS
-    }
-  }
+  // Guarded: `isStale` throws on a threshold that is not a positive number.
+  const staleAfter = readIcp(icpRow?.definition).staleAfterDays
   return {
     row,
     doc: row.document as Proposal,

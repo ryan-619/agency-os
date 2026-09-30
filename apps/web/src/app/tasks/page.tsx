@@ -28,6 +28,7 @@ import { refusalWords } from '@/lib/refusal-words'
  * how many there are.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 const VIEWS = ['mine', 'all', 'overdue', 'done'] as const
 type View = (typeof VIEWS)[number]
