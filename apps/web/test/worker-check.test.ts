@@ -44,10 +44,22 @@ describe('workerSilent', () => {
     expect(workerSilent({ configured: true, lastSeenAt: secondsAgo(86_400) }, NOW)).toEqual({ silent: true, ageSeconds: 86_400 })
   })
 
-  it('is never silent where no worker is configured — that deployment says "nothing will send" instead', () => {
+  it('is not silent where no worker is configured and none ever wrote — that deployment says "nothing will send" instead', () => {
     expect(workerSilent({ configured: false, lastSeenAt: null }, NOW)).toEqual({ silent: false, ageSeconds: null })
-    // A stale row still has an age; it is just not an alarm here.
-    expect(workerSilent({ configured: false, lastSeenAt: secondsAgo(86_400) }, NOW)).toEqual({ silent: false, ageSeconds: 86_400 })
+  })
+
+  /**
+   * The documented production shape: Vercel with no AGENT_URL, a worker on
+   * Fly. The web half is not "configured" for a worker, and one has been
+   * writing heartbeats — then stopped. The row is the observation, and an
+   * observation beats configuration: it is silent, as the digest's Worker
+   * line already said.
+   */
+  it('is silent where a worker wrote a heartbeat and stopped, configured here or not', () => {
+    expect(workerSilent({ configured: false, lastSeenAt: secondsAgo(86_400) }, NOW)).toEqual({ silent: true, ageSeconds: 86_400 })
+    expect(workerSilent({ configured: false, lastSeenAt: secondsAgo(601) }, NOW)).toEqual({ silent: true, ageSeconds: 601 })
+    expect(workerSilent({ configured: false, lastSeenAt: secondsAgo(15) }, NOW)).toEqual({ silent: false, ageSeconds: 15 })
+    expect(workerSilent({ configured: false, lastSeenAt: new Date(Number.NaN) }, NOW)).toEqual({ silent: true, ageSeconds: null })
   })
 
   it('honours the threshold a slow-ticking worker earns', () => {
@@ -73,20 +85,28 @@ describe('workerSilent', () => {
     expect(workerSilent({ configured: true, lastSeenAt: new Date(Number.NaN) }, NOW)).toEqual({ silent: true, ageSeconds: null })
   })
 
-  it('agrees with the digest’s Worker line on every configured deployment', () => {
-    // The route passes the row's own threshold; heartbeatReport uses the same one.
-    for (const intervalMs of [undefined, 15_000, 20 * 60_000]) {
-      for (const age of [null, 0, 599, 600, 601, 3599, 3600, 3601, 86_400]) {
-        const row =
-          age === null
-            ? null
-            : { lastTickAt: secondsAgo(age), outreach: 'send-and-receive', chat: 'enabled', detail: intervalMs ? { intervalMs } : {} }
-        const report = heartbeatReport(row, true, NOW)
-        const check = workerSilent({ configured: true, lastSeenAt: row?.lastTickAt ?? null }, NOW, heartbeatSilentAfter(row))
-        expect(check.silent, `interval ${String(intervalMs)}, age ${String(age)}`).toBe(
-          report.status === 'silent' || report.status === 'never',
-        )
-        expect(check.ageSeconds).toBe(report.ageSeconds)
+  /**
+   * Configured or not, with a row or without: the route passes the row's own
+   * threshold, heartbeatReport uses the same one, and the alert fires exactly
+   * when the digest's Worker line reads SILENT or NEVER. `configured: false`
+   * with a row present is the case the grid used to leave out, and the one
+   * that disagreed.
+   */
+  it('agrees with the digest’s Worker line on every deployment', () => {
+    for (const configured of [true, false]) {
+      for (const intervalMs of [undefined, 15_000, 20 * 60_000]) {
+        for (const age of [null, 0, 599, 600, 601, 3599, 3600, 3601, 86_400]) {
+          const row =
+            age === null
+              ? null
+              : { lastTickAt: secondsAgo(age), outreach: 'send-and-receive', chat: 'enabled', detail: intervalMs ? { intervalMs } : {} }
+          const report = heartbeatReport(row, configured, NOW)
+          const check = workerSilent({ configured, lastSeenAt: row?.lastTickAt ?? null }, NOW, heartbeatSilentAfter(row))
+          expect(check.silent, `configured ${String(configured)}, interval ${String(intervalMs)}, age ${String(age)}`).toBe(
+            report.status === 'silent' || report.status === 'never',
+          )
+          expect(check.ageSeconds).toBe(report.ageSeconds)
+        }
       }
     }
   })
