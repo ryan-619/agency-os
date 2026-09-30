@@ -1,4 +1,4 @@
-import { shareList, type AgencyDb, type ShareSummary } from '@agency/db/queries'
+import { shareEvidenceSuperseded, shareList, type AgencyDb, type ShareSummary } from '@agency/db/queries'
 import { getDb } from '@/lib/db'
 import { log } from '@/lib/logger'
 import { SHARE_EXPLAINER, SHARE_VIEWS_NOTE, shareCreateBlocked, shareState } from './proposal-share-copy'
@@ -13,8 +13,9 @@ import type { ProposalSlotProps } from './proposal-slot'
  * address — not the send. So it is offered only for a proposal a person has
  * already marked `sent` (§2.4: that explicit decision is what makes it
  * outbound, and a link must not be a second, implicit one), and not while the
- * evidence under it is stale (§2.2) — the same refusal the route makes, said
- * before the button is pressed rather than after.
+ * evidence under it is stale or superseded by a newer scan (§2.2) — the same
+ * refusals the route makes, said before the button is pressed rather than
+ * after.
  *
  * Every link the proposal has had is listed, revoked and expired ones too,
  * with its views and any acceptance. The URL itself is shown once, when it
@@ -22,8 +23,13 @@ import type { ProposalSlotProps } from './proposal-slot'
  */
 export async function ProposalShareSlot({ orgId, proposalId, status, evidenceStale, canWrite }: ProposalSlotProps): Promise<React.ReactNode> {
   let shares: ShareSummary[]
+  let evidenceSuperseded: boolean
   try {
-    shares = await shareList(getDb() as unknown as AgencyDb, orgId, proposalId)
+    const db = getDb() as unknown as AgencyDb
+    ;[shares, evidenceSuperseded] = await Promise.all([
+      shareList(db, orgId, proposalId),
+      shareEvidenceSuperseded(db, orgId, proposalId),
+    ])
   } catch (err) {
     log.warn('proposal share links could not be read', { proposalId, error: err instanceof Error ? err.name : 'UnknownError' })
     return <p className="err-line" style={{ marginTop: 10 }}>The buyer links for this proposal could not be read.</p>
@@ -63,7 +69,7 @@ export async function ProposalShareSlot({ orgId, proposalId, status, evidenceSta
         proposalId={proposalId}
         shares={rows}
         canWrite={canWrite}
-        blocked={shareCreateBlocked({ status, evidenceStale })}
+        blocked={shareCreateBlocked({ status, evidenceStale, evidenceSuperseded })}
       />
       {rows.length > 0 ? <p className="muted" style={{ fontSize: 12, margin: '8px 0 0' }}>{SHARE_VIEWS_NOTE}</p> : null}
     </section>

@@ -305,6 +305,23 @@ describe('the reporting tools', () => {
       expect(audited).toEqual([{ action: 'agent.get_compliance_summary', detail: { staleDays } }])
     })
 
+    // The two counts a review found under-reporting: a queued auto-send row
+    // leaves with nobody looking again, and a failed unsubscribe is an
+    // unrecorded opt-out as much as a failed reply is.
+    it('counts a queued message on missing evidence and an unsubscribe that failed to store', async () => {
+      await db.insert(schema.touches).values({ orgId, companyId, channel: 'email', direction: 'out', status: 'queued' })
+      await db.insert(schema.auditLog).values({
+        orgId, actor: 'system', action: 'unsubscribe.not_recorded', subjectType: 'touch', detail: { why: 'no_recipient' },
+      })
+      const out = await run(getComplianceSummary, {})
+      if (!out.ok) throw new Error(out.message)
+      expect(out.summary).toContain('Opt-outs that failed to store: 1 in the last 30 days, 1 all time.')
+      expect(out.summary).toContain(
+        'Outbound messages not yet sent on stale or missing evidence: 1 of 1 not yet sent (must be 0) — 0 awaiting approval; ' +
+          '0 approved, 1 queued and 0 sending, which go with no further look.',
+      )
+    })
+
     it('counts one org only', async () => {
       await db.insert(schema.suppressions).values({ orgId: otherOrgId, kind: 'email', value: 'x@rival.example', reason: 'asked', source: 'manual' })
       await newCompany('rival.example', otherOrgId)

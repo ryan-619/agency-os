@@ -1,6 +1,8 @@
 import { redirect } from 'next/navigation'
 import { can, DEFAULT_STALE_AFTER_DAYS, parseIcpDefinition } from '@agency/core'
-import { complianceSummary, type AgencyDb, type ComplianceSummary } from '@agency/db/queries'
+import {
+  complianceSummary, type AgencyDb, type ComplianceOptOutFailureAction, type ComplianceSummary, type ComplianceUnsentStatus,
+} from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { When } from '@/components/when'
@@ -44,6 +46,20 @@ const CONSENT_SOURCE_WORDS: Readonly<Record<string, string>> = {
   booking_page: 'the public booking page',
   contacts_page: 'a person, on the contacts page',
   other: 'anything else (an import, a seed, an older writer)',
+}
+
+/** Which writer knew an opt-out failed to store. Typed by the list the digest counts, so a new one fails the build. */
+const OPT_OUT_FAILURE_PATH: Readonly<Record<ComplianceOptOutFailureAction, string>> = {
+  'contact.opt_out_not_recorded': 'a reply or a call',
+  'unsubscribe.not_recorded': 'the one-click unsubscribe link',
+  'contact.erasure_failed': 'an erasure',
+}
+
+const UNSENT_STATUS_WORDS: Readonly<Record<ComplianceUnsentStatus, string>> = {
+  awaiting_approval: 'awaiting approval',
+  approved: 'approved, waiting for its moment',
+  queued: 'queued to send automatically',
+  sending: 'being sent',
 }
 
 const EVIDENCE_WORDS: Readonly<Record<string, string>> = {
@@ -299,11 +315,12 @@ function OptOuts({ s, absent }: { s: ComplianceSummary; absent: Absent }) {
       <Shown shown={Math.min(ROWS, w.rows.length)} total={w.count} />
       {nr.lastWindow.count > 0 ? (
         <table id="not-recorded-rows" style={{ marginTop: 12 }}>
-          <thead><tr><th>When</th><th>Channel</th><th>Company</th><th>Reason class</th></tr></thead>
+          <thead><tr><th>When</th><th>Path</th><th>Channel</th><th>Company</th><th>Reason class</th></tr></thead>
           <tbody>
             {nr.lastWindow.rows.slice(0, ROWS).map((r) => (
               <tr key={r.auditId}>
                 <td className="mono"><At at={r.at} /></td>
+                <td>{OPT_OUT_FAILURE_PATH[r.action]}</td>
                 <td>{r.channel ?? '—'}</td>
                 <td><CompanyLink domain={r.companyDomain} /></td>
                 <td className="mono">{r.why ?? '—'}</td>
@@ -384,34 +401,39 @@ function ColdOptIn({ s, absent }: { s: ComplianceSummary; absent: Absent }) {
 function DraftsOnStale({ s }: { s: ComplianceSummary }) {
   const d = s.draftsOnStaleEvidence
   const answers = d.rows.filter((r) => r.answersReply).length
+  const noLook = d.count - d.byStatus.awaiting_approval
   return (
     <section>
-      <h2>Drafts waiting on stale or missing evidence</h2>
+      <h2>Messages waiting to go on stale or missing evidence</h2>
       <Rule>
         §2.2: findings older than {s.freshness.staleDays} days must be re-verified before they appear in any
-        outbound draft. Drafts awaiting approval whose company has no successful scan, or whose last one is
-        stale — measured from the scan&apos;s <code>ran_at</code>, the way the draft generator measures it.
-        Should be zero for drafts written from the scan; an answer to a reply is listed too, tagged, because
-        nothing marks which of its words came from the scan.
+        outbound draft. Every outbound message not yet sent — awaiting approval, approved and waiting for its
+        moment, queued to send automatically, or being sent — whose company has no successful scan, or whose
+        last one is stale, measured from the scan&apos;s <code>ran_at</code> the way the draft generator
+        measures it. Only the first waits on a person: the other three go with nobody looking at the evidence
+        again. Should be zero for messages written from the scan; an answer to a reply is listed too, tagged,
+        because nothing marks which of its words came from the scan.
       </Rule>
       <div className="cards">
         <Count n={d.count} label="on stale or missing evidence" href="#draft-rows" mustBeZero />
+        <Count n={noLook} label="…of which go with no further look (approved, queued, sending)" href="#draft-rows" />
         <Count n={answers} label="…of which answers to a reply" href="#draft-rows" />
-        <Count n={d.awaiting} label="drafts awaiting approval" href="/approvals" />
+        <Count n={d.unsent} label="outbound messages not yet sent" href="/approvals" />
       </div>
       {d.count > 0 ? (
         <table id="draft-rows" style={{ marginTop: 12 }}>
-          <thead><tr><th>Drafted</th><th>Company</th><th>Evidence</th><th></th></tr></thead>
+          <thead><tr><th>Drafted</th><th>Company</th><th>Status</th><th>Evidence</th><th></th></tr></thead>
           <tbody>
             {d.rows.slice(0, ROWS).map((r) => (
               <tr key={r.touchId}>
                 <td className="mono"><At at={r.createdAt} /></td>
                 <td><CompanyLink domain={r.domain} /></td>
+                <td>{UNSENT_STATUS_WORDS[r.status]}</td>
                 <td>
                   {r.why === 'no_evidence' ? 'no successful scan' : <>last good scan <At at={r.lastOkScanAt} /></>}
                   {r.answersReply ? <span className="pill" style={{ marginLeft: 6 }}>answer to a reply</span> : null}
                 </td>
-                <td><a href="/approvals">approvals</a></td>
+                <td>{r.status === 'awaiting_approval' ? <a href="/approvals">approvals</a> : '—'}</td>
               </tr>
             ))}
           </tbody>

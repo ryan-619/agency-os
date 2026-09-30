@@ -59,6 +59,17 @@ export interface RawCapture {
      * site that sets no cookies.
      */
     readonly setCookies?: readonly string[]
+    /**
+     * EVERY enforced `Content-Security-Policy` value the homepage response
+     * carried, in order — `headers` above holds only the first, by parity. A
+     * browser enforces each of them, so a policy split across two headers
+     * judged on the first alone reads as a gap the site does not have.
+     *
+     * Optional because the sixteen recorded fixtures predate it. Absent means
+     * "not captured", and `csp_quality` then reads the first-value map exactly
+     * as it did before this field existed.
+     */
+    readonly cspHeaders?: readonly string[]
     readonly body: string
     /** See RawResponse.truncated. */
     readonly truncated?: boolean

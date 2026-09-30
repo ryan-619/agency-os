@@ -8,20 +8,30 @@
  * this time". A timeout, a WAF block or a CDN quirk on the newer scan is not
  * evidence that anything was fixed; it is evidence of nothing.
  *
- * So the state machine reads each side as one of three things — a gap, clear,
- * or UNOBSERVED — and checks the newer side first:
+ * So the state machine reads each side as one of four things — a gap, clear,
+ * NOT APPLICABLE, or UNOBSERVED — and checks the newer side first:
  *
  *   older       newer        change
  *   (absent)    anything     new_signal
  *   anything    unobserved   not_assessed_this_time   (never `fixed`)
  *   unobserved  observed     now_observed             (never `fixed` or `regressed`)
+ *   same        same         unchanged                (both OBSERVED)
+ *   gap/clear   n/a          no_longer_applicable     (never `fixed`)
+ *   n/a         gap/clear    now_applicable           (never `regressed`)
  *   gap         clear        fixed
  *   clear       gap          regressed
- *   same        same         unchanged                (both OBSERVED)
  *
  * `unchanged` is a comparison, and a comparison needs an observation on both
  * sides: a signal neither scan could see is `not_assessed_this_time`, not
  * `unchanged` — "we looked twice and saw nothing" is not "nothing changed".
+ *
+ * "Not applicable" is the scanner's convention for a question the page gave
+ * no occasion to ask — no CSP to judge the script sources of, no HSTS header
+ * to read a max-age from (`isNotApplicable`). It is stored `observed, gap =
+ * false`, which a two-way reading takes for "clear", and that turned a CSP
+ * with 'unsafe-inline' that was later REMOVED into "fixed". Nothing was fixed:
+ * the thing being judged went away. So it is its own reading, and a move into
+ * or out of it is its own change, counted apart from `fixed` and `regressed`.
  *
  * Every row carries BOTH inputs, evidence objects included, so a reader can
  * check the claim against what each scan actually recorded rather than take
@@ -31,6 +41,7 @@
  * `latestTwoOkScans` in packages/db, which only ever pairs two SUCCESSFUL
  * scans; a scan that never reached the site has no findings to diff.
  */
+import { isNotApplicable } from './informational.js'
 
 /** One finding, as the diff reads it. A `findings` row fits through `diffInputOf`. */
 export interface DiffInput {
@@ -46,13 +57,19 @@ export interface DiffInput {
   readonly scored?: boolean
 }
 
-export type SignalChange =
-  | 'fixed'
-  | 'regressed'
-  | 'not_assessed_this_time'
-  | 'now_observed'
-  | 'new_signal'
-  | 'unchanged'
+/** Every change the diff can report — the list a renderer must have words for. */
+export const SIGNAL_CHANGES = Object.freeze([
+  'fixed',
+  'regressed',
+  'not_assessed_this_time',
+  'now_observed',
+  'no_longer_applicable',
+  'now_applicable',
+  'new_signal',
+  'unchanged',
+] as const)
+
+export type SignalChange = (typeof SIGNAL_CHANGES)[number]
 
 export interface FindingDiffRow {
   readonly signalKey: string
@@ -80,10 +97,14 @@ export interface FindingDiff {
     readonly regressed: number
     readonly notAssessed: number
     readonly nowObserved: number
+    /** Judged on the older scan, nothing to judge on the newer. Never in `fixed`. */
+    readonly noLongerApplicable: number
+    /** Nothing to judge on the older scan, judged on the newer. Never in `regressed`. */
+    readonly nowApplicable: number
   }
 }
 
-type Reading = 'gap' | 'clear' | 'unobserved'
+type Reading = 'gap' | 'clear' | 'not_applicable' | 'unobserved'
 
 /**
  * What one side of the diff says. A row claiming `observed` with no `gap`
@@ -93,7 +114,8 @@ type Reading = 'gap' | 'clear' | 'unobserved'
  */
 function reading(d: DiffInput): Reading {
   if (!d.observed || d.gap === null) return 'unobserved'
-  return d.gap ? 'gap' : 'clear'
+  if (d.gap) return 'gap'
+  return isNotApplicable(d) ? 'not_applicable' : 'clear'
 }
 
 function changeOf(older: DiffInput | undefined, newer: DiffInput): SignalChange {
@@ -105,6 +127,10 @@ function changeOf(older: DiffInput | undefined, newer: DiffInput): SignalChange 
   if (now === 'unobserved') return 'not_assessed_this_time'
   if (was === 'unobserved') return 'now_observed'
   if (was === now) return 'unchanged'
+  // Before gap/clear, so a policy that went away is never `fixed` and one
+  // that appeared is never `regressed`: one side had nothing to judge.
+  if (now === 'not_applicable') return 'no_longer_applicable'
+  if (was === 'not_applicable') return 'now_applicable'
   return was === 'gap' ? 'fixed' : 'regressed'
 }
 
@@ -154,6 +180,8 @@ export function diffFindings(older: readonly DiffInput[], newer: readonly DiffIn
       regressed: count('regressed'),
       notAssessed: count('not_assessed_this_time'),
       nowObserved: count('now_observed'),
+      noLongerApplicable: count('no_longer_applicable'),
+      nowApplicable: count('now_applicable'),
     },
   }
 }

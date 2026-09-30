@@ -16,7 +16,13 @@
  *  - a stale scan produces NO proposal. §2.2 says stale findings must be
  *    re-verified before appearing in any outbound draft, and a proposal is the
  *    most outbound draft there is. The caller re-scans first, or gets a
- *    refusal that says so.
+ *    refusal that says so;
+ *  - neither does a scan scored under a different ICP profile than the one
+ *    the proposal walks. After an informational signal is promoted into the
+ *    ICP, a scan recorded before the promotion holds that key observed but
+ *    `scored = false`; the walk below skips such a row and would list the
+ *    signal as "not assessable from the outside" — in the buyer's document,
+ *    about a signal the scanner DID observe. `rescore` says so instead.
  *
  * Pure. The caller reads the rows, decides freshness with `isStale`, and
  * hands the facts in. `packages/core` does no I/O.
@@ -33,10 +39,22 @@ export interface ProposalFinding {
   readonly evidence: Readonly<Record<string, unknown>>
   /**
    * `findings.scored`. An informational signal (false) is never scope and is
-   * never counted in the summary's "of N signals observed". Optional; the
-   * ICP walk below excludes such rows either way, because none is in the ICP.
+   * never counted in the summary's "of N signals observed". Optional, and
+   * absent means scored (the column's default). Pass EVERY row of the scan,
+   * informational ones included: a row for an ICP key that says
+   * `scored = false` is how a scan recorded before a promotion is recognised.
    */
   readonly scored?: boolean
+}
+
+/**
+ * Which ICP profile the scan was scored under, beside the one active now.
+ * `scores.icp_profile_id` names the first; `scoreProfileId` is null only for
+ * a scan with no score row, which has no score to disagree with.
+ */
+export interface ProposalProfiles {
+  readonly activeProfileId: string
+  readonly scoreProfileId: string | null
 }
 
 export interface ProposalInput {
@@ -47,6 +65,8 @@ export interface ProposalInput {
   readonly findings: readonly ProposalFinding[]
   readonly scan: { readonly ranAt: Date; readonly stale: boolean; readonly ok: boolean }
   readonly score: { readonly score: number; readonly tier: string | null } | null
+  /** Required, so a caller cannot skip the check by not knowing it exists. */
+  readonly profiles: ProposalProfiles
   /** The agency's day rate, in whole currency units; null leaves pricing as a placeholder. */
   readonly dayRate?: number | null
   readonly currency?: string
@@ -88,9 +108,34 @@ export interface Proposal {
   readonly generatedAt: string
 }
 
+/** Why no proposal was written. Every screen that offers the button renders each of these. */
+export type ProposalRefusal = 'stale' | 'unreachable' | 'no_gaps' | 'no_scan' | 'rescore'
+
 export type ProposalOutcome =
   | { readonly ok: true; readonly proposal: Proposal }
-  | { readonly ok: false; readonly reason: 'stale' | 'unreachable' | 'no_gaps' | 'no_scan'; readonly message: string }
+  | { readonly ok: false; readonly reason: ProposalRefusal; readonly message: string }
+
+/** The `rescore` refusal's words, for the company page's button and the generator alike. */
+export const PROPOSAL_RESCORE_SENTENCE = 'scored under a different profile — re-scan'
+
+/**
+ * Whether the scan's findings were scored under a profile other than the
+ * active one, so the proposal's walk over the active ICP would misread them.
+ * Two ways to know: the score row names another profile, or a signal the
+ * active ICP scores has a row on this scan that was recorded unscored — the
+ * promotion case, which a score row alone cannot show if the promotion
+ * edited the active profile rather than replacing it.
+ */
+export function proposalNeedsRescore(input: {
+  readonly icp: IcpDefinition
+  readonly findings: readonly { readonly signalKey: string; readonly scored?: boolean }[]
+  readonly profiles: ProposalProfiles
+}): boolean {
+  const { activeProfileId, scoreProfileId } = input.profiles
+  if (scoreProfileId !== null && scoreProfileId !== activeProfileId) return true
+  const scoredNow = new Set(orderedSignals(input.icp).map(([key]) => key))
+  return input.findings.some((f) => f.scored === false && scoredNow.has(f.signalKey))
+}
 
 /**
  * Where each signal's remediation belongs, and how much of it there is.
@@ -215,6 +260,15 @@ export function proposalFromFindings(input: ProposalInput): ProposalOutcome {
       message:
         `The last scan of ${input.company.domain} ran on ${input.scan.ranAt.toISOString().slice(0, 10)} and has aged out. ` +
         'A proposal quotes findings, and stale findings must be re-verified first (§2.2). Re-scan, then generate.',
+    }
+  }
+  if (proposalNeedsRescore(input)) {
+    return {
+      ok: false,
+      reason: 'rescore',
+      message:
+        `The last scan of ${input.company.domain} was ${PROPOSAL_RESCORE_SENTENCE}, then generate. The active ICP ` +
+        'scores signals that scan did not, so a signal the scanner observed would be listed to the buyer as not assessed.',
     }
   }
 

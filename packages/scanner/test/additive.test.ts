@@ -9,7 +9,9 @@
  */
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { ADDITIVE_SIGNAL_KEYS, additiveObservations, parseSetCookie, type AdditiveKey } from '../src/additive.js'
+import {
+  ADDITIVE_SIGNAL_KEYS, SEVERAL_CSP_HEADERS, additiveObservations, parseSetCookie, viaDisclosesVersion, type AdditiveKey,
+} from '../src/additive.js'
 import { extractProfile } from '../src/extract.js'
 import { extractHtmlFacts } from '../src/html.js'
 import type { RawCapture } from '../src/types.js'
@@ -152,6 +154,36 @@ describe('Content-Security-Policy', () => {
     expect(o.gap).toBe(true)
     expect(o.detail).toMatch(/scripts are unrestricted/)
   })
+
+  // The first-value map keeps the FIRST Content-Security-Policy, for parity,
+  // and a browser enforces EVERY one. A policy split across two headers —
+  // frame-ancestors in one, script-src in the other — was judged on the first
+  // alone and got "scripts are unrestricted", a gap the site does not have.
+  it('does not judge a policy split across several headers: unobserved, and says why', () => {
+    const split = ["frame-ancestors 'self'", "script-src 'self'"]
+    const o = one('csp_quality', { headers: { 'content-security-policy': split[0]! }, cspHeaders: split })
+    expect(o).toMatchObject({ observed: false, gap: null, detail: SEVERAL_CSP_HEADERS })
+    expect(o.evidence).toMatchObject({ header: 'content-security-policy', headers: 2, seen: split })
+    // Report-only reads the enforced policies as present, as it did before.
+    const ro = one('csp_report_only', {
+      headers: { 'content-security-policy': split[0]!, 'content-security-policy-report-only': "default-src 'none'" },
+      cspHeaders: split,
+    })
+    expect(ro).toMatchObject({ observed: true, gap: false })
+  })
+
+  it('judges one captured policy, or a capture that predates the field, exactly as before', () => {
+    const header = "frame-ancestors 'self'"
+    const without = one('csp_quality', { headers: { 'content-security-policy': header } })
+    const withOne = one('csp_quality', { headers: { 'content-security-policy': header }, cspHeaders: [header] })
+    expect(withOne).toEqual(without)
+    expect(without).toMatchObject({ observed: true, gap: true })
+    // A blank second header enforces nothing, so one policy is still judged.
+    const blankBeside = one('csp_quality', { headers: { 'content-security-policy': header }, cspHeaders: [header, '  '] })
+    expect(blankBeside).toEqual(without)
+    // And an empty record is no CSP at all.
+    expect(one('csp_quality', { cspHeaders: [] }).detail).toMatch(/^not applicable/)
+  })
 })
 
 describe('headers the scored signals only check for presence', () => {
@@ -212,6 +244,23 @@ describe('what the server says about itself', () => {
     expect(one('stack_disclosure', { headers: { server: 'Framer/bea9510' } }).gap).toBe(true)
     expect(one('stack_disclosure', { headers: { server: 'cloudflare' } }).gap).toBe(false)
     expect(one('stack_disclosure', { headers: { 'x-aspnet-version': '4.0.30319' } }).gap).toBe(true)
+  })
+
+  // `Via: 1.1 google` names a CDN hop, and the `1.1` is the HTTP version an
+  // intermediary is required to add — not a software version.
+  it('flags a Via hop only for what follows its protocol token', () => {
+    for (const via of ['1.1 google', '1.1 varnish', '1.1 vegur', 'HTTP/1.1 cdn', '2 edge', '1.0 fred, 1.1 google']) {
+      expect(viaDisclosesVersion(via), via).toBe(false)
+      const o = one('stack_disclosure', { headers: { via } })
+      expect(o.gap, via).toBe(false)
+      expect(o.evidence).toMatchObject({ headers: {}, via })
+    }
+    for (const via of ['1.1 varnish (Varnish/6.0)', '1.1 google, 1.1 p.example.net (Apache/2.4.1)', '1.1 proxy/bea9510']) {
+      expect(viaDisclosesVersion(via), via).toBe(true)
+      const o = one('stack_disclosure', { headers: { via } })
+      expect(o.gap, via).toBe(true)
+      expect(o.detail).toBe(`via: ${via}`)
+    }
   })
 
   it('does not flag x-xss-protection: 0, which is the recommended value', () => {

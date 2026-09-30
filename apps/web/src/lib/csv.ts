@@ -1,4 +1,4 @@
-import { isStale } from '@agency/core'
+import { isNotApplicable, isStale } from '@agency/core'
 import { tierLabel, type CompanyListClock } from './company-list'
 
 /**
@@ -193,6 +193,12 @@ export interface FindingsCsvGroup {
  * `stale` is per row but derived from the SCAN's `ran_at`, because that is
  * when every finding in it was observed.
  *
+ * `gap` reads `not applicable` for the scanner's not-applicable rows (no CSP
+ * to judge, no HSTS header to read) rather than `no`: they are stored
+ * observed with no gap, and a `no` in a gap column is a pass somebody filters
+ * on, when the page gave nothing to judge (`isNotApplicable`, the rule the
+ * company page and the diff use).
+ *
  * A latest scan that recorded no findings still gets one row, with the signal
  * columns empty, so a failed scan reads as a failed scan rather than as a
  * company that is not in the file.
@@ -216,7 +222,7 @@ export function findingsCsvRows(groups: readonly FindingsCsvGroup[], clock: Comp
         ...scanCells,
         f.signalKey,
         yesNo(f.observed),
-        f.observed ? yesNo(f.gap) : '',
+        !f.observed ? '' : isNotApplicable(f) ? 'not applicable' : yesNo(f.gap),
         yesNo(f.scored),
         f.observed ? String(f.weight) : '',
         f.detail ?? '',

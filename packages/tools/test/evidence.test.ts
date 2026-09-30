@@ -276,6 +276,35 @@ describe('the evidence tools', () => {
       expect(out.summary).toContain('not scored')
       expect(out.summary).toContain('hsts_quality regressed')
     })
+
+    // additive.ts stores "not applicable" as observed with no gap. Read two
+    // ways, an HSTS max-age=300 that was later dropped altogether was
+    // "fixed", in the summary the model repeats to people.
+    it('reads a gap → not applicable as no longer applicable, never as fixed', async () => {
+      const short: Observation = {
+        observed: true, gap: true, detail: 'max-age=300 is under 180 days',
+        evidence: { url: 'https://acme.test/', maxAge: 300 },
+      }
+      const gone: Observation = {
+        observed: true, gap: false, detail: 'not applicable — no Strict-Transport-Security header',
+        evidence: { url: 'https://acme.test/', maxAge: null },
+      }
+      await scanAt('acme.test', daysAgo(10), reached({ extra: { hsts_quality: short } }))
+      await scanAt('acme.test', daysAgo(1), reached({ extra: { hsts_quality: gone } }))
+      const out = await run(getEvidenceChanges, { domain: 'acme.test' })
+      if (!out.ok) throw new Error(out.message)
+      const data = out.data as {
+        changes: Array<{ signal: string; change: string; newer: Record<string, unknown> }>
+        counts: { fixed: number; noLongerApplicable: number }
+      }
+      const row = data.changes.find((c) => c.signal === 'hsts_quality')!
+      expect(row.change).toBe('no_longer_applicable')
+      expect(row.newer).toMatchObject({ observed: true, gap: false, notApplicable: true })
+      expect(data.counts).toMatchObject({ fixed: 0, noLongerApplicable: 1 })
+      expect(out.summary).toContain('hsts_quality no longer applicable (nothing to judge now; not a fix)')
+      expect(out.summary).not.toContain('Fixed (')
+      expect(out.summary).not.toMatch(/hsts_quality (fixed|no_longer_applicable)/)
+    })
   })
 
   // -------------------------------------------------------------------------

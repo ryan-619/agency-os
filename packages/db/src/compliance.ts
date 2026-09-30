@@ -39,6 +39,10 @@ import {
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 import { callsThatDidNotDisclose } from './calls.js'
+// A cycle (digest.ts reads `complianceRefusalsByCode` from here), safe
+// because each side reads the other only inside a function body, never
+// while its module is being evaluated.
+import { DIGEST_OPT_OUT_FAILURES } from './digest.js'
 
 const MS_PER_DAY = 86_400_000
 
@@ -469,11 +473,24 @@ export async function complianceEvidenceFreshness(
 // 6. Drafts awaiting approval on evidence that is stale or missing
 // ---------------------------------------------------------------------------
 
+/**
+ * Every status an outbound row holds before it goes. `awaiting_approval`
+ * waits on a person; the other three do NOT: an auto-send row is `queued`,
+ * a person approved the words of an `approved` one (the worker re-checks the
+ * rules at sending, not the evidence the words quote), and `sending` is the
+ * worker's claim in flight. They leave with no further human look, which is
+ * why they are measured too.
+ */
+export const COMPLIANCE_UNSENT_STATUSES = Object.freeze(['awaiting_approval', 'approved', 'queued', 'sending'] as const)
+export type ComplianceUnsentStatus = (typeof COMPLIANCE_UNSENT_STATUSES)[number]
+
 export interface ComplianceDraftOnStaleEvidence {
   readonly touchId: string
   readonly companyId: string
   readonly domain: string
   readonly channel: string
+  /** Which of the not-yet-sent statuses the row is in — only the first waits on a person. */
+  readonly status: ComplianceUnsentStatus
   readonly createdAt: Date
   /** `no_evidence`: the company has no successful scan at all. */
   readonly why: 'stale' | 'no_evidence'
@@ -489,6 +506,10 @@ export interface ComplianceDraftOnStaleEvidence {
 export interface ComplianceDraftsOnStaleEvidence {
   /** Every outbound draft awaiting a person, about a company or not. */
   readonly awaiting: number
+  /** Every outbound row not yet sent, in any of `COMPLIANCE_UNSENT_STATUSES`, about a company or not. */
+  readonly unsent: number
+  /** The listed rows — those on stale or missing evidence — counted per status, zeros included. */
+  readonly byStatus: Readonly<Record<ComplianceUnsentStatus, number>>
   readonly count: number
   readonly rows: readonly ComplianceDraftOnStaleEvidence[]
 }
@@ -497,8 +518,14 @@ export interface ComplianceDraftsOnStaleEvidence {
  * §2.2: stale findings "must be re-verified before appearing in any outbound
  * draft". Measured the way `quotableFindings` measures it — the company's
  * most recent SUCCESSFUL scan, aged with `isStale()` from `ran_at` — so this
- * lists exactly the drafts whose company the draft generator could not quote
- * today. A draft names its company directly, or through its contact.
+ * lists exactly the messages whose company the draft generator could not
+ * quote today. A message names its company directly, or through its contact.
+ *
+ * Every outbound row not yet sent is measured, not only the drafts awaiting a
+ * person: a queued auto-send row and an approved-but-deferred one go out with
+ * nobody looking again, so they are the ones this count most needs to see.
+ * Each row is tagged with its status. This is the reporting half; refusing
+ * such a row at the moment of sending is the send path's.
  */
 export async function complianceDraftsOnStaleEvidence(
   db: AgencyDb,
@@ -512,6 +539,7 @@ export async function complianceDraftsOnStaleEvidence(
       touchId: schema.touches.id,
       companyId,
       channel: schema.touches.channel,
+      status: schema.touches.status,
       createdAt: schema.touches.createdAt,
       answersTouchId: schema.touches.answersTouchId,
     })
@@ -524,13 +552,15 @@ export async function complianceDraftsOnStaleEvidence(
       and(
         eq(schema.touches.orgId, orgId),
         eq(schema.touches.direction, 'out'),
-        eq(schema.touches.status, 'awaiting_approval'),
+        inArray(schema.touches.status, [...COMPLIANCE_UNSENT_STATUSES]),
       ),
     )
     .orderBy(asc(schema.touches.createdAt))
 
+  const awaiting = drafts.filter((d) => d.status === 'awaiting_approval').length
+  const byStatus = Object.fromEntries(COMPLIANCE_UNSENT_STATUSES.map((st) => [st, 0])) as Record<ComplianceUnsentStatus, number>
   const companyIds = [...new Set(drafts.map((d) => d.companyId).filter((id): id is string => Boolean(id)))]
-  if (companyIds.length === 0) return { awaiting: drafts.length, count: 0, rows: [] }
+  if (companyIds.length === 0) return { awaiting, unsent: drafts.length, byStatus, count: 0, rows: [] }
 
   const [companies, lastOk] = await Promise.all([
     db
@@ -560,18 +590,21 @@ export async function complianceDraftsOnStaleEvidence(
     const ranAt = lastOkAt.get(d.companyId) ?? null
     const why = ranAt === null ? 'no_evidence' : isStale(ranAt, staleDays, now) ? 'stale' : null
     if (!why) continue
+    const status = d.status as ComplianceUnsentStatus
+    byStatus[status] += 1
     rows.push({
       touchId: d.touchId,
       companyId: d.companyId,
       domain,
       channel: d.channel,
+      status,
       createdAt: d.createdAt,
       why,
       lastOkScanAt: ranAt,
       answersReply: d.answersTouchId !== null,
     })
   }
-  return { awaiting: drafts.length, count: rows.length, rows }
+  return { awaiting, unsent: drafts.length, byStatus, count: rows.length, rows }
 }
 
 // ---------------------------------------------------------------------------
@@ -720,9 +753,19 @@ export async function complianceColdOptInTouches(
 // Opt-outs that did not reach the suppression list
 // ---------------------------------------------------------------------------
 
+/** The audit actions a writer leaves when it knew an opt-out failed to store — the digest's own list. */
+export type ComplianceOptOutFailureAction = (typeof DIGEST_OPT_OUT_FAILURES)[number]
+
 export interface ComplianceOptOutNotRecordedRow {
   readonly auditId: string
   readonly at: Date
+  /**
+   * Which writer knew: `contact.opt_out_not_recorded` (a reply or a call),
+   * `unsubscribe.not_recorded` (the one-click link) or
+   * `contact.erasure_failed` (an erasure that could not keep its suppression).
+   */
+  readonly action: ComplianceOptOutFailureAction
+  /** The writer's channel, else the touch's; null for an erasure, which is every channel. */
   readonly channel: string | null
   /** The reason CLASS the writer recorded — never an address (§2.3). */
   readonly why: string | null
@@ -735,10 +778,23 @@ export interface ComplianceOptOutsNotRecorded {
 }
 
 /**
- * `contact.opt_out_not_recorded` audit rows: every time a writer knew an
- * opt-out had failed to store (§2.1's Phase 4 obligation). The count is
- * history — it stays after somebody records the suppression by hand; the
- * next block is what is still outstanding.
+ * Every audit row a writer leaves when it knew an opt-out had failed to
+ * store (§2.1's Phase 4 obligation): a reply or call reader's
+ * `contact.opt_out_not_recorded`, the unsubscribe link's
+ * `unsubscribe.not_recorded`, and an erasure's `contact.erasure_failed` —
+ * `DIGEST_OPT_OUT_FAILURES`, the list the daily digest counts, imported
+ * rather than restated, so the page, the dashboard, `get_compliance_summary`
+ * and the digest cannot disagree. Counting only the first reported 0 over a
+ * failed unsubscribe or erasure, neither of which leaves the opted-out reply
+ * or call the next block looks for.
+ *
+ * The count is history — it stays after somebody records the suppression by
+ * hand; the next block is what is still outstanding.
+ *
+ * The company is resolved through whatever the row names: the contact it is
+ * about, else the touch it is about (an unsubscribe names the touch; the
+ * touch names its company, or its contact does), else the `contactId` its
+ * detail carries. One contact expression, so a row can match at most one.
  */
 export async function complianceOptOutsNotRecorded(
   db: AgencyDb,
@@ -748,36 +804,58 @@ export async function complianceOptOutsNotRecorded(
 ): Promise<ComplianceOptOutsNotRecorded> {
   const where = and(
     eq(schema.auditLog.orgId, orgId),
-    eq(schema.auditLog.action, 'contact.opt_out_not_recorded'),
+    inArray(schema.auditLog.action, [...DIGEST_OPT_OUT_FAILURES]),
     since ? gte(schema.auditLog.createdAt, since) : undefined,
   )
+  // Compared as text: `detail->>'contactId'` is whatever the writer stored,
+  // and a cast of a value that is not a uuid would fail the whole page.
+  const contactOfRow = sql`coalesce(
+    CASE WHEN ${schema.auditLog.subjectType} = 'contact' THEN ${schema.auditLog.subjectId}::text END,
+    ${schema.touches.contactId}::text,
+    ${schema.auditLog.detail}->>'contactId'
+  )`
   const [counted, rows] = await Promise.all([
     db.select({ n: sql<number>`count(*)::int` }).from(schema.auditLog).where(where),
     db
       .select({
         auditId: schema.auditLog.id,
         at: schema.auditLog.createdAt,
-        channel: sql<string | null>`${schema.auditLog.detail}->>'channel'`,
+        action: schema.auditLog.action,
+        channel: sql<string | null>`coalesce(${schema.auditLog.detail}->>'channel', ${schema.touches.channel})`,
         why: sql<string | null>`coalesce(${schema.auditLog.detail}->>'why', ${schema.auditLog.detail}->>'path')`,
         companyDomain: schema.companies.domain,
       })
       .from(schema.auditLog)
       .leftJoin(
-        schema.contacts,
+        schema.touches,
         and(
-          eq(schema.auditLog.subjectType, 'contact'),
-          eq(schema.contacts.id, schema.auditLog.subjectId),
-          eq(schema.contacts.orgId, orgId),
+          eq(schema.auditLog.subjectType, 'touch'),
+          eq(schema.touches.id, schema.auditLog.subjectId),
+          eq(schema.touches.orgId, orgId),
         ),
       )
-      .leftJoin(schema.companies, eq(schema.companies.id, schema.contacts.companyId))
+      .leftJoin(
+        schema.contacts,
+        and(eq(schema.contacts.orgId, orgId), sql`${schema.contacts.id}::text = ${contactOfRow}`),
+      )
+      .leftJoin(
+        schema.companies,
+        and(
+          eq(schema.companies.orgId, orgId),
+          eq(schema.companies.id, sql`coalesce(${schema.touches.companyId}, ${schema.contacts.companyId})`),
+        ),
+      )
       .where(where)
       .orderBy(desc(schema.auditLog.createdAt))
       .limit(limit),
   ])
   return {
     count: counted[0]?.n ?? 0,
-    rows: rows.map((r) => ({ ...r, companyDomain: r.companyDomain ?? null })),
+    rows: rows.map((r) => ({
+      ...r,
+      action: r.action as ComplianceOptOutFailureAction,
+      companyDomain: r.companyDomain ?? null,
+    })),
   }
 }
 

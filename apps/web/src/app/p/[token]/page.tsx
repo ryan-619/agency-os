@@ -22,8 +22,8 @@ import { AcceptForm } from './accept-form'
  * "stale" (§2.2). Whether a buyer may see it at all is decided before it
  * renders — the link expires when the evidence under it goes stale, and the
  * read re-derives freshness from the scan's `ran_at` anyway; a proposal
- * whose evidence has aged out shows no document, only that it is being
- * re-verified.
+ * whose evidence has aged out, or been superseded by a newer successful scan,
+ * shows no document, only that it is being re-verified.
  *
  * Loading this page counts a view (a count and two instants — never an IP or
  * a user agent). It records nothing else: accepting is a POST, never a GET,

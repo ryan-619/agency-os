@@ -28,9 +28,10 @@ export type ProposalStatus = 'draft' | 'sent' | 'accepted' | 'declined' | 'withd
  * Generate and store a proposal for a company, from its latest scan.
  *
  * Refuses, with the generator's own words, when there is nothing honest to
- * propose from: no scan, an unreachable site, a stale scan, no gaps. A stale
- * scan is the important one — a proposal is the most outbound draft there is,
- * and §2.2 says stale findings are re-verified before appearing in one.
+ * propose from: no scan, an unreachable site, a stale scan, a scan scored
+ * under a different ICP profile (`rescore`), no gaps. A stale scan is the
+ * important one — a proposal is the most outbound draft there is, and §2.2
+ * says stale findings are re-verified before appearing in one.
  */
 export async function generateProposal(
   db: AgencyDb,
@@ -71,10 +72,13 @@ export async function generateProposal(
     company: { domain: company.domain, name: company.name },
     agency: { name: org.name },
     icp,
-    // Scored rows only: an informational signal is never scope, and counting
-    // it would make the buyer's "of N signals observed" a number about a
-    // review nobody scored.
-    findings: found.findings.filter((f) => f.scored).map((f) => ({
+    // EVERY row, informational ones included, each with its `scored` flag.
+    // The generator leaves the unscored ones out of the scope and the
+    // buyer's "of N signals observed" itself — and it needs to see them: a
+    // row for a key the ACTIVE ICP scores that this scan recorded unscored is
+    // a scan from before a promotion, which it refuses as `rescore` rather
+    // than calling the signal not assessed.
+    findings: found.findings.map((f) => ({
       signalKey: f.signalKey,
       observed: f.observed,
       gap: f.gap,
@@ -85,6 +89,7 @@ export async function generateProposal(
     })),
     scan: { ranAt: found.scan.ranAt, ok: found.scan.ok, stale: isStale(found.scan.ranAt, staleAfter, now) },
     score: found.score ? { score: found.score.score, tier: found.score.tier } : null,
+    profiles: { activeProfileId: icpRow.id, scoreProfileId: found.score?.icpProfileId ?? null },
     dayRate: args.dayRate ?? null,
     currency: args.currency ?? 'USD',
     generatedAt: now,
