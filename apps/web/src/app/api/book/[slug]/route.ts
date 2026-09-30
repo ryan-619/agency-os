@@ -1,7 +1,10 @@
-import { NextResponse } from 'next/server'
+import { NextResponse, after } from 'next/server'
 import { bookInbound, type AgencyDb } from '@agency/db/queries'
 import { getDb } from '@/lib/db'
 import { BOOKING_CONSENT_WORDING } from '@/lib/booking-copy'
+import { log } from '@/lib/logger'
+import { notify } from '@/lib/slack'
+import { bookingNotification } from './notification'
 
 /**
  * The public booking endpoint (PROMPT.md §8.6, §2.1).
@@ -16,8 +19,19 @@ import { BOOKING_CONSENT_WORDING } from '@/lib/booking-copy'
  *  - the consent rows record THIS file's wording, imported from the same
  *    module the form renders, so the evidence is what the visitor saw.
  *
- * Rate limiting belongs at the reverse proxy, like `/api/health`'s (CLAUDE.md
- * §4). What this route does on its own is refuse bodies over 8 KB.
+ * Rate limiting belongs in front of the app, not in it. On Vercel there is no
+ * reverse proxy to own it (CLAUDE.md §4 predates the move), so it is the WAF
+ * rule on `/api/book` that DEPLOYING.md's "The public surface, and what is
+ * not protected" asks for. What this route does on its own is refuse bodies
+ * over 8 KB.
+ *
+ * Each accepted booking also posts one Slack message when `SLACK_WEBHOOK_URL`
+ * is set — the meeting id and the company's domain, never the name, address,
+ * phone, notes or chosen time the visitor gave. That is one outbound request
+ * per accepted row, so the same WAF rule bounds it;
+ * a refused booking posts nothing. It runs in `after()`, once the visitor has
+ * their 201, and a failure to schedule it is logged, never returned: the
+ * booking is already committed.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -74,6 +88,15 @@ export async function POST(
     consentWording: BOOKING_CONSENT_WORDING,
   })
   if (!r.ok) return NextResponse.json({ error: r.message }, { status: r.status })
+
+  const event = bookingNotification(r)
+  if (event) {
+    try {
+      after(() => notify(event))
+    } catch (err) {
+      log.warn('booking notification not scheduled', { error: err instanceof Error ? err.name : 'UnknownError' })
+    }
+  }
   // The meeting id is not returned: a stranger has no use for an internal
   // id, and an id is a thing to enumerate with.
   return NextResponse.json({ ok: true }, { status: 201 })
