@@ -46,7 +46,7 @@ export const NOT_ASSESSED_SENTENCE =
 /** The 409 the markdown route answers for a draft whose evidence has aged out. */
 export function staleDraftRefusal(domain: string): string {
   return (
-    `The evidence under this draft has aged out, and stale findings are re-verified before they appear in anything outbound (§2.2). ` +
+    `The evidence under this draft has aged out: re-verify before it appears in anything outbound (§2.2). ` +
     `Re-scan ${domain} and generate a fresh proposal; this one is not exported.`
   )
 }
