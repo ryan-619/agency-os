@@ -1625,8 +1625,9 @@ token rows for addresses that are not team members. They are single-use, expire
 in 15 minutes, and grant nothing — but nothing prunes them and nothing rate
 limits the endpoint. Phase 2's worker should sweep
 `verification_tokens WHERE expires < now()`; rate limiting belongs at the
-reverse proxy. This was a deliberate trade against roster disclosure, which is
-the worse failure.
+edge — the reverse proxy on a VPS, the WAF rule on Vercel (DEPLOYING.md, "The
+public surface"). This was a deliberate trade against roster disclosure, which
+is the worse failure.
 
 **`AUTH_URL` is required and `AUTH_TRUST_HOST` is tri-state.** Auth.js reads
 `process.env.AUTH_URL` itself, so a zod `.default()` made the variable look
@@ -1680,6 +1681,20 @@ holds a definition with no `order` and will use that fallback; re-seed it.**
 numbers as literals. The threshold, channels and daily cap shown are whatever
 the active `icp_profiles` row says. A dashboard displaying a threshold the
 engine is not using is the same class of mistake as a finding nobody observed.
+So does `/settings/icp`, and there is no ICP editor, on purpose: a stored score
+names the definition it was computed from, and editing that definition in
+place would change what every old score claims to mean.
+
+**The ICP is partly descriptive, and `/settings/icp` says which part.**
+`scoreCompany` evaluates four disqualifiers (`unreachable`,
+`is_security_vendor`, `has_security_team`, `no_public_product`); the seed's
+`enterprise_scale` is checked by nothing, and the page marks it so
+(`SCORER_DISQUALIFIERS` in `apps/web/src/lib/icp-view.ts`, pinned against
+`scoring.ts`). The profile's outreach block — channels, `max_per_day`,
+`auto_send` — is enforced by nothing either: the send path applies each
+campaign's own channel, cap and quiet hours. The dashboard's Active ICP table
+still shows the profile's channels and daily cap as if they were the operative
+values; that is the one place left that overstates them.
 
 **Migration 0010's down file was edited before any deployment.** Its original
 down reverted `refused` rows to `failed` without clearing `refusal_code`,
@@ -1757,7 +1772,9 @@ orchestrator has to reach it — and it reports only `err.name`, never the drive
 message that would carry the DSN. It is not rate limited, so sustained
 anonymous traffic can occupy connections from the same pool the app uses;
 `DATABASE_POOL_MAX` exists partly so that ceiling is tunable. Rate limiting
-belongs with the reverse proxy in front of the VPS, not in the app.
+belongs at the edge, not in the app: the reverse proxy in front of a VPS, and
+on Vercel — where there is no proxy you control, which this sentence predates
+— the WAF rule DEPLOYING.md asks for.
 
 **`/api/health` reports the schema state, and deliberately does not enforce
 it.** It reads `max(version)` from `schema_migrations` and compares it against
@@ -1788,6 +1805,132 @@ as long as it takes to run the suite.
 `createUser` cannot succeed. That is deliberate: there is no signup flow (§1).
 The `signIn` callback refuses any address without a `users` row *before* mail is
 sent, and the NOT NULL is the backstop if that callback is ever bypassed.
+
+**Settings → Team revokes access and never deletes anyone.** Revoking stamps
+`users.revoked_at` and deletes that person's sessions in the same transaction;
+restoring clears the stamp and keeps the role. Three statements enforce the
+rules themselves, with no check beforehand to race: a revoked owner does not
+count as an owner, the last live owner cannot be demoted or revoked, and
+nobody can revoke themselves. Revocation is checked in three places in
+`auth.ts` — the request leg, the callback leg and the per-request `session`
+callback, all through `memberMayAccess` — and in the worker's
+`resolvePrincipal` on every turn. The session-callback check closes a race: a
+magic link completed just before a revocation could otherwise create a 30-day
+session just after it. That callback deletes the sessions and THROWS; returning
+nothing is not a safe alternative, because next-auth then falls back to the raw
+adapter session, `sessionToken` included.
+
+**"Last signed in" is `users.email_verified`.** @auth/core 0.41.3 re-stamps it
+on every completed magic link and at no other time. `users.updated_at` also
+moves on every sign-in (the adapter's `updateUser` fires the trigger), so it
+means nothing and the page never shows it. `verification_tokens` are never
+listed, because they hold rows for strangers.
+
+**The team page is not a roster oracle either.** `users_email_key` is global,
+so granting an address another org holds gets one generic sentence — "That
+address cannot be added here." — with the same 409 as a same-org repeat, and
+the address is never logged. A revoked member asking for a sign-in link gets
+the same response as a stranger; only the operator log's `reason`
+(`access_revoked` / `not_a_member`) tells them apart. Granting sends no mail.
+
+**Suppression audit rows were never written.** The suppression routes put the
+normalised value in `audit_log.subject_id`, a uuid column, and the insert
+failed silently behind `.catch(() => {})`. Now `subjectId` is null and the
+value is in `detail`, built by `auditSuppressionAdded`/`auditSuppressionRemoved`
+in `packages/db/src/audit.ts`, which `suppression-audit.test.ts` runs through
+`appendAudit` against a real engine. Every suppression change before 0018 is
+missing from the log, and `/audit` says so rather than implying the log is
+complete.
+
+**A cron rescans; it is not a scan button.** CLAUDE.md named the missing
+scheduled rescan and REPO-BRIEF's "no scan button" stands: nobody clicks
+`/api/cron/rescan`, and a person still scans one company with `npm run scan --
+<domain>`. **Its deadline is derived, not guessed.** `worstCaseScanMs =
+homeTimeoutMs × 11 + pathTimeoutMs × 11 + 8 000` (TLS) — 162 s at the cron's
+8 s / 6 s — because a redirect chain may spend a per-hop timeout eleven times.
+A company is dispatched only when `elapsed + worstCaseScanMs <= budget`, with
+the budget 300 s less a 60 s margin, shared across orgs. The first rule,
+"stop dispatching after 240 s", could start a scan at 239 s that ran to about
+400 s, and the platform would kill the function with the audit row unwritten.
+`rescan.test.ts` reads `fetch.ts`, so the restated 11 and 8 000 cannot drift.
+**And the per-hop timeouts do not bound a body that drips a byte inside each
+inactivity window** — `get()` checks its deadline before each hop, not during
+the read — so each scan is raced against its worst case; one that loses is
+abandoned, records nothing, and stops the run, because its sockets cannot be
+closed and a second scan beside it would be the overlap the design forbids.
+**It never picks a `*.inbound` company**: that is the booking page's
+placeholder named after a person, and scanning it would resolve somebody's
+email address as a DNS name every night, for an "unreachable" row about a
+company that does not exist. A refused host takes no batch slot, or it would
+sit at the head of the queue taking one every night forever.
+
+**A second stranger-facing write surface**, added with the booking page's
+rules verbatim — a hashed token, bodies read as text and bounded, nothing
+enumerable returned, the accept through the same `setProposalStatus` and
+`setDealStage` a person uses, audited — and §2.2 governs the buyer page harder:
+no score, no tier, no "stale". The other new public routes WRITE only an
+opt-out, which is the one write a stranger must always be able to make.
+
+**§8.4's single path has a human-shaped provider.** The alternative was a
+second sender in a route, which is exactly what the rule forbids. The words are
+revealed only after the rules pass, because a message a person could copy
+before the rules ran is a message that can go after a refusal.
+
+**A per-tool review that can only DISABLE, where §6 recommends wildcards that
+ALLOW.** §2's gate section explains why the wildcard is refused; this is what
+stands in its place. `connectorToolsSetDisabled` writes ONE key with
+`jsonb_set` and does not re-disable the connector or clear `last_ok_at` the way
+`updateConnector` does, because narrowing what a server may do is not a change
+to where it points — re-disabling would punish an owner for making a live
+connector safer. `disabledTools` is `.optional()` rather than `.default([])`:
+`ConnectorConfig` is the zod OUTPUT type, so a default made the key required
+in every config literal a caller builds; `disabledToolNames` applies the
+default instead.
+
+**On Postgres 18 an `ON DELETE RESTRICT` refusal is SQLSTATE 23001, not
+23503.** Measured on PGlite 18.3, and Neon runs 18.6: RESTRICT raises
+`restrict_violation` (23001), NO ACTION still raises 23503, and Postgres 16/17
+report RESTRICT as 23503. So `pg-errors.ts`'s `isForeignKeyViolation` comment
+("or a RESTRICT refused the delete") is wrong on the deployed server, and
+`credentials.ts` recognises both codes, scoped to the one constraint it means.
+Any new code that maps a RESTRICT refusal to a sentence must do the same.
+
+**`deployment()` flags are configuration, never observation — and a flag
+means the feature can actually run.** `inbound: 'webhook'` for Resend needs
+BOTH `RESEND_WEBHOOK_SECRET` and `RESEND_API_KEY`, because the route answers
+503 without either and saying "webhook" about a route that refuses everything
+is the claim the module exists to stop. The pure facts live in
+`lib/deployment-facts.ts` and the `server-only` reader in `lib/deployment.ts`,
+for a measured rule: **a module a test in `apps/web/test` imports carries no
+`server-only` and no `@/` import, transitively.** That is why
+`secret-compare.ts`, `slack-post.ts`, `deployment-facts.ts`, `resend-inbound.ts`
+and the `notification.ts` beside each hooked route exist as separate files, and
+why a route that cannot be imported is pinned by reading its source.
+
+**The web app reads a BLANK environment value as unset.** zod refuses `''` for
+`z.string().min(32).optional()` and for `.url().optional()`, and `.env.example`
+documents each optional variable as a blank `NAME=` — so with the plain shapes,
+`cp .env.example .env` stopped the whole app booting over features nobody had
+turned on. The six optional string variables and `INBOUND_WEBHOOK_SECRET` are
+wrapped in `z.preprocess(blankIsUnset, …)`; a present short value is still
+refused. The worker and the voice service do not do this yet (§3), and the
+Slack host refinement is hoisted into a const so its schema entry sits on one
+line, because `packages/db/test/deployment.test.ts` reads `env.ts` line by line
+and took a multi-line entry for a REQUIRED variable.
+
+**CI's table count is derived from the migrations**, every `CREATE TABLE` plus
+`schema_migrations` — 31 at 0018 — rather than written down, so a migration
+that adds a table cannot fail the Postgres 16 job for a reason nobody reads.
+The compose-config job carries `AGENT_INTERNAL_TOKEN`, without which compose
+refuses to render the file it is checking. `worker_heartbeats` is the one
+table with no `org_id`, listed under the migrations test's `SYSTEM_TABLES`
+with the auth tables and its own conventions.
+
+**Migration 0018 is not the master plan's SQL verbatim.** Review added block
+(0) — `users` and `contacts` `UNIQUE (id, org_id)` and the same-org composite
+keys (§1) — in place of per-column references that let a row in one org name a
+person in another, and the answer trigger. `schema.ts` declares those columns
+without `.references`, as it already did `scanId`.
 
 ---
 
