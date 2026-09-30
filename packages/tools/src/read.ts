@@ -9,8 +9,8 @@
  */
 import { z } from 'zod'
 import {
-  DEFAULT_STALE_AFTER_DAYS, INFORMATIONAL_SIGNALS, informationalStatus, isStale, orderedSignals,
-  parseIcpDefinition, type IcpDefinition,
+  INFORMATIONAL_SIGNALS, informationalStatus, isStale, orderedSignals,
+  parseIcpDefinition, staleAfterDaysOf, type IcpDefinition,
 } from '@agency/core'
 import {
   activeIcpProfile, companyList, findCompanyByDomain, latestScanWithFindings,
@@ -30,8 +30,13 @@ async function loadIcp(db: AgencyDb, orgId: string): Promise<IcpDefinition | nul
   }
 }
 
+/**
+ * The profile's re-verification window through `staleAfterDaysOf` — never the
+ * raw value, which `isStale` throws on unless it is a positive number, and
+ * which `get_icp` would otherwise repeat to the model as the rule.
+ */
 function staleDays(icp: IcpDefinition | null): number {
-  return icp?.freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
+  return staleAfterDaysOf(icp)
 }
 
 // ---------------------------------------------------------------------------

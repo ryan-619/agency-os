@@ -26,7 +26,7 @@
  * that could not open the page cannot read it through the agent either.
  */
 import { z } from 'zod'
-import { can, DEFAULT_STALE_AFTER_DAYS, parseIcpDefinition, pipelineMetrics, type PipelineMetrics } from '@agency/core'
+import { can, pipelineMetrics, staleAfterDaysOf, type PipelineMetrics } from '@agency/core'
 import {
   activeIcpProfile, analyticsTransitions, auditForSubject, callsForCompany, companyThread,
   complianceSummary, findCompanyByDomain, listDeals, meetingsForCompany, notesAuthorLabel, notesFor,
@@ -86,15 +86,13 @@ function firstLineOf(text: string | null | undefined, max = 160): string | null 
   return lines.length > 1 && !cut.endsWith('…') ? `${cut} …` : cut
 }
 
-/** The ICP's freshness window, the way the compliance page reads it. */
+/**
+ * The ICP's freshness window, the way the compliance page reads it: through
+ * `staleAfterDaysOf`, which `readIcp` delegates to. The raw value made this
+ * tool throw on a `0` that the page answered at the default.
+ */
 async function staleDaysFor(db: AgencyDb, orgId: string): Promise<number> {
-  const row = await activeIcpProfile(db, orgId)
-  if (!row) return DEFAULT_STALE_AFTER_DAYS
-  try {
-    return parseIcpDefinition(row.definition).freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
-  } catch {
-    return DEFAULT_STALE_AFTER_DAYS
-  }
+  return staleAfterDaysOf((await activeIcpProfile(db, orgId))?.definition)
 }
 
 // ---------------------------------------------------------------------------
@@ -423,6 +421,10 @@ export const getComplianceSummary: AgencyToolSpec<Record<string, never>> = {
       draftsOnStaleEvidence: {
         count: s.draftsOnStaleEvidence.count,
         byStatus: s.draftsOnStaleEvidence.byStatus,
+        byWhy: s.draftsOnStaleEvidence.byWhy,
+        refusedAtSending: s.draftsOnStaleEvidence.refusedAtSending,
+        notJudgedAtSending: s.draftsOnStaleEvidence.notJudgedAtSending,
+        notJudgedNoFurtherLook: s.draftsOnStaleEvidence.notJudgedNoFurtherLook,
         awaiting: s.draftsOnStaleEvidence.awaiting,
         unsent: s.draftsOnStaleEvidence.unsent,
       },
@@ -451,6 +453,7 @@ export const getComplianceSummary: AgencyToolSpec<Record<string, never>> = {
       autoSendOffCold: s.autoSendOffCold.count,
     }
 
+    const d = counts.draftsOnStaleEvidence
     const w = `the last ${s.windowDays} days`
     const tally = (xs: readonly { readonly granted: number; readonly refused: number }[], label: (i: number) => string) =>
       xs.map((x, i) => `${label(i)} ${x.granted} granted / ${x.refused} refused`).join(', ')
@@ -466,10 +469,16 @@ export const getComplianceSummary: AgencyToolSpec<Record<string, never>> = {
       `Opt-outs that failed to store: ${counts.optOutsNotRecorded.lastWindow} in ${w}, ${counts.optOutsNotRecorded.allTime} all time.`,
       `Messages that went out on an opt-in-only channel with no opt-in: ${counts.coldWithoutOptIn.touches} to ` +
         `${counts.coldWithoutOptIn.contacts} contacts (must be 0); ${counts.coldWithoutOptIn.stoppedBySendPath} stopped by the send path.`,
-      `Outbound messages not yet sent on stale or missing evidence: ${counts.draftsOnStaleEvidence.count} of ` +
-        `${counts.draftsOnStaleEvidence.unsent} not yet sent (must be 0) — ${counts.draftsOnStaleEvidence.byStatus.awaiting_approval} ` +
-        `awaiting approval; ${counts.draftsOnStaleEvidence.byStatus.approved} approved, ${counts.draftsOnStaleEvidence.byStatus.queued} ` +
-        `queued and ${counts.draftsOnStaleEvidence.byStatus.sending} sending, which go with no further look.`,
+      // The send path refuses a message whose words were written from a stale
+      // scan (`stale_evidence`), whoever approved it; saying these "go with no
+      // further look" told the model the opposite of what the sender does.
+      `Outbound messages not yet sent on stale or missing evidence: ${d.count} of ${d.unsent} not yet sent ` +
+        `(must be 0) — ${d.byStatus.awaiting_approval} awaiting approval, ${d.byStatus.approved} approved, ` +
+        `${d.byStatus.queued} queued, ${d.byStatus.sending} sending. ${d.refusedAtSending} were written from a scan ` +
+        'that is stale now and are refused at sending (stale_evidence) — waiting to be refused, or to be re-drafted ' +
+        `after a re-scan; ${d.notJudgedAtSending} have no successful scan behind them or answer a reply, so the send ` +
+        `path does not judge them by evidence and they go as written unless another rule stops them — ` +
+        `${d.notJudgedNoFurtherLook} of those with nobody looking again (approved, queued or sending).`,
       `Consent rows: ${tally(s.consents.byChannel, (i) => s.consents.byChannel[i]!.channel)}; ` +
         `${s.consents.total.granted} granted and ${s.consents.total.refused} refused in all.`,
       `Suppressions: ${s.suppressions.lastWindow.total} added in ${w} (${sources(s.suppressions.lastWindow.bySource)}); ` +

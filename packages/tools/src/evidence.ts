@@ -27,7 +27,7 @@
  */
 import { z } from 'zod'
 import {
-  DEFAULT_STALE_AFTER_DAYS, isNotApplicable, isStale, parseIcpDefinition, type DiffInput, type FindingDiffRow,
+  isNotApplicable, isStale, staleAfterDaysOf, type DiffInput, type FindingDiffRow,
   type SignalChange,
 } from '@agency/core'
 import {
@@ -45,18 +45,12 @@ import {
 const BUDGET = TOOL_TEXT_BUDGET - 100
 
 /**
- * The ICP's re-verification window. read.ts's rule, restated rather than
- * imported (it is not exported): no ICP, or one that does not parse, is the
- * default window — never "fresh forever".
+ * The ICP's re-verification window, through `staleAfterDaysOf`: no ICP, one
+ * that does not parse, or a value `isStale` would throw on is the default
+ * window — never "fresh forever", and never a thrown tool call.
  */
 async function staleAfterDays(db: AgencyDb, orgId: string): Promise<number> {
-  const row = await activeIcpProfile(db, orgId)
-  if (!row) return DEFAULT_STALE_AFTER_DAYS
-  try {
-    return parseIcpDefinition(row.definition).freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
-  } catch {
-    return DEFAULT_STALE_AFTER_DAYS
-  }
+  return staleAfterDaysOf((await activeIcpProfile(db, orgId))?.definition)
 }
 
 type Lookup =

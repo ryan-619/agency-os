@@ -13,10 +13,37 @@
  * answer. A page that trusted the column rendered a three-week-old gap
  * unmarked.
  */
+import { parseIcpDefinition } from './icp.js'
 
 export const DEFAULT_STALE_AFTER_DAYS = 14
 
 const MS_PER_DAY = 86_400_000
+
+/**
+ * The threshold an ICP definition sets, as every reader must take it: its
+ * `freshness.stale_after_days` when that is a finite positive number, and
+ * `DEFAULT_STALE_AFTER_DAYS` otherwise — no profile, a definition that is not
+ * a readable ICP (`parseIcpDefinition` refuses it), no `freshness`, or a value
+ * `isStale` would throw on.
+ *
+ * `parseIcpDefinition` does not check `freshness`, and `isStale` refuses a
+ * non-positive threshold rather than call everything fresh. Readers that
+ * passed the raw value between the two made a hand-edited `0` a 500 on the
+ * proposal and company pages, the share link and two agent tools, while
+ * `/compliance` fell back to the default — so the page and the tool that
+ * must agree did not. Takes the stored `definition` (or an already-parsed
+ * one) so there is nothing to read wrongly on the way in.
+ */
+export function staleAfterDaysOf(definition: unknown): number {
+  if (definition === null || definition === undefined) return DEFAULT_STALE_AFTER_DAYS
+  let days: unknown
+  try {
+    days = parseIcpDefinition(definition).freshness?.stale_after_days
+  } catch {
+    return DEFAULT_STALE_AFTER_DAYS
+  }
+  return typeof days === 'number' && Number.isFinite(days) && days > 0 ? days : DEFAULT_STALE_AFTER_DAYS
+}
 
 /** Is an observation made at `observedAt` past its re-verification deadline? */
 export function isStale(

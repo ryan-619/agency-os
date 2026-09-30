@@ -175,10 +175,11 @@ describe('the team’s side', () => {
   it('names an accepted link accepted even after it was revoked or ran out', () => {
     const now = new Date('2026-09-10T00:00:00.000Z')
     const base = { revokedAt: null, acceptedAt: null, expiresAt: '2026-09-15T08:00:00.000Z' }
-    expect(shareState(base, now)).toBe('live')
-    expect(shareState({ ...base, expiresAt: '2026-09-10T00:00:00.000Z' }, now)).toBe('expired')
-    expect(shareState({ ...base, revokedAt: '2026-09-09T00:00:00.000Z' }, now)).toBe('revoked')
-    expect(shareState({ ...base, revokedAt: '2026-09-09T00:00:00.000Z', acceptedAt: '2026-09-08T00:00:00.000Z' }, now)).toBe('accepted')
+    const fresh = { stale: false, superseded: false }
+    expect(shareState(base, now, fresh)).toBe('live')
+    expect(shareState({ ...base, expiresAt: '2026-09-10T00:00:00.000Z' }, now, fresh)).toBe('expired')
+    expect(shareState({ ...base, revokedAt: '2026-09-09T00:00:00.000Z' }, now, fresh)).toBe('revoked')
+    expect(shareState({ ...base, revokedAt: '2026-09-09T00:00:00.000Z', acceptedAt: '2026-09-08T00:00:00.000Z' }, now, fresh)).toBe('accepted')
   })
 })
 

@@ -1,6 +1,6 @@
 import { notFound, redirect } from 'next/navigation'
 import { and, eq } from 'drizzle-orm'
-import { DEFAULT_STALE_AFTER_DAYS, can, isStale, parseIcpDefinition, type Proposal } from '@agency/core'
+import { can, isStale, type Proposal } from '@agency/core'
 import { readProposal, schema, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
@@ -10,6 +10,7 @@ import { ProposalShareSlot } from '@/components/pipeline/proposal-share'
 import type { ProposalSlotProps } from '@/components/pipeline/proposal-slot'
 import { ProposalStatus } from '@/components/pipeline/proposal-status'
 import { When } from '@/components/when'
+import { readIcp } from '@/lib/company-list'
 import { getDb } from '@/lib/db'
 import { icpForOrg } from '@/lib/queries'
 
@@ -45,17 +46,11 @@ export default async function ProposalPage({ params }: { params: Promise<{ id: s
   if (!company) notFound()
   const doc = row.document as Proposal
 
-  let orgLabel = 'Agency'
-  let staleAfter = DEFAULT_STALE_AFTER_DAYS
-  if (icpRow) {
-    try {
-      const icp = parseIcpDefinition(icpRow.definition)
-      orgLabel = icp.label
-      staleAfter = icp.freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
-    } catch {
-      orgLabel = 'Agency'
-    }
-  }
+  // Guarded, like the print view and the Markdown export this page links to:
+  // `isStale` throws on a threshold that is not a positive number, and the
+  // raw `stale_after_days` made this page a 500 over a hand-edited 0.
+  const { icp, staleAfterDays: staleAfter } = readIcp(icpRow?.definition)
+  const orgLabel = icp?.label ?? 'Agency'
 
   // §2.2. The generator refuses to write a proposal from a stale scan — but a
   // proposal written while the scan was fresh keeps sitting here, and the

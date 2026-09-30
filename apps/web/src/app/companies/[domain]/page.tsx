@@ -1,6 +1,6 @@
 import { notFound, redirect } from 'next/navigation'
 import {
-  DEFAULT_STALE_AFTER_DAYS, PROPOSAL_RESCORE_SENTENCE, isStale, parseIcpDefinition, proposalNeedsRescore,
+  PROPOSAL_RESCORE_SENTENCE, isStale, parseIcpDefinition, proposalNeedsRescore, staleAfterDaysOf,
 } from '@agency/core'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
@@ -50,7 +50,9 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
     proposalsForCompany(db, user.orgId, company.id),
   ])
   const icp = icpRow ? parseIcpDefinition(icpRow.definition) : null
-  const staleAfter = icp?.freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
+  // Never the raw value: `isStale` throws on one that is not a positive number,
+  // which made this page a 500 over a hand-edited 0.
+  const staleAfter = staleAfterDaysOf(icp)
 
   // The score shown is the one computed FROM the scan whose findings are shown,
   // not the newest score row for the company. Pairing those independently puts

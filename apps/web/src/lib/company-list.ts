@@ -1,4 +1,4 @@
-import { DEFAULT_STALE_AFTER_DAYS, isStale, parseIcpDefinition, type IcpDefinition } from '@agency/core'
+import { DEFAULT_STALE_AFTER_DAYS, isStale, parseIcpDefinition, staleAfterDaysOf, type IcpDefinition } from '@agency/core'
 import type { CompanyListRow } from '@agency/db/repository'
 import type { DealStage } from '@agency/db/queries'
 
@@ -69,7 +69,9 @@ export interface CompanyListClock {
  * It also does not check `freshness.stale_after_days`, which `isStale()`
  * throws on unless it is a positive number. Either way the list and the
  * exports fall back to the documented default and the page says so
- * (`unreadable`), rather than failing or guessing a threshold.
+ * (`unreadable`), rather than failing or guessing a threshold. The threshold
+ * itself is `staleAfterDaysOf`'s answer — the one every db and tool reader
+ * takes — so a page and the agent reading one row cannot disagree about it.
  */
 export function readIcp(definition: unknown): {
   readonly icp: IcpDefinition | null
@@ -85,12 +87,11 @@ export function readIcp(definition: unknown): {
   } catch {
     return { icp: null, unreadable: true, staleAfterDays: DEFAULT_STALE_AFTER_DAYS }
   }
-  const days: unknown = icp.freshness?.stale_after_days
-  if (days === undefined) return { icp, unreadable: false, staleAfterDays: DEFAULT_STALE_AFTER_DAYS }
-  if (typeof days !== 'number' || !Number.isFinite(days) || days <= 0) {
-    return { icp, unreadable: true, staleAfterDays: DEFAULT_STALE_AFTER_DAYS }
-  }
-  return { icp, unreadable: false, staleAfterDays: days }
+  const staleAfterDays = staleAfterDaysOf(icp)
+  // A value the profile SETS that is not the one used is one no reader can
+  // use: said, never silently replaced. An unset one is the documented default.
+  const set: unknown = icp.freshness?.stale_after_days
+  return { icp, unreadable: set !== undefined && set !== staleAfterDays, staleAfterDays }
 }
 
 /** The longest search string kept; anything past it is not a search, it is a paste. */

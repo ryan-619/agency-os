@@ -8,7 +8,7 @@
  * the one high-risk tool Phase 2 ships.
  */
 import { z } from 'zod'
-import { DEFAULT_STALE_AFTER_DAYS, isStale, parseIcpDefinition, type IcpDefinition } from '@agency/core'
+import { isStale, parseIcpDefinition, staleAfterDaysOf, type IcpDefinition } from '@agency/core'
 import {
   activeIcpProfile, findCompanyByDomain, importCompanies, latestScanWithFindings,
   recordScan, type AgencyDb,
@@ -153,7 +153,8 @@ export const scoreCompanyTool: AgencyToolSpec<typeof scoreShape> = {
 
     const icp = await requireIcp(ctx.db, ctx.orgId)
     if (!icp) return fail('invalid_state', 'No active ICP profile, so there is nothing to score against.')
-    const days = icp.definition.freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
+    // Never the raw value: `isStale` throws on one that is not a positive number.
+    const days = staleAfterDaysOf(icp.definition)
 
     const found = await latestScanWithFindings(ctx.db, ctx.orgId, company.id)
     const fresh =
