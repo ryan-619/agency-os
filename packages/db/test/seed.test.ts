@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { migratedDb,type TestDb } from './helpers.js'
 import { seed, parseCompanySeeds } from '../src/seed.js'
-import { PERMITTED_TOOLS } from '@agency/core'
+import { AGENCY_TOOL_NAMES, AGENCY_TOOL_RISK, PERMITTED_TOOLS } from '@agency/core'
 
 const OPTS = { orgName: 'Agency', ownerEmail: 'Owner@Example.com', ownerName: 'Owner' }
 
@@ -241,6 +241,56 @@ describe('seeding a fresh database', () => {
         for (const tool of r.tools) {
           expect(PERMITTED_TOOLS.has(tool), `${r.slug} was granted ${tool}`).toBe(true)
         }
+      }
+    })
+
+    /**
+     * A prompt that sends a subagent to a tool it was not granted spends the
+     * turn on a refusal — and the model's reading of that refusal is a guess
+     * about the business, which is what the tool was named to prevent.
+     */
+    it('grants every agency tool an agent is told by its own prompt to run', async () => {
+      const rows = await db.driver.select<{ slug: string; system_prompt: string; tools: string[] }>(
+        'SELECT slug, system_prompt, tools FROM agent_defs',
+      )
+      for (const r of rows) {
+        const named = (r.system_prompt.match(/\b[a-z]+(?:_[a-z]+)+\b/g) ?? [])
+          .filter((w) => (AGENCY_TOOL_NAMES as readonly string[]).includes(w))
+        for (const tool of named) {
+          expect(r.tools, `${r.slug}'s prompt names ${tool}`).toContain(`mcp__agency__${tool}`)
+        }
+      }
+    })
+
+    /**
+     * §2.1: whether somebody may be written to is a rule, run by `check_send`
+     * and read by `get_consent`, not something a drafting agent works out for
+     * itself. Any role that can put a draft in front of a person has both.
+     */
+    it('gives every agent that can draft the two send-rule tools as well', async () => {
+      const rows = await db.driver.select<{ slug: string; tools: string[] }>(
+        'SELECT slug, tools FROM agent_defs',
+      )
+      const drafters = rows.filter((r) => r.tools.includes('mcp__agency__queue_touch'))
+      expect(drafters.map((r) => r.slug)).toEqual(['closer'])
+      for (const r of drafters) {
+        expect(r.tools, r.slug).toContain('mcp__agency__check_send')
+        expect(r.tools, r.slug).toContain('mcp__agency__get_consent')
+      }
+    })
+
+    /**
+     * The researcher is ENABLED and its prompt says it writes nothing and
+     * sends nothing, so every grant it holds must be a pure read — including
+     * the ones added after it was first seeded.
+     */
+    it('lets the researcher read and nothing else', async () => {
+      const rows = await db.driver.select<{ tools: string[] }>(
+        "SELECT tools FROM agent_defs WHERE slug = 'researcher'",
+      )
+      for (const tool of rows[0]!.tools) {
+        const name = tool.replace(/^mcp__agency__/, '') as keyof typeof AGENCY_TOOL_RISK
+        expect(AGENCY_TOOL_RISK[name]?.[1], tool).toBe('read_only')
       }
     })
 

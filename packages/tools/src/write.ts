@@ -214,9 +214,11 @@ const touchShape = {
 export const queueTouch: AgencyToolSpec<typeof touchShape> = {
   name: 'queue_touch',
   description:
-    'Draft an outbound message about a company and put it in the approval queue. It is NOT sent: ' +
-    'a human reads it and decides, and nothing in this system can send anything yet. Email and ' +
-    'LinkedIn only. Quote only findings you have read from get_company that are marked quotable.',
+    'Draft an outbound message about a company and put it in the approval queue. It is NOT sent now: ' +
+    'a person reads it, names the recipient and the campaign, and decides. The worker sends an ' +
+    'approved email only after every send rule is re-checked at that moment, and only where outbound ' +
+    'mail is configured; a LinkedIn draft is sent by a person, by hand. Email and LinkedIn only. ' +
+    'Quote only findings you have read from get_company that are marked quotable.',
   shape: touchShape,
   async handler(input, ctx): Promise<ToolOutcome<unknown>> {
     const domain = normaliseDomain(input.domain)
