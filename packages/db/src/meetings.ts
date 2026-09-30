@@ -335,10 +335,16 @@ export async function setMeetingOutcome(
  * booking does (a zone the runtime knows, a company and contact in this
  * org). It keeps the contact, title, length, notes and review flag of the
  * one it replaces — a reschedule does not confirm who booked — and not its
- * `external_ref`, which named the old calendar event. It moves the deal only
- * if the original did: a stranger's booking at a company already on file
- * never moved it, and a teammate moving the time is not the team deciding
- * that booking was genuine.
+ * `external_ref`, which named the old calendar event. It keeps the `source`
+ * too: it is the same booking at a new time, and the teammate who moved it
+ * is the audit row's actor and `created_by`. That matters beyond the label —
+ * a booking-page title is written by the system from the visitor's name, and
+ * the `.ics` download recognises it by the source and leaves the name out;
+ * a reschedule relabelled `manual` would carry the name into the file.
+ *
+ * It moves the deal only if the original did: a stranger's booking at a
+ * company already on file never moved it, and a teammate moving the time is
+ * not the team deciding that booking was genuine.
  *
  * The audit row on the OLD meeting names the new one (`rescheduledTo`), and
  * the new meeting's `meeting.booked` row names the old (`rescheduledFrom`),
@@ -395,7 +401,7 @@ export async function rescheduleMeeting(
         startsAt: args.startsAt,
         endsAt: old.endsAt ? new Date(args.startsAt.getTime() + (old.endsAt.getTime() - old.startsAt.getTime())) : null,
         timeZone: args.timeZone,
-        source: 'manual',
+        source: old.source as MeetingInput['source'],
         notes: old.notes,
         createdBy: args.createdBy ?? null,
         actor: args.actor,

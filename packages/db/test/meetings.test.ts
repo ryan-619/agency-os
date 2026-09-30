@@ -352,6 +352,19 @@ describe('meetings', () => {
         expect(out.replacement.endsAt).toBeNull()
       })
 
+      /**
+       * A booking-page title is the system's, written from the visitor's
+       * name; the `.ics` download knows to leave it out by the source. A
+       * reschedule that relabelled it `manual` would put the name in the file.
+       */
+      it('keeps the source, so a booking-page title is still known as the system’s', async () => {
+        const r = await book({ source: 'booking_page', title: 'Intro call with Priya Sharma' })
+        if (!r.ok) throw new Error(r.message)
+        const out = await rescheduleMeeting(db, { orgId, id: r.meeting.id, startsAt: LATER, timeZone: 'Europe/London', actor: 'test', now: AFTER })
+        if (!out.ok) throw new Error(out.message)
+        expect(out.replacement.source).toBe('booking_page')
+      })
+
       it('refuses a second reschedule of the same meeting, and records no second meeting', async () => {
         const r = await book()
         if (!r.ok) throw new Error(r.message)
