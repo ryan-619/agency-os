@@ -11,7 +11,7 @@ import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import { decideSend } from '@agency/core'
 import {
-  addSuppression, consentLedgerFor, contactsLedger, contactsLiftRefusal, contactsRecordConsent,
+  addSuppression, consentLedgerFor, contactsConsentUpsert, contactsLedger, contactsLiftRefusal, contactsRecordConsent,
   contactsUpdate, contactPatchInput, previewSend, schema, type AgencyDb,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
@@ -75,6 +75,36 @@ describe('the consent ledger writers', () => {
     expect(after?.source).toBe('reply 2026-09-02')
   })
 
+  /**
+   * The race the pre-check cannot close: a grant reads "never asked", a
+   * refusal commits, and the grant's upsert lands. PGlite is one session, so
+   * the interleaving cannot be produced here; what can be shown is that the
+   * STATEMENT refuses the grant with the pre-check out of the way, which is
+   * exactly the position the losing writer is in. Before the fix the upsert
+   * had an unconditional DO UPDATE and this left `granted = true`.
+   */
+  describe('the upsert keeps the rule on its own', () => {
+    it('refuses a grant over a stored refusal with the pre-check skipped, and the refusal survives', async () => {
+      await contactsRecordConsent(db, { orgId, contactId, channel: 'sms', granted: false, source: 'reply 2026-09-02' })
+      const r = await contactsConsentUpsert(db, { orgId, contactId, channel: 'sms', granted: true, source: 'form, racing' })
+      expect(r).toBe('refused_is_final')
+      const after = await row('sms')
+      expect(after?.granted).toBe(false)
+      expect(after?.source).toBe('reply 2026-09-02')
+    })
+
+    it('still writes a first answer, a grant over a grant, a refusal over a grant and a second refusal', async () => {
+      expect(await contactsConsentUpsert(db, { orgId, contactId, channel: 'sms', granted: true, source: 'form 1' })).toBe('written')
+      expect(await contactsConsentUpsert(db, { orgId, contactId, channel: 'sms', granted: true, source: 'form 2' })).toBe('written')
+      expect((await row('sms'))?.source).toBe('form 2')
+      expect(await contactsConsentUpsert(db, { orgId, contactId, channel: 'sms', granted: false, source: 'reply' })).toBe('written')
+      expect(await contactsConsentUpsert(db, { orgId, contactId, channel: 'sms', granted: false, source: 'call' })).toBe('written')
+      const after = await row('sms')
+      expect(after?.granted).toBe(false)
+      expect(after?.source).toBe('call')
+    })
+  })
+
   it('records a second refusal over a refusal, with its own evidence', async () => {
     await contactsRecordConsent(db, { orgId, contactId, channel: 'voice', granted: false, source: 'call 1' })
     const r = await contactsRecordConsent(db, { orgId, contactId, channel: 'voice', granted: false, source: 'call 2', evidence: { said: 'no again' } })
@@ -112,6 +142,28 @@ describe('the consent ledger writers', () => {
       // Only now can a new grant be recorded.
       const r = await contactsRecordConsent(db, { orgId, contactId, channel: 'sms', granted: true, source: 'their email, 2026-09-20' })
       expect(r).toEqual({ ok: true, previous: 'never_asked' })
+    })
+
+    /**
+     * The DELETE and its audit row are one act. Before, the DELETE committed
+     * on its own and an audit write that then failed left the refusal gone
+     * with nothing on the record saying who lifted it or why.
+     */
+    it('leaves the refusal in place when its audit row cannot be written', async () => {
+      await contactsRecordConsent(db, { orgId, contactId, channel: 'sms', granted: false, source: 'reply' })
+      await test.pg.exec(`
+        CREATE FUNCTION test_refuse_lift_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          IF NEW.action = 'consent.refusal_lifted' THEN RAISE EXCEPTION 'audit unavailable'; END IF;
+          RETURN NEW;
+        END $$;
+        CREATE TRIGGER test_refuse_lift_audit BEFORE INSERT ON audit_log
+          FOR EACH ROW EXECUTE FUNCTION test_refuse_lift_audit();
+      `)
+      await expect(
+        contactsLiftRefusal(db, { orgId, contactId, channel: 'sms', actorUserId: userId, reason: 'asked to be contacted' }),
+      ).rejects.toThrow()
+      expect((await row('sms'))?.granted).toBe(false)
     })
 
     it('refuses to lift a grant, a missing row, or with no reason', async () => {

@@ -94,33 +94,75 @@ export async function contactsRecordConsent(
     existing[0] === undefined ? 'never_asked' : existing[0].granted ? 'granted' : 'refused'
 
   if (previous === 'refused' && args.granted) {
-    return {
-      ok: false,
-      reason: 'refused_is_final',
-      message:
-        'This person refused this channel, and a refusal is not overwritten by a grant (§2.1). ' +
-        'An owner can lift the refusal on the record; only after that can a new consent be recorded.',
-    }
+    return { ok: false, reason: 'refused_is_final', message: REFUSED_IS_FINAL }
   }
 
-  // The same statement `recordConsent` runs, now that the rule has been
-  // checked. Two writers racing past the read above would both be grants
-  // or both refusals of the same row; the rule cannot be lost that way.
-  await db
+  // The read above turns the common case into a sentence before anything is
+  // written. It is not what keeps the rule: two writers can both pass it —
+  // a refusal committed between a grant's SELECT and its INSERT — and the
+  // statement below is what refuses the grant then.
+  const written = await contactsConsentUpsert(db, {
+    orgId: args.orgId,
+    contactId: args.contactId,
+    channel: args.channel,
+    granted: args.granted,
+    source,
+    ...(args.evidence ? { evidence: args.evidence } : {}),
+  })
+  if (written === 'refused_is_final') return { ok: false, reason: 'refused_is_final', message: REFUSED_IS_FINAL }
+  return { ok: true, previous }
+}
+
+const REFUSED_IS_FINAL =
+  'This person refused this channel, and a refusal is not overwritten by a grant (§2.1). ' +
+  'An owner can lift the refusal on the record; only after that can a new consent be recorded.'
+
+/**
+ * The upsert, with §2.1's rule IN the statement: `ON CONFLICT … DO UPDATE …
+ * WHERE consents.granted OR NOT excluded.granted`. A refusal always writes
+ * (over a grant, or as a second no). A grant writes over nothing or over a
+ * grant; over a stored refusal the conflict matches, the WHERE is false,
+ * nothing is updated and RETURNING is empty — `refused_is_final`.
+ *
+ * The statement this replaced had an unconditional DO UPDATE and relied on
+ * the caller's SELECT, so under READ COMMITTED a grant that read "never
+ * asked" and then lost the race to a refusal overwrote it — after which
+ * `decideSend` allows SMS or voice to a person who said no.
+ *
+ * Exported for the test that calls it with `contactsRecordConsent`'s
+ * pre-check skipped: PGlite is one session, so no test here can interleave
+ * two writers, and the guard has to be shown to hold on its own. Every other
+ * caller goes through `contactsRecordConsent`.
+ */
+export async function contactsConsentUpsert(
+  db: AgencyDb,
+  args: {
+    readonly orgId: string
+    readonly contactId: string
+    readonly channel: ConsentWriteChannel
+    readonly granted: boolean
+    /** Already trimmed and checked non-blank by the caller. */
+    readonly source: string
+    readonly evidence?: Record<string, unknown>
+  },
+): Promise<'written' | 'refused_is_final'> {
+  const rows = await db
     .insert(schema.consents)
     .values({
       orgId: args.orgId,
       contactId: args.contactId,
       channel: args.channel,
       granted: args.granted,
-      source,
+      source: args.source,
       evidence: args.evidence ?? {},
     })
     .onConflictDoUpdate({
       target: [schema.consents.contactId, schema.consents.channel],
-      set: { granted: args.granted, source, evidence: args.evidence ?? {}, recordedAt: sql`now()` },
+      set: { granted: args.granted, source: args.source, evidence: args.evidence ?? {}, recordedAt: sql`now()` },
+      setWhere: sql`${schema.consents.granted} OR NOT excluded.granted`,
     })
-  return { ok: true, previous }
+    .returning({ id: schema.consents.id })
+  return rows.length === 1 ? 'written' : 'refused_is_final'
 }
 
 export type ContactsLiftOutcome =
@@ -132,7 +174,8 @@ export type ContactsLiftOutcome =
  *
  * The row is deleted, so the person is back to never-asked: absence is NO
  * to the send path, and a new grant has to be recorded with its own source.
- * Audited as `consent.refusal_lifted` naming who and why, with ids only.
+ * Audited as `consent.refusal_lifted` naming who and why, in the same
+ * transaction as the DELETE.
  * The route must allow this to owners alone; the function takes the actor
  * for the record and does not decide roles.
  */
@@ -150,29 +193,36 @@ export async function contactsLiftRefusal(
   if (!reason) {
     return { ok: false, reason: 'blank_reason', message: 'Say why the refusal is being lifted — it goes in the audit log.' }
   }
-  const deleted = await db
-    .delete(schema.consents)
-    .where(
-      and(
-        eq(schema.consents.orgId, args.orgId),
-        eq(schema.consents.contactId, args.contactId),
-        eq(schema.consents.channel, args.channel),
-        eq(schema.consents.granted, false),
-      ),
-    )
-    .returning({ id: schema.consents.id })
-  if (deleted.length === 0) {
-    return { ok: false, reason: 'no_refusal', message: 'There is no recorded refusal on that channel to lift.' }
-  }
-  await appendAudit(db, {
-    orgId: args.orgId,
-    actor: args.actorUserId,
-    action: 'consent.refusal_lifted',
-    subjectType: 'contact',
-    subjectId: args.contactId,
-    detail: { channel: args.channel, reason },
+  // One transaction: the refusal goes and the record of who lifted it and
+  // why is written, or neither. Before, an audit write that failed after
+  // the DELETE had committed left a person back at never-asked with nothing
+  // saying who decided that — for an act this module calls audited.
+  return db.transaction(async (transaction) => {
+    const tx = transaction as unknown as AgencyDb
+    const deleted = await tx
+      .delete(schema.consents)
+      .where(
+        and(
+          eq(schema.consents.orgId, args.orgId),
+          eq(schema.consents.contactId, args.contactId),
+          eq(schema.consents.channel, args.channel),
+          eq(schema.consents.granted, false),
+        ),
+      )
+      .returning({ id: schema.consents.id })
+    if (deleted.length === 0) {
+      return { ok: false, reason: 'no_refusal', message: 'There is no recorded refusal on that channel to lift.' } as const
+    }
+    await appendAudit(tx, {
+      orgId: args.orgId,
+      actor: args.actorUserId,
+      action: 'consent.refusal_lifted',
+      subjectType: 'contact',
+      subjectId: args.contactId,
+      detail: { channel: args.channel, reason },
+    })
+    return { ok: true } as const
   })
-  return { ok: true }
 }
 
 // ---------------------------------------------------------------------------
