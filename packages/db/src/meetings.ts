@@ -208,10 +208,9 @@ export async function meetingsForCompany(db: AgencyDb, orgId: string, companyId:
  * than by a read that a concurrent click can slip between.
  */
 export async function cancelMeeting(db: AgencyDb, orgId: string, id: string, actor: string): Promise<boolean> {
-  const now = new Date()
   const rows = await db
     .update(schema.meetings)
-    .set({ cancelledAt: now, updatedAt: now })
+    .set({ cancelledAt: new Date() })
     .where(and(
       eq(schema.meetings.orgId, orgId), eq(schema.meetings.id, id),
       isNull(schema.meetings.cancelledAt), isNull(schema.meetings.outcome),
@@ -301,7 +300,7 @@ export async function setMeetingOutcome(
   const now = args.now ?? new Date()
   const rows = await db
     .update(schema.meetings)
-    .set({ outcome: args.outcome, updatedAt: now })
+    .set({ outcome: args.outcome })
     .where(and(
       eq(schema.meetings.orgId, args.orgId), eq(schema.meetings.id, args.id),
       isNull(schema.meetings.cancelledAt), lte(schema.meetings.startsAt, now),
@@ -378,7 +377,7 @@ export async function rescheduleMeeting(
       const txDb = tx as unknown as AgencyDb
       const rows = await txDb
         .update(schema.meetings)
-        .set({ outcome: 'rescheduled', updatedAt: now })
+        .set({ outcome: 'rescheduled' })
         .where(and(
           eq(schema.meetings.orgId, args.orgId), eq(schema.meetings.id, args.id),
           isNull(schema.meetings.cancelledAt), lte(schema.meetings.startsAt, now),
