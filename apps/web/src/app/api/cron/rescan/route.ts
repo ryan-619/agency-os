@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 import { parseIcpDefinition, type IcpDefinition } from '@agency/core'
 import { scanDomain, UnscannableHostError } from '@agency/scanner'
 import {
-  activeIcpProfile, listOrgIds, rescanWorstCaseMs, runRescan,
+  activeIcpProfile, claimRescan, listOrgIds, rescanWorstCaseMs, runRescan,
   RESCAN_MARGIN_MS, RESCAN_SCAN_TIMEOUTS,
   type AgencyDb, type RescanResult,
 } from '@agency/db/queries'
@@ -35,14 +35,24 @@ import { log } from '@/lib/logger'
  * fits in what is left. So a scan that starts is one that can finish, and the
  * audit row and this answer are always written.
  *
+ * ## Twice at once
+ *
+ * Vercel may deliver one cron event more than once, and two deliveries that
+ * overlap both read the queue before either records a scan. So each org is
+ * CLAIMED before anything is selected (`claimRescan`: an advisory lock and a
+ * `scan.cron_started` row that holds until this run's ceiling), and a
+ * delivery that finds another's claim reports the org `skipped: 'claimed'`
+ * and moves on. Under compose, where nothing schedules these routes, the
+ * same holds for a host crontab and a person's `curl` arriving together.
+ *
  * ## What it answers
  *
  * 200 with the counts per org, only after the work is done — never a
  * redirect, never early. An org with no usable ICP is reported and passed
- * over; an org whose run threw is reported by error class and makes the
- * answer a 500, so the platform's cron log shows the failure. The log line
- * carries the route and the outcome and nothing else — never the header,
- * never a domain.
+ * over, as is one another delivery is already running; an org whose run
+ * threw is reported by error class and makes the answer a 500, so the
+ * platform's cron log shows the failure. The log line carries the route and
+ * the outcome and nothing else — never the header, never a domain.
  */
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -51,6 +61,7 @@ export const maxDuration = 300
 type OrgAnswer =
   | ({ readonly orgId: string } & RescanResult)
   | { readonly orgId: string; readonly notRun: 'no_active_icp' | 'unparseable_icp' }
+  | { readonly orgId: string; readonly skipped: 'claimed'; readonly heldUntil: string }
   | { readonly orgId: string; readonly failed: string }
 
 export async function GET(request: Request): Promise<NextResponse> {
@@ -88,6 +99,12 @@ export async function GET(request: Request): Promise<NextResponse> {
         definition = parseIcpDefinition(profile.definition)
       } catch {
         orgs.push({ orgId, notRun: 'unparseable_icp' })
+        continue
+      }
+      // Before anything is selected: another delivery may be mid-run.
+      const claim = await claimRescan(db, { orgId, now: new Date(), budgetMs: deadline - Date.now(), schedule })
+      if (!claim.claimed) {
+        orgs.push({ orgId, skipped: 'claimed', heldUntil: claim.heldUntil.toISOString() })
         continue
       }
       const result = await runRescan(db, {

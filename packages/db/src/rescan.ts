@@ -10,8 +10,15 @@
  *     web pool is `DATABASE_POOL_MAX=1` on Vercel and `recordScan` is a
  *     transaction, so two in flight would queue on one connection at best;
  *   * a FLOOR. A company scanned in the last twenty hours is never picked, so
- *     Vercel's duplicated deliveries do nothing twice and no lock is needed
- *     (session advisory locks do not isolate on the pooled URL);
+ *     a delivery that arrives after another has FINISHED does nothing twice;
+ *   * a CLAIM, for the delivery that arrives while another is still running.
+ *     The floor cannot see a scan that has not been recorded yet: two
+ *     overlapping deliveries both read the queue before either commits, and
+ *     every company was scanned twice — double the requests to a prospect's
+ *     site, two scan rows minutes apart. `claimRescan` settles it per org, in
+ *     a transaction under an advisory lock, before anything is selected (see
+ *     below). The digest does the same for the same reason (`digestOnce`);
+ *     "no lock is needed" was true only of the sequential case;
  *   * a DEADLINE, derived from the timeouts the scan is actually handed —
  *     see `rescanWorstCaseMs` and the dispatch rule in `runRescan`.
  *
@@ -23,7 +30,7 @@
  * company with `npm run scan -- <domain>`. `recordScan` stays the only writer
  * of findings; the scanner's frozen path list is untouched.
  */
-import { asc } from 'drizzle-orm'
+import { and, asc, eq, gte, sql } from 'drizzle-orm'
 import {
   DEFAULT_STALE_AFTER_DAYS, isStale,
   type IcpDefinition, type SiteProfile,
@@ -136,6 +143,83 @@ export function selectRescanTargets(
     throw new Error(`batch must be a positive integer, got ${String(opts.batch)}`)
   }
   return rescanQueue(rows, opts).slice(0, opts.batch)
+}
+
+/**
+ * Claim one org's run for this delivery, before anything is selected — or
+ * learn that another delivery holds it.
+ *
+ * One short transaction: take `pg_advisory_xact_lock` on the org, look for a
+ * live `scan.cron_started` row, and only if there is none write one. A second
+ * delivery arriving together blocks on the lock, then reads the committed
+ * claim and skips the org. The lock is transaction-scoped because a session
+ * lock does not survive the pooled URL, and it takes the TWO-key form, in a
+ * different key space from the worker's lifetime lock — `digestOnce`'s
+ * reasoning, verbatim.
+ *
+ * A claim holds for as long as the run it guards can last, and no longer:
+ * `until` is the claim's moment plus the run's own budget plus
+ * `RESCAN_MARGIN_MS` — the route hands `runRescan` what is left of the
+ * function's ceiling less that margin, so `until` is the ceiling at the
+ * latest. Stored on the row rather than assumed by the reader, so a delivery
+ * with less time left cannot read a longer run's claim as expired. A run
+ * that dies holds nothing past its ceiling, and a manual `curl` later in the
+ * day claims afresh (the floor still decides what it picks). A claim whose
+ * `until` cannot be read holds nothing: it is not evidence of a run.
+ */
+export async function claimRescan(
+  db: AgencyDb,
+  input: {
+    readonly orgId: string
+    readonly now: Date
+    /** What the run about to start may spend — the same number handed to `runRescan`. */
+    readonly budgetMs: number
+    readonly actor?: string
+    readonly schedule?: string | null
+  },
+): Promise<{ readonly claimed: true } | { readonly claimed: false; readonly heldUntil: Date }> {
+  const now = input.now.getTime()
+  const until = new Date(now + Math.max(0, input.budgetMs) + RESCAN_MARGIN_MS)
+  // Any claim still live was written minutes ago; the floor bounds the read.
+  const lookback = new Date(now - RESCAN_MIN_AGE_HOURS * 3_600_000)
+  return db.transaction(async (tx) => {
+    const t = tx as unknown as AgencyDb
+    await t.execute(sql`SELECT pg_advisory_xact_lock(hashtext('cron.rescan'), hashtext(${input.orgId}))`)
+    const claims = await t
+      .select({ detail: schema.auditLog.detail })
+      .from(schema.auditLog)
+      .where(
+        and(
+          eq(schema.auditLog.orgId, input.orgId),
+          eq(schema.auditLog.action, 'scan.cron_started'),
+          gte(schema.auditLog.createdAt, lookback),
+        ),
+      )
+    for (const c of claims) {
+      const held = claimUntil(c.detail)
+      if (held !== null && held.getTime() > now) return { claimed: false as const, heldUntil: held }
+    }
+    await appendAudit(t, {
+      orgId: input.orgId,
+      actor: input.actor ?? 'system',
+      action: 'scan.cron_started',
+      detail: {
+        until: until.toISOString(),
+        // A header, so bounded: it is recorded, never trusted.
+        schedule: input.schedule ? input.schedule.slice(0, 64) : null,
+      },
+    })
+    return { claimed: true as const }
+  })
+}
+
+/** A claim row's `until`, or null when it holds none that can be read. */
+function claimUntil(detail: unknown): Date | null {
+  if (typeof detail !== 'object' || detail === null || !('until' in detail)) return null
+  const raw = (detail as { until: unknown }).until
+  if (typeof raw !== 'string') return null
+  const at = new Date(raw)
+  return Number.isFinite(at.getTime()) ? at : null
 }
 
 /** The route passes `scanDomain`; a test passes a hand-built profile. */
