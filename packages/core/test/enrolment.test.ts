@@ -143,11 +143,18 @@ describe('who can be drafted to', () => {
       timeZone: null,
     })
     expect(enrollableContact(everything, null, 'email')).toEqual({ ok: false, why: 'no_address' })
+    // A recorded refusal outranks a pause, as the send path orders them: the
+    // stronger statement is the one reported.
     expect(enrollableContact({ ...everything, email: 'priya@rentman.io' }, null, 'email')).toEqual({
+      ok: false,
+      why: 'declined',
+    })
+    // A pause outranks a bounce: it is a reason nobody may approve past.
+    expect(enrollableContact({ ...everything, email: 'priya@rentman.io', consents: [] }, null, 'email')).toEqual({
       ok: false,
       why: 'paused',
     })
-    // A refusal outranks a bounce: it is the reason nobody may approve past.
+    // A refusal outranks a bounce too.
     expect(enrollableContact({ ...everything, email: 'priya@rentman.io', pausedAt: null }, null, 'email')).toEqual({
       ok: false,
       why: 'declined',
@@ -213,6 +220,22 @@ describe('an earlier row for the same person and campaign', () => {
    * cancel (`consent_revoked`) and an opt-out (`suppressed`) are the
    * recipient's own no, and stop a new draft the same way.
    */
+  /**
+   * A pause is not a no. The review's case: a teammate paused Jane "on leave
+   * until October", the tick refused her queued opener — as a revoked
+   * consent, so after she was resumed every enrolment skipped her as
+   * already_contacted, and under auto-send on every campaign on the
+   * channel. A `paused` row stops nothing once the pause is lifted: a
+   * person paused now is skipped as `paused` before any row is read, and
+   * a resume is a person's audited decision. A reply's own cancel still
+   * writes `consent_revoked`, and that still stops a new draft.
+   */
+  it('lets a row the send path refused as paused be drafted again, once the pause is lifted', () => {
+    expect(enrolPriorSkip([refused('paused')], true)).toBeNull()
+    expect(enrolPriorSkip([refused('paused')], false)).toBeNull()
+    expect(enrolPriorSkip([refused('paused'), refused('consent_revoked')], true)).toBe('already_contacted')
+  })
+
   it('treats a refusal somebody made as already_contacted, supervised or auto-send', () => {
     for (const code of ['needs_approval', 'consent_revoked', 'suppressed']) {
       expect(enrolPriorSkip([refused(code)], true), code).toBe('already_contacted')
@@ -235,7 +258,7 @@ describe('an earlier row for the same person and campaign', () => {
       expect(enrolPriorSkip([refused(code)], false), code).toBeNull()
     }
     expect([...REFUSALS_A_CORRECTION_RESOLVES].sort()).toEqual(
-      ['bounced', 'stale_evidence', 'unknown_timezone', 'unparseable_recipient'],
+      ['bounced', 'paused', 'stale_evidence', 'unknown_timezone', 'unparseable_recipient'],
     )
     expect([...REFUSALS_THE_CLOCK_RESOLVES].sort()).toEqual(['campaign_inactive', 'daily_cap', 'quiet_hours'])
     expect([...ENROL_IGNORED_REFUSALS].sort()).toEqual(
@@ -262,6 +285,7 @@ describe('an earlier row for the same person and campaign', () => {
       needs_approval: 'stops a new draft',
       unparseable_recipient: 'does not',
       bounced: 'does not',
+      paused: 'does not',
       stale_evidence: 'does not',
       unknown_timezone: 'does not',
       quiet_hours: 'does not',
@@ -276,6 +300,7 @@ describe('an earlier row for the same person and campaign', () => {
       suppressed: false,
       recipientBounced: false,
       consent: null,
+      paused: false,
       recipientTimeZone: 'Europe/London',
       quietStart: '21:00',
       quietEnd: '08:00',
@@ -292,6 +317,7 @@ describe('an earlier row for the same person and campaign', () => {
       { suppressed: true },
       { recipientBounced: true },
       { consent: { granted: false, source: 'said no' } },
+      { paused: true, pausedFor: 'manual' },
       { evidenceStale: true },
       { recipientTimeZone: null },
       { now: new Date('2026-09-15T23:00:00.000Z') },
@@ -311,8 +337,8 @@ describe('an earlier row for the same person and campaign', () => {
     // The variants really reached the refusals they aim at.
     expect([...seen]).toEqual(
       expect.arrayContaining([
-        'cold_channel_forbidden', 'unparseable_recipient', 'suppressed', 'bounced', 'consent_revoked',
-        'unknown_timezone', 'quiet_hours', 'daily_cap', 'campaign_inactive', 'needs_approval',
+        'cold_channel_forbidden', 'unparseable_recipient', 'suppressed', 'bounced', 'consent_revoked', 'paused',
+        'stale_evidence', 'unknown_timezone', 'quiet_hours', 'daily_cap', 'campaign_inactive', 'needs_approval',
       ]),
     )
     for (const [code, verdict] of Object.entries(DECIDED)) {

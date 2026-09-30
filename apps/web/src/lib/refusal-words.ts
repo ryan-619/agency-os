@@ -15,7 +15,10 @@
  * not an owner lifting an opt-out. `stale_evidence` is a message whose words
  * quote a scan past its re-verification deadline at the moment of sending
  * (§2.2): nobody may approve past it, and the fix is a re-scan and a new
- * draft.
+ * draft. `paused` is a person held from every campaign — they replied, or a
+ * teammate paused them — and is not their no: nobody approves past it, and
+ * it ends when a person answers the reply or resumes them. It was logged as
+ * `consent_revoked` ("declined, or replied") before it had its own code.
  */
 export const REFUSAL_WORDS: Readonly<Record<string, string>> = {
   unparseable_recipient: 'no usable address',
@@ -23,6 +26,7 @@ export const REFUSAL_WORDS: Readonly<Record<string, string>> = {
   cold_channel_forbidden: 'cold channel not allowed',
   no_consent: 'no opt-in',
   consent_revoked: 'declined, or replied',
+  paused: 'contact paused',
   quiet_hours: 'quiet hours',
   unknown_timezone: 'no timezone on the contact',
   daily_cap: 'daily cap',

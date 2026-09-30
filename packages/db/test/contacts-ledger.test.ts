@@ -191,6 +191,7 @@ describe('the consent ledger writers', () => {
       recipient: '+14155550100',
       suppressed: false,
       consent: consent ? { granted: consent.granted, source: consent.source } : null,
+      paused: false,
       evidenceStale: false,
       recipientTimeZone: 'America/Los_Angeles',
       quietStart: '21:00',

@@ -42,9 +42,12 @@
  * keys is on the list, gets `{ ok: false, reason: 'opted_out' }`; a person who
  * has a recorded refusal of the channel gets `consent_refused`. A person with
  * an opt-out the system FAILED to record — an unsubscribe, an erasure or a
- * reply whose suppression could not be written, on the audit log as such —
- * gets `opt_out_not_recorded`, however long ago it was: nothing else stands
- * between them and the answer, because no suppression row exists. The
+ * reply whose suppression could not be written, on the audit log as such, or
+ * an earlier reply of theirs read as an opt-out that no suppression row
+ * matches today (the compliance page's own check, which survives a fault
+ * that failed the audit row too) — gets `opt_out_not_recorded`, however long
+ * ago it was: nothing else stands between them and the answer, because no
+ * suppression row exists. The
  * contact is NOT resumed on any of these paths. The send path would refuse
  * most of them anyway, but refusing HERE keeps the message off the
  * approver's screen, and keeps the pause exactly where it was.
@@ -57,7 +60,7 @@
 import { and, asc, count, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm'
 import { alias } from 'drizzle-orm/pg-core'
 import {
-  REPLY_KINDS, suppressionKeysFor, type Channel, type ReplyKind, type SendRefusalCode,
+  REPLY_KINDS, pauseReasonClass, suppressionKeysFor, type Channel, type ReplyKind, type SendRefusalCode,
 } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
@@ -83,32 +86,13 @@ export function inboxKindFilter(value: unknown): InboxKindFilter | null {
 
 /**
  * What paused a person, as a CLASS — the reason's text never leaves the
- * contact row (§2.3). Derived from the shape each writer gives the reason:
- *
- *  - `replied`       `recordInboundReply`: exactly `replied <ISO instant>`
- *  - `opt_out_not_recorded`  an unsubscribe whose suppression failed
- *  - `manual`        the contacts route: `<why> (by <who>)`
- *  - `erasure`       an erasure that could not finish
- *  - `unsubscribed`  a one-click unsubscribe that was recorded
- *  - `other`         anything else, or no reason at all
- *
- * `replied` is matched in full rather than by prefix, because a teammate's
- * reason can begin with the word too ("replied on the phone (by …)") and
- * only a pause a REPLY caused is one answering the reply may end.
+ * contact row (§2.3). Pure, so it lives in `packages/core` beside the send
+ * path, whose `paused` refusal is worded by it; re-exported here, where the
+ * inbox, the contacts route and the tests have always imported it from.
+ * Only a `replied` pause — exactly `replied <ISO instant>` — is one
+ * answering the reply may end.
  */
-export type PauseReasonClass = 'replied' | 'unsubscribed' | 'erasure' | 'manual' | 'opt_out_not_recorded' | 'other'
-
-const REPLY_PAUSE = /^replied \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/
-
-export function pauseReasonClass(reason: string | null | undefined): PauseReasonClass {
-  if (!reason) return 'other'
-  if (REPLY_PAUSE.test(reason)) return 'replied'
-  if (reason.startsWith('opt-out not recorded')) return 'opt_out_not_recorded'
-  if (/\(by [^()]*\)$/.test(reason)) return 'manual'
-  if (reason.startsWith('erasure ')) return 'erasure'
-  if (reason.startsWith('unsubscribed ')) return 'unsubscribed'
-  return 'other'
-}
+export { pauseReasonClass, type PauseReasonClass } from '@agency/core'
 
 /** The pause reason a reply writes, `recordInboundReply`'s format, for a reply read late. */
 function replyPauseReason(reply: { readonly sentAt: Date | null; readonly createdAt: Date }): string {
@@ -597,8 +581,9 @@ export type ReplyDraftRefusal =
  * from `ReplyDraftRefusal`, whose statuses and words the web app keeps.
  *
  * - `paused_for_another_reason` the person is paused, and not by a reply.
- * - `opt_out_not_recorded`      somebody asked to stop and the system could
- *                               not record it (the audit log says so).
+ * - `opt_out_not_recorded`      somebody asked to stop and no suppression
+ *                               row records it (the audit log says so, or
+ *                               an opted_out reply matches none).
  */
 export type ReplyDraftHold = 'paused_for_another_reason' | 'opt_out_not_recorded'
 
@@ -633,9 +618,10 @@ class DraftRefused extends Error {
 const STOPPED = 'This person asked to stop. The suppression row is what enforces it; do not answer.'
 
 const NOT_RECORDED =
-  'This person asked to stop — by unsubscribing, asking to be erased, or in a reply — and the system could not ' +
-  'record it: there is no suppression row, and the audit log says so. Record the opt-out by hand on ' +
-  '/suppressions (or finish the erasure). Answering them is not the fix. Nothing was drafted and nobody was resumed.'
+  'This person asked to stop — by unsubscribing, asking to be erased, or in a reply — and there is no suppression ' +
+  'row for it: the audit log says it could not be recorded, or a reply of theirs read as an opt-out matches no ' +
+  'suppression row today. Record the opt-out by hand on /suppressions (or finish the erasure). Answering them is ' +
+  'not the fix. Nothing was drafted and nobody was resumed.'
 
 const PAUSED_ELSEWHERE =
   'This person is paused for another reason, not by this reply. Resume them on /contacts first, if that is right — ' +
@@ -882,9 +868,21 @@ export async function replyQueueDraft(
 }
 
 /**
- * Has this person an opt-out on the audit log that was never recorded?
- * `contact.*` rows name the contact as their subject; `unsubscribe.not_recorded`
- * names the touch and carries the contact in `detail`.
+ * Has this person an opt-out that was never recorded?
+ *
+ * Two readings, either of which is enough:
+ *
+ *  - the audit log says so. `contact.*` rows name the contact as their
+ *    subject; `unsubscribe.not_recorded` names the touch and carries the
+ *    contact in `detail`.
+ *  - a reply of theirs was read as an opt-out (`reply_kind = 'opted_out'`)
+ *    and no suppression row matches the address it came FROM today — the
+ *    compliance page's own must-be-zero predicate, with the send path's own
+ *    keys (`suppressionKeysFor`: the address and its domain). A From that
+ *    cannot be read is counted, as the page counts it: no row could match
+ *    it. This is the reading that survives a fault that failed the
+ *    suppression AND the audit row beside it — the `.catch(() => {})` on
+ *    that write means the log alone can say nothing. Found by review.
  */
 async function optOutNotRecorded(db: AgencyDb, orgId: string, contactId: string): Promise<boolean> {
   const rows = await db
@@ -901,8 +899,31 @@ async function optOutNotRecorded(db: AgencyDb, orgId: string, contactId: string)
       ),
     )
     .limit(1)
-  return rows.length > 0
+  if (rows.length > 0) return true
+
+  const optedOut = await db
+    .select({ channel: schema.touches.channel, from: schema.touches.recipient })
+    .from(schema.touches)
+    .where(
+      and(
+        eq(schema.touches.orgId, orgId),
+        eq(schema.touches.contactId, contactId),
+        eq(schema.touches.direction, 'in'),
+        eq(schema.touches.replyKind, 'opted_out'),
+      ),
+    )
+  for (const r of optedOut) {
+    const keys = (CHANNELS as readonly string[]).includes(r.channel)
+      ? suppressionKeysFor(r.from ?? '', r.channel as Channel)
+      : null
+    if (keys === null || keys.length === 0) return true
+    if (!(await anySuppressed(db, orgId, keys))) return true
+  }
+  return false
 }
+
+/** The channels a reply can arrive on, as the compliance page reads them. */
+const CHANNELS: readonly Channel[] = ['email', 'linkedin', 'sms', 'voice', 'whatsapp']
 
 /** Does any of these keys have a suppression row in this org? One query. */
 async function anySuppressed(

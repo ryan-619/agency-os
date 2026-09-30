@@ -22,7 +22,7 @@ import { eq } from 'drizzle-orm'
 import { decideSend } from '@agency/core'
 import {
   approveDraft, contactsUpdate, denyDraft, dispatchTouch, dueTouches, evidenceAsOfFor, handleInboundEmail, looksLikeOptOut,
-  outreachRecordBounce, pauseContact, pendingDrafts, recordInboundReply, resumeContact, schema, sendFactsFor, sendOne,
+  outreachRecordBounce, pauseContact, pauseReasonClass, pendingDrafts, recordInboundReply, resumeContact, schema, sendFactsFor, sendOne,
   type AgencyDb, type InboundLog, type MessageProvider,
 } from '../src/index.js'
 import { migratedDb,type TestDb } from './helpers.js'
@@ -335,17 +335,21 @@ describe('the single send path', () => {
   })
 
   describe('a reply pauses everything, immediately (§8.4)', () => {
-    it('pauses the contact and refuses the next message', async () => {
+    it('pauses the contact and refuses the next message as paused', async () => {
       const reply = await recordInboundReply(db, {
         orgId, contactId, channel: 'email', from: 'priya@rentman.io',
         subject: 'Re: your note', body: 'Interested — can we talk Thursday?', now: NOON,
       })
       expect(reply.paused).toBe(true)
 
+      // A message queued AFTER the reply: the reply's cancel never saw it, so
+      // the send path refuses it for the pause — its own code, which a lifted
+      // pause does not turn into the person's no.
       const next = await send()
       expect(next.sent).toBe(false)
       expect(provider.sent).toEqual([])
-      expect((await touch(next.touchId)).refusalCode).toBe('consent_revoked')
+      expect((await touch(next.touchId)).refusalCode).toBe('paused')
+      expect(next.decision).toMatchObject({ code: 'paused', humanCanResolve: false })
     })
 
     it('cancels what was already queued for them', async () => {
@@ -850,12 +854,24 @@ describe('the send-path contract', () => {
       expect(out.facts.suppressed).toBe(true)
     })
 
-    it('reports a paused contact as paused, and the facts refuse as consent_revoked', async () => {
-      await pauseContact(db, orgId, contactId, 'replied', NOON)
+    /**
+     * A pause is its own fact and its own refusal. It used to be modelled as
+     * a revoked consent, so a teammate's hold was refused `consent_revoked`
+     * — the recipient's own no — and enrolment read it that way for good
+     * after the hold was lifted. Found by review.
+     */
+    it('reports a paused contact as paused, and the facts refuse as paused — not as a revoked consent', async () => {
+      await pauseContact(db, orgId, contactId, 'on leave until October (by sam@agency.test)', NOON)
       const out = await facts()
       if ('missing' in out) throw new Error(out.missing)
       expect(out.paused).toBe(true)
-      expect(decideSend(out.facts).code).toBe('consent_revoked')
+      expect(out.facts.paused).toBe(true)
+      expect(out.facts.pausedFor).toBe('manual')
+      expect(out.facts.consent).toBeNull()
+      const d = decideSend(out.facts)
+      expect(d).toMatchObject({ allowed: false, code: 'paused', humanCanResolve: false })
+      // The class, never the reason's text: it names a teammate.
+      if (!d.allowed) expect(d.reason).not.toContain('sam@agency.test')
     })
 
     /**
@@ -880,9 +896,11 @@ describe('the send-path contract', () => {
       const never = await facts()
       if ('missing' in never) throw new Error(never.missing)
       expect(never.pausedReason).toBe('replied 2026-09-15T12:00:00.000Z')
-      // The decision reads the pause as a revoked consent; the record says nobody asked.
-      expect(never.facts.consent).toEqual({ granted: false, source: 'replied 2026-09-15T12:00:00.000Z' })
+      expect(never.facts.pausedFor).toBe('replied')
+      // The decision reads the consent row as recorded — nobody asked — and the pause as a pause.
+      expect(never.facts.consent).toBeNull()
       expect(never.consentRecorded).toBeNull()
+      expect(decideSend(never.facts).code).toBe('paused')
 
       // A refusal they RECORDED is the stronger statement, and the decision reads it in its own words.
       await db.insert(schema.consents).values({ orgId, contactId, channel: 'email', granted: false, source: 'said no on a call' })
@@ -1075,7 +1093,7 @@ describe('the send-path contract', () => {
           if (prop !== 'select') return Reflect.get(target, prop, receiver)
           return (fields?: Record<string, unknown>) => {
             const keys = fields ? Object.keys(fields).sort().join(',') : ''
-            if (keys !== 'emailBouncedAt,pausedAt') return (target as AgencyDb).select(fields as never)
+            if (keys !== 'emailBouncedAt,pausedAt,pausedReason') return (target as AgencyDb).select(fields as never)
             // A thenable-free way in: run the race, then hand back the real builder.
             const builder = (target as AgencyDb).select(fields as never)
             const from = builder.from.bind(builder)
@@ -1133,6 +1151,43 @@ describe('the send-path contract', () => {
       expect((await touch(row.id)).refusalCode).toBe('suppressed')
     })
 
+    /**
+     * A pause landing in the window is refused as the pause it is. It was
+     * refused `consent_revoked` ("This contact replied a moment ago") for any
+     * pause, a teammate's included — the recipient's own no, which
+     * enrolment then read as one for good. Found by review.
+     */
+    it('refuses as paused, in the class’s words, when a teammate pauses them in between', async () => {
+      const row = await queuedRow()
+      const held = racing(() => pauseContact(db, orgId, contactId, 'on leave until October (by sam@agency.test)', NOON))
+      const r = await dispatchTouch(held, provider, row, { now: NOON })
+      expect(r.sent).toBe(false)
+      expect(r.decision).toMatchObject({ allowed: false, code: 'paused', humanCanResolve: false })
+      if (!r.decision.allowed) {
+        expect(r.decision.reason).toMatch(/^This contact was paused a moment ago\. A teammate paused this contact/)
+        expect(r.decision.reason).not.toContain('sam@agency.test')
+      }
+      expect(provider.sent).toEqual([])
+      expect(await touch(row.id)).toMatchObject({ status: 'refused', refusalCode: 'paused' })
+    })
+
+    /**
+     * An unsubscribe writes a suppression AND a pause. The opt-out is the
+     * stronger statement and is what is recorded — the look used to check
+     * the pause first, and logged the unsubscribe as a revoked consent.
+     */
+    it('refuses as suppressed, not paused, when an unsubscribe lands in between', async () => {
+      const row = await queuedRow()
+      const unsubscribed = racing(async () => {
+        await db.insert(schema.suppressions).values({ orgId, kind: 'email', value: 'priya@rentman.io', reason: 'clicked unsubscribe', source: 'unsubscribe' })
+        await pauseContact(db, orgId, contactId, `unsubscribed ${NOON.toISOString()}`, NOON)
+      })
+      const r = await dispatchTouch(unsubscribed, provider, row, { now: NOON })
+      expect(r.decision).toMatchObject({ allowed: false, code: 'suppressed', humanCanResolve: false })
+      expect(provider.sent).toEqual([])
+      expect((await touch(row.id)).refusalCode).toBe('suppressed')
+    })
+
     it('checks the domain half of the suppression too', async () => {
       const row = await queuedRow()
       const stopped = racing(() => db.insert(schema.suppressions).values({ orgId, kind: 'domain', value: 'rentman.io', reason: 'asked' }))
@@ -1161,7 +1216,16 @@ describe('the send-path contract', () => {
       expect(after.recipient).toBeNull()
     })
 
-    it('does not overwrite a row somebody else settled while the provider had it', async () => {
+    /**
+     * A stuck-send recovery that gave up on the row while the provider had
+     * it: `failed`, never sent, no refusal — "may or may not have gone". The
+     * provider's acceptance is better evidence than that, so the row is
+     * recorded as sent, with the provider id and the recipient a reply, a
+     * bounce or an unsubscribe click needs to find it. It was left `failed`
+     * with none of them, and a supervised re-enrolment then drafted the same
+     * opener again. Found by review.
+     */
+    it('records as sent a row a stuck-send recovery marked failed while the provider had it', async () => {
       const row = await queuedRow()
       await db.update(schema.touches).set({ status: 'sending' }).where(eq(schema.touches.id, row.id))
       const lines: string[] = []
@@ -1171,8 +1235,11 @@ describe('the send-path contract', () => {
         name: 'slow',
         channels: ['email'],
         async send(m) {
-          // A stuck-send recovery gave up on it meanwhile.
-          await db.update(schema.touches).set({ status: 'failed', error: 'stuck in sending' }).where(eq(schema.touches.id, row.id))
+          // What recoverStuckSends writes.
+          await db
+            .update(schema.touches)
+            .set({ status: 'failed', error: 'The worker restarted while this was being sent. It may or may not have gone; check the mailbox, then re-approve to send it again.' })
+            .where(eq(schema.touches.id, row.id))
           return provider.send(m)
         },
       }
@@ -1183,8 +1250,36 @@ describe('the send-path contract', () => {
         console.error = original
       }
       const after = await touch(row.id)
-      expect(after.status).toBe('failed')
-      expect(after.error).toBe('stuck in sending')
+      expect(after).toMatchObject({ status: 'sent', providerId: 'test-1', recipient: 'priya@rentman.io', refusalCode: null })
+      expect(after.sentAt?.toISOString()).toBe(NOON.toISOString())
+      // "re-approve to send it again" on a row that went is an instruction to send a duplicate.
+      expect(after.error).toBeNull()
+      expect(lines.some((l) => l.includes('already settled'))).toBe(false)
+    })
+
+    it('does not overwrite a row somebody else settled some other way while the provider had it', async () => {
+      const row = await queuedRow()
+      await db.update(schema.touches).set({ status: 'sending' }).where(eq(schema.touches.id, row.id))
+      const lines: string[] = []
+      const original = console.error
+      console.error = (line: string) => lines.push(line)
+      const settled: MessageProvider = {
+        name: 'slow',
+        channels: ['email'],
+        async send(m) {
+          // A refusal recorded meanwhile — not "may or may not have gone".
+          await db.update(schema.touches).set({ status: 'refused', refusalCode: 'consent_revoked' }).where(eq(schema.touches.id, row.id))
+          return provider.send(m)
+        },
+      }
+      try {
+        const r = await dispatchTouch(db, settled, row, { now: NOON })
+        expect(r.sent).toBe(true)
+      } finally {
+        console.error = original
+      }
+      const after = await touch(row.id)
+      expect(after).toMatchObject({ status: 'refused', refusalCode: 'consent_revoked', sentAt: null })
       // The audit row still says it went, which is the truth; the log says the row disagreed.
       expect((await db.select().from(schema.auditLog)).some((a) => a.action === 'send.sent')).toBe(true)
       expect(lines.some((l) => l.includes('already settled'))).toBe(true)
@@ -1354,6 +1449,38 @@ describe('the send-path contract', () => {
       expect(lines.some((l) => l.includes('OPT-OUT NOT RECORDED'))).toBe(true)
       const entry = (await db.select().from(schema.auditLog)).find((a) => a.action === 'contact.opt_out_not_recorded')
       expect(entry?.detail).toMatchObject({ why: 'Error' })
+    })
+
+    /**
+     * The pause says so, over the `replied …` the same call just wrote and
+     * over any earlier reason — as an unsubscribe's and an erasure's failure
+     * do. Left as `replied …`, answering a later reply from /inbox resumed a
+     * person whose opt-out was never recorded. Found by review.
+     */
+    it('pauses them with the failure as the reason, over the reply’s own and any earlier one', async () => {
+      const earlier = new Date(NOON.getTime() - 86_400_000)
+      await pauseContact(db, orgId, contactId, `replied ${earlier.toISOString()}`, earlier)
+      const r = await recordInboundReply(db, {
+        orgId, contactId, channel: 'email', from: 'not an address', subject: 'Re', body: 'unsubscribe', now: NOON,
+        log: { error: () => {} },
+      })
+      expect(r.optOutNotRecorded).toBe(true)
+      expect(r.paused).toBe(true)
+      const [c] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, contactId))
+      expect(c!.pausedReason).toBe(`opt-out not recorded: reply ${NOON.toISOString()} (unparseable_address)`)
+      expect(pauseReasonClass(c!.pausedReason)).toBe('opt_out_not_recorded')
+      expect(c!.pausedAt?.toISOString()).toBe(NOON.toISOString())
+    })
+
+    it('keeps the first reason when the opt-out WAS recorded', async () => {
+      const earlier = new Date(NOON.getTime() - 86_400_000)
+      await pauseContact(db, orgId, contactId, `replied ${earlier.toISOString()}`, earlier)
+      const r = await recordInboundReply(db, {
+        orgId, contactId, channel: 'email', from: 'priya@rentman.io', subject: 'Re', body: 'unsubscribe', now: NOON,
+      })
+      expect(r.suppressed).toBe(true)
+      const [c] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, contactId))
+      expect(c!.pausedReason).toBe(`replied ${earlier.toISOString()}`)
     })
 
     /**

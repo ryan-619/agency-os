@@ -656,6 +656,75 @@ describe('the inbox', () => {
         expect(await draft(id)).toMatchObject({ ok: true })
       })
 
+      /**
+       * The review's probe. A fault fails the suppression AND the audit row
+       * that would have said so — that write is `.catch(() => {})` — so the
+       * log alone leaves the hold nothing to find. Two things stop the answer
+       * now: the pause says `opt-out not recorded`, and the hold reads the
+       * opted_out reply itself against the suppression list, as the
+       * compliance page does. Before, a later "why are you still writing?"
+       * resumed them and drafted an answer.
+       */
+      it('refuses an answer to a later reply when an earlier opt-out and its audit row both failed to write', async () => {
+        const faulty = new Proxy(db as object, {
+          get(target, prop, receiver) {
+            if (prop === 'insert') {
+              return (table: unknown) => {
+                if (table === schema.suppressions || table === schema.auditLog) throw new Error('Connection terminated unexpectedly')
+                return (target as AgencyDb).insert(table as typeof schema.touches)
+              }
+            }
+            return Reflect.get(target, prop, receiver)
+          },
+        }) as AgencyDb
+        const stop = await handleInboundEmail(faulty, {
+          from: 'priya@rentman.io', subject: 'Re: A gap on your security page', text: 'Unsubscribe',
+          messageId: '<stop@rentman.io>', references: [OUR_MESSAGE_ID], now: NOON, log: { error: () => {} },
+        })
+        if (stop.matched === 'none') throw new Error('unmatched')
+        expect(stop.optOutNotRecorded).toBe(true)
+        expect(await db.select().from(schema.suppressions)).toEqual([])
+        expect(await auditActions()).not.toContain('contact.opt_out_not_recorded')
+        expect(pauseReasonClass((await contactRow()).pausedReason)).toBe('opt_out_not_recorded')
+
+        const later = await reply('Why are you still writing to me?', { messageId: '<later@rentman.io>' })
+        const r = await draft(later)
+        expect(r).toMatchObject({ ok: false, reason: 'opt_out_not_recorded' })
+        expect(await answersTo(later)).toEqual([])
+        expect((await contactRow()).pausedAt).not.toBeNull()
+        expect(await auditActions()).not.toContain('contact.resumed')
+      })
+
+      /**
+       * The hold's second reading on its own: an opted_out reply whose From
+       * no suppression row matches, with a reply's own pause and no audit
+       * row — the state a failed opt-out left before the pause said so.
+       */
+      it('refuses a person with an opted_out reply the suppression list does not match, with nothing on the audit log', async () => {
+        const [out] = await db
+          .insert(schema.touches)
+          .values({
+            orgId, contactId, companyId, channel: 'email', direction: 'in', status: 'replied', subject: 'Re', body: 'Unsubscribe',
+            recipient: 'priya@rentman.io', replyKind: 'opted_out', sentAt: NOON,
+          })
+          .returning({ id: schema.touches.id })
+        expect(out).toBeDefined()
+        const later = await reply()
+        expect(pauseReasonClass((await contactRow()).pausedReason)).toBe('replied')
+        expect(await draft(later)).toMatchObject({ ok: false, reason: 'opt_out_not_recorded' })
+        expect((await contactRow()).pausedAt).not.toBeNull()
+      })
+
+      it('is not held by an opted_out reply whose From IS on the suppression list', async () => {
+        await db.insert(schema.touches).values({
+          orgId, contactId, companyId, channel: 'email', direction: 'in', status: 'replied', subject: 'Re', body: 'Unsubscribe',
+          recipient: 'priya.personal@example.org', replyKind: 'opted_out', sentAt: NOON,
+        })
+        await db.insert(schema.suppressions).values({ orgId, kind: 'email', value: 'priya.personal@example.org', reason: 'replied stop', source: 'reply' })
+        const later = await reply()
+        expect(await draft(later)).toMatchObject({ ok: true, resumed: true })
+      })
+
       it('refuses a person with a recorded refusal of the channel, and rolls the resume back', async () => {
         const id = await reply()
         await db.insert(schema.consents).values({

@@ -205,7 +205,7 @@ describe('the compliance counts', () => {
      */
     it('agrees with decideSend on every code it can produce', () => {
       const base: SendFacts = {
-        channel: 'email', recipient: 'priya@rentman.io', suppressed: false, consent: null, evidenceStale: false,
+        channel: 'email', recipient: 'priya@rentman.io', suppressed: false, consent: null, paused: false, evidenceStale: false,
         recipientTimeZone: 'Europe/London', quietStart: '21:00', quietEnd: '08:00',
         sentToday: 0, dailyCap: 25, campaignStatus: 'active', autoSend: true,
         now: new Date('2026-09-15T12:00:00.000Z'),
@@ -216,6 +216,7 @@ describe('the compliance counts', () => {
         suppressed: { suppressed: true },
         bounced: { recipientBounced: true },
         consent_revoked: { consent: { granted: false, source: 'reply' } },
+        paused: { paused: true, pausedFor: 'manual' },
         stale_evidence: { evidenceStale: true },
         unknown_timezone: { recipientTimeZone: null },
         quiet_hours: { now: new Date('2026-09-15T23:00:00.000Z') },

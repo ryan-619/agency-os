@@ -361,7 +361,10 @@ describe('enrolling a campaign', () => {
     await scan()
     const jane = await contact()
     const first = ok(await enrol())
-    const denied = await denyDraft(db, { orgId, touchId: first.queued[0]!.touchId!, decidedBy: userId, note: 'not this one' })
+    // Denied at NOW, while the scan the words quote is fresh: a person's no. (A
+    // deny judged at the machine's clock would find that scan stale, and record
+    // the refusal a re-scan resolves — the test below.)
+    const denied = await denyDraft(db, { orgId, touchId: first.queued[0]!.touchId!, decidedBy: userId, note: 'not this one', now: NOW })
     expect(denied.ok).toBe(true)
 
     const again = ok(await enrol())
@@ -399,6 +402,84 @@ describe('enrolling a campaign', () => {
       [optedOut]: 'already_contacted',
     })
     expect(r.queued.map((q) => q.contactId)).toEqual([corrected])
+  })
+
+  /**
+   * The review's case, end to end. A teammate paused Jane "on leave until
+   * October", and the tick refused her queued opener — as `consent_revoked`
+   * before a pause had its own code, which enrolment reads as her own no: once
+   * she was resumed, every enrolment skipped her as already_contacted, and
+   * under auto-send on every campaign on the channel. Found by review. The
+   * sender now refuses it as `paused`, which a lifted pause does not keep.
+   */
+  it('drafts a person again once the pause that refused their queued opener is lifted', async () => {
+    const auto = await campaign({ name: 'Auto', autoSend: true })
+    await scan()
+    const jane = await contact()
+    const first = ok(await enrol({ campaignId: auto }))
+    expect(first.queued.map((q) => q.contactId)).toEqual([jane])
+
+    await db
+      .update(schema.contacts)
+      .set({ pausedAt: NOW, pausedReason: 'on leave until October (by sam@agency.test)' })
+      .where(eq(schema.contacts.id, jane))
+    const [row] = await db.select().from(schema.touches).where(eq(schema.touches.id, first.queued[0]!.touchId!))
+    const provider = countingProvider()
+    const refused = await dispatchTouch(db, provider, row!, { now: NOW })
+    expect(refused.decision).toMatchObject({ allowed: false, code: 'paused' })
+    expect(provider.sent).toEqual([])
+    expect((await outbound()).map((t) => [t.status, t.refusalCode])).toEqual([['refused', 'paused']])
+
+    // While the pause stands she is skipped for it, before any row is read.
+    expect(ok(await enrol({ campaignId: auto })).skipped).toEqual([{ companyId, contactId: jane, why: 'paused' }])
+
+    // A person lifts it; the refused row stops nothing, in this campaign or another on the channel.
+    await db.update(schema.contacts).set({ pausedAt: null, pausedReason: null }).where(eq(schema.contacts.id, jane))
+    const other = await campaign({ name: 'Auto B', autoSend: true })
+    expect(ok(await enrol({ campaignId: other })).queued.map((q) => q.contactId)).toEqual([jane])
+  })
+
+  /**
+   * The review's other case. A supervised draft that went stale while it
+   * waited is blocked on /approvals with "deny it, re-scan the company, then
+   * draft it again" — and denying it wrote `needs_approval`, a person's no,
+   * so after the re-scan enrolment still skipped them as already contacted.
+   * Found by review. Denied on stale evidence, the row says so, and a
+   * re-scan resolves it.
+   */
+  it('drafts a person again after a draft denied on stale evidence, once the company is re-scanned', async () => {
+    await scan()
+    const jane = await contact()
+    const first = ok(await enrol())
+    const draftId = first.queued[0]!.touchId!
+    // Written at NOW, from the FRESH_AT scan — pinned, rather than the clock the insert ran at.
+    await db.update(schema.touches).set({ createdAt: NOW }).where(eq(schema.touches.id, draftId))
+
+    const later = new Date(NOW.getTime() + 16 * 86_400_000)
+    const denied = await denyDraft(db, { orgId, touchId: draftId, decidedBy: userId, note: 'stale', now: later })
+    expect(denied.ok).toBe(true)
+    expect((await outbound()).map((t) => [t.status, t.refusalCode])).toEqual([['refused', 'stale_evidence']])
+    const audit = (await db.select().from(schema.auditLog)).find((a) => a.action === 'draft.denied')
+    expect(audit?.detail).toMatchObject({ note: 'stale', refusalCode: 'stale_evidence' })
+
+    // Not before the re-scan: the company itself is stale.
+    expect(ok(await enrol({ now: later })).skipped).toEqual([{ companyId, contactId: null, why: 'stale' }])
+
+    await scan(companyId, { ranAt: new Date(later.getTime() - 3_600_000) })
+    const again = ok(await enrol({ now: later }))
+    expect(again.queued.map((q) => q.contactId)).toEqual([jane])
+  })
+
+  it('still records a person’s no when the draft they denied was not stale', async () => {
+    await scan()
+    await contact()
+    const first = ok(await enrol())
+    await db.update(schema.touches).set({ createdAt: NOW }).where(eq(schema.touches.id, first.queued[0]!.touchId!))
+    const denied = await denyDraft(db, { orgId, touchId: first.queued[0]!.touchId!, decidedBy: userId, now: NOW })
+    expect(denied.ok).toBe(true)
+    expect((await outbound()).map((t) => t.refusalCode)).toEqual(['needs_approval'])
+    const audit = (await db.select().from(schema.auditLog)).find((a) => a.action === 'draft.denied')
+    expect(audit?.detail).toMatchObject({ refusalCode: 'needs_approval' })
   })
 
   /**

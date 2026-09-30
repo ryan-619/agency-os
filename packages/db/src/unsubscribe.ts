@@ -59,7 +59,7 @@ import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
 import { addSuppression } from './campaigns.js'
-import { pauseContact, type InboundLog } from './outreach.js'
+import { pauseContact, pauseContactOverriding, type InboundLog } from './outreach.js'
 
 const TOUCH_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const MAC_HEX = /^[0-9a-f]{64}$/
@@ -262,7 +262,7 @@ export async function recordUnsubscribe(
       // Recorded: the idempotent pause, which keeps an earlier reason. Not
       // recorded: THIS reason, over any earlier one (see the header).
       paused = failed
-        ? await pauseOverriding(
+        ? await pauseContactOverriding(
             db, orgId, contactId, `opt-out not recorded: one-click unsubscribe ${now.toISOString()} (${failed.why})`, now,
           )
         : await pauseContact(db, orgId, contactId, `unsubscribed ${now.toISOString()}`, now)
@@ -355,20 +355,6 @@ async function erasureKeptRecipient(db: AgencyDb, orgId: string, touchId: string
     )
     .limit(1)
   return held.length === 1
-}
-
-/**
- * Pause them with THIS reason, whether or not they were already paused — the
- * failure path's pause (see the header). Written here rather than as a
- * parameter on `pauseContact`, which outreach.ts owns.
- */
-async function pauseOverriding(db: AgencyDb, orgId: string, contactId: string, reason: string, now: Date): Promise<boolean> {
-  const rows = await db
-    .update(schema.contacts)
-    .set({ pausedAt: now, pausedReason: reason.slice(0, 500) })
-    .where(and(eq(schema.contacts.orgId, orgId), eq(schema.contacts.id, contactId)))
-    .returning({ id: schema.contacts.id })
-  return rows.length === 1
 }
 
 const stderrLog: InboundLog = {
