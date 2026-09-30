@@ -22,8 +22,11 @@ import {
  * Drafting RESUMES the person, because their reply paused them in every
  * campaign and an approved answer to a paused person is refused. That is a
  * person's decision and it is audited as one. It is never made for somebody
- * who asked to stop: an opted-out reply, a suppressed address or a recorded
- * refusal of the channel is a 409 and the pause stays exactly where it was.
+ * who asked to stop: an opted-out reply, a suppressed address, a recorded
+ * refusal of the channel, or an opt-out the system failed to record is a 409
+ * and the pause stays exactly where it was. Nor for a pause the reply did not
+ * cause — a teammate's, an unsubscribe's, an unfinished erasure's — which is
+ * a 409 that sends the person to /contacts.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -67,6 +70,10 @@ export async function POST(
     actor: user.id,
   })
   if (!r.ok) {
+    // The two holds carry their own sentence: each names where to go instead.
+    if (r.reason === 'paused_for_another_reason' || r.reason === 'opt_out_not_recorded') {
+      return NextResponse.json({ error: r.message, reason: r.reason }, { status: 409 })
+    }
     const error = r.reason === 'opted_out' ? ANSWER_OPTED_OUT_ERROR : r.message
     return NextResponse.json({ error, reason: r.reason }, { status: ANSWER_REFUSAL_STATUS[r.reason] })
   }

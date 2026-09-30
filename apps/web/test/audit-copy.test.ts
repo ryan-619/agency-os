@@ -109,7 +109,8 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'contact.opt_out_not_recorded': { touchId: SUBJECT, channel: 'email', why: 'unparseable' },
   'contact.created': { companyId: SUBJECT, source: 'manual', hasTimeZone: true },
   'contact.paused': { reason: 'asked for Q1', alreadyPaused: false },
-  'contact.resumed': { hadReason: 'asked for Q1' },
+  // The inbox's shape; the contacts route writes `{ hadReason }`, which no sentence reads.
+  'contact.resumed': { reason: 'answering their reply from the inbox', inboundTouchId: SUBJECT, pausedFor: 'replied' },
   'contact.timezone_set': { timeZone: 'Europe/Amsterdam' },
   'consent.granted': { channel: 'sms', source: 'said yes on the call, 12 Sep' },
   'consent.declined': { channel: 'sms', source: 'said no' },
@@ -166,7 +167,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'campaign.enrolled': { campaignId: SUBJECT, queued: 14, skipped: {}, status: 'active', limit: 50, truncated: false },
   'deal.next_action_set': { companyId: SUBJECT, from: null, to: '2026-10-02T09:00:00.000Z' },
   'reply.handled': { contactId: SUBJECT, replyKind: 'interested' },
-  'reply.reclassified': { from: 'other', to: 'interested' },
+  'reply.reclassified': { from: 'auto_reply', to: 'interested', paused: true, cancelledQueued: 1 },
   'reply.answer_drafted': { inboundTouchId: SUBJECT, touchId: SUBJECT, campaignId: SUBJECT, channel: 'email', resumed: true },
   'note.added': { companyId: SUBJECT, noteId: SUBJECT },
   'note.deleted': { companyId: SUBJECT, noteId: SUBJECT, authorUserId: ORG_USER },
@@ -277,6 +278,30 @@ describe('sentenceFor', () => {
         expect(s, action).not.toMatch(/undefined|\bnull\b|NaN|\[object |\$\{/)
       }
     }
+  })
+
+  /**
+   * A pause reason can hold a teammate's address and the contact's words, and
+   * this log is append-only. The inbox records the reason's CLASS, and the
+   * sentence reads only that — the contacts route's free-text `hadReason` is
+   * never rendered.
+   */
+  it('says what paused a resumed contact by its class, and never reads the reason text', () => {
+    expect(sentenceFor(line('contact.resumed', WRITTEN['contact.resumed']), lookups)).toBe(
+      'resumed a contact at rentman.io who had been paused by their reply, to answer their reply',
+    )
+    const free = sentenceFor(line('contact.resumed', { hadReason: 'Jane said stop calling (by sam@agency.test)' }), lookups)
+    expect(free).toBe('resumed a contact at rentman.io')
+    expect(sentenceFor(line('contact.resumed', { pausedFor: 'constructor' }), lookups)).toBe('resumed a contact at rentman.io')
+  })
+
+  it('says when a reclassification paused somebody and cancelled what was queued', () => {
+    expect(sentenceFor(line('reply.reclassified', WRITTEN['reply.reclassified']), lookups)).toBe(
+      'reclassified a reply from a contact at rentman.io from auto reply to interested: paused them in every campaign; cancelled 1 queued',
+    )
+    expect(sentenceFor(line('reply.reclassified', { from: 'other', to: 'not_now', paused: false, cancelledQueued: 0 }), lookups)).toBe(
+      'reclassified a reply from a contact at rentman.io from other to not now',
+    )
   })
 
   it('says what happened in the words the page leads with', () => {
