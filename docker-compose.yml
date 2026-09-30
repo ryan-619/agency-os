@@ -12,8 +12,9 @@
 # the variables its `environment:` block names, whatever .env holds — so every
 # optional variable a service reads is named here as `NAME: ${NAME:-}`, and
 # each app reads the resulting blank as unset (the feature behind it stays
-# off, as it would with the line absent). A number is given its schema's
-# default instead, because a blank number is not unset to zod's coerce.
+# off, as it would with the line absent). A number the app does not read
+# that way is given its schema's default here instead: zod's coerce reads a
+# blank as 0.
 
 name: agency-os
 
@@ -207,9 +208,10 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       LLM_ALLOW_REMOTE_LEAD_DATA: ${LLM_ALLOW_REMOTE_LEAD_DATA:-}
       # Deliberately NOT passed: AGENT_USE_LOCAL_LOGIN (development only — the
-      # worker refuses it under NODE_ENV=production), CLAUDE_CODE_PATH (the
-      # image carries its CLI), and APPROVAL_POLL_MS / APPROVAL_SWEEP_MS
-      # (tuning knobs; the image uses the schema's defaults).
+      # worker refuses it under NODE_ENV=production), CLAUDE_CODE_PATH (a path
+      # on a developer's machine, meaningless inside the image), and
+      # APPROVAL_POLL_MS / APPROVAL_SWEEP_MS (tuning knobs; the schema's
+      # defaults apply).
     volumes:
       # Put a skill at ./skills/.claude/skills/<name>/SKILL.md. The directory
       # may hold NOTHING else under .claude/ — see AGENT_SKILLS_DIR above.

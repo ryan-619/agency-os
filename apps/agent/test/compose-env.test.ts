@@ -104,7 +104,7 @@ describe('compose names every optional variable an app reads', () => {
    */
   const AGENT_NOT_PASSED = new Set([
     'AGENT_USE_LOCAL_LOGIN', // development only; refused under NODE_ENV=production
-    'CLAUDE_CODE_PATH', // the image carries its CLI
+    'CLAUDE_CODE_PATH', // a path on a developer's machine, meaningless inside the image
     'APPROVAL_POLL_MS', // tuning knobs: the image uses the schema's defaults
     'APPROVAL_SWEEP_MS',
   ])
