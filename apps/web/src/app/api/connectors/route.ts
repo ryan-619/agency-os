@@ -1,8 +1,9 @@
 import { NextResponse } from 'next/server'
 import { assertCan } from '@agency/core'
 import {
-  appendAudit, connectorNameSchema, createConnector, isReachableConnectorUrl,
-  parseConnectorConfig, putSecret, secretsKeyFromEnv, type AgencyDb, type ConnectorKind,
+  appendAudit, connectorNameSchema, createConnector, deleteSecret, isCheckViolation,
+  isReachableConnectorUrl, isUniqueViolation, parseConnectorConfig, putSecret, secretsKeyFromEnv,
+  type AgencyDb, type ConnectorKind,
 } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
@@ -133,13 +134,31 @@ export async function POST(request: Request): Promise<NextResponse> {
       secretRef,
       createdBy: user.id,
     })
-  } catch {
-    // The unique index on (org_id, name) is the likely cause and the only one
-    // worth naming — the rest are already validated above.
-    return NextResponse.json(
-      { error: `A connector called "${parsedName.data}" already exists.` },
-      { status: 409 },
-    )
+  } catch (err) {
+    // The credential was stored a moment ago for a row that now does not
+    // exist, and nothing else points at it. The catalog makes this ordinary
+    // rather than rare — three pairs of presets share a server name — so it
+    // is removed rather than left for a page nobody visits. Best effort: a
+    // failure here costs an orphaned ciphertext, not a leak.
+    if (secretRef) await deleteSecret(db, user.orgId, secretRef).catch(() => false)
+    // The in-process server is spread LAST when a turn is assembled, so a
+    // connector called `agency` would be silently displaced and its tools
+    // classified as the agency's own. 0018 refuses the name; this says why.
+    if (isCheckViolation(err, 'connectors_name_is_not_agency')) {
+      return NextResponse.json(
+        { error: 'agency is the product’s own server name. Choose another.' },
+        { status: 409 },
+      )
+    }
+    if (isUniqueViolation(err)) {
+      return NextResponse.json(
+        { error: `A connector called "${parsedName.data}" already exists. Choose another name.` },
+        { status: 409 },
+      )
+    }
+    // Everything else was validated above. Never the driver's message: it can
+    // quote the row, and the row is a config somebody typed.
+    return NextResponse.json({ error: 'The connector could not be saved.' }, { status: 500 })
   }
 
   await appendAudit(db, {

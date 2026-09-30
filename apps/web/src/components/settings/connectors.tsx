@@ -1,7 +1,9 @@
 'use client'
 
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { When } from '@/components/when'
+import { ConnectorCatalog, type FormPrefill } from './connector-catalog'
+import type { BrowserPreset } from './connector-presets'
 
 /**
  * Settings → Connectors (PROMPT.md §6).
@@ -16,6 +18,10 @@ import { When } from '@/components/when'
  * while a probe runs. Every rule lives in the routes, which is also where the
  * authorisation is: `can()` hides the controls below, and `assertCan()`
  * refuses the request, because hiding a button is not access control.
+ *
+ * Two ways in, one route: the catalog (`connector-catalog.tsx`) posts a
+ * preset's row, and the form below posts a hand-written one. Both land in
+ * `POST /api/connectors` and both are created disabled.
  */
 
 export interface ConnectorView {
@@ -34,11 +40,14 @@ type Probe = { tools: readonly { name: string; description: string }[]; message:
 
 export function ConnectorsPanel({
   connectors,
+  presets,
   canWrite,
   agentAvailable,
   secretsConfigured,
 }: {
   connectors: readonly ConnectorView[]
+  /** The catalog, already reduced to what a browser may see (`connector-presets.ts`). */
+  presets: readonly BrowserPreset[]
   canWrite: boolean
   agentAvailable: boolean
   secretsConfigured: boolean
@@ -57,6 +66,9 @@ export function ConnectorsPanel({
   const [justPassed, setJustPassed] = useState<Set<string>>(new Set())
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [adding, setAdding] = useState(false)
+  const [browsing, setBrowsing] = useState(false)
+  /** What "Fill in the form" on a catalog card put in the form. It remounts the form. */
+  const [prefill, setPrefill] = useState<FormPrefill | null>(null)
 
   const act = async (id: string, run: () => Promise<Response>): Promise<void> => {
     setBusy(id)
@@ -225,13 +237,45 @@ export function ConnectorsPanel({
       </div>
 
       {canWrite ? (
-        adding ? (
-          <AddConnector secretsConfigured={secretsConfigured} onCancel={() => setAdding(false)} />
-        ) : (
-          <button type="button" style={{ marginTop: 16 }} onClick={() => setAdding(true)}>
-            Add a connector
-          </button>
-        )
+        <>
+          {!browsing || !adding ? (
+            <div className="row-actions" style={{ marginTop: 16 }}>
+              {!browsing ? (
+                <button type="button" onClick={() => setBrowsing(true)}>
+                  Add from the catalog
+                </button>
+              ) : null}
+              {!adding ? (
+                <button type="button" onClick={() => setAdding(true)}>
+                  Add a connector by hand
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          {adding ? (
+            <AddConnector
+              key={prefill ? `${prefill.from}:${prefill.name}` : 'blank'}
+              initial={prefill}
+              secretsConfigured={secretsConfigured}
+              onCancel={() => {
+                setAdding(false)
+                setPrefill(null)
+              }}
+            />
+          ) : null}
+          {browsing ? (
+            <ConnectorCatalog
+              presets={presets}
+              existingNames={connectors.map((c) => c.name)}
+              agentAvailable={agentAvailable}
+              secretsConfigured={secretsConfigured}
+              onUseForm={(filled) => {
+                setPrefill(filled)
+                setAdding(true)
+              }}
+            />
+          ) : null}
+        </>
       ) : (
         <p className="muted" style={{ fontSize: 12.5, marginTop: 16 }}>
           Only an owner can add or change a connector.
@@ -241,30 +285,71 @@ export function ConnectorsPanel({
   )
 }
 
+/**
+ * A scheme typed without its space — `Sentry-Bearer` — gets one; a header
+ * value of `Sentry-Bearertoken` is a failure nobody could see from the form.
+ * Anything that is not a bare scheme is sent exactly as typed. Blank is the
+ * default, which the worker resolves (`secretPlacement`).
+ */
+function secretPrefixFrom(raw: string): string | undefined {
+  if (raw.trim() === '') return undefined
+  return /^[A-Za-z][A-Za-z0-9-]*$/.test(raw.trim()) ? `${raw.trim()} ` : raw
+}
+
 function AddConnector({
+  initial,
   secretsConfigured,
   onCancel,
 }: {
+  /** Filled in from a catalog preset that is not one click. */
+  initial: FormPrefill | null
   secretsConfigured: boolean
   onCancel: () => void
 }) {
-  const [kind, setKind] = useState<'http' | 'sse' | 'stdio'>('http')
-  const [name, setName] = useState('')
+  const [kind, setKind] = useState<'http' | 'sse' | 'stdio'>(initial ? 'stdio' : 'http')
+  const [name, setName] = useState(initial?.name ?? '')
   const [url, setUrl] = useState('')
-  const [command, setCommand] = useState('')
-  const [args, setArgs] = useState('')
+  const [command, setCommand] = useState(initial?.command ?? '')
+  const [args, setArgs] = useState(initial?.args.join(' ') ?? '')
   const [credential, setCredential] = useState('')
+  // Where the credential goes. NAMES, validated by the same schema the worker
+  // reads them back with; the value only ever goes in the credential field.
+  const [secretHeader, setSecretHeader] = useState('')
+  const [secretPrefix, setSecretPrefix] = useState('')
+  const [secretEnv, setSecretEnv] = useState(initial?.secretEnv ?? '')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const card = useRef<HTMLDivElement>(null)
+
+  // The form sits above the catalog, so a person who pressed "Fill in the
+  // form" at the bottom of a long list would otherwise not see it filled.
+  useEffect(() => {
+    if (initial) card.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [initial])
+
+  const header = secretHeader.trim().toLowerCase() || 'authorization'
+  const prefix = secretPrefixFrom(secretPrefix) ?? (header === 'authorization' ? 'Bearer ' : '')
+  const envName = secretEnv.trim() || 'MCP_SECRET'
 
   const submit = async (): Promise<void> => {
     setBusy(true)
     setError('')
     try {
+      const placedPrefix = secretPrefixFrom(secretPrefix)
       const config =
         kind === 'stdio'
-          ? { command, args: args.split(/\s+/).filter(Boolean), env: {} }
-          : { url, headers: {} }
+          ? {
+              command,
+              args: args.split(/\s+/).filter(Boolean),
+              env: {},
+              ...(secretEnv.trim() ? { secretEnv: secretEnv.trim() } : {}),
+            }
+          : {
+              url,
+              headers: {},
+              ...(secretHeader.trim() ? { secretHeader: secretHeader.trim().toLowerCase() } : {}),
+              ...(placedPrefix !== undefined ? { secretPrefix: placedPrefix } : {}),
+            }
       const res = await fetch('/api/connectors', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -272,7 +357,12 @@ function AddConnector({
           name,
           kind,
           config,
-          ...(credential ? { credential, credentialLabel: `${name} credential` } : {}),
+          ...(credential
+            ? {
+                credential,
+                credentialLabel: initial?.credentialLabel ? `${name}: ${initial.credentialLabel}` : `${name} credential`,
+              }
+            : {}),
         }),
       })
       const body = (await res.json().catch(() => ({}))) as { error?: string }
@@ -293,8 +383,14 @@ function AddConnector({
   }
 
   return (
-    <div className="row-card" style={{ marginTop: 16 }}>
+    <div className="row-card" style={{ marginTop: 16 }} ref={card}>
       <h3 style={{ margin: '0 0 10px' }}>Add a connector</h3>
+      {initial ? (
+        <div className="note" style={{ marginBottom: 6 }}>
+          Filled in from the catalog’s <strong>{initial.from}</strong> preset. Change the package in the
+          arguments to the exact version you reviewed — <code>package@1.2.3</code> — before adding it.
+        </div>
+      ) : null}
 
       <label>
         Name
@@ -323,9 +419,10 @@ function AddConnector({
         <>
           <div className="note warn">
             <strong>A stdio connector runs a command on the agent worker.</strong> Adding one is
-            installing software on that host, not configuring an integration. It inherits none of
-            the worker&apos;s environment — no database URL, no API keys — but it runs as the worker
-            user.
+            installing software on that host, not configuring an integration. The worker starts it
+            without its own credentials — no database URL, no API keys — but it runs as the worker
+            user. It runs whatever version the command names, so name an exact one:{' '}
+            <code>@latest</code> is whatever was published last, every time the worker starts it.
           </div>
           <label>
             Command
@@ -341,21 +438,72 @@ function AddConnector({
             />
             <span className="hint">Separated by spaces. Do not put a credential here — use the field below.</span>
           </label>
+          <details style={{ marginTop: 12 }} open={Boolean(initial?.secretEnv)}>
+            <summary className="muted" style={{ fontSize: 12.5, cursor: 'pointer' }}>
+              Where the credential goes
+            </summary>
+            <label>
+              Environment variable
+              <input
+                value={secretEnv}
+                onChange={(e) => setSecretEnv(e.target.value)}
+                placeholder="MCP_SECRET"
+                autoComplete="off"
+              />
+              <span className="hint">
+                A name, never the value — the variable the server reads its key from, such as{' '}
+                <code>BRAVE_API_KEY</code>. Blank means <code>MCP_SECRET</code>.
+              </span>
+            </label>
+          </details>
         </>
       ) : (
-        <label>
-          URL
-          <input
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            placeholder="https://mcp.example.com/v1"
-            autoComplete="off"
-          />
-          <span className="hint">
-            Must be reachable from the worker and outside its own network. Do not put a token in the
-            query string — use the field below.
-          </span>
-        </label>
+        <>
+          <label>
+            URL
+            <input
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://mcp.example.com/v1"
+              autoComplete="off"
+            />
+            <span className="hint">
+              Must be reachable from the worker and outside its own network. Do not put a token in the
+              query string — use the field below.
+            </span>
+          </label>
+          <details style={{ marginTop: 12 }}>
+            <summary className="muted" style={{ fontSize: 12.5, cursor: 'pointer' }}>
+              Where the credential goes
+            </summary>
+            <label>
+              Header
+              <input
+                value={secretHeader}
+                onChange={(e) => setSecretHeader(e.target.value)}
+                placeholder="authorization"
+                autoComplete="off"
+              />
+              <span className="hint">
+                A name, never the value — the header the server reads its key from, such as{' '}
+                <code>x-api-key</code>. Blank means <code>authorization</code>.
+              </span>
+            </label>
+            <label>
+              Text before the key
+              <input
+                value={secretPrefix}
+                onChange={(e) => setSecretPrefix(e.target.value)}
+                placeholder={header === 'authorization' ? 'Bearer' : '(nothing)'}
+                autoComplete="off"
+              />
+              <span className="hint">
+                A scheme, never the value — such as <code>Sentry-Bearer</code>; its space is added. Blank
+                means <code>Bearer</code> on <code>authorization</code> and nothing on any other header.
+              </span>
+            </label>
+          </details>
+        </>
       )}
 
       <label>
@@ -370,8 +518,8 @@ function AddConnector({
         <span className="hint">
           {secretsConfigured
             ? kind === 'stdio'
-              ? 'Encrypted before it is stored, and passed to the command as MCP_SECRET. It is never written to the connector row, a log, or the agent’s context.'
-              : 'Encrypted before it is stored, and sent as an Authorization: Bearer header. It is never written to the connector row, a log, or the agent’s context.'
+              ? `Encrypted before it is stored, and passed to the command as ${envName}. It is never written to the connector row, a log, or the agent’s context.`
+              : `Encrypted before it is stored, and sent as ${header}: ${prefix}<key>. It is never written to the connector row, a log, or the agent’s context.`
             : 'SECRETS_KEY is not set on this deployment, so a credential cannot be stored encrypted — and it will not be stored any other way.'}
         </span>
       </label>

@@ -1,11 +1,12 @@
 import { redirect } from 'next/navigation'
-import { can, parseIcpDefinition } from '@agency/core'
+import { can, CONNECTOR_CATALOG, parseIcpDefinition } from '@agency/core'
 import {
   listConnectors, parseConnectorConfig, secretsKeyFromEnv, type AgencyDb, type ConnectorRow,
 } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { ConnectorsPanel, type ConnectorView } from '@/components/settings/connectors'
+import { browserPresets } from '@/components/settings/connector-presets'
 import { getDb } from '@/lib/db'
 import { agentConfigured } from '@/lib/agent'
 import { icpForOrg } from '@/lib/queries'
@@ -23,6 +24,11 @@ import { icpForOrg } from '@/lib/queries'
  * whose only purpose is to be dereferenced by the worker. `toView` below is
  * the boundary, and it is the reason this page holds a mapping function rather
  * than passing rows straight through.
+ *
+ * The catalog crosses the same way, through `browserPresets`: the fields a
+ * card renders and the `config` Install posts, never a URL with a query
+ * string, and the decision about whether there is an Install button at all
+ * already made on this side.
  */
 export const dynamic = 'force-dynamic'
 
@@ -60,6 +66,7 @@ export default async function ConnectorsPage() {
       </p>
       <ConnectorsPanel
         connectors={rows.map(toView)}
+        presets={browserPresets(CONNECTOR_CATALOG)}
         canWrite={can({ id: user.id, orgId: user.orgId, role: user.role }, 'connectors:write')}
         agentAvailable={agentConfigured()}
         secretsConfigured={secretsKeyFromEnv() !== null}
