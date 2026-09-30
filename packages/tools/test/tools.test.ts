@@ -68,7 +68,9 @@ describe('the agency tools', () => {
     return spec.handler(parsed as never, ctx(over))
   }
 
-  const profileFor = (over: { gaps?: string[]; unobserved?: string[]; fetchOk?: boolean } = {}): SiteProfile => {
+  const profileFor = (
+    over: { gaps?: string[]; unobserved?: string[]; fetchOk?: boolean; extra?: Record<string, Observation> } = {},
+  ): SiteProfile => {
     const observations: Record<string, Observation> = {}
     for (const key of AGENCY_SIGNALS) {
       observations[key] = { observed: true, gap: false, detail: '', evidence: { header: key, seen: 'present' } }
@@ -79,6 +81,7 @@ describe('the agency tools', () => {
     for (const key of over.unobserved ?? []) {
       observations[key] = { observed: false, gap: null, detail: 'timed out', evidence: { outcome: 'no response' } }
     }
+    Object.assign(observations, over.extra ?? {})
     return {
       domain: 'acme.test', company: 'Acme', title: 'Acme',
       fetchOk: over.fetchOk ?? true, fetchError: over.fetchOk === false ? 'TimeoutError' : '',
@@ -264,6 +267,57 @@ describe('the agency tools', () => {
       expect(mentioned).not.toContain('trust_page')
       expect(data.notObservedCount).toBe(2)
       expect(out.summary).toContain('could not be observed')
+    })
+
+    /**
+     * An informational signal is observed and recorded but not in the score.
+     * It must reach the model labelled as exactly that — never among the
+     * gaps, never among the strengths, never counted as a signal the scan
+     * could not observe — so the model cannot lead an email with it.
+     */
+    it('lists informational signals apart, as not scored, and never among the gaps', async () => {
+      await scanOf('beta.test', {
+        gaps: ['csp'],
+        extra: {
+          hsts_quality: {
+            observed: true, gap: true, detail: 'max-age=3600 is under 180 days',
+            evidence: { url: 'https://beta.test/', maxAge: 3600 },
+          },
+          cookie_flags: {
+            observed: true, gap: false, detail: 'not applicable — no cookies set on the homepage',
+            evidence: { url: 'https://beta.test/', cookies: [] },
+          },
+          mixed_content: {
+            observed: false, gap: null, detail: 'homepage exceeded the read cap',
+            evidence: { url: 'https://beta.test/', outcome: 'body truncated' },
+          },
+        },
+      })
+      const out = await run(getCompany, { domain: 'beta.test' })
+      expect(out.ok).toBe(true)
+      if (!out.ok) return
+      const data = out.data as {
+        gaps: Array<{ signal: string }>
+        strengths: Array<{ signal: string }>
+        notObservedCount: number
+        informational: Array<{ key: string; label: string; why: string; observed: boolean; gap: boolean | null; status: string; detail: string }>
+      }
+      expect(data.gaps.map((g) => g.signal)).toEqual(['csp'])
+      const scoredNames = [...data.gaps, ...data.strengths].map((f) => f.signal)
+      for (const key of ['hsts_quality', 'cookie_flags', 'mixed_content']) expect(scoredNames).not.toContain(key)
+      // The unobserved informational row is dropped like any other, and is not
+      // counted among the SCORED signals that could not be observed.
+      expect(data.notObservedCount).toBe(0)
+      expect(data.informational.map((i) => i.key).sort()).toEqual(['cookie_flags', 'hsts_quality'])
+      const hsts = data.informational.find((i) => i.key === 'hsts_quality')!
+      expect(hsts).toMatchObject({ label: 'HSTS max-age', observed: true, gap: true, status: 'gap' })
+      expect(hsts.why.length).toBeGreaterThan(20)
+      expect(data.informational.find((i) => i.key === 'cookie_flags')!.status).toBe('not applicable')
+
+      expect(out.summary).toContain('not scored')
+      const [before, after] = out.summary.split('Also observed')
+      expect(before).not.toContain('hsts_quality')
+      expect(after).toContain('hsts_quality [gap]')
     })
 
     it('tells the model when the evidence is too old to quote', async () => {

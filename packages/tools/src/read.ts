@@ -8,8 +8,8 @@
  */
 import { z } from 'zod'
 import {
-  DEFAULT_STALE_AFTER_DAYS, isStale, orderedSignals, parseIcpDefinition,
-  type IcpDefinition,
+  DEFAULT_STALE_AFTER_DAYS, INFORMATIONAL_SIGNALS, informationalStatus, isStale, orderedSignals,
+  parseIcpDefinition, type IcpDefinition,
 } from '@agency/core'
 import {
   activeIcpProfile, companyList, findCompanyByDomain, latestScanWithFindings,
@@ -175,7 +175,8 @@ export const getCompany: AgencyToolSpec<typeof getCompanyShape> = {
     'Read one company in full: its latest score and the individual findings that scan actually ' +
     'observed, each with the evidence behind it. Use this before saying anything specific about ' +
     'a company. Findings the scan could NOT observe are not returned at all — if something is ' +
-    'absent here, it was not seen, and you must not claim it either way.',
+    'absent here, it was not seen, and you must not claim it either way. Signals under ' +
+    '`informational` were observed but are NOT scored: context, never a gap to quote to anyone.',
   shape: getCompanyShape,
   async handler(input, ctx): Promise<ToolOutcome<unknown>> {
     // The SAME normalisation the three write tools use, not a lowercase and a
@@ -209,11 +210,27 @@ export const getCompany: AgencyToolSpec<typeof getCompanyShape> = {
     const days = staleDays(icp)
     const stale = isStale(found.scan.ranAt, days, ctx.now())
 
+    // Scored and informational rows part company first. An informational
+    // signal is not in the score, so it is never a gap or a strength here:
+    // it goes under `informational`, labelled as unscored, where a model
+    // cannot mistake it for something to lead an email with.
+    const scored = found.findings.filter((f) => f.scored)
     // §2.2 and §12: drop everything the scan did not observe, BEFORE it is
     // serialised. The model's context is a rendering like any other.
-    const observed = found.findings.filter((f) => f.observed)
+    const observed = scored.filter((f) => f.observed)
     const gaps = observed.filter((f) => f.gap === true)
     const inPlace = observed.filter((f) => f.gap === false)
+    const informational = found.findings
+      .filter((f) => !f.scored && f.observed)
+      .map((f) => ({
+        key: f.signalKey,
+        label: INFORMATIONAL_SIGNALS[f.signalKey]?.label ?? f.signalKey,
+        why: INFORMATIONAL_SIGNALS[f.signalKey]?.why ?? null,
+        observed: f.observed,
+        gap: f.gap,
+        status: informationalStatus(f),
+        detail: f.detail,
+      }))
 
     const payload = {
       domain,
@@ -235,7 +252,8 @@ export const getCompany: AgencyToolSpec<typeof getCompanyShape> = {
         quotable: !stale,
       })),
       strengths: inPlace.map((f) => ({ signal: f.signalKey, detail: f.detail })),
-      notObservedCount: found.findings.length - observed.length,
+      notObservedCount: scored.length - observed.length,
+      informational,
     }
 
     return ok(
@@ -255,6 +273,13 @@ export const getCompany: AgencyToolSpec<typeof getCompanyShape> = {
         ...gaps.map((f) => `  ${String(f.weight).padStart(2)}  ${f.signalKey} — ${f.detail || 'absent'}`),
         'Already in place:',
         `  ${inPlace.map((f) => f.signalKey).join(', ') || 'none'}`,
+        ...(informational.length > 0
+          ? [
+              `Also observed, not scored (${informational.length}) — context only; not part of the score, ` +
+                'and never to be presented as a finding or quoted in outreach:',
+              ...informational.map((i) => `  ${i.key} [${i.status}] — ${i.detail || i.label}`),
+            ]
+          : []),
       ]),
     )
   },
