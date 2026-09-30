@@ -17,6 +17,9 @@
  * that catches a template written next year that reads `detail.token`,
  * which no list of today's keys could.
  */
+import { readdirSync, readFileSync } from 'node:fs'
+import { dirname, join, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { AGENCY_TOOL_NAMES, REDACTED, SENSITIVE_KEY, SUPPRESSION_SOURCES } from '@agency/core'
 import { describe, expect, it } from 'vitest'
 import {
@@ -35,6 +38,7 @@ import {
   suppressionSource,
   type AuditLine,
 } from '../src/lib/audit-copy'
+import { REFUSAL_WORDS } from '../src/lib/refusal-words'
 
 const ORG_USER = '0b0e5a4e-7d1c-4c8e-9a51-1f7d1c0c0001'
 const OTHER_USER = '0b0e5a4e-7d1c-4c8e-9a51-1f7d1c0c0002'
@@ -56,8 +60,15 @@ const lookups = { company: COMPANY, person: (id: string) => people[id] ?? null }
 
 /**
  * Every action a writer in this tree produces today, with the detail shape
- * it writes (research §6.4, and the wave-1 writers since). A new writer is
- * added HERE, and the test fails until audit-copy.ts has its sentence.
+ * it writes (research §6.4, and the writers since). A new writer is added
+ * HERE, and the test fails until audit-copy.ts has its sentence.
+ *
+ * "Added here" used to be a convention, and the convention failed: eight
+ * features wrote new actions from files that were not this one, and /audit
+ * showed every one of them as a raw name. So the last describe below reads
+ * the source tree and fails for an action a writer produces that is missing
+ * from this map — and for an entry here that no writer produces, because a
+ * test pinned to a name nobody writes proves nothing.
  */
 const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'deal.created': { companyId: SUBJECT, stage: 'contacted' },
@@ -176,6 +187,55 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'export.companies': { rows: 42, filters: {} },
   'export.findings': { rows: 310, filters: {} },
   'export.consents': { rows: 18, filters: {} },
+  // --- written by the wave-3 features, and the gate's own ------------------
+  'agent.tool_disabled': { toolName: 'mcp__zapier__send_email', toolUseId: 't1', agentId: null, agentType: null },
+  'agent.get_scan_history': { companyId: SUBJECT, returned: 3, turnId: SUBJECT },
+  'agent.get_evidence_changes': {
+    companyId: SUBJECT, newerScanId: SUBJECT, olderScanId: SUBJECT, fixed: 1, regressed: 0, notAssessed: 2, nowObserved: 0,
+  },
+  'agent.get_stale_companies': { matched: 4, returned: 4, turnId: SUBJECT },
+  'agent.get_replies': { kind: null, unhandledOnly: true, sinceDays: 14, returned: 2, turnId: SUBJECT },
+  'agent.classify_reply': { touchId: SUBJECT, kind: 'interested', from: 'other', handled: true, turnId: SUBJECT },
+  'agent.get_pipeline_metrics': { sinceDays: 90, deals: 12, moves: 30, turnId: SUBJECT },
+  'agent.get_company_timeline': { companyId: SUBJECT, returned: 20, turnId: SUBJECT },
+  'agent.get_compliance_summary': { staleDays: 14, turnId: SUBJECT },
+  'agent.search_crm': { sections: ['companies', 'contacts'], returned: 5, truncated: false, turnId: SUBJECT },
+  'agent.add_note': { noteId: SUBJECT, companyId: SUBJECT, contactId: null, turnId: SUBJECT },
+  'agent.create_task': { taskId: SUBJECT, companyId: SUBJECT, assigneeUserId: OTHER_USER, turnId: SUBJECT },
+  'agent.list_tasks': { open: true, assigneeUserId: null, companyId: null, returned: 3, turnId: SUBJECT },
+  'proposal.draft': { companyId: SUBJECT },
+  'proposal.exported': { companyId: SUBJECT, format: 'markdown' },
+  'proposal.accepted_via_share': { proposalId: SUBJECT, shareId: SUBJECT, companyId: SUBJECT },
+  'proposal.share_created': { companyId: SUBJECT, shareId: SUBJECT, expiresAt: '2026-10-14T03:17:00.000Z', cappedByEvidence: true },
+  'proposal.share_revoked': { shareId: SUBJECT },
+  'linkedin.handed': { touchId: SUBJECT, campaignId: SUBJECT, contactId: SUBJECT, userId: ORG_USER },
+  'linkedin.sent': { touchId: SUBJECT, taskId: SUBJECT, campaignId: SUBJECT },
+  'linkedin.not_sent': { touchId: SUBJECT, taskId: SUBJECT, campaignId: SUBJECT },
+  'linkedin.dismissed': { touchId: SUBJECT, taskId: SUBJECT, campaignId: SUBJECT },
+  'send.bounced': { campaignId: SUBJECT, channel: 'email', code: 'bounced' },
+  'contact.bounced': { code: '5.1.1', cancelledQueued: 1, touchId: SUBJECT },
+  'contact.bounce_transient': { code: '4.2.2', touchId: SUBJECT },
+  'contact.bounce_cleared': { code: '5.1.1' },
+  'contact.bounce_unmatched': { why: 'recipient_mismatch', code: '5.1.1', permanent: true, touchId: SUBJECT },
+  'campaign.auto_paused': { bouncePct: 12, threshold: 5, sentTo: 25, bounced: 3 },
+  'contact.unsubscribed': { contactId: SUBJECT, touchId: SUBJECT, addresses: 1, paused: true, cancelledQueued: 0 },
+  'unsubscribe.not_recorded': { touchId: SUBJECT, contactId: SUBJECT, why: 'Error', paused: true, cancelledQueued: 0 },
+  'contact.exported': { contactId: SUBJECT },
+  'contact.erased': { touchesScrubbed: 4, callsScrubbed: 1, suppressionsAdded: 2 },
+  'contact.erasure_failed': { why: 'unreadable_phone', paused: true },
+  'connector.tools_disabled': {
+    name: 'zapier', tools: ['send_email'], before: { source: 'catalog', tools: [], everyTool: true },
+  },
+  'cron.digest': {
+    posted: false,
+    why: 'no_slack',
+    counts: {
+      pendingApprovals: 2, unhandledReplies: 1, rottingDeals: 0, staleCompanies: 3, neverScanned: 1, dueTasks: 0,
+      overdueTasks: 0, refusals24h: 1, refusalsByCode: { quiet_hours: 1 }, optOutsNotRecorded24h: 0, spend24hUsd: '0.12',
+    },
+    worker: 'live',
+    workerAlert: 'not_needed',
+  },
 }
 
 describe('sentenceFor', () => {
@@ -242,6 +302,57 @@ describe('sentenceFor', () => {
       'refused an email to a contact at rentman.io: on the suppression list; nothing was sent',
     )
     expect(sentenceFor(line('meeting.booked', WRITTEN['meeting.booked']), lookups)).toContain('(Europe/London)')
+  })
+
+  it('says the newer writers’ facts, including the ones word() could not read', () => {
+    const say = (action: string, detail: unknown = WRITTEN[action], actor = 'system'): string =>
+      sentenceFor(line(action, detail, { actor }), lookups)
+    // An RFC 3463 status starts with a digit, so the enum reader dropped it from every bounce line.
+    expect(say('contact.bounced')).toBe(
+      'recorded a hard bounce (5.1.1) for a contact at rentman.io; email to that address stops until it is corrected, and 1 queued was cancelled',
+    )
+    expect(say('contact.bounce_transient')).toBe(
+      'recorded a temporary delivery failure (4.2.2) for a contact at rentman.io; nothing was changed',
+    )
+    expect(say('contact.bounce_unmatched')).toBe(
+      'did not act on a delivery report (5.1.1) about a contact at rentman.io: the address it names is not the one that message went to; no contact was changed',
+    )
+    expect(say('contact.bounced', { code: 'not-a-status' })).not.toContain('not-a-status')
+    expect(say('send.bounced')).toBe('refused an email to a contact at rentman.io: address bounced; nothing was sent')
+    expect(say('campaign.auto_paused')).toBe(
+      'paused a campaign automatically: 12% of the addresses it wrote to bounced (3 of 25; the limit is 5%); a person re-activates it',
+    )
+    // advanceDeal records { from, to }; POST /api/deals records { stage }. Both read.
+    expect(say('deal.advanced', { companyId: SUBJECT, from: 'contacted', to: 'replied' })).toBe(
+      'moved rentman.io forward from contacted to replied',
+    )
+    expect(say('deal.advanced', { companyId: SUBJECT, stage: 'replied' })).toBe('moved rentman.io forward to replied')
+    expect(say('deal.created', { companyId: SUBJECT, from: null, to: 'contacted' })).toBe('opened a deal for rentman.io at contacted')
+    expect(say('proposal.share_created', WRITTEN['proposal.share_created'], ORG_USER)).toBe(
+      'created a share link for the proposal for rentman.io, open until 2026-10-14 (when its evidence ages out); nothing was sent',
+    )
+    expect(say('linkedin.not_sent', WRITTEN['linkedin.not_sent'], ORG_USER)).toBe(
+      'said the LinkedIn message for a contact at rentman.io was not sent; it is recorded as failed',
+    )
+    expect(say('agent.classify_reply', WRITTEN['agent.classify_reply'], 'agent')).toBe(
+      'recorded a reply as interested (it was other); marked it handled; nothing was sent',
+    )
+    expect(say('agent.classify_reply', { touchId: SUBJECT, kind: null, from: null, handled: true }, 'agent')).toBe(
+      'marked a reply handled; nothing was sent',
+    )
+    // A catalog server's send tools are off before any owner chose anything.
+    const disabled = say('agent.tool_disabled', WRITTEN['agent.tool_disabled'], 'agent')
+    expect(disabled).toBe(
+      'was refused mcp__zapier__send_email: it is turned off in Settings → Connectors, so nobody was asked',
+    )
+    expect(disabled).not.toContain('owner')
+    expect(say('cron.digest')).toBe('built the daily digest and did not post it: no Slack webhook is configured')
+    expect(say('cron.digest', { posted: true, counts: {}, worker: 'silent', workerAlert: 'posted' })).toBe(
+      'posted the daily digest to Slack; the worker was silent, and a separate alert was posted',
+    )
+    expect(say('cron.digest', { posted: false, why: 'slack_failed', worker: 'silent', workerAlert: 'failed' })).toBe(
+      'built the daily digest and did not post it: Slack did not accept it; the worker was silent, and the alert could NOT be posted',
+    )
   })
 
   it('never writes the removed value into the sentence — the list is the place for the value', () => {
@@ -420,7 +531,18 @@ describe('around the sentence', () => {
     expect(isAlarm(line('call.opted_out', { suppressed: true }))).toBe(false)
     expect(isAlarm(line('call.ended', { disclosed: false }))).toBe(true)
     expect(isAlarm(line('call.ended', { disclosed: true }))).toBe(false)
+    expect(isAlarm(line('unsubscribe.not_recorded', WRITTEN['unsubscribe.not_recorded']))).toBe(true)
+    expect(isAlarm(line('contact.erasure_failed', WRITTEN['contact.erasure_failed']))).toBe(true)
     expect(isAlarm(line('deal.moved'))).toBe(false)
+  })
+
+  it('raises a silent worker that the daily alert reached nobody about — the worker cannot say it', () => {
+    const digest = (workerAlert: string): AuditLine => line('cron.digest', { ...WRITTEN['cron.digest'], workerAlert }, { actor: 'system' })
+    expect(isAlarm(digest('failed'))).toBe(true)
+    expect(isAlarm(digest('no_slack'))).toBe(true)
+    expect(isAlarm(digest('posted'))).toBe(false)
+    expect(isAlarm(digest('not_needed'))).toBe(false)
+    expect(isAlarm(line('cron.digest', {}))).toBe(false)
   })
 
   it('offers every catalogued family as a filter', () => {
@@ -443,5 +565,103 @@ describe('suppression sources', () => {
     expect(UNRECORDED_SOURCE).toEqual({ tag: 'unrecorded', explain: 'recorded before sources were tracked' })
     const s = sentenceFor(line('suppression.removed', { kind: 'phone', hadSource: null }), lookups)
     expect(s).toBe('removed a phone number from the suppression list (source: unrecorded); it may be contacted again')
+  })
+})
+
+/**
+ * The tree, read. Every `action:` a writer sets and every `audit('…')` a
+ * tool or a gate ring calls, as a string literal — including one spread
+ * over a ternary on the lines after `action:`. An action built from a
+ * template is listed in DYNAMIC with every value it can take, so a new
+ * template fails here until somebody says what it expands to.
+ */
+describe('every writer in the tree', () => {
+  const here = dirname(fileURLToPath(import.meta.url))
+  const root = resolve(here, '../../..')
+
+  const DYNAMIC: Readonly<Record<string, readonly string[]>> = {
+    // `advanceDeal`'s outcome, as POST /api/deals records it.
+    'deal.${moved.outcome}': ['deal.created', 'deal.advanced', 'deal.unchanged'],
+    'linkedin.${args.outcome}': ['linkedin.sent', 'linkedin.not_sent', 'linkedin.dismissed'],
+    'proposal.${args.status}': ['proposal.draft', 'proposal.sent', 'proposal.accepted', 'proposal.declined', 'proposal.withdrawn'],
+    // Every `SendRefusalCode`: refusal-words.test.ts pins that REFUSAL_WORDS names them all.
+    'send.${decision.code}': Object.keys(REFUSAL_WORDS).map((code) => `send.${code}`),
+  }
+
+  function sources(): string[] {
+    const out: string[] = []
+    const walk = (dir: string): void => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, e.name)
+        if (e.isDirectory()) walk(p)
+        else if (/\.tsx?$/.test(e.name) && !e.name.endsWith('.d.ts')) out.push(p)
+      }
+    }
+    for (const top of ['apps', 'packages']) {
+      for (const d of readdirSync(join(root, top), { withFileTypes: true })) {
+        if (!d.isDirectory()) continue
+        const src = join(root, top, d.name, 'src')
+        try {
+          walk(src)
+        } catch {
+          // a workspace with no src/ writes nothing
+        }
+      }
+    }
+    return out
+  }
+
+  function writtenInTree(): { literal: Map<string, string>; template: Map<string, string> } {
+    const literal = new Map<string, string>()
+    const template = new Map<string, string>()
+    for (const file of sources()) {
+      if (file.endsWith(join('lib', 'audit-copy.ts'))) continue
+      const lines = readFileSync(file, 'utf8').split('\n')
+      lines.forEach((l, i) => {
+        // A doc comment that says "a whole action: `send` matches …" writes nothing.
+        if (/^\s*(\*|\/\/|\/\*)/.test(l)) return
+        let text: string
+        const at = l.search(/\baction:/)
+        if (at >= 0) {
+          text = l.slice(at)
+          // An action chosen by a ternary runs on until the property's comma.
+          for (let j = i + 1; j < Math.min(lines.length, i + 6) && !/[,;{}]\s*$/.test(text.trimEnd()); j++) {
+            text += ` ${(lines[j] ?? '').trim()}`
+          }
+        } else if (/\baudit\(/.test(l)) {
+          text = l.slice(l.search(/\baudit\(/))
+        } else return
+        const where = `${relative(root, file)}:${i + 1}`
+        for (const m of text.matchAll(/(['"`])([a-z_]+\.[a-z_]+)\1/g)) literal.set(m[2] ?? '', where)
+        for (const m of text.matchAll(/`([a-z_]+\.\$\{[^}`]+\})`/g)) template.set(m[1] ?? '', where)
+      })
+    }
+    return { literal, template }
+  }
+
+  const { literal, template } = writtenInTree()
+  const expanded = Object.values(DYNAMIC).flat()
+
+  it('reads enough of the tree to mean something', () => {
+    // Fewer than this and the scan broke, which would pass everything below.
+    expect(literal.size).toBeGreaterThan(120)
+    expect(literal.get('contact.opt_out_not_recorded')).toMatch(/^packages\/db\/src\//)
+    expect(literal.has('campaign.auto_send_on')).toBe(true) // the ternary on the lines after `action:`
+    expect(literal.has('agent.tool_disabled')).toBe(true) // a gate ring's `deps.audit(…)`
+  })
+
+  it('knows what every templated action expands to', () => {
+    expect([...template.keys()].sort()).toEqual(Object.keys(DYNAMIC).sort())
+  })
+
+  it('has a sentence and a detail shape for every action a writer produces', () => {
+    const produced = [...literal.keys(), ...expanded]
+    expect(produced.filter((a) => !AUDIT_ACTIONS.includes(a)).map((a) => `${a} (${literal.get(a) ?? 'template'})`)).toEqual([])
+    expect(produced.filter((a) => !(a in WRITTEN)).map((a) => `${a} (${literal.get(a) ?? 'template'})`)).toEqual([])
+  })
+
+  it('pins no detail shape for an action nobody writes', () => {
+    const produced = new Set([...literal.keys(), ...expanded])
+    expect(Object.keys(WRITTEN).filter((a) => !produced.has(a))).toEqual([])
   })
 })

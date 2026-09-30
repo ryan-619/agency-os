@@ -99,6 +99,16 @@ function word(d: unknown, key: string): string | null {
   return typeof v === 'string' && /^[a-z][a-z0-9_:-]{0,60}$/i.test(v) ? v : null
 }
 
+/**
+ * An RFC 3463 delivery status (`5.1.1`, `4.2.2`), or null. `word()` needs a
+ * leading letter, so a status read through it never rendered at all — every
+ * bounce sentence silently lost the one fact the row carries.
+ */
+function status(d: unknown, key: string): string | null {
+  const v = detailValue(d, key)
+  return typeof v === 'string' && /^[245]\.\d{1,3}\.\d{1,3}$/.test(v) ? v : null
+}
+
 function num(d: unknown, key: string): number | null {
   const v = detailValue(d, key)
   return typeof v === 'number' && Number.isFinite(v) ? v : null
@@ -196,6 +206,20 @@ const REPLY_KIND: Readonly<Record<string, string>> = {
   auto_reply: 'an auto-reply',
   opted_out: 'a reply asking to stop',
   other: 'a reply',
+}
+
+/** Why `contact.bounce_unmatched` left a report alone — `outreach.ts`'s own four reasons. */
+const BOUNCE_UNMATCHED: Readonly<Record<string, string>> = {
+  no_recorded_recipient: 'the returned message has no recorded recipient',
+  no_recipient: 'the report names no recipient',
+  recipient_mismatch: 'the address it names is not the one that message went to',
+  address_changed: 'the contact’s address has changed since that message went',
+}
+
+/** Why `cron.digest` did not reach Slack. */
+const DIGEST_NOT_POSTED: Readonly<Record<string, string>> = {
+  no_slack: 'no Slack webhook is configured',
+  slack_failed: 'Slack did not accept it',
 }
 
 /** A deal label as `meeting.booked` and `contact.replied` write it: `<outcome>:<stage>`. */
@@ -343,13 +367,17 @@ const TOOL_SENTENCES: Readonly<Record<string, Template>> = Object.fromEntries(
 const SENTENCES: Readonly<Record<string, Template>> = {
   ...TOOL_SENTENCES,
   // --- the pipeline -------------------------------------------------------
+  // Two writers: `POST /api/deals` records `{ stage }`, and `advanceDeal`
+  // records every automatic move as `{ from, to }`. Both are read.
   'deal.created': (c) => {
-    const stage = word(c.d, 'stage')
+    const stage = word(c.d, 'stage') ?? word(c.d, 'to')
     return `opened a deal for ${c.co}${stage ? ` at ${stage}` : ''}`
   },
   'deal.advanced': (c) => {
-    const stage = word(c.d, 'stage')
-    return stage ? `moved ${c.co} forward to ${stage}` : `moved the deal for ${c.co} forward`
+    const to = word(c.d, 'stage') ?? word(c.d, 'to')
+    const from = word(c.d, 'from')
+    if (!to) return `moved the deal for ${c.co} forward`
+    return from ? `moved ${c.co} forward from ${from} to ${to}` : `moved ${c.co} forward to ${to}`
   },
   'deal.unchanged': (c) => {
     const stage = word(c.d, 'stage')
@@ -410,6 +438,15 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   },
   'proposal.accepted_via_share': (c) =>
     `accepted the proposal for ${c.co} through its share link, which closes the deal as won`,
+  // A share link is not a send: a person pastes the URL into a message they write.
+  'proposal.share_created': (c) => {
+    const until = text(c.d, 'expiresAt', 40)
+    const date = until && !Number.isNaN(Date.parse(until)) ? until.slice(0, 10) : null
+    return `created a share link for the proposal for ${c.co}${date ? `, open until ${date}` : ''}${
+      flag(c.d, 'cappedByEvidence') ? ' (when its evidence ages out)' : ''
+    }; nothing was sent`
+  },
+  'proposal.share_revoked': (c) => `revoked a share link for the proposal for ${c.co}; the link no longer opens`,
   'lead.inbound': (c) => {
     const consented = words(c.d, 'consented')
     return `took a booking for ${c.co} from the public booking page${tail([
@@ -464,14 +501,41 @@ const SENTENCES: Readonly<Record<string, Template>> = {
       kept !== null && `${plural(kept, 'suppression')} kept`,
     ])}`
   },
-  'contact.erasure_failed': () => 'could not erase a contact: an opt-out could not be recorded first; follow up by hand',
-  'contact.unsubscribed': (c) => `recorded a one-click unsubscribe from a contact at ${c.co}`,
-  'contact.bounced': (c) => {
-    const code = word(c.d, 'code')
-    return `recorded a hard bounce${code ? ` (${code})` : ''} for a contact at ${c.co}`
+  'contact.erasure_failed': (c) =>
+    `could not erase a contact: nothing was erased and no suppression was recorded${
+      flag(c.d, 'paused') ? '; they were paused' : ''
+    } — follow up by hand`,
+  'contact.unsubscribed': (c) => {
+    const addresses = num(c.d, 'addresses')
+    const cancelled = num(c.d, 'cancelledQueued')
+    return `recorded a one-click unsubscribe from a contact at ${c.co}${tail([
+      addresses !== null && addresses > 0 && `${plural(addresses, 'address', 'addresses')} on the suppression list`,
+      flag(c.d, 'paused') && 'paused them in every campaign',
+      cancelled !== null && cancelled > 0 && `cancelled ${cancelled} queued`,
+    ])}`
   },
-  'contact.bounce_transient': (c) => `recorded a temporary bounce for a contact at ${c.co}`,
-  'contact.bounce_cleared': (c) => `cleared the bounce on a contact at ${c.co}`,
+  // A bounce is evidence about an address, never a suppression: the words say
+  // what stopped and what did not.
+  'contact.bounced': (c) => {
+    const code = status(c.d, 'code')
+    const cancelled = num(c.d, 'cancelledQueued')
+    return `recorded a hard bounce${code ? ` (${code})` : ''} for a contact at ${c.co}; email to that address stops until it is corrected${
+      cancelled !== null && cancelled > 0 ? `, and ${cancelled} queued ${cancelled === 1 ? 'was' : 'were'} cancelled` : ''
+    }`
+  },
+  'contact.bounce_transient': (c) => {
+    const code = status(c.d, 'code')
+    return `recorded a temporary delivery failure${code ? ` (${code})` : ''} for a contact at ${c.co}; nothing was changed`
+  },
+  'contact.bounce_cleared': (c) => {
+    const code = status(c.d, 'code')
+    return `cleared the bounce${code ? ` (${code})` : ''} on a contact at ${c.co}: their email address was changed`
+  },
+  'contact.bounce_unmatched': (c) => {
+    const code = status(c.d, 'code')
+    const why = own(BOUNCE_UNMATCHED, word(c.d, 'why'))
+    return `did not act on a delivery report${code ? ` (${code})` : ''} about a contact at ${c.co}${why ? `: ${why}` : ''}; no contact was changed`
+  },
   'contacts.imported': (c) => {
     const n = (k: string): number | null => num(c.d, k)
     return `imported contacts${tail([
@@ -512,7 +576,12 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   'campaign.auto_paused': (c) => {
     const pct = num(c.d, 'bouncePct')
     const limit = num(c.d, 'threshold')
-    return `paused a campaign automatically${pct !== null ? `: ${pct}% of recent messages bounced` : ''}${limit !== null ? ` (the limit is ${limit}%)` : ''}`
+    const bounced = num(c.d, 'bounced')
+    const sentTo = num(c.d, 'sentTo')
+    const counts = join([bounced !== null && sentTo !== null && `${bounced} of ${sentTo}`, limit !== null && `the limit is ${limit}%`])
+    return `paused a campaign automatically${pct !== null ? `: ${pct}% of the addresses it wrote to bounced` : ''}${
+      counts ? ` (${counts})` : ''
+    }; a person re-activates it`
   },
   'suppression.added': (c) => `added ${own(SUPPRESSION_KIND, word(c.d, 'kind')) ?? 'a value'} to the suppression list`,
   'suppression.already_present': (c) =>
@@ -533,6 +602,15 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   },
   'reply.answer_drafted': (c) =>
     `drafted an answer to a reply from a contact at ${c.co}; it waits for approval and nothing was sent`,
+
+  // --- LinkedIn: the provider is a person ----------------------------------
+  // Written with the person as actor; the words are never in the row.
+  'linkedin.handed': (c) =>
+    `was handed a LinkedIn message for a contact at ${c.co} to send from their own account, after every send rule passed`,
+  'linkedin.sent': (c) => `said the LinkedIn message for a contact at ${c.co} was sent from their own account`,
+  'linkedin.not_sent': (c) =>
+    `said the LinkedIn message for a contact at ${c.co} was not sent; it is recorded as failed`,
+  'linkedin.dismissed': (c) => `closed a LinkedIn step for a contact at ${c.co} that the send rules had stopped`,
 
   // --- the agent: its tools, and the gate --------------------------------
   'agent.get_icp': () => 'read the ideal customer profile',
@@ -575,6 +653,16 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     const at = domainLabel(c.d)
     return `read the consent recorded for a contact${at ? ` at ${at}` : ''}`
   },
+  // Never `opted_out`: the tool's enum has no such value, and the row check refuses it again.
+  'agent.classify_reply': (c) => {
+    const kind = word(c.d, 'kind')
+    const from = word(c.d, 'from')
+    const done = join([
+      kind && `recorded a reply as ${spaced(kind)}${from && from !== kind ? ` (it was ${spaced(from)})` : ''}`,
+      flag(c.d, 'handled') === true && (kind ? 'marked it handled' : 'marked a reply handled'),
+    ])
+    return `${done || 'looked at a reply and changed nothing'}; nothing was sent`
+  },
   'agent.tool_pre': (c) => `was about to call ${tool(c.d)}${riskNote(c.d)}`,
   'agent.tool_post': (c) => `finished ${tool(c.d)}`,
   'agent.tool_allow': (c) => `ran ${tool(c.d)} without asking — it is low risk`,
@@ -582,7 +670,10 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     const rule = word(c.d, 'rule')
     return `was refused ${tool(c.d)}${riskNote(c.d)}${rule ? ` by the rule ${rule}` : ''}`
   },
-  'agent.tool_disabled': (c) => `was refused ${tool(c.d)}: an owner turned that tool off`,
+  // Not "an owner turned it off": a catalog server's send tools are off by
+  // default until an owner saves a list, and nobody chose that for this row.
+  'agent.tool_disabled': (c) =>
+    `was refused ${tool(c.d)}: it is turned off in Settings → Connectors, so nobody was asked`,
   'approval.requested': (c) => `asked a person to approve ${tool(c.d)}${riskNote(c.d)}`,
   'approval.approved': (c) => {
     if (c.row.actor !== 'agent') return `approved ${tool(c.d)}`
@@ -704,9 +795,20 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   },
   'cron.digest': (c) => {
     const why = word(c.d, 'why')
-    return flag(c.d, 'posted')
+    const digest = flag(c.d, 'posted')
       ? 'posted the daily digest to Slack'
-      : `built the daily digest and did not post it${why ? ` (${spaced(why)})` : ''}`
+      : `built the daily digest and did not post it${why ? `: ${own(DIGEST_NOT_POSTED, why) ?? spaced(why)}` : ''}`
+    // The alert that the worker is silent cannot come from the worker; this row says whether it went.
+    switch (word(c.d, 'workerAlert')) {
+      case 'posted':
+        return `${digest}; the worker was silent, and a separate alert was posted`
+      case 'failed':
+        return `${digest}; the worker was silent, and the alert could NOT be posted`
+      case 'no_slack':
+        return `${digest}; the worker was silent, and nobody was alerted`
+      default:
+        return digest
+    }
   },
 }
 
@@ -715,8 +817,11 @@ export const AUDIT_ACTIONS: readonly string[] = Object.freeze(Object.keys(SENTEN
 
 /**
  * Rows a person must not scroll past: an opt-out that was not stored, and a
- * call with no AI disclosure. §2.1's failures, highlighted rather than
- * rendered like every other line.
+ * call with no AI disclosure — §2.1's failures, highlighted rather than
+ * rendered like every other line. And one operational failure nobody else
+ * will report: the worker went silent and the daily alert reached nobody,
+ * either because Slack refused it or because there is no Slack. The worker
+ * cannot say it is silent, so on such a deployment this line is the alarm.
  */
 export function isAlarm(row: AuditLine): boolean {
   switch (row.action) {
@@ -728,6 +833,10 @@ export function isAlarm(row: AuditLine): boolean {
       return flag(row.detail, 'suppressed') === false
     case 'call.ended':
       return flag(row.detail, 'disclosed') === false
+    case 'cron.digest': {
+      const alert = word(row.detail, 'workerAlert')
+      return alert === 'failed' || alert === 'no_slack'
+    }
     default:
       return false
   }
@@ -843,7 +952,7 @@ const FAMILY_LABEL: Readonly<Record<string, string>> = {
   suppression: 'Suppressions', unsubscribe: 'Unsubscribes', reply: 'Replies', agent: 'Agent and subagents',
   approval: 'Approvals', turn: 'Chat turns', connector: 'Connectors', credential: 'Credentials', user: 'Team',
   company: 'Companies', note: 'Notes', task: 'Tasks', call: 'Calls', notification: 'Notifications',
-  scan: 'Scheduled rescans', cron: 'Scheduled jobs', export: 'Exports',
+  scan: 'Scheduled rescans', cron: 'Scheduled jobs', export: 'Exports', linkedin: 'LinkedIn steps',
 }
 export const AUDIT_FAMILIES: readonly { readonly value: string; readonly label: string }[] = Object.freeze(
   [...new Set(AUDIT_ACTIONS.map((a) => a.split('.')[0] ?? a))].map((value) => ({
