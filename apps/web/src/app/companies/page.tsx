@@ -160,7 +160,10 @@ export default async function Companies({
           <option value="score">Sort: score</option>
           <option value="lastScanAt">Sort: last scan</option>
         </select>
-        <select name="dir" defaultValue={query.dir} aria-label="Direction" style={control}>
+        {/* Empty is "the sort's own order": highest score and newest scan first, names A→Z.
+            Pre-selecting the old direction would sort by score LOWEST first on a fresh pick. */}
+        <select name="dir" defaultValue={query.dir === defaultDir(query.sort) ? '' : query.dir} aria-label="Direction" style={control}>
+          <option value="">Natural order</option>
           <option value="asc">Ascending</option>
           <option value="desc">Descending</option>
         </select>

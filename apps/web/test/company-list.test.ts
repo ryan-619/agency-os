@@ -58,6 +58,13 @@ describe('parseCompanyQuery', () => {
     expect(fromUrl).toMatchObject({ q: 'acme', state: 'stale', sort: 'score', dir: 'desc' })
   })
 
+  it('takes an empty direction as the sort\'s natural one — what the form sends by default', () => {
+    expect(q({ sort: 'score', dir: '' }).dir).toBe('desc')
+    expect(q({ sort: 'lastScanAt', dir: '' }).dir).toBe('desc')
+    expect(q({ sort: 'name', dir: '' }).dir).toBe('asc')
+    expect(q({ sort: 'score', dir: 'asc' }).dir).toBe('asc')
+  })
+
   it('ignores a value it does not know rather than guessing at one', () => {
     expect(q({ state: 'old', qualified: 'maybe', openDeal: 'won', sort: 'revenue', dir: 'up' })).toEqual(q({}))
   })
