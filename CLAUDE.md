@@ -1874,8 +1874,9 @@ in `packages/db/src/audit.ts`, which `suppression-audit.test.ts` runs through
 missing from the log, and `/audit` says so rather than implying the log is
 complete.
 
-**A cron rescans; it is not a scan button.** CLAUDE.md named the missing
-scheduled rescan and REPO-BRIEF's "no scan button" stands: nobody clicks
+**A cron rescans; it is not a scan button.** §1 used to end its
+`findings.stale` paragraph with "there is still no scheduled rescan"; now there
+is one, and REPO-BRIEF's "no scan button" still stands: nobody clicks
 `/api/cron/rescan`, and a person still scans one company with `npm run scan --
 <domain>`. **Its deadline is derived, not guessed.** `worstCaseScanMs =
 homeTimeoutMs × 11 + pathTimeoutMs × 11 + 8 000` (TLS) — 162 s at the cron's
