@@ -474,7 +474,12 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   'draft.approved': (c) => `approved a draft ${own(CHANNEL_NOUN, word(c.d, 'channel')) ?? 'message'} to a contact at ${c.co}`,
   'draft.denied': (c) => {
     const note = text(c.d, 'note', 80)
-    return `denied a draft about ${c.co}${note ? `: ${quoted(note)}` : ''}`
+    // A deny on words quoting an aged-out scan is recorded as stale_evidence,
+    // which lets enrolment draft them again after a re-scan; say so.
+    const stale = word(c.d, 'refusalCode') === 'stale_evidence'
+    return `denied a draft about ${c.co}${stale ? ' (its evidence was stale — a re-scan lets it be drafted again)' : ''}${
+      note ? `: ${quoted(note)}` : ''
+    }`
   },
   'contact.replied': (c) => {
     const kind = word(c.d, 'replyKind')

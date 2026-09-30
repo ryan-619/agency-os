@@ -148,10 +148,8 @@ describe('packages/db/src reads stale_after_days only through staleAfterDaysOf',
    * Readers owned elsewhere, each already guarding the value itself or
    * handed it by a caller that does. Remove a name when its file is folded in.
    */
-  const ELSEWHERE = new Set([
-    'outreach.ts', // its private staleAfterDays() checks for a finite positive number
-    'enrolment.ts', // reads `freshness?.stale_after_days ?? DEFAULT` from a parsed profile
-  ])
+  // Every reader in this package goes through staleAfterDaysOf now.
+  const ELSEWHERE = new Set<string>([])
 
   it.each(readdirSync(SRC).filter((f) => f.endsWith('.ts')))('%s', (file) => {
     if (ELSEWHERE.has(file)) return

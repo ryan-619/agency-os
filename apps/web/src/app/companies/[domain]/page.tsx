@@ -49,7 +49,14 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
     meetingsForCompany(db, user.orgId, company.id),
     proposalsForCompany(db, user.orgId, company.id),
   ])
-  const icp = icpRow ? parseIcpDefinition(icpRow.definition) : null
+  // A profile that does not parse is read as no profile, as every other page
+  // reads it: one bad ICP edit must not make the company page a 500.
+  let icp: ReturnType<typeof parseIcpDefinition> | null
+  try {
+    icp = icpRow ? parseIcpDefinition(icpRow.definition) : null
+  } catch {
+    icp = null
+  }
   // Never the raw value: `isStale` throws on one that is not a positive number,
   // which made this page a 500 over a hand-edited 0.
   const staleAfter = staleAfterDaysOf(icp)

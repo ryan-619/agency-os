@@ -67,6 +67,11 @@ describe('the ICP is read through the guarded helper where a bad profile made a 
     expect(src).toContain('readIcp(')
   })
 
+  it('the company page reads a profile that does not parse as no profile', () => {
+    const src = code(read(`${APP}companies/[domain]/page.tsx`))
+    expect(src).toMatch(/try\s*\{\s*icp = icpRow \? parseIcpDefinition\(icpRow\.definition\) : null\s*\}\s*catch\s*\{\s*icp = null\s*\}/)
+  })
+
   it.each([
     ['/compliance', 'compliance/page.tsx'],
     ['the print view', 'proposals/[id]/print/page.tsx'],

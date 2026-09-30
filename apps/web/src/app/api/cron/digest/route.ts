@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { DEFAULT_STALE_AFTER_DAYS, parseIcpDefinition } from '@agency/core'
+import { staleAfterDaysOf } from '@agency/core'
 import {
   DIGEST_MAX_PAUSE_NOTICES, DIGEST_WINDOW_HOURS, activeIcpProfile, appendAudit, digestCampaignPauses, digestCounts,
   digestFacts, digestOnce, digestRecord, heartbeatReport, heartbeatReportedStatus, heartbeatSilentAfter, listOrgIds,
@@ -242,14 +242,7 @@ async function post(
  * is the only thing the digest reads from it.
  */
 async function staleDaysFor(db: AgencyDb, orgId: string): Promise<number> {
-  const profile = await activeIcpProfile(db, orgId)
-  if (!profile) return DEFAULT_STALE_AFTER_DAYS
-  try {
-    const days = parseIcpDefinition(profile.definition).freshness?.stale_after_days
-    return typeof days === 'number' && Number.isFinite(days) && days > 0 ? days : DEFAULT_STALE_AFTER_DAYS
-  } catch {
-    return DEFAULT_STALE_AFTER_DAYS
-  }
+  return staleAfterDaysOf((await activeIcpProfile(db, orgId))?.definition)
 }
 
 /** The class only. A driver error's message can carry the DSN (§2.3). */

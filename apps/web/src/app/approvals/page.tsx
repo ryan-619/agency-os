@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation'
-import { DEFAULT_STALE_AFTER_DAYS, can, isStale, parseIcpDefinition, type IcpDefinition } from '@agency/core'
+import { can, isStale, parseIcpDefinition, staleAfterDaysOf, type IcpDefinition } from '@agency/core'
 import { and, desc, eq, lte } from 'drizzle-orm'
 import {
   evidenceAsOfFor, listCampaigns, listContactsForCompany, pendingApprovals, pendingDrafts, previewSend, quotableFindings,
@@ -104,9 +104,7 @@ export default async function ApprovalsPage() {
   const orgLabel = icp?.label ?? 'Agency'
   // `isStale` throws on a non-positive threshold, and one bad ICP value must
   // not take the approval queue down with it. The default is §2.2's own 14.
-  const configured = icp?.freshness?.stale_after_days
-  const staleAfter =
-    typeof configured === 'number' && Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_STALE_AFTER_DAYS
+  const staleAfter = staleAfterDaysOf(icp)
 
   const campaignChoices = campaigns.map((c) => ({
     id: c.id,

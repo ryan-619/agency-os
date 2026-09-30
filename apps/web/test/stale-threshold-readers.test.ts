@@ -104,9 +104,6 @@ describe('apps/web/src reads stale_after_days only in readIcp and icpView', () =
   const ALLOWED = new Set([
     'lib/company-list.ts',
     'lib/icp-view.ts',
-    // Owned elsewhere; each checks for a finite positive number inline.
-    'app/approvals/page.tsx',
-    'app/api/cron/digest/route.ts',
   ])
   it.each(walk(SRC).map((f) => f.slice(SRC.length)))('%s', (file) => {
     if (ALLOWED.has(file)) return

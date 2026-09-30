@@ -28,9 +28,9 @@
  */
 import { and, eq, inArray, or, sql } from 'drizzle-orm'
 import {
-  DEFAULT_STALE_AFTER_DAYS, ENROL_IGNORED_REFUSALS, ENROL_LIMIT_DEFAULT, ENROL_LIMIT_MAX, enrolCompanyGate,
+  ENROL_IGNORED_REFUSALS, ENROL_LIMIT_DEFAULT, ENROL_LIMIT_MAX, enrolCompanyGate,
   enrolIgnoredStatuses, enrolPriorScope, enrolPriorSkip, enrolSkipCounts, enrollableContact, enrolmentDraft, isStale,
-  parseIcpDefinition, type EnrolChannel, type EnrolPriorRow, type EnrolSkip, type IcpDefinition,
+  parseIcpDefinition, staleAfterDaysOf, type EnrolChannel, type EnrolPriorRow, type EnrolSkip, type IcpDefinition,
 } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
@@ -147,7 +147,7 @@ export async function enrolCampaign(
       message: 'There is no readable active ICP profile, so nothing can say which companies qualify or what their gaps mean.',
     }
   }
-  const staleAfter = icp.freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
+  const staleAfter = staleAfterDaysOf(icp)
 
   const [org] = await db.select({ name: schema.orgs.name }).from(schema.orgs).where(eq(schema.orgs.id, args.orgId)).limit(1)
   const agencyName = org?.name ?? ''

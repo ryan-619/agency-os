@@ -104,7 +104,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'send.campaign_inactive': { campaignId: SUBJECT, channel: 'email', code: 'campaign_inactive' },
   'send.needs_approval': { campaignId: SUBJECT, channel: 'email', code: 'needs_approval' },
   'draft.approved': { contactId: SUBJECT, campaignId: SUBJECT, channel: 'email' },
-  'draft.denied': { note: 'too pushy' },
+  'draft.denied': { note: 'too pushy', refusalCode: 'needs_approval' },
   'contact.replied': { channel: 'email', paused: true, cancelledQueued: 2, suppressed: false, deal: 'advanced:replied' },
   'contact.opt_out_not_recorded': { touchId: SUBJECT, channel: 'email', why: 'unparseable' },
   'contact.created': { companyId: SUBJECT, source: 'manual', hasTimeZone: true },
@@ -564,6 +564,10 @@ describe('credentials never reach a sentence', () => {
   it('keeps a connection string under an innocuous key out of the sentence that reads that key', () => {
     const dsn = 'postgres://app:hunter2@db.internal:5432/agency'
     expect(sentenceFor(line('draft.denied', { note: dsn }), lookups)).toBe('denied a draft about rentman.io')
+    expect(sentenceFor(line('draft.denied', { note: 'old scan', refusalCode: 'stale_evidence' }), lookups)).toBe(
+      'denied a draft about rentman.io (its evidence was stale — a re-scan lets it be drafted again): “old scan”',
+    )
+    expect(sentenceFor(line('draft.denied', { refusalCode: 'needs_approval' }), lookups)).toBe('denied a draft about rentman.io')
     expect(sentenceFor(line('campaign.created', { name: dsn }), lookups)).not.toContain('hunter2')
     expect(sentenceFor(line('contact.paused', { reason: dsn }), lookups)).not.toContain('hunter2')
   })

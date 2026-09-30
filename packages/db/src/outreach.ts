@@ -34,8 +34,8 @@
  */
 import { and, asc, count, desc, eq, gte, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm'
 import {
-  DEFAULT_STALE_AFTER_DAYS, decideSend, isStale, mentionsRemovalOrDeparture, normaliseEmail, ownWords, parseDsn,
-  parseIcpDefinition, pauseReasonClass, pausedSentence, readMailSignals, suppressionKeysFor,
+  decideSend, isStale, mentionsRemovalOrDeparture, normaliseEmail, ownWords, parseDsn,
+  pauseReasonClass, pausedSentence, readMailSignals, staleAfterDaysOf, suppressionKeysFor,
   type Channel, type MailSignal, type SendDecision, type SendFacts, type SuppressionKind, classifyReply, type ReplyKind,
 } from '@agency/core'
 import * as schema from './schema.js'
@@ -793,9 +793,9 @@ export async function sendFactsFor(
  * moment of writing; with none, no scan could have been quoted, and there
  * is nothing to be stale. The threshold is the active ICP's
  * `freshness.stale_after_days`, read the way every other reader of it does
- * — `activeIcpProfile`, then `DEFAULT_STALE_AFTER_DAYS` when there is no
- * profile, it will not parse, or the value is not a positive number
- * (`isStale` throws on one, and a bad ICP value must not stop the sender).
+ * — `staleAfterDaysOf`, which gives §2.2's default when there is no profile,
+ * it will not parse, or the value is not a positive number (`isStale` throws
+ * on one, and a bad ICP value must not stop the sender).
  */
 async function evidenceIsStale(
   db: AgencyDb,
@@ -822,17 +822,7 @@ async function evidenceIsStale(
 }
 
 async function staleAfterDays(db: AgencyDb, orgId: string): Promise<number> {
-  const icp = await activeIcpProfile(db, orgId)
-  if (!icp) return DEFAULT_STALE_AFTER_DAYS
-  let configured: unknown
-  try {
-    configured = parseIcpDefinition(icp.definition).freshness?.stale_after_days
-  } catch {
-    return DEFAULT_STALE_AFTER_DAYS
-  }
-  return typeof configured === 'number' && Number.isFinite(configured) && configured > 0
-    ? configured
-    : DEFAULT_STALE_AFTER_DAYS
+  return staleAfterDaysOf((await activeIcpProfile(db, orgId))?.definition)
 }
 
 /** Where a message on this channel is addressed. */
