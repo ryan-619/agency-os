@@ -26,6 +26,16 @@
  * nobody in this codebase has read, and the place to relax it is a per-tool
  * review recorded in the database — not a wildcard that turns the gate off.
  *
+ * ## A per-tool review that can only DISABLE
+ *
+ * The half of that review that adds no bypass ships: `disabledTools` below is
+ * the set of calls an owner turned off (or the catalog turned off for a server
+ * nobody has reviewed yet — `connectorToolsState` in `@agency/db`), and both
+ * gate rings refuse a name in it before classification. It is a DENY list and
+ * nothing else. It never reaches `allowedTools`, which stays `[]`: a name
+ * there auto-approves, and an allow-shaped option is the wrong place to put a
+ * refusal even if it happened to work.
+ *
  * ## Credentials
  *
  * `revealSecret` is called here and the plaintext goes straight into a header
@@ -59,8 +69,8 @@
  */
 import type { AgencyDb, ConnectorRow } from '@agency/db'
 import {
-  enabledConnectors, isReachableConnectorUrl, parseConnectorConfig, revealSecret, secretEnvName,
-  secretPlacement, type HttpConfig, type StdioConfig,
+  connectorToolsDenied, enabledConnectors, isReachableConnectorUrl, parseConnectorConfig, revealSecret,
+  secretEnvName, secretPlacement, type HttpConfig, type StdioConfig,
 } from '@agency/db'
 import type { Logger } from '../logger.js'
 
@@ -79,6 +89,13 @@ export interface BuildResult {
   readonly servers: Record<string, BuiltMcpServer>
   /** Rows that were enabled but could not be built, and why. For the log. */
   readonly skipped: readonly { readonly name: string; readonly why: string }[]
+  /**
+   * The calls both gate rings refuse before classification: `mcp__<name>__<tool>`
+   * for each tool turned off on a server in `servers`, and `mcp__<name>__*`
+   * where every tool is. Ask `connectorToolsIsDisabled`, not `.has()`, or the
+   * second form is missed. Names only (§2.3).
+   */
+  readonly disabledTools: ReadonlySet<string>
 }
 
 /**
@@ -124,6 +141,7 @@ export async function buildMcpServers(
   const rows = await enabledConnectors(db, orgId)
   const servers: Record<string, BuiltMcpServer> = {}
   const skipped: { name: string; why: string }[] = []
+  const disabledTools = new Set<string>()
 
   for (const row of rows) {
     const built = await buildConnector(db, row, masterKey, log)
@@ -133,9 +151,16 @@ export async function buildMcpServers(
       continue
     }
     servers[row.name] = built.server
+    // Only a server this turn will actually have, and never one named
+    // `agency`: the session spreads the in-process server LAST, so such a row
+    // is displaced, and a tool list an owner ticked for a server that never
+    // runs must not quietly switch off the agency's own tools.
+    if (row.name !== 'agency') {
+      for (const name of connectorToolsDenied(row)) disabledTools.add(name)
+    }
   }
 
-  return { servers, skipped }
+  return { servers, skipped, disabledTools }
 }
 
 /**

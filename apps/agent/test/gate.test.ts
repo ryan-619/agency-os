@@ -18,9 +18,9 @@ import { describe, it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import type { ChatEventBody } from '@agency/core'
-import type { ApprovalRow } from '@agency/db'
+import { connectorToolsEveryTool, type ApprovalRow } from '@agency/db'
 import { makeCanUseTool, type GateDeps } from '../src/gate/can-use-tool.js'
-import { makePreToolUse, makePostToolUse } from '../src/gate/pre-tool-use.js'
+import { makePreToolUse, makePostToolUse, type HookDeps } from '../src/gate/pre-tool-use.js'
 import { createLedger, fingerprint } from '../src/gate/ledger.js'
 import { createApprovalWaiter, abortableSleep, type Decision } from '../src/gate/waiter.js'
 
@@ -64,6 +64,7 @@ function makeDeps(over: Partial<GateDeps> = {}) {
     ensureApproval: async () => approvalRow(),
     waiter: { healthy: true, await: async (): Promise<Decision> => ({ status: 'approved' }) },
     ledger,
+    disabledTools: new Set(),
     audit: async (action) => {
       audited.push(action)
     },
@@ -136,6 +137,16 @@ describe('canUseTool always settles', () => {
       'mcp__agency__queue_touch',
     ],
     ['a halted runtime', { halted: () => true }, 'mcp__agency__get_icp'],
+    [
+      'a connector tool an owner turned off',
+      { disabledTools: new Set(['mcp__stripe__create_refund']) },
+      'mcp__stripe__create_refund',
+    ],
+    [
+      'a server whose every tool is off',
+      { disabledTools: new Set([connectorToolsEveryTool('zapier')]) },
+      'mcp__zapier__gmail_send_email',
+    ],
   ]
 
   it.each(scenarios)('returns a decision for %s', async (_label, over, toolName) => {
@@ -285,6 +296,116 @@ describe('what the gate decides', () => {
   })
 })
 
+/**
+ * Settings → Connectors: a tool an owner turned off (connector-tool-disable).
+ *
+ * A refusal on top of `high`, never an allow. So the assertions are about
+ * what does NOT happen — no approval row, no card, no grant — and about the
+ * tool beside it on the same server, which must still reach a person.
+ */
+describe('a connector tool that was turned off', () => {
+  const off = new Set(['mcp__stripe__create_refund', connectorToolsEveryTool('zapier')])
+
+  it('is refused without an approval, a card or a grant', async () => {
+    const ensureApproval = vi.fn()
+    const { deps, emitted, audited, ledger } = makeDeps({ ensureApproval, disabledTools: off })
+    const result = await makeCanUseTool(deps)('mcp__stripe__create_refund', { amount: 100 }, options())
+    expect(result?.behavior).toBe('deny')
+    expect(result && 'message' in result ? result.message : '').toMatch(/disabled in Settings → Connectors/)
+    expect(result && 'message' in result ? result.message : '').toMatch(/Do not try a variation/)
+    expect(ensureApproval).not.toHaveBeenCalled()
+    expect(emitted).toEqual([])
+    expect(ledger.outstanding).toBe(0)
+    expect(audited).toEqual(['agent.tool_disabled'])
+  })
+
+  it('is refused for every tool on a server that is off entirely', async () => {
+    const ensureApproval = vi.fn()
+    const { deps, emitted } = makeDeps({ ensureApproval, disabledTools: off })
+    const result = await makeCanUseTool(deps)('mcp__zapier__slack_send_message', {}, options())
+    expect(result?.behavior).toBe('deny')
+    expect(ensureApproval).not.toHaveBeenCalled()
+    expect(emitted).toEqual([])
+  })
+
+  /** The deny is narrow: the tool beside it still parks on a human, as every connector tool does. */
+  it('leaves the rest of the server asking a person, as before', async () => {
+    const asked: string[] = []
+    const { deps, emitted } = makeDeps({
+      disabledTools: off,
+      ensureApproval: async (req) => {
+        asked.push(`${req.toolName}:${req.risk}`)
+        return approvalRow({ toolName: req.toolName })
+      },
+    })
+    const result = await makeCanUseTool(deps)('mcp__stripe__list_customers', {}, options())
+    expect(result).toEqual({ behavior: 'allow' })
+    expect(asked).toEqual(['mcp__stripe__list_customers:high'])
+    expect(emitted[0]).toMatchObject({ kind: 'approval_requested', risk: 'high' })
+  })
+
+  it('does not reach another server whose name merely starts the same way', async () => {
+    const ensureApproval = vi.fn(async () => approvalRow())
+    const { deps } = makeDeps({ ensureApproval, disabledTools: off })
+    await makeCanUseTool(deps)('mcp__zapier-two__slack_send_message', {}, options())
+    expect(ensureApproval).toHaveBeenCalledTimes(1)
+  })
+
+  /**
+   * BEFORE classification: whatever tier the classifier would give, a name
+   * in the set is refused. (The runtime never puts the agency's own tools in
+   * the set; this is about the order of the checks, not about that.)
+   */
+  it('is decided before the classifier, which would have allowed this one', async () => {
+    const { deps } = makeDeps({ disabledTools: new Set(['mcp__agency__get_icp']) })
+    const result = await makeCanUseTool(deps)('mcp__agency__get_icp', {}, options())
+    expect(result?.behavior).toBe('deny')
+  })
+
+  it('still refuses when the audit write fails', async () => {
+    const { deps } = makeDeps({
+      disabledTools: off,
+      audit: async () => {
+        throw new Error('audit down')
+      },
+    })
+    const result = await makeCanUseTool(deps)('mcp__stripe__create_refund', {}, options())
+    expect(result?.behavior).toBe('deny')
+  })
+
+  /**
+   * The order is a claim about the SOURCE as much as the behaviour: the check
+   * sits inside the try (so a throw from it is still a deny), before
+   * `classifyRisk`, and in both rings.
+   */
+  it.each(['can-use-tool.ts', 'pre-tool-use.ts'])('is checked before classifyRisk in %s', (file) => {
+    const src = readFileSync(fileURLToPath(new URL(`../src/gate/${file}`, import.meta.url)), 'utf8')
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+    const check = code.indexOf('connectorToolsIsDisabled(deps.disabledTools')
+    const classify = code.indexOf('classifyRisk({')
+    // The try of the callback itself, not a helper's above it.
+    const tryAt = code.indexOf('try {', code.indexOf('return async ('))
+    expect(tryAt).toBeGreaterThan(-1)
+    expect(check).toBeGreaterThan(-1)
+    expect(classify).toBeGreaterThan(check)
+    expect(check).toBeGreaterThan(tryAt)
+  })
+
+  /**
+   * "A deny, never an allow." The disabled list must never find its way into
+   * an allow-shaped option: a bare allowedTools entry auto-approves before the
+   * gate is consulted, which is the opposite of what an owner asked for.
+   */
+  it.each(['gate/can-use-tool.ts', 'gate/pre-tool-use.ts', 'runtime/connectors.ts'])(
+    'never names allowedTools in %s',
+    (file) => {
+      const src = readFileSync(fileURLToPath(new URL(`../src/${file}`, import.meta.url)), 'utf8')
+      const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+      expect(code).not.toMatch(/allowedTools/)
+    },
+  )
+})
+
 describe('an approval never outlives its turn', () => {
   /**
    * The boot check that AGENT_TURN_TIMEOUT_MINUTES > APPROVAL_TTL_MINUTES is
@@ -418,7 +539,7 @@ describe('the authorisation ledger', () => {
 })
 
 describe('the PreToolUse backstop', () => {
-  const deps = { audit: async () => {}, log: { error: () => {} } }
+  const deps: HookDeps = { audit: async () => {}, log: { error: () => {} }, disabledTools: new Set() }
 
   const hookInput = (toolName: string, toolInput: Record<string, unknown> = {}) => ({
     hook_event_name: 'PreToolUse',
@@ -463,6 +584,7 @@ describe('the PreToolUse backstop', () => {
         seen.push(detail)
       },
       log: { error: () => {} },
+      disabledTools: new Set(),
     })
     await hook({ ...hookInput('mcp__agency__get_icp'), agent_id: 'sub-1', agent_type: 'qualifier' })
     expect(seen[0]).toMatchObject({ agentId: 'sub-1', agentType: 'qualifier' })
@@ -474,10 +596,48 @@ describe('the PreToolUse backstop', () => {
         throw new Error('audit down')
       },
       log: { error: () => {} },
+      disabledTools: new Set(),
     })
     const out = await hook(hookInput('mcp__agency__queue_touch', { channel: 'email' }))
     // Empty: canUseTool, which is fail-closed, still answers.
     expect(out).toEqual({})
+  })
+
+  /**
+   * Ring 2 refuses a turned-off tool too, and that is what makes it hold: a
+   * deny from this hook settles the call even where a bare allowedTools
+   * entry or a settings rule would have approved it before canUseTool.
+   */
+  it('denies a tool an owner turned off, without asking, and audits it', async () => {
+    const actions: string[] = []
+    const hook = makePreToolUse({
+      audit: async (action) => {
+        actions.push(action)
+      },
+      log: { error: () => {} },
+      disabledTools: new Set(['mcp__stripe__create_refund', connectorToolsEveryTool('zapier')]),
+    })
+    for (const name of ['mcp__stripe__create_refund', 'mcp__zapier__gmail_send_email']) {
+      const out = await hook(hookInput(name))
+      expect(out['hookSpecificOutput']).toMatchObject({ permissionDecision: 'deny' })
+      expect(JSON.stringify(out)).toMatch(/disabled in Settings → Connectors/)
+    }
+    expect(actions).toEqual(['agent.tool_disabled', 'agent.tool_disabled'])
+    // The tool beside it still forces the prompt, exactly as before.
+    const beside = await hook(hookInput('mcp__stripe__list_customers'))
+    expect(beside['hookSpecificOutput']).toMatchObject({ permissionDecision: 'ask' })
+  })
+
+  it('denies a turned-off tool even when its audit write fails', async () => {
+    const hook = makePreToolUse({
+      audit: async () => {
+        throw new Error('audit down')
+      },
+      log: { error: () => {} },
+      disabledTools: new Set(['mcp__stripe__create_refund']),
+    })
+    const out = await hook(hookInput('mcp__stripe__create_refund'))
+    expect(out['hookSpecificOutput']).toMatchObject({ permissionDecision: 'deny' })
   })
 
   it('ignores events that are not PreToolUse', async () => {
@@ -491,6 +651,7 @@ describe('the PreToolUse backstop', () => {
         seen.push(detail)
       },
       log: { error: () => {} },
+      disabledTools: new Set(),
     })
     await hook({
       hook_event_name: 'PostToolUse',
