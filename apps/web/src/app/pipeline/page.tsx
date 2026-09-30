@@ -73,7 +73,9 @@ export default async function PipelinePage() {
         updatedAt: lastChanged.toISOString(),
         closedAt: d.closedAt ? d.closedAt.toISOString() : null,
         nextActionAt: d.nextActionAt ? d.nextActionAt.toISOString() : null,
-        overdue: !d.closedAt && dealIsOverdue(d.nextActionAt, now),
+        // Decided for closed cards too: the board hides their date, and a card
+        // reopened by a drag must not come back claiming it is on time.
+        overdue: dealIsOverdue(d.nextActionAt, now),
         untouched: rot,
         rottenLabel: rot?.rotten ? untouchedLabel(rot.days) : null,
         ownerUserId: d.ownerUserId,
