@@ -9,7 +9,7 @@
  *
  * §8.4's order, end to end:
  *
- *   suppression → consent → quiet hours → daily cap → approval gate
+ *   suppression → bounce → consent → quiet hours → daily cap → approval gate
  *      ↑ gathered here, decided in core ↑         ↑ this file, from here on ↑
  *   → provider send → write `touches` → write `audit_log`
  *
@@ -30,8 +30,8 @@
  */
 import { and, asc, count, desc, eq, gte, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm'
 import {
-  decideSend, normaliseEmail, suppressionKeysFor,
-  type Channel, type SendDecision, type SendFacts, classifyReply, type ReplyKind,
+  decideSend, normaliseEmail, parseDsn, readMailSignals, suppressionKeysFor,
+  type Channel, type MailSignal, type SendDecision, type SendFacts, classifyReply, type ReplyKind,
 } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
@@ -288,10 +288,11 @@ export async function dispatchTouch(
   // Past every check. One last look before the wire: a reply can land
   // between `gatherFacts` reading the contact and this line, and the cancel
   // that reply performs skips rows that are already `sending`. Cheap, and
-  // it closes the window to the width of the provider call itself.
+  // it closes the window to the width of the provider call itself. A bounce
+  // recorded in the same window is the same race, and gets the same look.
   if (touch.contactId) {
     const [fresh] = await db
-      .select({ pausedAt: schema.contacts.pausedAt })
+      .select({ pausedAt: schema.contacts.pausedAt, emailBouncedAt: schema.contacts.emailBouncedAt })
       .from(schema.contacts)
       .where(eq(schema.contacts.id, touch.contactId))
       .limit(1)
@@ -300,6 +301,14 @@ export async function dispatchTouch(
       return {
         touchId: touch.id,
         decision: { allowed: false, code: 'consent_revoked', reason: 'This contact replied a moment ago. Nothing was sent.', humanCanResolve: false },
+        sent: false,
+      }
+    }
+    if (fresh?.emailBouncedAt && facts.facts.channel === 'email') {
+      await settle(db, touch.id, { status: 'refused', refusalCode: 'bounced', recipient: facts.recipient })
+      return {
+        touchId: touch.id,
+        decision: { allowed: false, code: 'bounced', reason: 'This address bounced a moment ago. Nothing was sent. Correct the address.', humanCanResolve: true },
         sent: false,
       }
     }
@@ -517,6 +526,13 @@ export async function sendFactsFor(
   const base = {
     channel,
     recipient,
+    /**
+     * A permanent bounce is about the EMAIL address, so it refuses email and
+     * nothing else: the person may still be reachable on LinkedIn. The mark
+     * is cleared by correcting the address (`contactsUpdate`), which is the
+     * only thing that could make the next message land.
+     */
+    recipientBounced: channel === 'email' && row.contact.emailBouncedAt !== null,
     recipientTimeZone: row.contact.timeZone ?? row.companyTimeZone ?? null,
     quietStart: row.campaign.quietStart,
     quietEnd: row.campaign.quietEnd,
@@ -961,12 +977,12 @@ export async function recordInboundReply(
     readonly inReplyTo?: string | null
     /**
      * Whether the mail's HEADERS said it was automatic (Auto-Submitted,
-     * Precedence: bulk). The reader that decides it from headers is
-     * `mail-signals-and-bounce-pause`'s (wave 3), so nothing passes it yet;
-     * the PRECEDENCE is stated here, now, so that feature cannot get it
-     * wrong: the opt-out reader runs first on every inbound, and only a body
-     * that did not ask to be left alone may be filed as an auto-reply. See
-     * the comment at the classification below.
+     * Precedence: bulk — `readMailSignals` in packages/core decides it, and
+     * `handleInboundEmail` passes it from every inbound path). The
+     * PRECEDENCE is fixed here, not by the caller: the opt-out reader runs
+     * first on every inbound, and only a body that did not ask to be left
+     * alone may be filed as an auto-reply. See the comment at the
+     * classification below.
      */
     readonly autoReply?: boolean
     /** See `InboundLog`. Defaults to a structured line on stderr. */
@@ -1166,12 +1182,291 @@ export type InboundOutcome =
       readonly companyId: string | null
       readonly companyDomain: string | null
     }
-  | { readonly matched: 'none'; readonly why: string }
+  | {
+      readonly matched: 'none'
+      readonly why: string
+      /**
+       * Present when the mail was a delivery report this system tied to a
+       * message it SENT, and so acted on. A bounce is not a reply: to every
+       * caller that handles replies — the Slack hook, the triage model, the
+       * inbox — it is `none`, because nobody answered anything, and that is
+       * why it lives on this branch rather than beside `message`/`contact`.
+       * A caller that wants to say what happened reads it from here.
+       */
+      readonly bounce?: InboundBounce
+    }
+
+/** What a delivery report did, once it was tied to a message this system sent. */
+export interface InboundBounce {
+  readonly orgId: string
+  readonly contactId: string
+  /** The outbound message the report returned. */
+  readonly touchId: string
+  /** `5.x.x` (not `x.2.2`): the address is marked and its queue cancelled. Otherwise audit only. */
+  readonly permanent: boolean
+  /** The RFC 3463 status, as the report gave it. */
+  readonly code: string
+  /**
+   * True when THIS report marked the contact. False for a transient one, and
+   * for a permanent one that found the address already marked — a report an
+   * IMAP reconnect presented twice changes nothing the second time.
+   */
+  readonly marked: boolean
+}
+
+/**
+ * Record a permanent bounce: the mark, the cancelled queue, the audit row.
+ *
+ * A bounce is evidence about an ADDRESS, not a person asking to be left
+ * alone — a typo is not an opt-out — so it is a column on the contact and a
+ * refusal (`bounced`) in the send path, never a suppression row. The status
+ * code is stored beside the time because it is the evidence (§2.2): a
+ * person reading "bounced" can see `5.1.1` (no such mailbox) or `5.7.1`
+ * (refused on policy) and fix the right thing.
+ *
+ * Only EMAIL touches are cancelled: the address that failed is the email
+ * one, and the person may still be reachable on LinkedIn. `sending` rows
+ * are left alone, as a reply leaves them — the worker owns those, and the
+ * last look before the wire in `dispatchTouch` refuses them.
+ *
+ * `address`, when given, must still be the contact's email for the mark to
+ * land: a report about the address somebody corrected an hour ago is about
+ * an address this contact no longer has. Idempotent: an already-marked
+ * contact keeps its FIRST mark and nothing is written or audited again.
+ */
+export async function outreachRecordBounce(
+  db: AgencyDb,
+  args: {
+    readonly orgId: string
+    readonly contactId: string
+    readonly code: string
+    /** The folded address the report named; the mark lands only if it is still the contact's. */
+    readonly address?: string | null
+    /** The outbound message the report returned, for the audit row. */
+    readonly touchId?: string | null
+    readonly now?: Date
+  },
+): Promise<{ marked: boolean; cancelled: number }> {
+  const code = args.code.trim()
+  // The code is the evidence, so it must BE one: an RFC 3463 status, or
+  // nothing is marked. `contacts_bounce_has_code` would take any string.
+  if (!/^[45]\.\d{1,3}\.\d{1,3}$/.test(code)) return { marked: false, cancelled: 0 }
+  const now = args.now ?? new Date()
+
+  const result = await db.transaction(async (tx) => {
+    const marked = await tx
+      .update(schema.contacts)
+      .set({ emailBouncedAt: now, emailBounceCode: code })
+      .where(
+        and(
+          eq(schema.contacts.orgId, args.orgId),
+          eq(schema.contacts.id, args.contactId),
+          isNull(schema.contacts.emailBouncedAt),
+          args.address
+            ? sql`lower(${schema.contacts.email}) = ${args.address.toLowerCase()}`
+            : isNotNull(schema.contacts.email),
+        ),
+      )
+      .returning({ id: schema.contacts.id })
+    if (marked.length === 0) return { marked: false, cancelled: 0 }
+
+    // Marked refused rather than deleted, like a reply's cancel: the record
+    // that a message was ABOUT to go, and why it did not, is the useful one.
+    const cancelled = await tx
+      .update(schema.touches)
+      .set({ status: 'refused', refusalCode: 'bounced' })
+      .where(
+        and(
+          eq(schema.touches.orgId, args.orgId),
+          eq(schema.touches.contactId, args.contactId),
+          eq(schema.touches.direction, 'out'),
+          eq(schema.touches.channel, 'email'),
+          inArray(schema.touches.status, ['queued', 'awaiting_approval', 'approved']),
+        ),
+      )
+      .returning({ id: schema.touches.id })
+    return { marked: true, cancelled: cancelled.length }
+  })
+
+  if (result.marked) {
+    await appendAudit(db, {
+      orgId: args.orgId,
+      actor: 'system',
+      action: 'contact.bounced',
+      subjectType: 'contact',
+      subjectId: args.contactId,
+      // §2.3: the code and the counts. Never the address.
+      detail: { code, cancelledQueued: result.cancelled, ...(args.touchId ? { touchId: args.touchId } : {}) },
+    }).catch(() => {})
+  }
+  return result
+}
+
+/**
+ * A delivery report that named a failure. Acted on ONLY when it is tied to a
+ * message this system sent — anyone can mail the inbox a well-formed DSN
+ * naming any address, and a bounce read from the report alone would let a
+ * stranger stop the agency writing to anyone they chose.
+ *
+ * The tie, in order of how directly it names the returned message: the
+ * Message-ID of the copy the report carries (`originalMessageIds`, which the
+ * IMAP parser reads from the message/rfc822 or text/rfc822-headers part),
+ * the reporting MTA's `Original-Message-ID`, then the report's own
+ * In-Reply-To/References (Gmail and Exchange set them). Then the address the
+ * report names must be the address that message went to, and must still be
+ * the contact's. Anything short of that changes no contact: it is audited as
+ * `contact.bounce_unmatched` when the org is known, and otherwise answered
+ * as `none` for the caller to log.
+ */
+async function handleBounce(
+  db: AgencyDb,
+  mail: {
+    readonly references?: readonly string[]
+    readonly originalMessageIds?: readonly string[]
+    readonly now?: Date
+  },
+  signal: Extract<MailSignal, { kind: 'bounce' }>,
+): Promise<InboundOutcome> {
+  const ids = [
+    ...new Set(
+      [...(mail.originalMessageIds ?? []), signal.originalMessageId, ...(mail.references ?? [])]
+        .map((id) => id?.trim() ?? '')
+        .filter((id) => id.length > 0),
+    ),
+  ]
+  const nothing = {
+    matched: 'none',
+    why: 'a delivery report that names no message this system sent; no contact was changed',
+  } as const
+  if (ids.length === 0) return nothing
+
+  const hits = await db
+    .select({
+      id: schema.touches.id,
+      orgId: schema.touches.orgId,
+      contactId: schema.touches.contactId,
+      recipient: schema.touches.recipient,
+      providerId: schema.touches.providerId,
+    })
+    .from(schema.touches)
+    .where(
+      and(
+        eq(schema.touches.direction, 'out'),
+        eq(schema.touches.channel, 'email'),
+        isNotNull(schema.touches.providerId),
+        inArray(schema.touches.providerId, ids),
+      ),
+    )
+    .limit(20)
+  const people = new Set(hits.map((h) => `${h.orgId}/${h.contactId ?? ''}`))
+  if (people.size > 1) {
+    return { matched: 'none', why: 'a delivery report that names messages sent to more than one contact; no contact was changed' }
+  }
+  const hit = ids.map((id) => hits.find((h) => h.providerId === id)).find((h) => h !== undefined)
+  if (!hit?.contactId) return nothing
+  const contactId = hit.contactId
+
+  const [contact] = await db
+    .select({ email: schema.contacts.email })
+    .from(schema.contacts)
+    .where(and(eq(schema.contacts.orgId, hit.orgId), eq(schema.contacts.id, contactId)))
+    .limit(1)
+  if (!contact) return nothing
+
+  const sentTo = normaliseEmail(hit.recipient ?? '')
+  const named = [signal.recipient, signal.originalRecipient]
+    .map((a) => (a ? normaliseEmail(a) : null))
+    .filter((a): a is string => a !== null)
+  const why =
+    sentTo === null
+      ? 'no_recorded_recipient'
+      : named.length === 0
+        ? 'no_recipient'
+        : !named.includes(sentTo)
+          ? 'recipient_mismatch'
+          : normaliseEmail(contact.email ?? '') !== sentTo
+            ? 'address_changed'
+            : null
+  if (why !== null) {
+    await appendAudit(db, {
+      orgId: hit.orgId,
+      actor: 'system',
+      action: 'contact.bounce_unmatched',
+      subjectType: 'contact',
+      subjectId: contactId,
+      // §2.3: why it was not acted on, and the report's code. No address.
+      detail: { why, code: signal.status, permanent: signal.permanent, touchId: hit.id },
+    }).catch(() => {})
+    const words: Record<typeof why, string> = {
+      no_recorded_recipient: 'the returned message has no recorded recipient',
+      no_recipient: 'the report names no recipient',
+      recipient_mismatch: 'the address it names is not the one that message went to',
+      address_changed: 'the contact’s address has changed since that message went',
+    }
+    return { matched: 'none', why: `a delivery report that was not acted on — ${words[why]}; no contact was changed` }
+  }
+
+  if (!signal.permanent) {
+    // A full mailbox, a greylisting server, a timeout: the address may well
+    // work tomorrow, and marking it would stop a sequence for a person whose
+    // inbox is merely busy. The row says it happened; nothing else changes.
+    await appendAudit(db, {
+      orgId: hit.orgId,
+      actor: 'system',
+      action: 'contact.bounce_transient',
+      subjectType: 'contact',
+      subjectId: contactId,
+      detail: { code: signal.status, touchId: hit.id },
+    }).catch(() => {})
+    return {
+      matched: 'none',
+      why: `a temporary delivery failure (${signal.status}); recorded, and nothing was changed`,
+      bounce: { orgId: hit.orgId, contactId, touchId: hit.id, permanent: false, code: signal.status, marked: false },
+    }
+  }
+
+  const r = await outreachRecordBounce(db, {
+    orgId: hit.orgId,
+    contactId,
+    code: signal.status,
+    address: sentTo,
+    touchId: hit.id,
+    ...(mail.now ? { now: mail.now } : {}),
+  })
+  return {
+    matched: 'none',
+    why: r.marked
+      ? `a permanent bounce (${signal.status}); the address is marked and ${r.cancelled} queued message(s) were cancelled`
+      : `a permanent bounce (${signal.status}) for an address already marked; nothing changed`,
+    bounce: { orgId: hit.orgId, contactId, touchId: hit.id, permanent: true, code: signal.status, marked: r.marked },
+  }
+}
+
+/** The RFC 3464 actions, so a `why` never echoes an attacker's word back. */
+const DSN_ACTIONS = new Set(['failed', 'delayed', 'delivered', 'relayed', 'expanded'])
 
 /**
  * An inbound email, from IMAP or from a webhook — one function for both.
  *
- * Matching, in order of confidence:
+ * First, what the mail says about ITSELF (`readMailSignals`, headers and the
+ * delivery-status part only — never the body):
+ *
+ *  - A delivery report is never a reply. A failure is handled as a bounce
+ *    (`handleBounce`: tied to a message this system sent, or it changes
+ *    nothing); any other report — delayed, delivered — is answered `none`.
+ *    Before this, a bounce from a server that sets References was filed as
+ *    the contact REPLYING: paused, deal moved to `replied`.
+ *  - An automatic answer (`Auto-Submitted`, `Precedence: bulk`, …) is still
+ *    recorded as a reply, with `autoReply` set, so it is stored `auto_reply`
+ *    and does not pause the contact, cancel their queue or move the deal —
+ *    an out-of-office is not somebody answering. This is a behaviour change:
+ *    before, every inbound paused. The opt-out reader still runs first
+ *    inside `recordInboundReply`; an automatic mail that says "unsubscribe"
+ *    is an opt-out and is suppressed.
+ *
+ * Without headers or a DSN nothing here changes, and the rest is as it was.
+ *
+ * Then matching a reply, in order of confidence:
  *
  *  1. `In-Reply-To` / `References` against the Message-ID a provider assigned
  *     to something this system sent. Unambiguous: it names the exact message,
@@ -1196,23 +1491,39 @@ export async function handleInboundEmail(
     /** Every Message-ID in In-Reply-To and References, in that order. */
     readonly references?: readonly string[]
     /**
-     * The raw header map and the DSN status, when the caller has them.
-     * Accepted and IGNORED here: `mail-signals-and-bounce-pause` is the
-     * feature that reads them, and until it lands a caller passing them
-     * changes nothing. Declared now so `inbound-resend` can pass them
-     * without importing that feature.
+     * The mail's headers, when the caller has them — any case, any number;
+     * `readMailSignals` reads the few it needs (see `MAIL_SIGNAL_HEADERS`).
      */
     readonly headers?: Readonly<Record<string, string>>
+    /** The text of a `message/delivery-status` part, when the mail has one. */
     readonly dsn?: string | null
+    /**
+     * The Message-ID (then References) of the copy a delivery report
+     * carries in its message/rfc822 or text/rfc822-headers part. Read only
+     * for a bounce, to tie it to a message this system sent.
+     */
+    readonly originalMessageIds?: readonly string[]
     /** Forwarded to `recordInboundReply`; see `InboundLog`. */
     readonly log?: InboundLog
     readonly now?: Date
   },
 ): Promise<InboundOutcome> {
+  // 0. What the mail says about itself, before anything is matched: a
+  //    report's From is the reporting server, never the contact, so it must
+  //    not reach the address rule below.
+  const signal = readMailSignals({ headers: mail.headers ?? null, dsn: mail.dsn ?? null })
+  if (signal?.kind === 'bounce') return handleBounce(db, mail, signal)
+  const report = mail.dsn ? parseDsn(mail.dsn) : null
+  if (report?.action) {
+    const action = DSN_ACTIONS.has(report.action) ? report.action : 'unrecognised'
+    return { matched: 'none', why: `a delivery report (${action}) is not a reply; nothing was recorded` }
+  }
+  const autoReply = signal?.kind === 'auto_reply'
+
   const from = normaliseEmail(mail.from)
   if (!from) return { matched: 'none', why: 'the From address could not be read' }
 
-  // 0. Seen before. A webhook provider retries on any non-2xx and sometimes
+  // 1. Seen before. A webhook provider retries on any non-2xx and sometimes
   //    on a slow 2xx, and an IMAP reconnect can re-present a message; the
   //    Message-ID is the same each time, so the reply is recorded once.
   if (mail.messageId) {
@@ -1247,7 +1558,7 @@ export async function handleInboundEmail(
     }
   }
 
-  // 1. By the message it answers.
+  // 2. By the message it answers.
   const refs = (mail.references ?? []).map((r) => r.trim()).filter(Boolean)
   if (refs.length > 0) {
     const hits = await db
@@ -1272,6 +1583,7 @@ export async function handleInboundEmail(
         body: mail.text,
         providerId: mail.messageId ?? null,
         inReplyTo: hit.id,
+        autoReply,
         ...(mail.now ? { now: mail.now } : {}),
         ...(mail.log ? { log: mail.log } : {}),
       })
@@ -1290,7 +1602,7 @@ export async function handleInboundEmail(
     }
   }
 
-  // 2. By the address, only when it is unambiguous.
+  // 3. By the address, only when it is unambiguous.
   const contacts = await db
     .select({ id: schema.contacts.id, orgId: schema.contacts.orgId })
     .from(schema.contacts)
@@ -1309,6 +1621,7 @@ export async function handleInboundEmail(
     subject: mail.subject,
     body: mail.text,
     providerId: mail.messageId ?? null,
+    autoReply,
     ...(mail.now ? { now: mail.now } : {}),
     ...(mail.log ? { log: mail.log } : {}),
   })

@@ -19,8 +19,8 @@ import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import { decideSend } from '@agency/core'
 import {
-  approveDraft, denyDraft, dispatchTouch, dueTouches, handleInboundEmail, looksLikeOptOut,
-  pauseContact, pendingDrafts, recordInboundReply, resumeContact, schema, sendFactsFor, sendOne,
+  approveDraft, contactsUpdate, denyDraft, dispatchTouch, dueTouches, handleInboundEmail, looksLikeOptOut,
+  outreachRecordBounce, pauseContact, pendingDrafts, recordInboundReply, resumeContact, schema, sendFactsFor, sendOne,
   type AgencyDb, type InboundLog, type MessageProvider,
 } from '../src/index.js'
 import { migratedDb,type TestDb } from './helpers.js'
@@ -1080,13 +1080,335 @@ describe('the send-path contract', () => {
       expect((await touch(r.touchId)).replyKind).toBe('auto_reply')
     })
 
-    it('without the header flag, an out-of-office body still pauses — the flag is what nothing passes yet', async () => {
+    /**
+     * Without headers nothing changes: the body regex still SORTS it as an
+     * auto-reply, and it still pauses — the words are a hint about what the
+     * mail is, never a reason to treat it differently.
+     */
+    it('without the header flag, an out-of-office body still pauses — a body is never read as automatic', async () => {
       const r = await recordInboundReply(db, {
         orgId, contactId, channel: 'email', from: 'priya@rentman.io', subject: 'Automatic reply',
         body: 'I am out of the office until Monday.', now: NOON,
       })
       expect(r.replyKind).toBe('auto_reply')
       expect(r.paused).toBe(true)
+    })
+  })
+  /**
+   * What a mail says about ITSELF — headers and the delivery-status part,
+   * never the body (packages/core/src/mail-signals.ts).
+   *
+   * An auto-reply is recorded and changes nothing about the conversation. A
+   * bounce is evidence about an ADDRESS: a column and a refusal, never a
+   * suppression row, and only when the report names a message this system
+   * sent — anyone can mail the inbox a DSN naming anybody.
+   */
+  describe('mail signals: auto-replies and bounces', () => {
+    const OUR_ID = '<sent-1@agency.test>'
+    const MAILER = 'MAILER-DAEMON@mx.rentman.io'
+
+    /** Provider ids shaped like SMTP's, so a DSN can name them. */
+    const idProvider = (): MessageProvider & { sent: string[] } => {
+      const sent: string[] = []
+      return {
+        name: 'ids', channels: ['email', 'linkedin'], sent,
+        async send(m) {
+          sent.push(m.to)
+          return { providerId: `<sent-${sent.length}@agency.test>` }
+        },
+      }
+    }
+    let ids: ReturnType<typeof idProvider>
+    beforeEach(() => {
+      ids = idProvider()
+    })
+
+    const sendOneMail = (over: Record<string, unknown> = {}) =>
+      sendOne(db, ids, { orgId, campaignId, contactId, companyId, subject: 'A gap', body: 'Hello.', now: NOON, ...over })
+
+    const report = (lines: string[]): string =>
+      ['Reporting-MTA: dns; mx.rentman.io', '', ...lines, ''].join('\r\n')
+    const failed = (status = '5.1.1', recipient = 'priya@rentman.io') =>
+      report([`Final-Recipient: rfc822; ${recipient}`, 'Action: failed', `Status: ${status}`])
+
+    /** A DSN the way the IMAP parser hands it over: the report, and the returned copy's Message-ID. */
+    const bounceMail = (dsn: string, originalMessageIds: string[] = [OUR_ID], over: Record<string, unknown> = {}) =>
+      handleInboundEmail(db, {
+        from: MAILER, subject: 'Undelivered Mail Returned to Sender', text: 'I am sorry to inform you…',
+        headers: { 'Auto-Submitted': 'auto-replied' }, dsn, originalMessageIds, now: NOON, ...over,
+      })
+
+    const contactRow = async () => (await db.select().from(schema.contacts).where(eq(schema.contacts.id, contactId)))[0]!
+    const queue = async (over: Record<string, unknown> = {}) =>
+      (await db
+        .insert(schema.touches)
+        .values({ orgId, companyId, contactId, campaignId, channel: 'email', direction: 'out', status: 'queued', subject: 's', body: 'b', ...over })
+        .returning())[0]!
+    const auditOf = async (action: string) => (await db.select().from(schema.auditLog)).filter((a) => a.action === action)
+
+    describe('an auto-reply, read from its headers', () => {
+      it('is logged as an inbound touch of kind auto_reply and changes nothing about the conversation', async () => {
+        await sendOneMail()
+        const waiting = await queue()
+        const outcome = await handleInboundEmail(db, {
+          from: 'priya@rentman.io', subject: 'Automatic reply: A gap', text: 'Thanks for your message. I am away until the 21st.',
+          references: [OUR_ID], headers: { 'Auto-Submitted': 'auto-replied' }, now: NOON,
+        })
+        expect(outcome).toMatchObject({ matched: 'message', replyKind: 'auto_reply', paused: false, suppressed: false })
+        if (outcome.matched === 'none') return
+        expect((await touch(outcome.touchId)).replyKind).toBe('auto_reply')
+        expect((await contactRow()).pausedAt).toBeNull()
+        expect((await touch(waiting.id)).status).toBe('queued')
+        // The deal stays where the SEND put it; an out-of-office is not a reply.
+        const [deal] = await db.select().from(schema.deals).where(eq(schema.deals.companyId, companyId))
+        expect(deal!.stage).toBe('contacted')
+      })
+
+      it('reads Precedence: bulk on a mail matched by address alone', async () => {
+        const outcome = await handleInboundEmail(db, {
+          from: 'priya@rentman.io', subject: 'Re', text: 'Your message was received.', headers: { Precedence: 'bulk' }, now: NOON,
+        })
+        expect(outcome).toMatchObject({ matched: 'contact', replyKind: 'auto_reply', paused: false })
+      })
+
+      /** RFC 3834: `no` means a person wrote it — and a person's reply pauses. */
+      it('treats Auto-Submitted: no as a person, who pauses the sequence', async () => {
+        const outcome = await handleInboundEmail(db, {
+          from: 'priya@rentman.io', subject: 'Re', text: 'Thursday works.', headers: { 'Auto-Submitted': 'no' }, now: NOON,
+        })
+        expect(outcome).toMatchObject({ matched: 'contact', paused: true })
+      })
+
+      /**
+       * THE precedence, through the inbound path this time: the header says
+       * automatic, the first line says unsubscribe, and the opt-out wins —
+       * suppression row, `opted_out`, paused.
+       */
+      it('an auto-reply whose first line says unsubscribe still writes the suppression row and is stored opted_out — from the headers too', async () => {
+        await sendOneMail()
+        const outcome = await handleInboundEmail(db, {
+          from: 'priya@rentman.io', subject: 'Automatic reply',
+          text: 'Unsubscribe.\nThis mailbox is no longer monitored.',
+          references: [OUR_ID], headers: { 'Auto-Submitted': 'auto-replied', Precedence: 'bulk' }, now: NOON,
+        })
+        expect(outcome).toMatchObject({ matched: 'message', replyKind: 'opted_out', suppressed: true, paused: true })
+        const [row] = await db.select().from(schema.suppressions)
+        expect(row).toMatchObject({ kind: 'email', value: 'priya@rentman.io', source: 'reply' })
+      })
+    })
+
+    describe('a permanent bounce', () => {
+      it('marks the address with the report’s own code, cancels the email queue, and writes NO suppression', async () => {
+        await sendOneMail()
+        const queued = await queue()
+        const approved = await queue({ status: 'approved', approvedBy: userId, approvedAt: NOON })
+        const draft = await queue({ status: 'awaiting_approval' })
+        const [li] = await db
+          .insert(schema.campaigns)
+          .values({ orgId, name: 'LinkedIn', channel: 'linkedin', autoSend: false, dailyCap: 10, status: 'active' })
+          .returning({ id: schema.campaigns.id })
+        const onLinkedIn = await queue({ campaignId: li!.id, channel: 'linkedin' })
+
+        const outcome = await bounceMail(failed())
+        expect(outcome).toMatchObject({
+          matched: 'none',
+          bounce: { orgId, contactId, permanent: true, code: '5.1.1', marked: true },
+        })
+
+        const c = await contactRow()
+        expect(c.emailBouncedAt?.toISOString()).toBe(NOON.toISOString())
+        expect(c.emailBounceCode).toBe('5.1.1')
+        // A typo is not a request to be left alone.
+        expect(await db.select().from(schema.suppressions)).toEqual([])
+        expect(c.pausedAt).toBeNull()
+        for (const t of [queued, approved, draft]) {
+          expect(await touch(t.id)).toMatchObject({ status: 'refused', refusalCode: 'bounced' })
+        }
+        // The address that failed is the email one.
+        expect((await touch(onLinkedIn.id)).status).toBe('queued')
+        // Not a reply: nothing inbound was filed, and the deal did not move to replied.
+        expect((await db.select().from(schema.touches)).filter((t) => t.direction === 'in')).toEqual([])
+        const [deal] = await db.select().from(schema.deals).where(eq(schema.deals.companyId, companyId))
+        expect(deal!.stage).toBe('contacted')
+
+        const [audit] = await auditOf('contact.bounced')
+        expect(audit).toMatchObject({ actor: 'system', subjectType: 'contact', subjectId: contactId })
+        expect(audit!.detail).toMatchObject({ code: '5.1.1', cancelledQueued: 3 })
+        // §2.3: the audit row never names the address.
+        expect(JSON.stringify(await db.select().from(schema.auditLog))).not.toContain('priya@')
+      })
+
+      it('matches by the report’s own References, as Gmail and Exchange send them', async () => {
+        await sendOneMail()
+        const outcome = await bounceMail(failed(), [], { references: [OUR_ID] })
+        expect(outcome).toMatchObject({ bounce: { permanent: true, marked: true } })
+      })
+
+      it('changes nothing the second time the same report arrives', async () => {
+        await sendOneMail()
+        await bounceMail(failed())
+        const again = await bounceMail(failed('5.1.2'))
+        expect(again).toMatchObject({ bounce: { marked: false } })
+        expect((await contactRow()).emailBounceCode).toBe('5.1.1')
+        expect(await auditOf('contact.bounced')).toHaveLength(1)
+      })
+
+      it('is then refused by the send path as bounced, before any provider', async () => {
+        await sendOneMail()
+        await bounceMail(failed())
+        const r = await sendOneMail()
+        expect(r.sent).toBe(false)
+        expect(r.decision).toMatchObject({ allowed: false, code: 'bounced', humanCanResolve: true })
+        expect(ids.sent).toHaveLength(1)
+        expect(await touch(r.touchId)).toMatchObject({ status: 'refused', refusalCode: 'bounced' })
+      })
+
+      it('refuses an approved message too: approving does not lift it', async () => {
+        await sendOneMail()
+        await bounceMail(failed())
+        const t = await queue({ status: 'approved', approvedBy: userId, approvedAt: NOON })
+        const r = await dispatchTouch(db, provider, t, { now: NOON })
+        expect(r.decision).toMatchObject({ code: 'bounced' })
+        expect(provider.sent).toEqual([])
+      })
+
+      /** The fix is a corrected address. That clears the mark, and the next message goes. */
+      it('is cleared by changing the address, and only by that', async () => {
+        await sendOneMail()
+        await bounceMail(failed())
+
+        // The same address in another case is not a change.
+        const same = await contactsUpdate(db, orgId, contactId, { email: 'PRIYA@rentman.io' })
+        expect(same).toMatchObject({ ok: true, changed: [], bounceCleared: false })
+        expect((await contactRow()).emailBouncedAt).not.toBeNull()
+        const resumed = await resumeContact(db, orgId, contactId)
+        expect(resumed).toBe(true)
+        expect((await contactRow()).emailBouncedAt).not.toBeNull()
+
+        const fixed = await contactsUpdate(db, orgId, contactId, { email: 'priya.shah@rentman.io' }, { actor: userId })
+        expect(fixed).toMatchObject({ ok: true, changed: ['email'], bounceCleared: true })
+        const c = await contactRow()
+        expect(c.emailBouncedAt).toBeNull()
+        expect(c.emailBounceCode).toBeNull()
+        const [cleared] = await auditOf('contact.bounce_cleared')
+        expect(cleared).toMatchObject({ actor: userId, subjectId: contactId, detail: { code: '5.1.1' } })
+        expect(JSON.stringify(cleared)).not.toContain('priya')
+
+        const next = await sendOneMail()
+        expect(next.sent).toBe(true)
+        expect(ids.sent.at(-1)).toBe('priya.shah@rentman.io')
+      })
+
+      /** A report about the address somebody already corrected is about an address this contact no longer has. */
+      it('does not mark a contact whose address changed after the message went', async () => {
+        await sendOneMail()
+        await contactsUpdate(db, orgId, contactId, { email: 'priya.shah@rentman.io' })
+        const outcome = await bounceMail(failed())
+        expect(outcome).toMatchObject({ matched: 'none' })
+        expect(outcome.matched === 'none' && outcome.bounce).toBeFalsy()
+        expect((await contactRow()).emailBouncedAt).toBeNull()
+        const [audit] = await auditOf('contact.bounce_unmatched')
+        expect(audit!.detail).toMatchObject({ why: 'address_changed', code: '5.1.1' })
+      })
+
+      it('reads the facts only for email: the same person is still sendable on LinkedIn', async () => {
+        await outreachRecordBounce(db, { orgId, contactId, code: '5.1.1', now: NOON })
+        await db.update(schema.contacts).set({ linkedinUrl: 'https://linkedin.com/in/priya' }).where(eq(schema.contacts.id, contactId))
+        const [li] = await db
+          .insert(schema.campaigns)
+          .values({ orgId, name: 'LinkedIn', channel: 'linkedin', autoSend: true, dailyCap: 10, status: 'active' })
+          .returning({ id: schema.campaigns.id })
+        const email = await sendFactsFor(db, { orgId, campaignId, contactId, approvedByHuman: false, now: NOON })
+        const linkedin = await sendFactsFor(db, { orgId, campaignId: li!.id, contactId, approvedByHuman: false, now: NOON })
+        if ('missing' in email || 'missing' in linkedin) throw new Error('missing')
+        expect(email.facts.recipientBounced).toBe(true)
+        expect(linkedin.facts.recipientBounced).toBe(false)
+      })
+
+      it('refuses to mark with a code that is not an RFC 3463 status — the code is the evidence', async () => {
+        for (const code of ['', 'bounced', '550', '2.0.0']) {
+          expect(await outreachRecordBounce(db, { orgId, contactId, code, now: NOON }), code).toEqual({ marked: false, cancelled: 0 })
+        }
+        expect((await contactRow()).emailBouncedAt).toBeNull()
+      })
+    })
+
+    describe('a bounce that is not acted on', () => {
+      it('records a transient failure in the audit log and nothing else', async () => {
+        await sendOneMail()
+        const waiting = await queue()
+        const outcome = await bounceMail(failed('4.2.2'))
+        expect(outcome).toMatchObject({ matched: 'none', bounce: { permanent: false, code: '4.2.2', marked: false } })
+        expect((await contactRow()).emailBouncedAt).toBeNull()
+        expect((await touch(waiting.id)).status).toBe('queued')
+        const [audit] = await auditOf('contact.bounce_transient')
+        expect(audit).toMatchObject({ subjectId: contactId, detail: { code: '4.2.2' } })
+        expect(await auditOf('contact.bounced')).toEqual([])
+      })
+
+      /**
+       * §2.2, and the reason the Message-ID gate exists: a well-formed DSN
+       * naming a real contact, mailed in by anybody. It names no message
+       * this system sent, so it changes nobody.
+       */
+      it('ignores a forged report that names no message this system sent', async () => {
+        await sendOneMail()
+        for (const forged of [
+          () => bounceMail(failed(), ['<forged@evil.test>']),
+          () => bounceMail(failed(), []),
+          () => handleInboundEmail(db, { from: 'priya@rentman.io', subject: 'x', text: 'x', dsn: failed(), now: NOON }),
+        ]) {
+          const outcome = await forged()
+          expect(outcome).toMatchObject({ matched: 'none' })
+          expect(outcome.matched === 'none' && outcome.bounce).toBeFalsy()
+        }
+        expect((await contactRow()).emailBouncedAt).toBeNull()
+        expect((await contactRow()).pausedAt).toBeNull()
+        expect((await db.select().from(schema.auditLog)).filter((a) => a.action.startsWith('contact.bounce'))).toEqual([])
+        expect((await db.select().from(schema.touches)).filter((t) => t.direction === 'in')).toEqual([])
+      })
+
+      it('audits, and does not act on, a report whose address is not the one the message went to', async () => {
+        await sendOneMail()
+        const outcome = await bounceMail(failed('5.1.1', 'someone.else@rentman.io'))
+        expect(outcome).toMatchObject({ matched: 'none' })
+        expect((await contactRow()).emailBouncedAt).toBeNull()
+        const [audit] = await auditOf('contact.bounce_unmatched')
+        expect(audit).toMatchObject({ subjectId: contactId, detail: { why: 'recipient_mismatch', code: '5.1.1' } })
+        expect(JSON.stringify(audit)).not.toContain('someone.else')
+      })
+
+      it('does not act on a report that names no recipient', async () => {
+        await sendOneMail()
+        await bounceMail(report(['Action: failed', 'Status: 5.1.1']))
+        expect((await contactRow()).emailBouncedAt).toBeNull()
+        expect((await auditOf('contact.bounce_unmatched'))[0]!.detail).toMatchObject({ why: 'no_recipient' })
+      })
+
+      /**
+       * Before this, a delivery report from a server that sets References was
+       * filed as the contact REPLYING. A report is never a reply.
+       */
+      it('files a delayed report as nothing at all — not a reply, not a bounce', async () => {
+        await sendOneMail()
+        const outcome = await bounceMail(report(['Final-Recipient: rfc822; priya@rentman.io', 'Action: delayed', 'Status: 4.4.7']), [], {
+          references: [OUR_ID],
+        })
+        expect(outcome).toMatchObject({ matched: 'none' })
+        if (outcome.matched === 'none') expect(outcome.why).toContain('delayed')
+        expect((await db.select().from(schema.touches)).filter((t) => t.direction === 'in')).toEqual([])
+        expect((await contactRow()).pausedAt).toBeNull()
+      })
+    })
+
+    /** Without headers or a DSN, every inbound path is exactly what it was. */
+    it('behaves as before when a caller passes neither headers nor a DSN', async () => {
+      await sendOneMail()
+      const outcome = await handleInboundEmail(db, {
+        from: 'priya@rentman.io', subject: 'Re', text: 'I am out of the office until Monday.', references: [OUR_ID], now: NOON,
+      })
+      // The body sorts it as an auto-reply; without the header it still pauses.
+      expect(outcome).toMatchObject({ matched: 'message', replyKind: 'auto_reply', paused: true })
     })
   })
 })
