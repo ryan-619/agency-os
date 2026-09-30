@@ -26,7 +26,7 @@
  * that could not open the page cannot read it through the agent either.
  */
 import { z } from 'zod'
-import { can, DEFAULT_STALE_AFTER_DAYS, parseIcpDefinition, pipelineMetrics, type PipelineMetrics } from '@agency/core'
+import { can, pipelineMetrics, staleAfterDaysOf, type PipelineMetrics } from '@agency/core'
 import {
   activeIcpProfile, analyticsTransitions, auditForSubject, callsForCompany, companyThread,
   complianceSummary, findCompanyByDomain, listDeals, meetingsForCompany, notesAuthorLabel, notesFor,
@@ -86,15 +86,13 @@ function firstLineOf(text: string | null | undefined, max = 160): string | null 
   return lines.length > 1 && !cut.endsWith('…') ? `${cut} …` : cut
 }
 
-/** The ICP's freshness window, the way the compliance page reads it. */
+/**
+ * The ICP's freshness window, the way the compliance page reads it: through
+ * `staleAfterDaysOf`, which `readIcp` delegates to. The raw value made this
+ * tool throw on a `0` that the page answered at the default.
+ */
 async function staleDaysFor(db: AgencyDb, orgId: string): Promise<number> {
-  const row = await activeIcpProfile(db, orgId)
-  if (!row) return DEFAULT_STALE_AFTER_DAYS
-  try {
-    return parseIcpDefinition(row.definition).freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
-  } catch {
-    return DEFAULT_STALE_AFTER_DAYS
-  }
+  return staleAfterDaysOf((await activeIcpProfile(db, orgId))?.definition)
 }
 
 // ---------------------------------------------------------------------------
