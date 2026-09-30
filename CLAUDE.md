@@ -1421,7 +1421,7 @@ has actually run in the last 36 hours.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 1500 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice
+npm test                 # 3506 tests in 140 files: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice + the 0018 release
 npx vitest run --maxWorkers=1 --minWorkers=1   # the same suite on a machine short of memory
 npm run build            # packages, then the Next app
 
@@ -1516,7 +1516,10 @@ process, keeps the finished data directory, and hands each test a COPY via
 `loadDataDir`. The work is shared; the state is not — `loadDataDir` hydrates
 a new instance rather than attaching to one. Measured: the whole suite went
 from **290s to 97s** single-worker, with the same tests passing, and
-`apps/voice` alone from 9.8s to 4.4s.
+`apps/voice` alone from 9.8s to 4.4s. The suite has more than doubled since:
+at 0018 it is 3,506 tests in 140 files, and a single-worker run took 1,060 s
+on a four-core container already loaded past its core count — the typecheck
+first, then every test green, with no `.env` in the tree.
 
 `freshDb()` remains and `migrations.test.ts` and `schema-parity.test.ts`
 still use it — a test about applying migrations cannot start from a database
