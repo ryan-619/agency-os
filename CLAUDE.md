@@ -1868,8 +1868,10 @@ sit at the head of the queue taking one every night forever.
 rules verbatim — a hashed token, bodies read as text and bounded, nothing
 enumerable returned, the accept through the same `setProposalStatus` and
 `setDealStage` a person uses, audited — and §2.2 governs the buyer page harder:
-no score, no tier, no "stale". The other new public routes WRITE only an
-opt-out, which is the one write a stranger must always be able to make.
+no score, no tier, no "stale". The only other stranger-facing write added is
+the one-click unsubscribe, and all it writes is an opt-out — the one write a
+stranger must always be able to make. (The cron and Resend routes are public
+paths too, but each is authenticated by a secret, not by a session.)
 
 **§8.4's single path has a human-shaped provider.** The alternative was a
 second sender in a route, which is exactly what the rule forbids. The words are
