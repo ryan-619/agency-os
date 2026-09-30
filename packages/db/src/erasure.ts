@@ -260,12 +260,12 @@ export interface ErasureSkipped {
   readonly why: 'company_page' | 'unreadable'
 }
 
-/** Why an erasure did not happen. A reason CLASS — never the value (§2.3). */
-export type ErasureFailure =
-  | 'unreadable_email'
-  | 'unreadable_phone'
-  | 'unreadable_linkedin'
-  | (string & {})
+/**
+ * Why an erasure did not happen. A reason CLASS — never the value (§2.3):
+ * `unreadable_email`, `unreadable_phone` or `unreadable_linkedin` for a
+ * contact-row value a person can correct, otherwise the error's name.
+ */
+export type ErasureFailure = string
 
 class ErasureAborted extends Error {
   constructor(readonly why: ErasureFailure) {
