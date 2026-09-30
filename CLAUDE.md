@@ -710,10 +710,196 @@ the suppression step and being stopped later by the provider. That is the
 right direction — it is a refusal a human can act on — but it is a behaviour
 change, not just a new column.
 
+**The sender's facts have one gatherer, and every screen reads it.**
+`sendFactsFor` gathers exactly what `dispatchTouch` checks, and `previewSend`
+runs `decideSend` over them and writes nothing. The contacts ledger, the
+send-check route, `check_send`, the approvals page and the inbox's answer
+path all show the decision the sender WILL make, from the same function —
+never a restatement of the rules that could drift from them.
+
+**The ledger says never-asked, refused and granted are three facts.**
+`/contacts` shows each person's consent and suppression answer from
+`consentLedgerFor`, which `get_consent` also reads, and a send-check per
+campaign through `previewSend`, with the recipient masked to its domain.
+Consent recorded there carries the form's wording as evidence; a grant over a
+refusal is a 409 (`refused_is_final`), and lifting a refusal is an owner's
+explicit act that returns the person to never-asked (§1).
+
+**An edit cannot move a person out from under their own opt-out.** A
+suppression is keyed by value, so `contactsUpdate` refuses any edit — a change
+or a clear — that would make a suppression row stop matching the contact, and
+repeats that condition inside the UPDATE, so a "stop" arriving mid-edit fails
+the edit (`changed_meanwhile`). An email moving within a suppressed domain is
+allowed. Carrying the suppression over to the new value was rejected: that
+would suppress an address that may belong to somebody who never asked. Phones
+are stored as E.164 on edit, a LinkedIn URL must be one `normaliseLinkedIn`
+can read, and changing the email clears a bounce mark in the same UPDATE.
+
+**An import writes no consent row; a company carries a declared zone,
+editable, never derived from `country`.** `/contacts/import` drops a phone
+`normalisePhone` cannot read and reports it by line, stores a readable one as
+E.164, and is idempotent on a re-run: a person matches on email; without one,
+on LinkedIn profile; without that, on phone AND name at the same company,
+because a shared switchboard number is not one person. It refuses a file that
+is not UTF-8, because Excel's plain CSV is Windows-1252 and accented names
+would be stored garbled. Company edit (`PATCH /api/companies/[id]`) changes
+the name, the country and the IANA zone, through `isKnownTimeZone`.
+
+**Enrolment is the first production caller of `draftOpener`.** It checks
+consent for the channel, the recipient's zone, pause and a usable address,
+and does NOT read the suppression table: a suppressed contact is enrolled and
+then refused `suppressed` by `dispatchTouch`, the one place that rule lives
+(a dry run reports a hint count through `previewSend`). The duplicate guard is
+a NOT EXISTS in the INSERT's own SELECT over every earlier outbound row for
+the (contact, campaign) pair except `refused` — and except `failed` where a
+person approves each draft. Under auto-send a `failed` row blocks, because
+`recoverStuckSends` leaves `failed` on a send that may have gone, and queuing
+it again with no person in the loop would be exactly the guess that rule
+refuses. A contact already sent the opener is skipped `already_contacted`; a
+never-scanned company is skipped `stale`, because a scan fixes both; and a
+campaign on a cold-forbidden channel is refused whole
+(`campaign_channel_unsupported`).
+
+**The approvals page shows the same facts the sender reads**, from
+`previewSend`, and the evidence the draft quotes with its date — exactly
+`quotableFindings`, so a stale scan lists no lines and says why. Approve is
+disabled only for a `humanCanResolve: false` decision, and the page says so;
+everything else stays approvable, because the worker re-checks at sending.
+From the keyboard approving is two steps: `a` arms the focused card and Enter
+on that same card approves; any other key or a change of focus disarms it
+(§2.4). A page load is bounded to 80 previews, four at a time, because
+Vercel's pool is one connection; past that a person reads "could not be
+checked here — the worker checks again at sending" and is never blocked.
+
+**Replies have a screen.** `/inbox` lists every reply with its kind. A person
+may set any kind except `opted_out` and may never clear it — the zod enum and
+the query predicate both enforce that. An answer is an `awaiting_approval`
+draft naming `answers_touch_id`, which `dispatchTouch` threads through
+In-Reply-To/References from the parent's Message-ID (an inbound parent in the
+same org only — the §1 trigger). Answering resumes the person the reply paused,
+with an audit row. **The inbox never drafts to somebody who asked to stop**: a
+reply of kind `opted_out`, a suppression on the address on file OR on the
+From the reply came from, or a recorded refusal of the channel is a 409, and
+nobody is resumed. The check is the sender's own dry run, inside the draft's
+transaction after the resume, so a refusal nobody may approve past rolls back
+both; one a person can resolve (quiet hours, the cap, a zone, a paused
+campaign) comes back beside the draft as `wouldHold`. Two people answering
+one reply are serialised by locking the reply row — an `INSERT … WHERE NOT
+EXISTS` does not serialise under READ COMMITTED.
+
+**The opt-out reader runs first, and a genuine auto-reply pauses nobody.**
+`recordInboundReply` reads the words before the headers: an auto-reply flag
+applies only to a body that did not ask to be left alone. **An auto-reply read
+from `Auto-Submitted` — or `Precedence: bulk|junk|list|auto_reply`,
+`X-Autoreply`, `X-Autorespond` — no longer pauses a contact. That is a
+behaviour change, flagged.** It is stored `auto_reply` and skips the pause,
+the cancel and the advance. An explicit `Auto-Submitted: no` wins over any
+Precedence, because reading a mail as human-written is the direction that
+pauses; with no headers at all the behaviour is byte-for-byte what it was. An
+opt-out whose suppression cannot be written is audited
+`contact.opt_out_not_recorded`, logged `OPT-OUT NOT RECORDED — follow up by
+hand`, and returned as `optOutNotRecorded`.
+
+**A bounce is evidence about an address, not a person asking to be left
+alone.** It is a column and a refusal — `bounced`, ordered right after
+`suppressed` with the order asserted, and `humanCanResolve: true`: correct
+the address — never a suppression row. A delivery report of any kind is never
+filed as a reply; before, a DSN from a server that sets References was
+recorded as the contact replying, which paused them and moved the deal to
+`replied`. A report is acted on only when it is tied to a message this system
+SENT (the returned copy's Message-ID, the MTA's `Original-Message-ID`, or the
+report's own References), the address it names is the one that message went
+to, and that address is still the contact's; otherwise it is audited
+`contact.bounce_unmatched` and nothing changes. `5.2.2` (mailbox full) is
+transient although its class is 5, per RFC 3463, and a transient failure is
+recorded and changes nothing. `dispatchTouch`'s last look before the provider
+re-reads the mark. A campaign that bounces past `OUTREACH_BOUNCE_PAUSE_PCT`
+(30 days, at least 20 people written to) pauses itself — the existing
+`campaign_inactive` deferral is the stop — and its window restarts after the
+pause. **Residual risk, stated:** anyone who can mail the agency inbox can
+write a DSN, so a report is believed only when it names one of our
+Message-IDs AND the address that message went to — in practice the
+recipient, or somebody they forwarded our mail to. The effect is bounded:
+email to that one address stops until corrected; it suppresses nobody,
+pauses nobody, and touches no other contact.
+
+**A click IS the opt-out** — the fourth way a suppression row is written,
+after the suppressions page, a reply and a spoken opt-out. The token is
+`${touchId}.${hex HMAC-SHA256(UNSUBSCRIBE_SECRET, touchId)}`: it names the
+touch row and nothing else — no address, no expiry, no org. The minter is
+exported from the `@agency/db` root only; the web verifies through `queries`
+and computes its own MAC rather than importing the minter. `recordUnsubscribe`
+suppresses the address the message was DELIVERED to (`touches.recipient`)
+first, and the contact's current email too when it differs, all under the
+touch's org; a deleted contact still records. The loud path — a NULL
+recipient, an `addSuppression` that returns `ok: false` or throws, any
+intended row missing — audits `unsubscribe.not_recorded`, logs `OPT-OUT NOT
+RECORDED — record it by hand` at error, AWAITS the Slack notice (never
+`after()`: this is the one event that must not be lost to a host without
+`waitUntil`) and answers 500; the pause and the cancel run on that path too. A
+repeat click is idempotent. A GET only redirects to the page, because link
+scanners prefetch. The worker adds `List-Unsubscribe`/`List-Unsubscribe-Post`
+only with both `UNSUBSCRIBE_SECRET` and `WEB_PUBLIC_URL`.
+
+**The LinkedIn provider is a person.** `linkedinHumanProvider(userId)` is a
+`MessageProvider` whose `send()` sends nothing: it hands the words to whoever
+pressed Start and answers `human:<userId>`. Two presses, in that order. Start
+claims the row `sending` (the tick's own predicate, so two clicks give one
+hand-over and one `claimed`) and runs `dispatchTouch`, so every §2.1 rule —
+suppression by the 0016 `in/slug` key included — is checked at that moment.
+The words reach the screen ONLY on the success path, and the row settles
+`sent` in the same request; a refusal hands over nothing, and a clock refusal
+restores `approved` plus `scheduled_for` exactly as the worker's tick does,
+pinned by twin-row tests. "I sent it" closes the step's task; "I did not send
+it" marks the row `failed` with `sent_at` cleared, so the daily cap stops
+counting it (the deal is left where the forward-only move put it). `/tasks`
+materialises one `linkedin_send` task per approved or queued LinkedIn touch on
+read, so it works with no worker, and fails its own claims left `sending`
+past 30 minutes; `recoverStuckSends` is untouched and still covers them.
+`send.sent` reads "via human" for this path.
+
+**Erasure keeps the suppression.** Suppression rows first, everything in one
+transaction, and a suppression that cannot be stored aborts the erasure and
+fails loudly (§2.1's Phase 4 obligation) — rolled back, the contact paused
+with the reason, `contact.erasure_failed` audited, `OPT-OUT NOT RECORDED`
+logged, the Slack notice awaited, 500. Owners only, with the contact's id
+typed back as confirmation; downloading the record first is any member's, and
+audited as `contact.exported` BEFORE the file is produced (no audit row, no
+file). The keys kept: the contact's email, E.164 phone and LinkedIn `in/`
+slug, the recipient of every outbound message, the number on every linked
+call, and the key each of their opt-outs was recorded against — never the
+email's domain or a `company/` page, either of which would silence the whole
+company, and never the From of an ordinary reply, which may be a colleague in
+the thread. A contact-row value that cannot be read aborts (a person can fix
+it); a historical one is skipped and reported, or the person could never be
+erased. An opted-out reply keeps its From and an opted-out call its numbers,
+with their words scrubbed, because the compliance page re-derives every
+opt-out's key from them. **Not scrubbed, and the page says so:** chat
+transcripts, audit detail, free text about the company that names them, and a
+recording held at Twilio — the result returns the call SIDs for a person to
+delete by hand.
+
+**The Resend inbound route is a READER.** It verifies the Svix signature
+(in-repo, pinned to Svix's published vector), fetches the message, maps it to
+`handleInboundEmail` and can send nothing — no second matcher, and the same
+opt-out reader the IMAP listener and `/api/inbound/email` use. Its status codes
+are decisions about retrying: an unfetchable message is 502 and a recording
+failure 500, so Resend retries both; everything it read is 200. The generic
+route's "200 either way" is deliberately not copied, because a 2xx for an
+unread message could swallow a "stop". An HTML-only reply is converted to text
+with its lines kept, so a one-word "Stop" above a `<blockquote>` reads as an
+opt-out. **Open finding:** the worker's IMAP path flattens HTML to one line,
+so the same HTML-only reply arriving there pauses the contact and is never
+suppressed; `apps/web/test/resend-inbound.test.ts` demonstrates it. `dsn` is
+always null on this path — the receiving API lists attachments without their
+contents — so a bounce arriving through Resend is never recognised as one.
+
 **Not built:** SendGrid behind the provider interface (the interface is the
-point; the second implementation is a few lines when it is needed) and a
-LinkedIn *provider* — nothing can send on that channel, so the suppression
-above is a rule waiting for its sender rather than one in use.
+point; the second implementation is a few lines when it is needed); any
+automation of LinkedIn — the provider is a person, by design; multi-step
+sequences (enrolment writes one opener per person); and the campaign's
+`icp_profile_id` (enrolment qualifies against the active ICP; nothing sets or
+reads that column).
 
 ### The pipeline (Phase 5, §8.6)
 
