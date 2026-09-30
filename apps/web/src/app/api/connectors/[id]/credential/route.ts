@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server'
 import { assertCan } from '@agency/core'
 import {
-  appendAudit, credentialsReplaceForConnector, secretsKeyFromEnv, type AgencyDb,
+  LEGACY_AGENCY_CONNECTOR_MESSAGE, appendAudit, credentialsReplaceForConnector, isLegacyAgencyConnectorRefusal,
+  secretsKeyFromEnv, type AgencyDb,
 } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
@@ -86,6 +87,12 @@ export async function PATCH(
       key,
     )
   } catch (err) {
+    // A connector named `agency` from before 0018: the name CHECK refuses
+    // every UPDATE of the row, so the pointer cannot move. The transaction
+    // rolled the new secret back with it; nothing was stored.
+    if (isLegacyAgencyConnectorRefusal(err)) {
+      return NextResponse.json({ error: LEGACY_AGENCY_CONNECTOR_MESSAGE }, { status: 409 })
+    }
     // The name only. A driver error quotes the statement's parameters, and
     // one of them is the ciphertext; a message about a value nobody may see
     // has no business in a log line either.

@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server'
 import { assertCan } from '@agency/core'
 import {
-  appendAudit, connectorToolsCheck, connectorToolsSetDisabled, connectorToolsState, deleteConnector,
-  readConnector, setConnectorEnabled, type AgencyDb,
+  LEGACY_AGENCY_CONNECTOR_MESSAGE, appendAudit, connectorToolsCheck, connectorToolsSetDisabled, connectorToolsState,
+  deleteConnector, isLegacyAgencyConnectorRefusal, readConnector, setConnectorEnabled, type AgencyDb,
 } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
@@ -26,6 +26,12 @@ import { getDb } from '@/lib/db'
  * write that switched the connector off would punish the person making it
  * safer. It can only ever refuse more or refuse less; nothing sent here
  * makes any tool run without a person.
+ *
+ * A connector named `agency` from before 0018 can do neither — the name
+ * CHECK is evaluated on every UPDATE — and gets a 409 saying to delete it
+ * and add it again (`LEGACY_AGENCY_CONNECTOR_MESSAGE`). It is inert
+ * meanwhile: the product's own server takes its place in every turn. DELETE
+ * is unaffected.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -72,7 +78,15 @@ export async function PATCH(
     )
   }
 
-  const updated = await setConnectorEnabled(db, user.orgId, id, enabled)
+  let updated
+  try {
+    updated = await setConnectorEnabled(db, user.orgId, id, enabled)
+  } catch (err) {
+    if (isLegacyAgencyConnectorRefusal(err)) {
+      return NextResponse.json({ error: LEGACY_AGENCY_CONNECTOR_MESSAGE }, { status: 409 })
+    }
+    throw err
+  }
   await appendAudit(db, {
     orgId: user.orgId,
     actor: user.id,
@@ -107,7 +121,15 @@ async function setDisabledTools(
   if (!checked.ok) return NextResponse.json({ error: checked.message }, { status: 400 })
 
   const before = connectorToolsState(row)
-  const updated = await connectorToolsSetDisabled(db, user.orgId, id, checked.value)
+  let updated
+  try {
+    updated = await connectorToolsSetDisabled(db, user.orgId, id, checked.value)
+  } catch (err) {
+    if (isLegacyAgencyConnectorRefusal(err)) {
+      return NextResponse.json({ error: LEGACY_AGENCY_CONNECTOR_MESSAGE }, { status: 409 })
+    }
+    throw err
+  }
   if (!updated) return NextResponse.json({ error: 'No such connector.' }, { status: 404 })
 
   await appendAudit(db, {
