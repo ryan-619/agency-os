@@ -13,6 +13,7 @@
  * gap.
  */
 import type { Observation, OutdatedLib, SiteProfile } from '@agency/core'
+import { additiveObservations } from './additive.js'
 import { extractHtmlFacts } from './html.js'
 import {
   COMPLIANCE_TERMS, OUTDATED_JS, SECURITY_TEAM_TERMS, SECURITY_VENDOR_TERMS,
@@ -321,6 +322,9 @@ export function extractProfile(raw: RawCapture, company?: string): SiteProfile {
       host: raw.domain, outcome: 'handshake failed',
     })
   }
+
+  // --- informational: observed, recorded, never scored (additive.ts) ---------
+  Object.assign(observations, additiveObservations(raw, facts))
 
   return {
     domain: raw.domain,
