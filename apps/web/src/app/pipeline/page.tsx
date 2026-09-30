@@ -1,7 +1,7 @@
 import { redirect } from 'next/navigation'
-import { can, parseIcpDefinition } from '@agency/core'
+import { STAGE_ROT_DAYS, can, dealIsOverdue, parseIcpDefinition, rottingState, untouchedLabel } from '@agency/core'
 import { eq } from 'drizzle-orm'
-import { listDealsForBoard, listProposals, schema, upcomingMeetings, type AgencyDb } from '@agency/db/queries'
+import { dealsDue, listDealsForBoard, listProposals, schema, upcomingMeetings, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { PipelineBoard, type DealCard, type Stage } from '@/components/pipeline/board'
@@ -18,10 +18,19 @@ import { icpForOrg } from '@/lib/queries'
  * proposals written. Closed deals older than sixty days drop off the board
  * — they are still in the table and the audit log — so `won` and `lost`
  * show recent outcomes rather than everything that ever happened.
+ *
+ * Above the board, what is due: every open deal whose `next_action_at` falls
+ * within the next twenty-four hours or has passed. A due date set from the
+ * board is the END of the day it names in the setter's zone, so "within 24
+ * hours" is "today" wherever they are — the server does not know the
+ * viewer's zone, and does not pretend to. Each card's "untouched" verdict is
+ * core's `rottingState`, computed here from `updated_at`, and the lede
+ * states the thresholds from `STAGE_ROT_DAYS` rather than repeating them.
  */
 export const dynamic = 'force-dynamic'
 
 const CLOSED_SHOWN_FOR_DAYS = 60
+const DUE_WITHIN_MS = 24 * 3_600_000
 
 export default async function PipelinePage() {
   const session = await auth()
@@ -32,8 +41,9 @@ export default async function PipelinePage() {
   const db = getDb() as unknown as AgencyDb
   const now = new Date()
   const cutoff = new Date(now.getTime() - CLOSED_SHOWN_FOR_DAYS * 86_400_000)
-  const [deals, team, meetings, proposals, icpRow] = await Promise.all([
+  const [deals, due, team, meetings, proposals, icpRow] = await Promise.all([
     listDealsForBoard(db, user.orgId),
+    dealsDue(db, user.orgId, new Date(now.getTime() + DUE_WITHIN_MS)),
     // The team, for the assign control. Small by definition (§1 calls this a
     // 2-5 person agency) so there is nothing to paginate.
     db.select({ id: schema.users.id, email: schema.users.email, name: schema.users.name })
@@ -47,23 +57,35 @@ export default async function PipelinePage() {
 
   const cards: DealCard[] = deals
     .filter((d) => !d.closedAt || d.closedAt.getTime() >= cutoff.getTime())
-    .map((d) => ({
-      id: d.id,
-      stage: d.stage as Stage,
-      companyId: d.companyId,
-      companyDomain: d.companyDomain,
-      companyName: d.companyName,
-      nextAction: d.nextAction,
-      valueCents: d.valueCents,
-      currency: d.currency,
-      lostReason: d.lostReason,
-      updatedAt: (d.updatedAt ?? d.createdAt).toISOString(),
-      closedAt: d.closedAt ? d.closedAt.toISOString() : null,
-      ownerUserId: d.ownerUserId,
-      ownerEmail: d.ownerEmail,
-      ownerName: d.ownerName,
-    }))
+    .map((d) => {
+      const lastChanged = d.updatedAt ?? d.createdAt
+      const rot = d.closedAt ? null : rottingState(d.stage, lastChanged, now)
+      return {
+        id: d.id,
+        stage: d.stage as Stage,
+        companyId: d.companyId,
+        companyDomain: d.companyDomain,
+        companyName: d.companyName,
+        nextAction: d.nextAction,
+        valueCents: d.valueCents,
+        currency: d.currency,
+        lostReason: d.lostReason,
+        updatedAt: lastChanged.toISOString(),
+        closedAt: d.closedAt ? d.closedAt.toISOString() : null,
+        nextActionAt: d.nextActionAt ? d.nextActionAt.toISOString() : null,
+        overdue: !d.closedAt && dealIsOverdue(d.nextActionAt, now),
+        untouched: rot,
+        rottenLabel: rot?.rotten ? untouchedLabel(rot.days) : null,
+        ownerUserId: d.ownerUserId,
+        ownerEmail: d.ownerEmail,
+        ownerName: d.ownerName,
+      }
+    })
   const hiddenClosed = deals.length - cards.length
+  const thresholds = Object.entries(STAGE_ROT_DAYS)
+    .filter((entry): entry is [string, number] => entry[1] !== null)
+    .map(([stage, days]) => `${stage} ${days}`)
+    .join(', ')
 
   let orgLabel = 'Agency'
   if (icpRow) {
@@ -87,8 +109,44 @@ export default async function PipelinePage() {
           ? 'Sends and replies move cards forward on their own; a person moves them anywhere, and a lost deal is asked for its reason.'
           : 'A person moves cards anywhere, and a lost deal is asked for its reason. Nothing moves them on its own here: no worker is connected to this deployment, so nothing is sending or reading replies.'}
         {hiddenClosed > 0 ? <> {hiddenClosed} closed more than {CLOSED_SHOWN_FOR_DAYS} days ago {hiddenClosed === 1 ? 'is' : 'are'} not shown.</> : null}
+        {' '}A card is marked untouched once nobody has changed it for its stage&apos;s limit, in days
+        ({thresholds}) — counted from the last change to the card, a due date included, not from when it
+        entered the stage. <a href="/pipeline/analytics">Analytics →</a>
       </p>
-      <PipelineBoard deals={cards} canWrite={can(principal, 'deals:write')} team={team} />
+
+      <h2>Due today, or overdue</h2>
+      {due.length === 0 ? (
+        <p className="muted">
+          Nothing due. A due date is set on a card, and it is the end of the day it names; this lists every
+          open deal due within the next twenty-four hours or already past it.
+        </p>
+      ) : (
+        <table>
+          <thead>
+            <tr><th>Due</th><th>Company</th><th>Stage</th><th>Next action</th><th>Owner</th></tr>
+          </thead>
+          <tbody>
+            {due.map((d) => {
+              const late = dealIsOverdue(d.nextActionAt, now)
+              return (
+                <tr key={d.id}>
+                  <td className="mono">
+                    {d.nextActionAt ? <When iso={d.nextActionAt.toISOString()} mode="date" /> : '—'}
+                    {late ? <> <span className="tag warn">overdue</span></> : null}
+                  </td>
+                  <td><a href={`/companies/${encodeURIComponent(d.companyDomain)}`}>{d.companyName ?? d.companyDomain}</a></td>
+                  <td className="mono">{d.stage}</td>
+                  <td>{d.nextAction ?? <span className="muted">no next action written</span>}</td>
+                  <td>{d.ownerName?.trim() || d.ownerEmail || <span className="muted">unassigned</span>}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      )}
+
+      <h2>Board</h2>
+      <PipelineBoard deals={cards} canWrite={can(principal, 'deals:write')} team={team} rotDays={STAGE_ROT_DAYS} />
 
       <h2>Meetings coming up</h2>
       {meetings.length === 0 ? (
