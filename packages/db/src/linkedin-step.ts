@@ -33,6 +33,22 @@
  *                not deliver, which is exactly what `failed` means — so the
  *                record never claims a message nobody sent.
  *
+ * ## A hand-over is re-checked every time it is shown
+ *
+ * Handing the words over is the moment of sending for the RECORD — but the
+ * message leaves when the person gets to it, which can be the next morning.
+ * An opt-out on another channel, a pause, or a suppression written in
+ * between would otherwise sit under a step still showing the words. So every
+ * read of a handed step re-asks the send path (`previewSend`, the sender's own
+ * facts) and WITHHOLDS the words — never sends them to the screen at all —
+ * when the answer is now a refusal nobody may approve past, when the person
+ * is paused, when the rules cannot be asked (no contact or campaign), or once
+ * the hand-over is older than `LINKEDIN_HANDOVER_HOURS`: past that, "the
+ * rules passed" is a fact about a day nobody is looking at. The row is never
+ * marked `failed` for any of these — the person may already have sent it,
+ * and a guessed `failed` is a claim — so "I sent it" and "I did not send it"
+ * both stay open.
+ *
  * ## The step list is materialised on read
  *
  * Every `approved` LinkedIn touch, and every `queued` one an auto-send
@@ -132,6 +148,23 @@ export const LINKEDIN_STEP_STUCK_ERROR =
 export const LINKEDIN_STEP_NOT_SENT_ERROR =
   'Handed to a person to send from their own LinkedIn account, and they said it was not sent. Nothing went from here.'
 
+/**
+ * How long a hand-over keeps its words on screen. The rules were checked when
+ * Start was pressed; a day later that check is about a moment nobody is
+ * looking at, so the words are withheld and the person says what happened.
+ */
+export const LINKEDIN_HANDOVER_HOURS = 24
+
+/**
+ * Why a handed step's words are withheld (see the header):
+ *
+ * - `refused`   the send path now refuses this person, and nobody may approve past it.
+ * - `paused`    the contact is paused — a reply, an unsubscribe or a teammate.
+ * - `unchecked` the contact or the campaign is gone, so the rules cannot be asked.
+ * - `expired`   handed over more than `LINKEDIN_HANDOVER_HOURS` ago.
+ */
+export type LinkedinWithheld = 'refused' | 'paused' | 'unchecked' | 'expired'
+
 /** The refusals that are about the clock, not the person. */
 const CLOCK_CODES: readonly SendRefusalCode[] = ['quiet_hours', 'daily_cap', 'campaign_inactive']
 
@@ -168,6 +201,11 @@ export interface LinkedinStep {
   readonly campaignName: string | null
   /** When a deferral said to try again; the rules decide, this is a hint. */
   readonly scheduledFor: Date | null
+  /**
+   * `scheduledFor` is still ahead of the `now` the list was read at. Decided
+   * here, on the server, so the page and its hydration cannot disagree.
+   */
+  readonly deferred: boolean
   readonly approvedAt: Date | null
   readonly assigneeUserId: string | null
   readonly dueAt: Date | null
@@ -176,7 +214,15 @@ export interface LinkedinStep {
    * Null when the row has no contact or campaign to check against.
    */
   readonly preview: SendPreview | null
-  /** `handed` only: the words the person was given, and who. */
+  /**
+   * `handed` only: the dry run of the send path, re-asked at `now` — the
+   * rules as they stand when the list is read, not when Start was pressed.
+   * Null when the row has no contact or campaign to check against.
+   */
+  readonly recheck: SendPreview | null
+  /** `handed` only: why the words are withheld, or null when they are shown. */
+  readonly withheld: LinkedinWithheld | null
+  /** `handed` and not withheld only: the words the person was given, and who. */
   readonly words: LinkedinWords | null
   readonly handedTo: { readonly userId: string; readonly label: string | null } | null
   readonly handedAt: Date | null
@@ -286,6 +332,11 @@ export async function linkedinStepsDue(
       ? await previewSend(db, { orgId, contactId: t.contactId, campaignId: t.campaignId, now })
       : null
     const handedUser = state === 'handed' ? t.providerId!.slice(HUMAN_PREFIX.length) : null
+    // Re-asked on every read: the person sends when they get to it.
+    const recheck = state === 'handed' && t.contactId && t.campaignId
+      ? await previewSend(db, { orgId, contactId: t.contactId, campaignId: t.campaignId, now })
+      : null
+    const withheld = state === 'handed' ? withheldFor(recheck, t.sentAt ?? t.updatedAt ?? t.createdAt, now) : null
     steps.push({
       taskId: r.task.id,
       touchId: t.id,
@@ -300,11 +351,15 @@ export async function linkedinStepsDue(
       campaignId: t.campaignId,
       campaignName: r.campaignName,
       scheduledFor: t.scheduledFor,
+      deferred: t.scheduledFor !== null && t.scheduledFor.getTime() > now.getTime(),
       approvedAt: t.approvedAt,
       assigneeUserId: r.task.assigneeUserId,
       dueAt: r.task.dueAt,
       preview,
-      words: state === 'handed'
+      recheck,
+      withheld,
+      // Withheld means NOT SENT to the client, not hidden by it.
+      words: state === 'handed' && withheld === null
         ? {
             to: t.recipient ?? '',
             profileUrl: linkedinProfileUrl(t.recipient),
@@ -319,6 +374,15 @@ export async function linkedinStepsDue(
     })
   }
   return steps
+}
+
+/** See `LinkedinWithheld`. The person comes before the clock: a pause is the reason worth saying. */
+function withheldFor(recheck: SendPreview | null, handedAt: Date, now: Date): LinkedinWithheld | null {
+  if (!recheck || !recheck.ok) return 'unchecked'
+  if (recheck.facts.paused) return 'paused'
+  if (!recheck.decision.allowed && !recheck.decision.humanCanResolve) return 'refused'
+  if (now.getTime() - handedAt.getTime() > LINKEDIN_HANDOVER_HOURS * 3_600_000) return 'expired'
+  return null
 }
 
 function isHanded(t: Pick<TouchRow, 'status' | 'providerId'>): boolean {

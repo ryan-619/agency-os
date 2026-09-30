@@ -16,6 +16,17 @@ import { When } from '@/components/when'
  *
  * What the send path would say right now is shown BEFORE Start, from the
  * server's dry run of the same rules. It is a forecast: Start asks again.
+ *
+ * AFTER Start the server asks again on every load, because the person sends
+ * when they get to it. When the answer is now a refusal nobody may approve
+ * past, the person is paused, or the hand-over is more than a day old, the
+ * server withholds the words — they never reach this component — and says
+ * why. Either way the person can still say whether they sent it: they may
+ * already have, and nothing here guesses.
+ *
+ * Nothing here reads the clock while rendering. Whether a deferral is still
+ * ahead is decided on the server (`deferred`), so the server's render and the
+ * browser's hydration cannot disagree about it.
  */
 
 export interface LinkedinStepItem {
@@ -29,16 +40,25 @@ export interface LinkedinStepItem {
   readonly profileUrl: string | null
   /** When an earlier Start was deferred until; the rules decide, this is a hint. */
   readonly scheduledFor: string | null
+  /** `scheduledFor` is still ahead, decided on the server at the time of the page's read. */
+  readonly deferred: boolean
   /**
    * `ready` only: the dry run, in words. `clear` and `clock` leave Start
    * enabled — the clock may have moved by the time it is pressed, and a
    * deferral hands nothing over. `blocked` disables it.
    */
   readonly check: { readonly kind: 'clear' | 'clock' | 'blocked'; readonly text: string } | null
-  /** `handed` only. */
+  /** `handed` only, and absent when withheld: the server did not send them. */
   readonly words: { readonly subject: string; readonly body: string } | null
   readonly handedTo: string | null
   readonly handedAt: string | null
+  /**
+   * `handed` with words only: the rules re-asked when the page was read.
+   * `hold` is a refusal a person can wait out or fix, said beside the words.
+   */
+  readonly recheck: { readonly kind: 'clear' | 'hold'; readonly text: string } | null
+  /** `handed` only: why the words are withheld, in a person's words, or null when they are shown. */
+  readonly withheld: string | null
   /** `stopped` only: why, in a person's words. */
   readonly stoppedBecause: string | null
 }
@@ -148,7 +168,7 @@ function Step({ step, canAct }: { step: LinkedinStepItem; canAct: boolean }) {
               {step.check.text}
             </p>
           ) : null}
-          {step.scheduledFor && Date.parse(step.scheduledFor) > Date.now() ? (
+          {step.deferred && step.scheduledFor ? (
             <span className="hint">
               An earlier Start was deferred; the rules said to try again after <When iso={step.scheduledFor} />.
             </span>
@@ -182,10 +202,15 @@ function Step({ step, canAct }: { step: LinkedinStepItem; canAct: boolean }) {
       {state === 'handed' && handed ? (
         <>
           <p className="hint" style={{ marginTop: 6 }}>
-            Every rule passed. Handed to {step.handedTo ?? 'you'}
-            {step.handedAt ? <> at <When iso={step.handedAt} /></> : null}. Send it from your own LinkedIn
-            account, then say whether it went.
+            Every rule passed when {step.handedTo ?? 'you'} pressed Start
+            {step.handedAt ? <> (<When iso={step.handedAt} />)</> : null}. Send it from your own LinkedIn account,
+            then say whether it went.
           </p>
+          {step.recheck ? (
+            <p style={{ margin: '4px 0', fontSize: 13 }} className={step.recheck.kind === 'clear' ? 'ok-line' : 'err-line'}>
+              {step.recheck.text}
+            </p>
+          ) : null}
           {handed.subject ? <div style={{ fontSize: 12.5, marginTop: 6 }}><strong>{handed.subject}</strong></div> : null}
           <pre className="touch-body" style={{ fontFamily: 'inherit' }}>{handed.body}</pre>
           <div className="row-actions" style={{ marginTop: 8, alignItems: 'center' }}>
@@ -199,6 +224,25 @@ function Step({ step, canAct }: { step: LinkedinStepItem; canAct: boolean }) {
             ) : (
               <span className="hint" style={{ marginTop: 0 }}>No readable profile link on the contact.</span>
             )}
+            <button type="button" disabled={!canAct || busy} onClick={() => void act('sent')}>I sent it</button>
+            <button type="button" className="deny" disabled={!canAct || busy} onClick={() => void act('not_sent')}>
+              I did not send it
+            </button>
+          </div>
+        </>
+      ) : null}
+
+      {state === 'handed' && !handed ? (
+        <>
+          <p style={{ margin: '6px 0', fontSize: 13 }} className="err-line">
+            {step.withheld ?? 'The words are no longer shown here.'}
+          </p>
+          <p className="hint" style={{ marginTop: 0 }}>
+            Handed to {step.handedTo ?? 'somebody'}
+            {step.handedAt ? <> (<When iso={step.handedAt} />)</> : null}. If it was already sent, press I sent it;
+            if not, press I did not send it — it is recorded as not sent, and nothing goes from here.
+          </p>
+          <div className="row-actions" style={{ marginTop: 4 }}>
             <button type="button" disabled={!canAct || busy} onClick={() => void act('sent')}>I sent it</button>
             <button type="button" className="deny" disabled={!canAct || busy} onClick={() => void act('not_sent')}>
               I did not send it
