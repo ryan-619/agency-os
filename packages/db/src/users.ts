@@ -292,10 +292,9 @@ export async function usersSetRole(
  *
  * Self and the last owner are refused IN the statement, which runs after
  * `lockOwners` (see the module comment). The session delete is in the same
- * transaction as the stamp, so
- * there is no moment where the row says revoked and a browser still holds a
- * session that would carry it for thirty days — Auth.js reads `sessions`,
- * not `users.revoked_at`, on every request.
+ * transaction as the stamp, so there is no moment where the row says revoked
+ * and a browser still holds a session that would carry it for thirty days —
+ * Auth.js reads `sessions`, not `users.revoked_at`, on every request.
  *
  * An already-revoked person is left as they are and reported as done with no
  * sessions ended: the state asked for is the state they are in.
