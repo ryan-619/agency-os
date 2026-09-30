@@ -76,8 +76,15 @@ export function parseIcpDefinition(value: unknown): IcpDefinition {
   else {
     const entries = Object.entries(d.signals)
     for (const [key, sig] of entries) {
-      if (typeof sig?.weight !== 'number' || !Number.isFinite(sig.weight) || sig.weight < 0) {
-        problems.push(`signals.${key}.weight must be a non-negative number`)
+      // Zero is refused as well as negatives. A signal at weight 0 is in the
+      // ICP, so `recordScan` would stamp it `scored` — a row that counts for
+      // nothing while reading as though it counts. A signal the agency wants
+      // observed but not scored belongs in the informational catalogue
+      // (`INFORMATIONAL_SIGNALS`); promoting one means giving it a weight here.
+      if (typeof sig?.weight !== 'number' || !Number.isFinite(sig.weight) || sig.weight <= 0) {
+        problems.push(
+          `signals.${key}.weight must be a positive number — an informational signal is a catalogue entry, not a zero in the ICP`,
+        )
       }
       if (typeof sig?.why !== 'string') problems.push(`signals.${key}.why must be a string`)
       if (sig?.order !== undefined && (typeof sig.order !== 'number' || !Number.isFinite(sig.order))) {

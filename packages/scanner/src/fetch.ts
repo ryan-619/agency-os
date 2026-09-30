@@ -91,6 +91,8 @@ interface HttpResult {
   readonly finalUrl: string
   /** Lower-cased names. The FIRST value of a repeated header, as Python reads it. */
   readonly headers: Readonly<Record<string, string>>
+  /** Every Set-Cookie, value redacted — see `setCookieHeaders`. */
+  readonly setCookies: readonly string[]
   readonly body: string
   /** The response hit MAX_ENCODED_BYTES, so the body is a prefix of the page. */
   readonly truncated: boolean
@@ -112,6 +114,32 @@ export function firstHeaders(raw: readonly string[]): Record<string, string> {
   }
   // Returned with its null prototype intact, so a header literally named
   // `constructor` answers with nothing rather than with a function.
+  return out
+}
+
+/**
+ * Every `Set-Cookie` in `rawHeaders` (name/value pairs, any case), in order,
+ * with each cookie's VALUE replaced by `<redacted>`.
+ *
+ * A second read of the same pairs, not a change to `firstHeaders`: parity
+ * needs the map to keep the first value of every header, and a site that sets
+ * three cookies would otherwise be judged on one of them. The value goes
+ * because nothing reads it — `cookie_flags` judges names and attributes — and
+ * a session cookie's value is a live bearer credential for whatever session
+ * the prospect's server handed the scanner (§2.3). It has no business in
+ * `scans.raw`.
+ */
+export function setCookieHeaders(raw: readonly string[]): string[] {
+  const out: string[] = []
+  for (let i = 0; i + 1 < raw.length; i += 2) {
+    if (raw[i]!.toLowerCase() !== 'set-cookie') continue
+    const value = raw[i + 1]!
+    const semi = value.indexOf(';')
+    const pair = semi === -1 ? value : value.slice(0, semi)
+    const eq = pair.indexOf('=')
+    const name = eq === -1 ? '' : pair.slice(0, eq)
+    out.push(`${name}=<redacted>${semi === -1 ? '' : value.slice(semi)}`)
+  }
   return out
 }
 
@@ -265,6 +293,9 @@ async function get(startUrl: string, timeoutMs: number): Promise<HttpResult> {
       status,
       finalUrl: url.toString(),
       headers,
+      // From the FINAL response only. A cookie set on a redirect hop belongs to
+      // that hop's host, which is not the page being described.
+      setCookies: setCookieHeaders(res.rawHeaders),
       body: decodeBody(raw, headers['content-encoding'] ?? ''),
       truncated,
     }
@@ -352,6 +383,7 @@ export async function capture(domain: string, opts: FetchOptions = {}): Promise<
       status: res.status,
       finalUrl: res.finalUrl,
       headers: res.headers,
+      setCookies: res.setCookies,
       body: res.body,
       truncated: res.truncated,
       ...(ok ? {} : { error: `HTTP ${res.status}` }),

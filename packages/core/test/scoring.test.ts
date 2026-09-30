@@ -189,9 +189,13 @@ describe('parseIcpDefinition', () => {
     expect(Object.keys(icp.signals)).toHaveLength(12)
   })
 
-  it('rejects a definition with a negative weight', () => {
+  // Zero as well as negatives since the informational signals: a weight-0
+  // signal would be stamped `scored` while counting for nothing (icp.test.ts).
+  it('rejects a definition with a negative or zero weight', () => {
     expect(() => parseIcpDefinition({ ...icp, signals: { csp: { weight: -1, why: 'x' } } }))
-      .toThrow(/non-negative/)
+      .toThrow(/must be a positive number/)
+    expect(() => parseIcpDefinition({ ...icp, signals: { csp: { weight: 0, why: 'x' } } }))
+      .toThrow(/must be a positive number/)
   })
 
   it('rejects tiers that are not ordered highest floor first', () => {

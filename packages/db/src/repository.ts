@@ -125,9 +125,13 @@ export interface RecordScanOutput {
   readonly scoreId: string
   /** What was written, so the caller need not re-derive it. */
   readonly result: ScoreResult
+  /** Every row, informational ones included. */
   readonly findingsWritten: number
+  /** Of the SCORED signals — the ones the score was computed over. */
   readonly observedCount: number
   readonly unobservedCount: number
+  /** Rows written `scored = false`: observed context, never part of the score. */
+  readonly informationalCount: number
 }
 
 /**
@@ -140,6 +144,9 @@ export interface RecordScanOutput {
  *   * an unobserved signal is stored with gap = NULL and weight 0;
  *   * a gap's weight is the ICP's weight for that signal, so a finding cannot
  *     claim a weight the profile does not give it;
+ *   * a signal the ICP does not name — an informational one — is stored
+ *     `scored = false` at weight 0 (`findings_informational_carries_no_weight`),
+ *     so it is recorded as observed and can never be read as a gap that counts;
  *   * the score names the scan it was computed from, so no reader can pair one
  *     scan's number with another scan's evidence.
  */
@@ -168,19 +175,28 @@ export async function recordScan(db: AgencyDb, input: RecordScanInput): Promise<
     // weights from it wrote 0 against every real gap a disqualified company
     // has, and the detail page then ranked them all equally at zero.
 
-    const findingRows = Object.entries(profile.observations).map(([signalKey, o]) => ({
-      orgId,
-      scanId: scan.id,
-      companyId,
-      signalKey,
-      observed: o.observed,
-      // NULL whenever unobserved: unknown, not "no gap".
-      gap: o.observed ? Boolean(o.gap) : null,
-      weight: o.observed && o.gap ? (icp.signals[signalKey]?.weight ?? 0) : 0,
-      detail: o.detail || null,
-      evidence: (o.evidence ?? {}) as Record<string, unknown>,
-      stale: false,
-    }))
+    const findingRows = Object.entries(profile.observations).map(([signalKey, o]) => {
+      // Scored means "the ICP names it", decided HERE from the definition the
+      // score was computed with — not from a list of informational keys, so
+      // promoting a signal is an ICP edit and nothing else. An own-property
+      // test, because `signals` is a plain object and `'constructor' in {}`
+      // is true.
+      const scored = Object.prototype.hasOwnProperty.call(icp.signals, signalKey)
+      return {
+        orgId,
+        scanId: scan.id,
+        companyId,
+        signalKey,
+        observed: o.observed,
+        // NULL whenever unobserved: unknown, not "no gap".
+        gap: o.observed ? Boolean(o.gap) : null,
+        weight: scored && o.observed && o.gap ? (icp.signals[signalKey]?.weight ?? 0) : 0,
+        scored,
+        detail: o.detail || null,
+        evidence: (o.evidence ?? {}) as Record<string, unknown>,
+        stale: false,
+      }
+    })
 
     if (findingRows.length) await tx.insert(schema.findings).values(findingRows)
 
@@ -205,8 +221,9 @@ export async function recordScan(db: AgencyDb, input: RecordScanInput): Promise<
       scoreId: score.id,
       result,
       findingsWritten: findingRows.length,
-      observedCount: findingRows.filter((f) => f.observed).length,
-      unobservedCount: findingRows.filter((f) => !f.observed).length,
+      observedCount: findingRows.filter((f) => f.scored && f.observed).length,
+      unobservedCount: findingRows.filter((f) => f.scored && !f.observed).length,
+      informationalCount: findingRows.filter((f) => !f.scored).length,
     }
   })
 }
@@ -455,9 +472,46 @@ export async function quotableFindings(
         eq(schema.findings.observed, true),
         eq(schema.findings.gap, true),
         eq(schema.findings.stale, false),
+        // An informational signal is context, never a talking point: it is
+        // not in the score, so an email must not lead with it.
+        eq(schema.findings.scored, true),
       ),
     )
     .orderBy(desc(schema.findings.weight))
+}
+
+/**
+ * The informational (unscored) findings on a company's LATEST scan, with that
+ * scan — or null when the latest scan never reached the site or there is none.
+ *
+ * The same "latest" `latestScanWithFindings` means, so the company page's
+ * informational section always describes the scan whose score and gaps sit
+ * above it; an older successful scan's context under a newer failed scan
+ * would be one scan's evidence beside another's verdict. Freshness is the
+ * caller's to judge, from `scan.ranAt`, as everywhere else.
+ */
+export async function latestInformationalFindings(db: AgencyDb, orgId: string, companyId: string) {
+  const scans = await db
+    .select({ id: schema.scans.id, ranAt: schema.scans.ranAt, ok: schema.scans.ok })
+    .from(schema.scans)
+    .where(and(eq(schema.scans.orgId, orgId), eq(schema.scans.companyId, companyId)))
+    .orderBy(desc(schema.scans.ranAt))
+    .limit(1)
+  const scan = scans[0]
+  if (!scan || !scan.ok) return null
+
+  const findings = await db
+    .select()
+    .from(schema.findings)
+    .where(
+      and(
+        eq(schema.findings.orgId, orgId),
+        eq(schema.findings.scanId, scan.id),
+        eq(schema.findings.scored, false),
+      ),
+    )
+    .orderBy(schema.findings.signalKey)
+  return { scan, findings }
 }
 
 /** The org's active ICP profile row. */

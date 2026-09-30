@@ -254,7 +254,7 @@ export async function briefForMeeting(
     deal: deal ? { stage: deal.stage, nextAction: deal.nextAction, valueCents: deal.valueCents } : null,
     signals: icp?.signals ?? {},
     findings: (found?.findings ?? []).map((f) => ({
-      signalKey: f.signalKey, observed: f.observed, gap: f.gap, weight: f.weight, detail: f.detail,
+      signalKey: f.signalKey, observed: f.observed, gap: f.gap, weight: f.weight, detail: f.detail, scored: f.scored,
     })),
     scan: found ? { ranAt: found.scan.ranAt, ok: found.scan.ok, stale: isStale(found.scan.ranAt, staleAfter, now) } : null,
     score: found?.score ? { score: found.score.score, tier: found.score.tier } : null,

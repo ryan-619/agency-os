@@ -71,13 +71,17 @@ export async function generateProposal(
     company: { domain: company.domain, name: company.name },
     agency: { name: org.name },
     icp,
-    findings: found.findings.map((f) => ({
+    // Scored rows only: an informational signal is never scope, and counting
+    // it would make the buyer's "of N signals observed" a number about a
+    // review nobody scored.
+    findings: found.findings.filter((f) => f.scored).map((f) => ({
       signalKey: f.signalKey,
       observed: f.observed,
       gap: f.gap,
       weight: f.weight,
       detail: f.detail,
       evidence: (f.evidence ?? {}) as Record<string, unknown>,
+      scored: f.scored,
     })),
     scan: { ranAt: found.scan.ranAt, ok: found.scan.ok, stale: isStale(found.scan.ranAt, staleAfter, now) },
     score: found.score ? { score: found.score.score, tier: found.score.tier } : null,
