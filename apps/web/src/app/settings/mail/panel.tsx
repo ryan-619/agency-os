@@ -22,7 +22,8 @@ type State =
 
 const SELECTOR_WORDS: Readonly<Record<DkimSelectorResult['state'], string>> = {
   found: 'key published',
-  short: 'RSA key shorter than 2048 bits',
+  rsa1024: 'key published (1024-bit RSA)',
+  short: 'RSA key shorter than 1024 bits',
   revoked: 'key revoked (empty p=)',
   none: 'TXT present, but not a DKIM key',
   absent: 'no record',

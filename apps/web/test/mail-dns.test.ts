@@ -12,6 +12,8 @@
  * user input: a DKIM selector must be a single DNS label before it is ever
  * put in front of `._domainkey.`.
  */
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
   DKIM_DEFAULT_SELECTORS, MAIL_DNS_VERDICT_WORDS, assessMailDns, isDkimSelector, lookupMailDns, mailFromDomain,
@@ -23,8 +25,10 @@ const ABSENT: TxtAnswer = { kind: 'absent' }
 const SERVFAIL: TxtAnswer = { kind: 'unchecked', code: 'ESERVFAIL' }
 /** A 2048-bit RSA SubjectPublicKeyInfo is 294 bytes: 392 base64 characters. */
 const KEY_2048 = 'M' + 'A'.repeat(391)
-/** A 1024-bit one is 162 bytes: 216 characters. */
+/** A 1024-bit one is 162 bytes: 216 characters. Resend's and Google's defaults. */
 const KEY_1024 = 'M' + 'A'.repeat(215)
+/** A 512-bit one is 94 bytes: 128 characters (with padding). */
+const KEY_512 = 'M' + 'A'.repeat(125) + '=='
 
 function dnsError(code: string): Error {
   return Object.assign(new Error(`queryTxt ${code} example`), { code })
@@ -138,9 +142,10 @@ describe('parseDmarc', () => {
 })
 
 describe('parseDkim', () => {
-  it('reads a published key, a short one, a revoked one, and TXT that is no key', () => {
+  it('reads a published key, a 1024-bit one, a short one, a revoked one, and TXT that is no key', () => {
     expect(parseDkim([`v=DKIM1; k=rsa; p=${KEY_2048}`])).toBe('found')
-    expect(parseDkim([`v=DKIM1; p=${KEY_1024}`])).toBe('short')
+    expect(parseDkim([`v=DKIM1; p=${KEY_1024}`])).toBe('rsa1024')
+    expect(parseDkim([`v=DKIM1; p=${KEY_512}`])).toBe('short')
     expect(parseDkim(['v=DKIM1; k=ed25519; p=11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo='])).toBe('found')
     expect(parseDkim(['v=DKIM1; p='])).toBe('revoked')
     expect(parseDkim(['some-other-verification=1'])).toBe('none')
@@ -223,8 +228,19 @@ describe('assessMailDns', () => {
     expect(a.dkim.detail).toMatch(/not ruled out/)
   })
 
-  it('grades a short key weak and names a revoked one', () => {
-    expect(assessMailDns({ spf: ABSENT, dmarc: ABSENT, dkim: [{ selector: 's1', answer: records(`p=${KEY_1024}`) }] }).dkim.verdict).toBe('weak')
+  /**
+   * 1024 bits is RFC 8301's minimum and the default Resend and Google publish,
+   * so it passes with a note; calling it weak would flag every such domain
+   * over a key its provider chose. Under 1024, receivers ignore the signature.
+   */
+  it('passes a 1024-bit key with a note, and grades one under 1024 bits weak', () => {
+    const k1024 = assessMailDns({ spf: ABSENT, dmarc: ABSENT, dkim: [{ selector: 'resend', answer: records(`p=${KEY_1024}`) }] }).dkim
+    expect(k1024.verdict).toBe('pass')
+    expect(k1024.detail).toMatch(/1024-bit/)
+    expect(assessMailDns({ spf: ABSENT, dmarc: ABSENT, dkim: [{ selector: 's1', answer: records(`p=${KEY_512}`) }] }).dkim.verdict).toBe('weak')
+  })
+
+  it('names a revoked key', () => {
     const revoked = assessMailDns({ spf: ABSENT, dmarc: ABSENT, dkim: [{ selector: 's1', answer: records('v=DKIM1; p=') }] }).dkim
     expect(revoked.verdict).toBe('missing')
     expect(revoked.detail).toMatch(/s1 publishes a revoked key/)
@@ -276,5 +292,48 @@ describe('lookupMailDns', () => {
     const { resolve, asked } = fakeResolver({})
     await expect(lookupMailDns('agency.com', ['evil.com.'], resolve)).rejects.toThrow(/single DNS label/)
     expect(asked).toEqual([])
+  })
+})
+
+/**
+ * The route cannot be loaded here — it imports `@/auth` — so what it must do
+ * is pinned from its source, the way `search-source.test.ts` pins the search
+ * route. Comments are stripped so prose about a rule is not mistaken for the
+ * rule.
+ */
+describe('GET /api/settings/mail-dns, from its source', () => {
+  const raw = readFileSync(fileURLToPath(new URL('../src/app/api/settings/mail-dns/route.ts', import.meta.url)), 'utf8')
+  const code = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
+
+  it('refuses a selector that is not one DNS label with a 400, before any resolver exists', () => {
+    const check = code.indexOf('!isDkimSelector(dkim)')
+    const refusal = code.indexOf('status: 400')
+    const resolver = code.indexOf('new Resolver(')
+    const lookup = code.indexOf('lookupMailDns(')
+    expect(check).toBeGreaterThan(-1)
+    expect(refusal).toBeGreaterThan(check)
+    expect(resolver).toBeGreaterThan(refusal)
+    expect(lookup).toBeGreaterThan(resolver)
+  })
+
+  it('reads nothing from the request but the selector', () => {
+    const reads = [...code.matchAll(/searchParams\.get\(\s*'([^']*)'\s*\)/g)].map((m) => m[1])
+    expect(reads).toEqual(['dkim'])
+    expect(code).not.toMatch(/request\.json\(|formData\(|headers\.get\(/)
+  })
+
+  it('resolves TXT only, for the domain in MAIL_FROM', () => {
+    expect(code).toContain('mailFromDomain(env().MAIL_FROM)')
+    expect(code).toMatch(/resolver\.resolveTxt\(name\)/)
+    for (const other of ['resolve4', 'resolve6', 'resolveAny', 'resolveCname', 'resolveNs', 'resolveSrv', 'reverse(', 'lookup(', "from 'node:net'", "from 'node:http"]) {
+      expect(code, other).not.toContain(other)
+    }
+  })
+
+  it('asks for a signed-in principal who may read settings, and runs on Node, uncached', () => {
+    expect(code).toMatch(/status: 401/)
+    expect(code).toContain("'connectors:read'")
+    expect(code).toContain("export const runtime = 'nodejs'")
+    expect(code).toContain("export const dynamic = 'force-dynamic'")
   })
 })

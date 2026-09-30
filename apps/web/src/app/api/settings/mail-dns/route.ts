@@ -34,7 +34,7 @@ export const revalidate = 0
 const NO_STORE = { 'cache-control': 'no-store' }
 
 /** Per query, per try. Two tries: one dropped UDP packet is not a verdict. */
-const TIMEOUT_MS = 2_500
+const TIMEOUT_MS = 2_000
 const TRIES = 2
 
 export async function GET(request: Request): Promise<NextResponse> {

@@ -189,35 +189,42 @@ export function parseDmarc(txt: readonly string[]): DmarcParse {
   return { records, policy, pct, reports: Boolean(t.get('rua')) }
 }
 
-export type DkimKeyState = 'found' | 'short' | 'revoked' | 'none'
+export type DkimKeyState = 'found' | 'rsa1024' | 'short' | 'revoked' | 'none'
 
 /**
  * One selector's TXT records, read as a DKIM key record. `found` is a
- * published key; `short` an RSA key under 2048 bits; `revoked` a record with
- * an empty `p=` (RFC 6376 §3.6.1's way of withdrawing a key); `none` is TXT
- * at that name that is not a key record at all.
+ * published key of 2048 bits or more (or not RSA); `rsa1024` an RSA key of at
+ * least 1024 bits and under 2048 — RFC 8301's minimum, and what Resend and
+ * Google Workspace publish by default; `short` an RSA key under 1024 bits,
+ * whose signatures RFC 8301 tells receivers to ignore; `revoked` a record
+ * with an empty `p=` (RFC 6376 §3.6.1's way of withdrawing a key); `none` is
+ * TXT at that name that is not a key record at all.
  */
 export function parseDkim(txt: readonly string[]): DkimKeyState {
+  const rank: Record<DkimKeyState, number> = { none: 0, revoked: 1, short: 2, rsa1024: 3, found: 4 }
   let state: DkimKeyState = 'none'
+  const keep = (next: DkimKeyState) => {
+    if (rank[next] > rank[state]) state = next
+  }
   for (const record of txt) {
     const t = tags(record)
     if (!t.has('p')) continue
     const key = (t.get('p') ?? '').replace(/\s+/g, '')
     if (key === '') {
-      if (state === 'none') state = 'revoked'
+      keep('revoked')
       continue
     }
     const k = (t.get('k') ?? 'rsa').toLowerCase()
-    // The key is base64 DER (SubjectPublicKeyInfo). A 2048-bit RSA key is
-    // 294 bytes of it and a 1024-bit one 162, so the byte count alone says
-    // which side of 2048 bits it falls — measured from what is published,
-    // not guessed.
-    const bytes = Math.floor((key.length * 3) / 4) - (key.endsWith('==') ? 2 : key.endsWith('=') ? 1 : 0)
-    if (k === 'rsa' && bytes < 256) {
-      if (state !== 'found') state = 'short'
+    if (k !== 'rsa') {
+      keep('found')
       continue
     }
-    state = 'found'
+    // The key is base64 DER (SubjectPublicKeyInfo), whose size follows the
+    // modulus: 162 bytes for 1024 bits, 294 for 2048. The byte count alone
+    // says which side of each line a key falls — measured from what is
+    // published, not guessed.
+    const bytes = Math.floor((key.length * 3) / 4) - (key.endsWith('==') ? 2 : key.endsWith('=') ? 1 : 0)
+    keep(bytes < 150 ? 'short' : bytes < 280 ? 'rsa1024' : 'found')
   }
   return state
 }
@@ -332,9 +339,23 @@ function assessDkim(results: readonly { readonly selector: string; readonly answ
   if (found.length > 0) {
     return { verdict: 'pass', record: null, selectors, detail: `A published key at ${found.join(', ')}.` }
   }
+  const rsa1024 = named('rsa1024')
+  if (rsa1024.length > 0) {
+    return {
+      verdict: 'pass',
+      record: null,
+      selectors,
+      detail: `A published 1024-bit RSA key at ${rsa1024.join(', ')}. That meets RFC 8301's minimum and is what several providers publish by default; 2048 bits is the recommendation.`,
+    }
+  }
   const short = named('short')
   if (short.length > 0) {
-    return { verdict: 'weak', record: null, selectors, detail: `The key at ${short.join(', ')} is RSA shorter than 2048 bits.` }
+    return {
+      verdict: 'weak',
+      record: null,
+      selectors,
+      detail: `The key at ${short.join(', ')} is RSA shorter than 1024 bits, and RFC 8301 tells receivers to ignore signatures made with it.`,
+    }
   }
   const failed = named('unchecked')
   if (failed.length > 0) {
