@@ -888,11 +888,10 @@ failure 500, so Resend retries both; everything it read is 200. The generic
 route's "200 either way" is deliberately not copied, because a 2xx for an
 unread message could swallow a "stop". An HTML-only reply is converted to text
 with its lines kept, so a one-word "Stop" above a `<blockquote>` reads as an
-opt-out. **Open finding:** the worker's IMAP path flattens HTML to one line,
-so the same HTML-only reply arriving there pauses the contact and is never
-suppressed; `apps/web/test/resend-inbound.test.ts` demonstrates it. `dsn` is
-always null on this path — the receiving API lists attachments without their
-contents — so a bounce arriving through Resend is never recognised as one.
+opt-out — by `htmlToText` in packages/core, the one converter both this route
+and the worker's IMAP listener use. `dsn` is always null on this path — the
+receiving API lists attachments without their contents — so a bounce arriving
+through Resend is never recognised as one.
 
 **Not built:** SendGrid behind the provider interface (the interface is the
 point; the second implementation is a few lines when it is needed); any

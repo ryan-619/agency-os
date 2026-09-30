@@ -31,6 +31,7 @@ export * from './voice.js'
 export * from './llm/provider.js'
 export * from './suppression-source.js'
 export * from './connector-catalog.js'
+export * from './html-text.js'
 // Wave-1 stubs, each replaced wholesale by the feature named on its first line.
 export * from './informational.js'
 export * from './diff.js'

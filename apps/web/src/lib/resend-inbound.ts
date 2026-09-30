@@ -1,3 +1,4 @@
+import { htmlToText } from '@agency/core'
 import type { handleInboundEmail, InboundOutcome } from '@agency/db/queries'
 import { log } from './logger'
 import { verifySvix } from './svix'
@@ -76,8 +77,6 @@ const RESEND_API = 'https://api.resend.com'
 const FETCH_TIMEOUT_MS = 10_000
 /** The generic route's bound on the text handed to `handleInboundEmail`. */
 const MAX_TEXT = 20_000
-/** HTML is converted before the text bound applies; this bounds the work of converting it. */
-const MAX_HTML = 200_000
 const MAX_SUBJECT = 998
 const MAX_HEADERS = 100
 const MAX_HEADER_VALUE = 2_000
@@ -144,53 +143,6 @@ function addressOf(from: unknown): string | null {
   const angle = /<([^<>]*)>\s*$/.exec(from)
   const address = (angle ? angle[1] : from)?.trim()
   return address ? address : null
-}
-
-const ENTITIES: Readonly<Record<string, string>> = { nbsp: ' ', amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" }
-
-function decodeEntities(s: string): string {
-  // One pass, so `&amp;lt;` becomes `&lt;` and not `<`.
-  return s.replace(/&(#\d{1,7}|#x[0-9a-f]{1,6}|[a-z]{2,8});/gi, (whole, e: string) => {
-    if (e.startsWith('#')) {
-      const hex = e[1] === 'x' || e[1] === 'X'
-      const cp = Number.parseInt(e.slice(hex ? 2 : 1), hex ? 16 : 10)
-      return cp > 0 && cp <= 0x10ffff && !(cp >= 0xd800 && cp <= 0xdfff) ? String.fromCodePoint(cp) : whole
-    }
-    return ENTITIES[e.toLowerCase()] ?? whole
-  })
-}
-
-/**
- * An HTML-only reply as text, KEEPING ITS LINES.
- *
- * The lines are the point. The opt-out reader (`looksLikeOptOut`) reads the
- * person's own words — the first line, above anything quoted — and a quote
- * is recognised by a line that starts `>` or reads `On … wrote:`. The
- * worker's fallback flattens HTML to a single line, which turns
- * `Stop<blockquote>…` into `Stop On Mon, … wrote: …`: not a line that IS an
- * opt-out, so the reply pauses the contact but never suppresses them. Here a
- * block element ends a line and a `<blockquote>` opens one with `>`, so
- * the same reply reads `Stop` above a quote.
- *
- * Not an HTML parser, and it does not need to be one: the output is read
- * for a handful of words and stored as a reply's text. Script, style and
- * comments are dropped whole, so their contents are never read as words.
- */
-export function htmlToText(html: string): string {
-  const flat = html
-    .slice(0, MAX_HTML)
-    .replace(/<(script|style|head|title)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/<blockquote\b[^>]*>/gi, '\n> ')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/?(?:p|div|li|ul|ol|tr|table|h[1-6]|blockquote|pre|section|article|header|footer|hr)\b[^>]*>/gi, '\n')
-    .replace(/<[^>]*>/g, ' ')
-  return decodeEntities(flat)
-    .split(/\r?\n/)
-    .map((line) => line.replace(/[ \t\f\v ]+/g, ' ').trim())
-    .join('\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
 }
 
 /**

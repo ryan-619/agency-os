@@ -39,7 +39,7 @@
 import { ImapFlow } from 'imapflow'
 import { simpleParser, type HeaderValue, type SimpleParserOptions } from 'mailparser'
 import { handleInboundEmail, type AgencyDb } from '@agency/db'
-import { MAIL_SIGNAL_HEADERS, MAIL_SIGNAL_LIMITS, type LlmProvider } from '@agency/core'
+import { MAIL_SIGNAL_HEADERS, MAIL_SIGNAL_LIMITS, htmlToText, type LlmProvider } from '@agency/core'
 import { refineReplyKind } from './classify.js'
 import type { Logger } from '../logger.js'
 
@@ -153,9 +153,12 @@ export async function parseInbound(raw: Buffer | string): Promise<{
   return {
     from,
     subject: parsed.subject ?? null,
-    // The text part, or the HTML stripped to text if that is all there is. A
-    // reply that is only HTML must still be readable for the opt-out check.
-    text: parsed.text ?? (typeof parsed.html === 'string' ? parsed.html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : null),
+    // The text part, or the HTML converted to text if that is all there is —
+    // with its LINES kept, by the same converter the Resend reader uses. The
+    // opt-out reader looks at the first line above a quote, so a one-word
+    // "Stop" over Gmail's <blockquote> flattened to one line would pause the
+    // contact and never suppress them.
+    text: parsed.text ?? (typeof parsed.html === 'string' ? htmlToText(parsed.html) : null),
     messageId: parsed.messageId ?? null,
     references: [...new Set(refs)],
     headers,

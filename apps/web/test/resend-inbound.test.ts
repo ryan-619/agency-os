@@ -18,11 +18,11 @@
 import { createHmac } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { htmlToText } from '@agency/core'
 import { looksLikeOptOut, type InboundOutcome } from '@agency/db/queries'
 import {
   RESEND_MAX_BODY,
   fetchReceivedEmail,
-  htmlToText,
   mapReceivedEmail,
   receiveResendWebhook,
   type InboundMail,
@@ -171,6 +171,11 @@ describe('mapReceivedEmail', () => {
   })
 })
 
+/**
+ * The converter is packages/core's, shared with the worker's IMAP listener;
+ * its exact output is pinned in packages/core/test/html-text.test.ts. What is
+ * asked here is what the Resend path hands the opt-out reader.
+ */
 describe('htmlToText, read by the opt-out reader', () => {
   /** What Gmail sends for a one-word reply above the quoted original. */
   const gmailStop =
@@ -183,7 +188,9 @@ describe('htmlToText, read by the opt-out reader', () => {
     const text = htmlToText(gmailStop)
     expect(text.split('\n')[0]).toBe('Stop')
     expect(looksLikeOptOut(text)).toBe(true)
-    // Flattened to one line — the worker's fallback — the same reply is not.
+    // Flattened to one line, the same reply is not — which is what the
+    // worker's IMAP fallback did before it used this converter, and why the
+    // lines are kept.
     expect(looksLikeOptOut(text.replace(/\s+/g, ' '))).toBe(false)
   })
 
@@ -193,15 +200,6 @@ describe('htmlToText, read by the opt-out reader', () => {
     const text = htmlToText(html)
     expect(text).toContain('Sounds interesting')
     expect(looksLikeOptOut(text)).toBe(false)
-  })
-
-  it('drops script, style and comments whole, and decodes entities once', () => {
-    expect(htmlToText('<style>p{color:red}</style><script>stop()</script><!-- stop --><p>a &amp;lt; b &#233;&#x2014;&nbsp;c</p>'))
-      .toBe('a &lt; b é— c')
-  })
-
-  it('leaves an entity it does not know alone', () => {
-    expect(htmlToText('<p>&bogus; &#0; &#xD800;</p>')).toBe('&bogus; &#0; &#xD800;')
   })
 })
 
