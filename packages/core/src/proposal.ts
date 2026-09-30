@@ -31,6 +31,12 @@ export interface ProposalFinding {
   readonly weight: number
   readonly detail: string | null
   readonly evidence: Readonly<Record<string, unknown>>
+  /**
+   * `findings.scored`. An informational signal (false) is never scope and is
+   * never counted in the summary's "of N signals observed". Optional; the
+   * ICP walk below excludes such rows either way, because none is in the ICP.
+   */
+  readonly scored?: boolean
 }
 
 export interface ProposalInput {
@@ -212,7 +218,9 @@ export function proposalFromFindings(input: ProposalInput): ProposalOutcome {
     }
   }
 
-  const bySignal = new Map(input.findings.map((f) => [f.signalKey, f]))
+  // Scored rows only. An informational row is not part of the score this
+  // proposal is based on, so it is neither scope nor "in place" nor counted.
+  const bySignal = new Map(input.findings.filter((f) => f.scored !== false).map((f) => [f.signalKey, f]))
   const signals = orderedSignals(input.icp)
 
   const scope: ScopeItem[] = []
@@ -284,7 +292,11 @@ export function proposalFromFindings(input: ProposalInput): ProposalOutcome {
   const total = dayRate ? { low: Math.round(effort.low * dayRate), high: Math.round(effort.high * dayRate) } : null
 
   const gapCount = scope.length
-  const observedCount = input.findings.filter((f) => f.observed).length
+  // Counted over the ICP's signals — the same walk the scope came from — and
+  // not over every row on the scan. A scan also records informational
+  // signals, and "Of 25 signals observed, 4 were gaps" about a review scored
+  // on twelve is a number nobody computed, in the document a buyer reads.
+  const observedCount = signals.filter(([key]) => bySignal.get(key)?.observed === true).length
 
   return {
     ok: true,

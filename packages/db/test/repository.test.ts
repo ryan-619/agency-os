@@ -9,8 +9,13 @@ import * as schema from '../src/schema.js'
 import { SEED_DIR } from '../src/paths.js'
 import {
   importCompanies, recordScan, latestScanWithFindings, latestScore, companyList,
-  markStaleFindings, quotableFindings, findCompanyByDomain, type AgencyDb,
+  markStaleFindings, quotableFindings, findCompanyByDomain, latestInformationalFindings, type AgencyDb,
 } from '../src/repository.js'
+// The scanner's own extractor and recordings, by path: packages/db does not
+// depend on the scanner, and only this test needs a REAL profile.
+import { extractProfile } from '../../scanner/src/extract.js'
+import { ADDITIVE_SIGNAL_KEYS } from '../../scanner/src/additive.js'
+import { fixtureNames, loadFixture } from '../../scanner/test/fixtures.js'
 
 const icp: IcpDefinition = parseIcpDefinition(
   JSON.parse(readFileSync(join(SEED_DIR, 'icp-security-gap-saas.json'), 'utf8')),
@@ -418,6 +423,112 @@ describe('the qualification data core', () => {
       expect(hsts!.weight).toBe(icp.signals.hsts!.weight)
       // ...and a signal that is not a gap is still worth nothing.
       expect(rows.find((f) => f.signalKey === 'tls')!.weight).toBe(0)
+    })
+  })
+
+  /**
+   * §2.2 for signals the scanner observes and the ICP does not score. They are
+   * recorded, because the page shows them; they are marked, because nothing
+   * may quote them; and the schema pins them to weight 0, so no reader can
+   * mistake one for a gap that counts.
+   */
+  describe('informational signals are recorded and never scored', () => {
+    const withInformational = (): SiteProfile => {
+      const base = profileWith({ gaps: ['csp'] })
+      return {
+        ...base,
+        observations: {
+          ...base.observations,
+          cross_origin_policies: {
+            observed: true, gap: true, detail: 'none of COOP, COEP or CORP is sent',
+            evidence: { url: 'https://info.test/', coop: 'absent', coep: 'absent', corp: 'absent' },
+          },
+          cookie_flags: {
+            observed: false, gap: null, detail: 'not captured',
+            evidence: { url: 'https://info.test/', reason: 'this capture did not record every Set-Cookie header' },
+          },
+        },
+      }
+    }
+
+    it('writes a key the ICP does not name as scored = false, weight 0 — even as a gap', async () => {
+      const [company] = await db
+        .insert(schema.companies).values({ orgId, domain: 'info.test' })
+        .returning({ id: schema.companies.id })
+      const out = await recordScan(db, { orgId, companyId: company!.id, icpProfile, raw: {}, profile: withInformational() })
+
+      const rows = await db.select().from(schema.findings).where(eq(schema.findings.scanId, out.scanId))
+      const coop = rows.find((f) => f.signalKey === 'cross_origin_policies')!
+      expect(coop).toMatchObject({ scored: false, weight: 0, observed: true, gap: true })
+      expect(rows.find((f) => f.signalKey === 'cookie_flags')).toMatchObject({ scored: false, gap: null })
+      // Every ICP key is scored, and csp keeps its real weight.
+      for (const key of Object.keys(icp.signals)) expect(rows.find((f) => f.signalKey === key)!.scored, key).toBe(true)
+      expect(rows.find((f) => f.signalKey === 'csp')!.weight).toBe(icp.signals.csp!.weight)
+      // And the score is the one the ICP alone gives.
+      expect(out.result.score).toBe(scoreCompany(profileWith({ gaps: ['csp'] }), icp).score)
+    })
+
+    it('never offers one for quoting in a draft', async () => {
+      const company = await findCompanyByDomain(db, orgId, 'info.test')
+      const quotable = await quotableFindings(db, orgId, company!.id)
+      expect(quotable.map((f) => f.signalKey)).toEqual(['csp'])
+    })
+
+    it('still returns it to the page, which shows it under "Also observed"', async () => {
+      const company = await findCompanyByDomain(db, orgId, 'info.test')
+      const found = await latestScanWithFindings(db, orgId, company!.id)
+      expect(found!.findings.map((f) => f.signalKey)).toContain('cross_origin_policies')
+
+      const info = await latestInformationalFindings(db, orgId, company!.id)
+      expect(info!.findings.map((f) => f.signalKey).sort()).toEqual(['cookie_flags', 'cross_origin_policies'])
+      expect(info!.findings.every((f) => !f.scored)).toBe(true)
+    })
+
+    it('shows no informational section for a latest scan that never reached the site', async () => {
+      const company = await findCompanyByDomain(db, orgId, 'info.test')
+      await recordScan(db, {
+        orgId, companyId: company!.id, icpProfile, raw: {},
+        profile: { ...withInformational(), fetchOk: false, fetchError: 'TimeoutError', observations: {} },
+      })
+      expect(await latestInformationalFindings(db, orgId, company!.id)).toBeNull()
+    })
+
+    it('is refused by the database if it ever claims a weight', async () => {
+      const company = await findCompanyByDomain(db, orgId, 'acme.test')
+      const found = await latestScanWithFindings(db, orgId, company!.id)
+      const message = await expectRejection(() =>
+        test.driver.select(
+          `INSERT INTO findings (org_id, scan_id, company_id, signal_key, observed, gap, weight, scored, evidence)
+           VALUES ($1, $2, $3, 'hsts_quality', true, true, 5, false, '{"url":"https://acme.test/"}'::jsonb)`,
+          [orgId, found!.scan.id, company!.id],
+        ),
+      )
+      expect(message).toMatch(/findings_informational_carries_no_weight/)
+    })
+
+    /**
+     * A REAL profile: every key the scanner produces for a recorded site,
+     * the 'not applicable' and 'not captured' variants included. One bad
+     * observation — an unobserved row with a gap, a gap with empty evidence —
+     * fails the whole insert, and with it every scan in production.
+     */
+    it('records every key of a real recorded site through the constraints', async () => {
+      const domain = fixtureNames()[0]!
+      const fixture = loadFixture(domain)
+      const profile = extractProfile(fixture, fixture.company)
+      expect(profile.fetchOk).toBe(true)
+
+      const [company] = await db
+        .insert(schema.companies).values({ orgId, domain: `fixture-${domain}` })
+        .returning({ id: schema.companies.id })
+      const out = await recordScan(db, { orgId, companyId: company!.id, icpProfile, raw: fixture, profile })
+
+      const rows = await db.select().from(schema.findings).where(eq(schema.findings.scanId, out.scanId))
+      expect(rows).toHaveLength(Object.keys(icp.signals).length + ADDITIVE_SIGNAL_KEYS.length)
+      const unscored = rows.filter((f) => !f.scored)
+      expect(unscored.map((f) => f.signalKey).sort()).toEqual([...ADDITIVE_SIGNAL_KEYS].sort())
+      expect(unscored.every((f) => f.weight === 0)).toBe(true)
+      expect(unscored.find((f) => f.signalKey === 'cookie_flags')).toMatchObject({ observed: false, gap: null })
     })
   })
 })

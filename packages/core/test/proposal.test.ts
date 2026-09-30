@@ -213,3 +213,50 @@ describe('what the document says about itself', () => {
     expect(text).not.toMatch(/penetration test|pentest|probed|scanned your network|vulnerability scan/)
   })
 })
+
+/**
+ * A scan also records the informational signals: observed, unscored, weight
+ * 0. The proposal is based on the SCORE, so none of them may become scope,
+ * and none may swell the buyer-facing count — "Of 25 signals observed, 4
+ * were gaps" about a review scored on twelve is a number nobody computed.
+ */
+describe('informational signals on the same scan', () => {
+  const informational: ProposalFinding[] = [
+    'csp_quality', 'cross_origin_policies', 'sri_third_party', 'stack_disclosure', 'hsts_quality',
+    'csp_report_only', 'referrer_policy_quality', 'permissions_policy_quality', 'content_type_options_quality',
+    'mixed_content', 'deprecated_headers', 'reporting_endpoints',
+  ].map((key) => ({
+    signalKey: key, observed: true, gap: true, weight: 0, detail: `${key} flagged`, evidence: { url: 'https://www.rentman.io/' }, scored: false,
+  }))
+  const cookie: ProposalFinding = {
+    signalKey: 'cookie_flags', observed: false, gap: null, weight: 0, detail: 'not captured',
+    evidence: { url: 'https://www.rentman.io/', reason: 'not recorded' }, scored: false,
+  }
+
+  it('counts the ICP’s signals in the summary, not every row on the scan', () => {
+    const plain = proposalFromFindings(input())
+    const mixed = proposalFromFindings(input({ findings: [...findings(['csp', 'hsts', 'security_txt']), ...informational, cookie] }))
+    if (!plain.ok || !mixed.ok) throw new Error('expected both to generate')
+    const icpCount = Object.keys(icp.signals).length
+    expect(mixed.proposal.summary).toContain(`Of ${icpCount} signals observed, 3 were gaps`)
+    expect(mixed.proposal.summary).toBe(plain.proposal.summary)
+  })
+
+  it('never turns one into scope, into "already in place" or into "not assessed"', () => {
+    const out = proposalFromFindings(input({ findings: [...findings(['csp']), ...informational, cookie] }))
+    if (!out.ok) throw new Error(out.message)
+    const named = [
+      ...out.proposal.workstreams.flatMap((w) => w.items.map((i) => i.signalKey)),
+      ...out.proposal.alreadyInPlace.map((x) => x.signalKey),
+      ...out.proposal.notAssessed.map((x) => x.signalKey),
+    ]
+    for (const f of [...informational, cookie]) expect(named, f.signalKey).not.toContain(f.signalKey)
+  })
+
+  it('refuses rather than proposing when only informational rows are gaps', () => {
+    const out = proposalFromFindings(input({ findings: [...findings([]), ...informational] }))
+    expect(out.ok).toBe(false)
+    if (out.ok) return
+    expect(out.reason).toBe('no_gaps')
+  })
+})

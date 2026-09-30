@@ -18,6 +18,13 @@ export interface BriefFinding {
   readonly gap: boolean | null
   readonly weight: number
   readonly detail: string | null
+  /**
+   * `findings.scored`. False for an informational signal, which is context on
+   * the company page and never a talking point: the brief leaves it out of
+   * both the gaps and the things in place. Optional so an older caller that
+   * does not pass it still gets the ICP-key filter below.
+   */
+  readonly scored?: boolean
 }
 
 export interface BriefTouch {
@@ -76,8 +83,14 @@ export function meetingBrief(input: BriefInput): Brief {
   const signals = input.signals
 
   const fresh = input.scan !== null && input.scan.ok && !input.scan.stale
+  // Only what the score was computed from is a posture talking point. A row
+  // marked unscored is out, and so — when there IS an ICP to ask — is any key
+  // the ICP does not name, which catches a caller that never mapped `scored`.
+  const scoredOnly = input.findings.filter(
+    (f) => f.scored !== false && (Object.keys(signals).length === 0 || f.signalKey in signals),
+  )
   const gaps = fresh
-    ? input.findings
+    ? scoredOnly
         .filter((f) => f.observed && f.gap === true)
         .sort((a, b) => b.weight - a.weight)
         .map((f) => ({ signalKey: f.signalKey, why: signals[f.signalKey]?.why ?? f.signalKey, detail: f.detail }))
@@ -86,7 +99,7 @@ export function meetingBrief(input: BriefInput): Brief {
   // Content-Security-Policy — …"), so quoting it under "already in place"
   // states the opposite of what was observed. The first live brief did.
   const strengths = fresh
-    ? input.findings
+    ? scoredOnly
         .filter((f) => f.observed && f.gap === false)
         .map((f) => f.signalKey)
     : []
