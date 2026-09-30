@@ -2345,6 +2345,56 @@ PREDATES the boot can have been orphaned. The single-worker advisory lock is a
 second layer rather than the first, because it cannot be verified everywhere —
 see the PGlite socket bridge note in §4.
 
+**And the heartbeat.** `boot/heartbeat.ts` is started after the lock, like the
+sender, and what its row says is read through `healthInputs()`, so the row and
+`/readyz` cannot disagree about the halt or the lock. `/readyz` always carries
+`heartbeatWrittenAt` — null until a write has landed, an ISO instant after —
+and the boot log prints `workerId` (`hostname:pid`), the key the row is keyed
+by. A silent worker is now a number in `/api/health`, not an inference (§2,
+"Notifications and the heartbeat").
+
+### Threads are per person, and the page checks
+
+`/chat` picks the person's newest unarchived thread, or creates one, and
+redirects to `/chat/<id>`, so the URL always names the thread on screen. A
+thread list sits beside the panel with New thread, Rename and Archive, and a
+way to put an archived thread back. `chatReadOwnSession` puts org AND user in
+the WHERE, so a teammate's thread, another org's thread and a made-up id all
+get the same 404; the org-scoped `readChatSession` stays the worker's read,
+because the worker re-checks the owner itself. **Archive is refused while
+`running_turn_id IS NOT NULL`**, in the UPDATE's own WHERE: a running turn may
+be holding an approval card open in that thread, and archiving would hide the
+card. Archived threads are hidden, not deleted — opened by URL they are
+read-only, with no composer. A blank title is refused rather than stored as
+NULL, because `ensureChatSessionTitle` would overwrite a NULL with the next
+message. `chatSessionCosts` sums `cost_usd` in Postgres and returns
+Postgres's own text; no total is ever formed in JavaScript. All of this works
+with no worker; only sending a turn needs one, and the panel says so by naming
+`AGENT_URL` and `AGENT_INTERNAL_TOKEN` rather than blaming an API key.
+
+### The prompt names the gate-side tools, and the seed shapes new databases only
+
+**The system prompt stops guessing where the rules are.** It points the model
+to `get_pipeline`/`update_deal`/`book_meeting` for deals; to `check_send` and
+`get_consent` before drafting — "the rule, not your guess"; to
+`get_evidence_changes` before it repeats an old finding and
+`get_stale_companies` before it quotes anything. It says `classify_reply` may
+set a reply's kind but may never mark an opt-out, and that a note from
+`add_note` is never evidence. A test fails if the prompt names a tool that is
+not in `AGENCY_TOOL_NAMES`.
+
+**Fourteen tools joined the nine**, and the seeded subagents were given the ones
+their job needs: the qualifier `get_scan_history` and `get_evidence_changes`;
+the researcher those two plus `get_consent`, `check_send`,
+`get_company_timeline` and `search_crm`; the closer `check_send`,
+`get_consent`, `get_replies`, `classify_reply`, `add_note` and `create_task`.
+Each seeded prompt says when to run the tools it was given, and `seed.test.ts`
+pins grants and prompts together. **The seed inserts `agent_defs` with `ON
+CONFLICT (org_id, slug) DO NOTHING`, so a live database's subagents do NOT
+pick these up** — "re-seeding updates grants" was proposed and dropped for
+exactly that reason. Change them in Settings → Agents; the seed only shapes a
+new database.
+
 ### Costs are strings, and the SDK's total is cumulative
 
 `chat_messages.cost_usd` is drizzle `numeric` with no mode, so it is a STRING
@@ -2363,7 +2413,11 @@ on a human, which is Phase 4's single send path. `get_pipeline` and
 `update_deal` were held back until Phase 5 gave `deals` a writer — §12
 forbids a tool that teaches the model a false shape of the business — and
 ship now, with `book_meeting` beside them; all three write internal state
-only and say in their summary that nothing was sent.
+only and say in their summary that nothing was sent. The same rule held the
+0018 tools back until their tables had writers: wave 1 shipped them as stubs
+answering `invalid_state`, and `packages/tools/test/no-stubs.test.ts` now fails
+if a stub marker, or the stubs' "not available in this revision", survives in
+any shipped source.
 
 And §6's **skill-upload UI** — see the skills section above for why. Everything
 else in §6 and §7 ships.
