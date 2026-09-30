@@ -13,6 +13,8 @@ import {
 } from '../src/repository.js'
 // The scanner's own extractor and recordings, by path: packages/db does not
 // depend on the scanner, and only this test needs a REAL profile.
+import { generateProposal } from '../src/proposals.js'
+import { briefForMeeting, createMeeting } from '../src/meetings.js'
 import { extractProfile } from '../../scanner/src/extract.js'
 import { ADDITIVE_SIGNAL_KEYS } from '../../scanner/src/additive.js'
 import { fixtureNames, loadFixture } from '../../scanner/test/fixtures.js'
@@ -529,6 +531,38 @@ describe('the qualification data core', () => {
       expect(unscored.map((f) => f.signalKey).sort()).toEqual([...ADDITIVE_SIGNAL_KEYS].sort())
       expect(unscored.every((f) => f.weight === 0)).toBe(true)
       expect(unscored.find((f) => f.signalKey === 'cookie_flags')).toMatchObject({ observed: false, gap: null })
+    })
+
+    /**
+     * The two documents written FROM that scan, through the same code the
+     * pages call. The buyer's "Of N signals observed" must be the ICP's N,
+     * and the brief must not raise a signal the score never counted.
+     */
+    it('keeps them out of the proposal written from that scan, and out of the brief', async () => {
+      const company = await findCompanyByDomain(db, orgId, `fixture-${fixtureNames()[0]!}`)
+      const found = await latestScanWithFindings(db, orgId, company!.id)
+      const observedIcp = found!.findings.filter((f) => f.scored && f.observed).length
+      const additive = new Set<string>(ADDITIVE_SIGNAL_KEYS)
+
+      const proposal = await generateProposal(db, { orgId, companyId: company!.id, actor: 'test', dayRate: 1000 })
+      if (!proposal.ok) throw new Error(proposal.message)
+      expect(proposal.document.summary).toContain(`Of ${observedIcp} signals observed,`)
+      const named = [
+        ...proposal.document.workstreams.flatMap((w) => w.items.map((i) => i.signalKey)),
+        ...proposal.document.alreadyInPlace.map((x) => x.signalKey),
+        ...proposal.document.notAssessed.map((x) => x.signalKey),
+      ]
+      expect(named.filter((k) => additive.has(k))).toEqual([])
+
+      const booked = await createMeeting(db, {
+        orgId, companyId: company!.id, startsAt: new Date(Date.now() + 86_400_000),
+        timeZone: 'Europe/London', source: 'manual', actor: 'test',
+      })
+      if (!booked.ok) throw new Error(booked.message)
+      const brief = await briefForMeeting(db, orgId, booked.meeting.id)
+      const raised = [...brief!.brief.posture.gaps.map((g) => g.signalKey), ...brief!.brief.posture.strengths]
+      expect(raised.length).toBeGreaterThan(0)
+      expect(raised.filter((k) => additive.has(k))).toEqual([])
     })
   })
 })
