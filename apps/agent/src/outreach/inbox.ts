@@ -130,10 +130,22 @@ export async function parseInbound(raw: Buffer | string): Promise<{
     if (value !== null) headers[name] = value.slice(0, MAIL_SIGNAL_LIMITS.headerChars)
   }
 
-  // A report is a MIME part, never the body. Its returned copy is read only
-  // when there IS a report: a person forwarding a message as an attachment
-  // is not telling us which message bounced.
-  const report = parsed.attachments.find((a) => DSN_TYPES.has(a.contentType.toLowerCase()))
+  // A report is a MIME part, never the body — and only the part of a mail
+  // that IS a report. mailparser walks into an inline message/rfc822, so a
+  // delivery status nested in a forwarded message surfaces in `attachments`
+  // exactly as a real one does; read from there, a prospect's "please
+  // unsubscribe me" that forwards a bounce inline (mutt, `mime_forward=yes`)
+  // became a bounce of our message, and the opt-out was never read. So the
+  // ROOT must be multipart/report. RFC 6522 lets a report be nested, which is
+  // precisely how a forwarded one arrives; this is a choice, not the RFC's
+  // rule — the reports this system acts on come from the reporting MTA,
+  // which writes the report as the whole message. A wrapped one reads as an
+  // ordinary mail: recording a reply nobody wrote is recoverable, and losing
+  // an opt-out is not. The returned copy is read only when there IS a
+  // report: a person forwarding a message as an attachment is not telling us
+  // which message bounced.
+  const isReport = headerText(parsed.headers.get('content-type'))?.toLowerCase() === 'multipart/report'
+  const report = isReport ? parsed.attachments.find((a) => DSN_TYPES.has(a.contentType.toLowerCase())) : undefined
   const dsn = report ? report.content.toString('utf8').slice(0, MAIL_SIGNAL_LIMITS.dsnChars) : null
   const originalMessageIds: string[] = []
   if (report) {
