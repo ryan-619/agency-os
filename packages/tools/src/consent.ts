@@ -182,7 +182,10 @@ export const getConsent: AgencyToolSpec<typeof getConsentShape> = {
         domain: schema.companies.domain,
       })
       .from(schema.contacts)
-      .innerJoin(schema.companies, eq(schema.companies.id, schema.contacts.companyId))
+      .innerJoin(
+        schema.companies,
+        and(eq(schema.companies.id, schema.contacts.companyId), eq(schema.companies.orgId, ctx.orgId)),
+      )
       .where(and(eq(schema.contacts.orgId, ctx.orgId), sql`lower(${schema.contacts.email}) = ${email}`))
       .limit(1)
     const contact = rows[0]
