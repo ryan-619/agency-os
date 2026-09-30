@@ -53,7 +53,9 @@ export async function ProposalShareSlot({ orgId, proposalId, status, evidenceSta
     return {
       id: s.id,
       ...iso,
-      state: shareState(iso, now),
+      // What the buyer's page decides on every read, so the team's list says
+      // what the buyer sees rather than only what the link row says.
+      state: shareState(iso, now, { stale: evidenceStale, superseded: evidenceSuperseded }),
       viewCount: s.viewCount,
       firstViewedAt: s.firstViewedAt ? s.firstViewedAt.toISOString() : null,
       lastViewedAt: s.lastViewedAt ? s.lastViewedAt.toISOString() : null,

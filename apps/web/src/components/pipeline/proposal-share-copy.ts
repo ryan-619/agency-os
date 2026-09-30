@@ -45,14 +45,40 @@ export function shareCreateBlocked(input: {
 }
 
 /** A link's state as the team's list shows it. */
+export type ShareState = 'accepted' | 'revoked' | 'expired' | 'stale' | 'superseded' | 'live'
+
+/**
+ * A link's state as the team's list shows it.
+ *
+ * The link's own facts come first — accepted, revoked, expired say what
+ * happened to the LINK. Then the evidence, because the buyer's page and the
+ * accept route re-derive it on every request: a link whose scan has aged out
+ * (the ICP's threshold lowered after minting) or been superseded by a newer
+ * successful scan shows the buyer "being re-verified" and answers Accept
+ * with a 410. Calling that link "live" told the team something the buyer
+ * could not see. `evidence` is required, so a caller cannot forget it; the
+ * order of the two matches `shareCreateBlocked` and the read.
+ */
 export function shareState(
   share: { readonly revokedAt: string | null; readonly expiresAt: string; readonly acceptedAt: string | null },
   now: Date,
-): 'accepted' | 'revoked' | 'expired' | 'live' {
+  evidence: { readonly stale: boolean; readonly superseded: boolean },
+): ShareState {
   if (share.acceptedAt) return 'accepted'
   if (share.revokedAt) return 'revoked'
   if (new Date(share.expiresAt).getTime() <= now.getTime()) return 'expired'
+  if (evidence.stale) return 'stale'
+  if (evidence.superseded) return 'superseded'
   return 'live'
+}
+
+/**
+ * The words in the list's State column. The two evidence states say what
+ * the buyer holding the link sees, in the buyer's own words — "stale" is
+ * the team's, never the buyer's.
+ */
+export function shareStateLabel(state: ShareState): string {
+  return state === 'stale' || state === 'superseded' ? `${state} — the buyer sees “being re-verified”` : state
 }
 
 // ---------------------------------------------------------------------------
