@@ -126,9 +126,9 @@ export const getReplies: AgencyToolSpec<typeof getRepliesShape> = {
         /** On the suppression list by any key this person matches: nobody may answer. */
         suppressed: r.suppressed,
         /** Where the latest answer drafted to it got to, if one was. */
-        answer: r.answered?.status ?? null,
+        answerStatus: r.answered?.status ?? null,
         /** Our own message it answered, when matched by Message-ID; null when matched by address alone. */
-        answered: r.parent
+        inReplyTo: r.parent
           ? { touchId: r.parent.id, subject: clip(r.parent.subject, 120) || null, sentAt: r.parent.sentAt?.toISOString() ?? null }
           : null,
         /** Their words: the first line only, at most 200 characters. */
@@ -154,10 +154,10 @@ export const getReplies: AgencyToolSpec<typeof getRepliesShape> = {
       const status = [
         r.handled ? `handled${r.handledBy ? ` by ${clip(r.handledBy, 40)}` : ''}` : 'NOT handled',
         ...(r.suppressed ? ['on the suppression list — do not answer'] : []),
-        ...(r.answer ? [`an answer is ${r.answer}`] : []),
+        ...(r.answerStatus ? [`an answer is ${r.answerStatus}`] : []),
       ].join(' · ')
-      const re = r.answered
-        ? `re “${r.answered.subject ?? '(no subject)'}”`
+      const re = r.inReplyTo
+        ? `re “${r.inReplyTo.subject ?? '(no subject)'}”`
         : 'matched by address, not to a message of ours'
       const said = r.firstLine ? `“${r.firstLine}”${r.moreInBody ? ' (more in the inbox)' : ''}` : '(no text)'
       return `  ${minute(new Date(r.receivedAt))}  ${r.kind}  ${who} · ${status} · ${re} · id ${r.touchId} · ${said}`
