@@ -27,16 +27,37 @@
  * somebody presses it to be left alone — both worse than no link, because
  * the person believes they asked. Other channels never get it: a LinkedIn
  * message is typed by a person, and a header on it would be carried nowhere.
+ *
+ * ## The bounce threshold
+ *
+ * `OUTREACH_BOUNCE_PAUSE_PCT` (default 5) becomes `bouncePausePct`: after
+ * each tick, a campaign whose addresses bounced past it — once it has
+ * written to twenty people — is paused, and a person re-activates it. Said
+ * once at boot, with the number, so a deployment knows the check is on.
  */
 import { unsubscribeHeaders } from '@agency/db'
 import type { loadEnv } from '../env.js'
 import type { Logger } from '../logger.js'
-import type { SenderDeps } from './sender.js'
+import { BOUNCE_PAUSE_MIN_SENT_TO, type SenderDeps } from './sender.js'
 
 export type OutreachOptions = Partial<Omit<SenderDeps, 'db' | 'provider' | 'log' | 'batch'>>
 
 /** The optional sender settings derived from the environment. */
 export function outreachOptions(env: ReturnType<typeof loadEnv>, log: Logger): OutreachOptions {
+  return { ...unsubscribeOptions(env, log), ...bounceOptions(env, log) }
+}
+
+function bounceOptions(env: ReturnType<typeof loadEnv>, log: Logger): OutreachOptions {
+  // `loadEnv` always supplies a number (zod's default); an env assembled by
+  // hand without it — a test naming only the variables it cares about —
+  // leaves the check off rather than inventing a threshold.
+  const pct = env.OUTREACH_BOUNCE_PAUSE_PCT
+  if (typeof pct !== 'number' || !Number.isFinite(pct)) return {}
+  log.info('bounce auto-pause: on', { thresholdPct: pct, minSentTo: BOUNCE_PAUSE_MIN_SENT_TO })
+  return { bouncePausePct: pct }
+}
+
+function unsubscribeOptions(env: ReturnType<typeof loadEnv>, log: Logger): OutreachOptions {
   const secret = env.UNSUBSCRIBE_SECRET
   const origin = env.WEB_PUBLIC_URL
   if (!secret || !origin) {

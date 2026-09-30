@@ -12,7 +12,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
-import { eq } from 'drizzle-orm'
+import { eq, inArray } from 'drizzle-orm'
 import { createDryRunProvider, schema, type AgencyDb, type MessageProvider } from '@agency/db'
 import { verifyUnsubscribeToken } from '@agency/db/queries'
 import { migratedDb,type TestDb } from '../../../packages/db/test/helpers.js'
@@ -27,8 +27,8 @@ const NOON = new Date('2026-09-15T12:00:00.000Z')
 const NIGHT = new Date('2026-09-15T23:30:00.000Z')
 
 const UNSUBSCRIBE_SECRET = 'u'.repeat(32) + '-sender-test'
-/** Just the two variables `outreachOptions` reads; the rest of the env is not its business. */
-const envWith = (vars: { UNSUBSCRIBE_SECRET?: string; WEB_PUBLIC_URL?: string }) =>
+/** Just the variables `outreachOptions` reads; the rest of the env is not its business. */
+const envWith = (vars: { UNSUBSCRIBE_SECRET?: string; WEB_PUBLIC_URL?: string; OUTREACH_BOUNCE_PAUSE_PCT?: number }) =>
   vars as unknown as ReturnType<typeof loadEnv>
 
 /** Records what each send carried — headers included — and never sends. */
@@ -303,6 +303,105 @@ describe('the sender tick', () => {
   })
 
   /**
+   * A campaign whose addresses bounce past the threshold pauses itself after
+   * a tick — once, audited, one log line — and the existing
+   * `campaign_inactive` deferral is what stops it. Only a person re-activates.
+   */
+  describe('pausing a campaign that bounces', () => {
+    /** `n` people this campaign wrote to yesterday, `bounced` of whose addresses have since bounced. */
+    const history = async (n: number, bounced: number, over: { org?: string; company?: string; campaign?: string } = {}) => {
+      const ids: string[] = []
+      for (let i = 0; i < n; i += 1) {
+        const [c] = await db
+          .insert(schema.contacts)
+          .values({ orgId: over.org ?? orgId, companyId: over.company ?? companyId, email: `p${i}-${Math.random().toString(36).slice(2, 10)}@rentman.io`, timeZone: 'Europe/London' })
+          .returning({ id: schema.contacts.id })
+        ids.push(c!.id)
+      }
+      const yesterday = new Date(NOON.getTime() - 24 * 60 * 60 * 1000)
+      await db.insert(schema.touches).values(
+        ids.map((id) => ({
+          orgId: over.org ?? orgId, campaignId: over.campaign ?? campaignId, contactId: id, companyId: over.company ?? companyId,
+          channel: 'email', direction: 'out', status: 'sent', sentAt: yesterday, subject: 's', body: 'b',
+        })),
+      )
+      if (bounced > 0) {
+        await db
+          .update(schema.contacts)
+          .set({ emailBouncedAt: new Date(NOON.getTime() - 60 * 60 * 1000), emailBounceCode: '5.1.1' })
+          .where(inArray(schema.contacts.id, ids.slice(0, bounced)))
+      }
+    }
+    const tickAt5 = (log = silent) => runSenderTick({ db, provider, log, batch: 20, now: () => NOON, bouncePausePct: 5 })
+    const status = async (id = campaignId) =>
+      (await db.select({ s: schema.campaigns.status }).from(schema.campaigns).where(eq(schema.campaigns.id, id)))[0]!.s
+    const pauses = async () => (await db.select().from(schema.auditLog)).filter((a) => a.action === 'campaign.auto_paused')
+
+    it('does nothing at or below the threshold', async () => {
+      await history(20, 1) // 5% — not past 5%
+      expect((await tickAt5()).autoPaused).toBe(0)
+      expect(await status()).toBe('active')
+      expect(await pauses()).toEqual([])
+    })
+
+    it('does nothing above the threshold before twenty people were written to', async () => {
+      await history(19, 5)
+      expect((await tickAt5()).autoPaused).toBe(0)
+      expect(await status()).toBe('active')
+    })
+
+    it('does nothing when the deployment set no threshold', async () => {
+      await history(20, 10)
+      expect((await tick()).autoPaused).toBe(0)
+      expect(await status()).toBe('active')
+    })
+
+    it('pauses once past the threshold with twenty sent — audited once, one log line — and a second tick does not re-audit', async () => {
+      await history(20, 2) // 10%
+      const log = keepingLog()
+      expect((await tickAt5(log)).autoPaused).toBe(1)
+      expect(await status()).toBe('paused')
+      const [row] = await pauses()
+      expect(row).toMatchObject({ actor: 'system', subjectId: campaignId, detail: { bouncePct: 10, threshold: 5, sentTo: 20, bounced: 2 } })
+      const said = log.lines.filter((l) => l.msg.startsWith('campaign paused automatically'))
+      expect(said).toHaveLength(1)
+      expect(said[0]!.fields).toMatchObject({ campaignId, bouncePct: 10, threshold: 5 })
+      // §2.3: counts and ids, never who bounced.
+      expect(JSON.stringify(log.lines)).not.toContain('@rentman.io')
+
+      expect((await tickAt5()).autoPaused).toBe(0)
+      expect(await pauses()).toHaveLength(1)
+    })
+
+    /** No new stop mechanism: the pause IS `campaign_inactive`, which defers. */
+    it('defers what a person had already approved in it, rather than refusing it', async () => {
+      await history(20, 2)
+      await tickAt5()
+      const t = await approved()
+      const s = await tickAt5()
+      expect(s).toMatchObject({ picked: 1, sent: 0, deferred: 1, refused: 0 })
+      const row = await reread(t.id)
+      expect(row.status).toBe('approved')
+      expect(row.approvedBy).toBe(userId)
+      expect(provider.sent).toEqual([])
+    })
+
+    it('leaves another org’s campaign alone', async () => {
+      const [other] = await db.insert(schema.orgs).values({ name: 'Rival' }).returning({ id: schema.orgs.id })
+      const [otherCompany] = await db.insert(schema.companies).values({ orgId: other!.id, domain: 'rival.io' }).returning({ id: schema.companies.id })
+      const [theirs] = await db
+        .insert(schema.campaigns)
+        .values({ orgId: other!.id, name: 'Theirs', channel: 'email', autoSend: false, dailyCap: 25, status: 'active' })
+        .returning({ id: schema.campaigns.id })
+      await history(20, 0, { org: other!.id, company: otherCompany!.id, campaign: theirs!.id })
+      await history(20, 3)
+      expect((await tickAt5()).autoPaused).toBe(1)
+      expect(await status()).toBe('paused')
+      expect(await status(theirs!.id)).toBe('active')
+    })
+  })
+
+  /**
    * RFC 8058 (§2.1). The headers ride inside `dispatchTouch`, after every
    * rule has passed, and only when the deployment can name a link the web
    * app will verify. The message itself is not touched.
@@ -389,6 +488,17 @@ describe('outreachOptions', () => {
       expect(JSON.stringify(log.lines)).not.toContain(UNSUBSCRIBE_SECRET)
       expect(JSON.stringify(log.lines)).not.toContain('agency.example')
     }
+  })
+
+  it('passes the bounce threshold through, and says so once at boot', () => {
+    const log = keepingLog()
+    const opts = outreachOptions(envWith({ OUTREACH_BOUNCE_PAUSE_PCT: 7 }), log)
+    expect(opts.bouncePausePct).toBe(7)
+    expect(log.lines).toContainEqual({ level: 'info', msg: 'bounce auto-pause: on', fields: { thresholdPct: 7, minSentTo: 20 } })
+  })
+
+  it('leaves the bounce check off when the environment names no threshold', () => {
+    expect('bouncePausePct' in outreachOptions(envWith({}), keepingLog())).toBe(false)
   })
 
   it('answers null for anything that is not an email', () => {
