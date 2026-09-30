@@ -19,15 +19,18 @@
  * through `previewSend`, which reads exactly what the sender reads and
  * decides nothing about the plan.
  *
- * The rules — who may be drafted to, what the draft says, what an earlier row
- * means — are pure and live in `packages/core/src/enrolment.ts`. This file
- * gathers the rows and writes the drafts.
+ * The rules — who may be drafted to, what the draft says, which earlier rows
+ * count and what they mean — are pure and live in
+ * `packages/core/src/enrolment.ts`. This file gathers the rows and writes the
+ * drafts, and says the earlier-row rule twice: once in the read that names a
+ * skip, and again in the INSERT's own NOT EXISTS, so a race cannot slip a
+ * draft past it.
  */
-import { and, eq, inArray, sql } from 'drizzle-orm'
+import { and, eq, inArray, or, sql } from 'drizzle-orm'
 import {
-  DEFAULT_STALE_AFTER_DAYS, ENROL_LIMIT_DEFAULT, ENROL_LIMIT_MAX, enrolCompanyGate, enrolIgnoredStatuses,
-  enrolPriorSkip, enrolSkipCounts, enrollableContact, enrolmentDraft, isStale, parseIcpDefinition,
-  type EnrolChannel, type EnrolSkip, type IcpDefinition,
+  DEFAULT_STALE_AFTER_DAYS, ENROL_IGNORED_REFUSALS, ENROL_LIMIT_DEFAULT, ENROL_LIMIT_MAX, enrolCompanyGate,
+  enrolIgnoredStatuses, enrolPriorScope, enrolPriorSkip, enrolSkipCounts, enrollableContact, enrolmentDraft, isStale,
+  parseIcpDefinition, type EnrolChannel, type EnrolPriorRow, type EnrolSkip, type IcpDefinition,
 } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
@@ -161,7 +164,12 @@ export async function enrolCampaign(
   const companies = [...(await companyList(db, args.orgId))].sort((a, b) => (b.score ?? -1) - (a.score ?? -1))
 
   const status = campaign.autoSend ? ('queued' as const) : ('awaiting_approval' as const)
-  const ignored = enrolIgnoredStatuses(campaign.autoSend)
+  const prior: PriorRule = {
+    orgId: args.orgId,
+    campaignId: campaign.id,
+    channel,
+    autoSend: campaign.autoSend,
+  }
   const queued: EnrolQueued[] = []
   const skipped: EnrolSkipped[] = []
   let truncated = false
@@ -217,17 +225,7 @@ export async function enrolCampaign(
       continue
     }
 
-    const prior = await db
-      .select({ contactId: schema.touches.contactId, status: schema.touches.status })
-      .from(schema.touches)
-      .where(
-        and(
-          eq(schema.touches.orgId, args.orgId),
-          eq(schema.touches.campaignId, campaign.id),
-          eq(schema.touches.direction, 'out'),
-          inArray(schema.touches.contactId, people.map((p) => p.id)),
-        ),
-      )
+    const earlierRows = await priorRows(db, prior, people.map((p) => p.id))
 
     for (const p of people) {
       const who = enrollableContact(p, companyZone.get(c.companyId) ?? null, channel)
@@ -236,7 +234,7 @@ export async function enrolCampaign(
         continue
       }
       const earlier = enrolPriorSkip(
-        prior.filter((t) => t.contactId === p.id).map((t) => t.status),
+        earlierRows.filter((t) => t.contactId === p.id),
         campaign.autoSend,
       )
       if (earlier) {
@@ -252,21 +250,22 @@ export async function enrolCampaign(
         continue
       }
 
-      const touchId = await insertDraft(db, {
-        orgId: args.orgId,
-        campaignId: campaign.id,
+      const touchId = await insertDraft(db, prior, {
         contactId: p.id,
         companyId: c.companyId,
-        channel,
         status,
         subject: verdict.draft.subject,
         body: verdict.draft.body,
-        ignored,
       })
-      // No row means another enrolment wrote one for this pair between the
-      // read above and this statement — its NOT EXISTS saw that row.
-      if (touchId) queued.push({ touchId, contactId: p.id, companyId: c.companyId })
-      else skipped.push({ companyId: c.companyId, contactId: p.id, why: 'already_enrolled' })
+      if (touchId) {
+        queued.push({ touchId, contactId: p.id, companyId: c.companyId })
+        continue
+      }
+      // No row means a row that counts landed between the read above and
+      // this statement — another enrolment's draft, a send, a denial — and
+      // the INSERT's NOT EXISTS saw it. Read again to say which.
+      const recheck = enrolPriorSkip(await priorRows(db, prior, [p.id]), campaign.autoSend)
+      skipped.push({ companyId: c.companyId, contactId: p.id, why: recheck ?? 'already_enrolled' })
     }
   }
 
@@ -304,8 +303,48 @@ function boundedLimit(limit: number | undefined): number {
   return Math.min(Math.max(Math.trunc(limit), 1), ENROL_LIMIT_MAX)
 }
 
+/** What the earlier-row rule needs to know, for the read and for the insert. */
+interface PriorRule {
+  readonly orgId: string
+  readonly campaignId: string
+  readonly channel: EnrolChannel
+  readonly autoSend: boolean
+}
+
 /**
- * One draft, written only if the pair has no earlier row that counts.
+ * The earlier outbound rows that `enrolPriorSkip` reads for these people:
+ * this campaign's, and — under auto-send, `enrolPriorScope` — every
+ * campaign's on the same channel too. Ignored rows are returned as well; the
+ * rule in core decides what they mean.
+ */
+async function priorRows(
+  db: AgencyDb,
+  rule: PriorRule,
+  contactIds: readonly string[],
+): Promise<(EnrolPriorRow & { readonly contactId: string | null })[]> {
+  if (contactIds.length === 0) return []
+  const thisCampaign = eq(schema.touches.campaignId, rule.campaignId)
+  return db
+    .select({
+      contactId: schema.touches.contactId,
+      status: schema.touches.status,
+      refusalCode: schema.touches.refusalCode,
+    })
+    .from(schema.touches)
+    .where(
+      and(
+        eq(schema.touches.orgId, rule.orgId),
+        eq(schema.touches.direction, 'out'),
+        inArray(schema.touches.contactId, [...contactIds]),
+        enrolPriorScope(rule.autoSend) === 'channel'
+          ? or(thisCampaign, eq(schema.touches.channel, rule.channel))
+          : thisCampaign,
+      ),
+    )
+}
+
+/**
+ * One draft, written only if the person has no earlier row that counts.
  *
  * The check lives in the INSERT's own SELECT rather than in a read before it,
  * so it is one statement: two people pressing Enrol at once can still both
@@ -316,35 +355,43 @@ function boundedLimit(limit: number | undefined): number {
  * one), and
  * a partial unique index would be a migration this feature does not own.
  *
+ * It is `enrolPriorSkip`'s rule in SQL, over `priorRows`'s rows: a row
+ * counts unless it is `refused` with a code in `ENROL_IGNORED_REFUSALS`, or
+ * has a status `enrolIgnoredStatuses` ignores. A `refused` row with no code
+ * (0010 makes one unstorable) counts, as core reads it.
+ *
  * Raw SQL because the typed builder's INSERT … SELECT must list every column
  * of `touches` in table order; naming only the columns written leaves the
  * rest to their defaults, as `.values()` would.
  */
 async function insertDraft(
   db: AgencyDb,
+  rule: PriorRule,
   d: {
-    readonly orgId: string
-    readonly campaignId: string
     readonly contactId: string
     readonly companyId: string
-    readonly channel: EnrolChannel
     readonly status: 'queued' | 'awaiting_approval'
     readonly subject: string
     readonly body: string
-    readonly ignored: readonly string[]
   },
 ): Promise<string | null> {
+  const list = (values: readonly string[]) => sql.join(values.map((v) => sql`${v}`), sql`, `)
+  const ignoredStatuses = enrolIgnoredStatuses(rule.autoSend)
   const res: unknown = await db.execute(sql`
     INSERT INTO touches (org_id, campaign_id, contact_id, company_id, channel, direction, status, subject, body)
-    SELECT ${d.orgId}::uuid, ${d.campaignId}::uuid, ${d.contactId}::uuid, ${d.companyId}::uuid,
-           ${d.channel}, 'out', ${d.status}, ${d.subject}, ${d.body}
+    SELECT ${rule.orgId}::uuid, ${rule.campaignId}::uuid, ${d.contactId}::uuid, ${d.companyId}::uuid,
+           ${rule.channel}, 'out', ${d.status}, ${d.subject}, ${d.body}
     WHERE NOT EXISTS (
       SELECT 1 FROM touches t
-       WHERE t.org_id = ${d.orgId}::uuid
-         AND t.campaign_id = ${d.campaignId}::uuid
+       WHERE t.org_id = ${rule.orgId}::uuid
          AND t.contact_id = ${d.contactId}::uuid
          AND t.direction = 'out'
-         AND t.status NOT IN (${sql.join(d.ignored.map((s) => sql`${s}`), sql`, `)})
+         AND (t.campaign_id = ${rule.campaignId}::uuid${
+           enrolPriorScope(rule.autoSend) === 'channel' ? sql` OR t.channel = ${rule.channel}` : sql``
+         })
+         AND NOT (t.status = 'refused' AND coalesce(t.refusal_code, '') IN (${list(ENROL_IGNORED_REFUSALS)}))${
+           ignoredStatuses.length > 0 ? sql` AND t.status NOT IN (${list(ignoredStatuses)})` : sql``
+         }
     )
     RETURNING id`)
   // node-postgres and PGlite both answer `{ rows }`; an array is accepted too
