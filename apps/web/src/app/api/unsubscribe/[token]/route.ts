@@ -47,7 +47,7 @@ export const runtime = 'nodejs'
 const MAX_BODY = 1024
 
 /** A token's shape, without the secret: enough to tell a real click from a probe in a log. */
-const TOKEN_SHAPE = /^[0-9a-f-]{36}\.[0-9a-f]{64}$/
+const TOKEN_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.[0-9a-f]{64}$/
 
 const COPY = {
   done: 'Done. You will not be emailed again.',

@@ -108,6 +108,13 @@ describe('the new routes check an id’s full shape, so a malformed one is a 404
     'api/meetings/[id]/route.ts',
     'api/meetings/[id]/ics/route.ts',
     'api/touches/[id]/performed/route.ts',
+    // The same pattern, found afterwards in older pages and routes.
+    'calls/[id]/page.tsx',
+    'meetings/[id]/page.tsx',
+    'proposals/[id]/page.tsx',
+    'api/deals/route.ts',
+    'api/proposals/route.ts',
+    'api/campaigns/[id]/enrol/route.ts',
   ]
   const MALFORMED = [
     '------------------------------------',

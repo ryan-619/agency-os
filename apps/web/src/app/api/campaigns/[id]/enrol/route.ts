@@ -4,6 +4,8 @@ import { enrolCampaign, type AgencyDb } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 /**
  * Enrol a campaign: one draft per enrollable contact (PROMPT.md §8.4).
  *
@@ -38,7 +40,7 @@ export async function POST(
   }
 
   const { id } = await context.params
-  if (!/^[0-9a-f-]{36}$/i.test(id)) return NextResponse.json({ error: 'No such campaign.' }, { status: 404 })
+  if (!UUID.test(id)) return NextResponse.json({ error: 'No such campaign.' }, { status: 404 })
 
   let body: unknown
   try {

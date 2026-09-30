@@ -72,6 +72,8 @@ import { dispatchTouch, evidenceAsOfFor, type MessageProvider, type TouchRow } f
 import { previewSend, type SendPreview } from './send-preview.js'
 import { tasksComplete, tasksCreate, tasksOpenForTouch } from './tasks.js'
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 /** What a person is handed when the send path says yes. */
 export interface LinkedinWords {
   /** The recipient as the send path resolved it — the contact's `linkedin_url`. */
@@ -315,7 +317,7 @@ export async function linkedinStepsDue(
 
   const handedIds = [
     ...new Set(rows.filter((r) => isHanded(r.touch)).map((r) => r.touch.providerId!.slice(HUMAN_PREFIX.length))),
-  ].filter((id) => /^[0-9a-f-]{36}$/i.test(id))
+  ].filter((id) => UUID.test(id))
   const people = handedIds.length === 0
     ? []
     : await db

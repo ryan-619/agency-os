@@ -481,7 +481,9 @@ function EraseContact({ contactId, name, onCancel }: { contactId: string; name: 
         <li>An opt-out keeps the one address or number it was recorded against — it is on the suppression list anyway, and the compliance page checks it.</li>
       </ul>
       <p className="muted" style={{ margin: '0 0 6px', fontSize: 12.5 }}>
-        Not scrubbed: chat transcripts and audit detail (which never held their words); free text about the company
+        Not scrubbed: chat transcripts; audit detail, which holds ids and counts except a reason a teammate typed and
+        the suppression list’s own history (an added or removed address keeps its value there, for the same reason the
+        suppression is kept — both are in their record); free text about the company
         that happens to name them, like a company note or a deal’s next action; and a call recording stored at
         Twilio — the result lists the call SIDs to delete there by hand. It cannot be undone:{' '}
         <a href={`/api/contacts/${contactId}/record`}>download their record</a> first if they asked for a copy.

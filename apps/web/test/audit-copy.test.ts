@@ -109,7 +109,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'contact.opt_out_not_recorded': { touchId: SUBJECT, channel: 'email', why: 'unparseable' },
   'contact.created': { companyId: SUBJECT, source: 'manual', hasTimeZone: true },
   'contact.paused': { reason: 'asked for Q1', alreadyPaused: false },
-  // The inbox's shape; the contacts route writes `{ hadReason }`, which no sentence reads.
+  // The inbox's shape; the contacts route writes `{ pausedFor }` alone.
   'contact.resumed': { reason: 'answering their reply from the inbox', inboundTouchId: SUBJECT, pausedFor: 'replied' },
   'contact.timezone_set': { timeZone: 'Europe/Amsterdam' },
   'consent.granted': { channel: 'sms', source: 'said yes on the call, 12 Sep' },
@@ -287,9 +287,9 @@ describe('sentenceFor', () => {
 
   /**
    * A pause reason can hold a teammate's address and the contact's words, and
-   * this log is append-only. The inbox records the reason's CLASS, and the
-   * sentence reads only that — the contacts route's free-text `hadReason` is
-   * never rendered.
+   * this log is append-only. Both writers record the reason's CLASS, and the
+   * sentence reads only that — the free-text `hadReason` the contacts route
+   * wrote before is never rendered, and that route no longer writes it.
    */
   it('says what paused a resumed contact by its class, and never reads the reason text', () => {
     expect(sentenceFor(line('contact.resumed', WRITTEN['contact.resumed']), lookups)).toBe(
@@ -298,6 +298,9 @@ describe('sentenceFor', () => {
     const free = sentenceFor(line('contact.resumed', { hadReason: 'Jane said stop calling (by sam@agency.test)' }), lookups)
     expect(free).toBe('resumed a contact at rentman.io')
     expect(sentenceFor(line('contact.resumed', { pausedFor: 'constructor' }), lookups)).toBe('resumed a contact at rentman.io')
+    const route = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/app/api/contacts/[id]/route.ts'), 'utf8')
+    expect(route).toContain('pausedFor: pauseReasonClass(contact.pausedReason)')
+    expect(route).not.toContain('hadReason')
   })
 
   it('says when a reclassification paused somebody and cancelled what was queued', () => {

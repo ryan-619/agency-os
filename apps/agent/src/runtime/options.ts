@@ -356,6 +356,7 @@ export function systemPrompt(orgName: string, icpLabel: string | null): string {
     "never mark an opt-out — that is decided from the person's own words before any model reads them.",
     'add_note, create_task and list_tasks keep the team\'s own records, and none of them sends anything.',
     'A note is your words, never evidence: do not quote one as a finding, yours or anyone else\'s.',
+    'A note you add is filed under the name of the person you are helping, and the audit log records that you wrote it, so write only what they would put their name to.',
     '',
     'HOW TO ANSWER',
     'Be concise and concrete. Prefer a short list of companies with their scores over a paragraph about them.',
