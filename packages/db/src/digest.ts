@@ -311,8 +311,8 @@ export interface DigestPauseMark {
  * How far back the previous run's `cron.digest` row is looked for. Wider
  * than a day on purpose: Vercel fires a cron anywhere inside its minute, so
  * on about half of days the previous run is a little more than 24 hours
- * old, and a failed day makes it two. A mark older than this is not looked
- * for, and the run reads the 24-hour lookback instead.
+ * old, and a failed day makes it two. A previous run older than this is not
+ * looked for, and the run reads the 24-hour lookback instead.
  */
 export const DIGEST_MARK_LOOKBACK_DAYS = 7
 
@@ -340,12 +340,12 @@ const createdAtText = sql<string>`to_char(${schema.auditLog.createdAt} AT TIME Z
  *
  * With no mark — no previous run in `DIGEST_MARK_LOOKBACK_DAYS`, or one from
  * before the mark was recorded — the window is the 24-hour lookback, started
- * no earlier than that previous row, as before: a manual run twenty-one
- * hours after the scheduled one would otherwise read three hours of pauses
- * the scheduled one already announced. A run that reads nothing carries the
- * previous mark forward rather than moving it to its own `now`, so a pause
- * the database stamped before this run read, and committed after, is still
- * after the mark.
+ * no earlier than that previous row when there is one, as before: a manual
+ * run twenty-one hours after the scheduled one would otherwise read three
+ * hours of pauses the scheduled one already announced. A run that reads
+ * nothing carries the previous mark forward rather than moving it to its own
+ * `now`, so a pause the database stamped before this run read, and committed
+ * after, is still after the mark.
  *
  * Call it BEFORE `digestRecord`, inside `digestOnce`, where the newest
  * `cron.digest` row is the previous run's. The rows past the cap are read —
@@ -395,7 +395,7 @@ export async function digestCampaignPauses(
     // A previous run that recorded no mark: after its own row, strictly, and inside the lookback.
     after = and(
       gte(t.createdAt, lookback),
-      sql`${t.createdAt} > (SELECT p.created_at FROM audit_log p WHERE p.id = ${previous.id}::uuid)`,
+      sql`${t.createdAt} > (SELECT p.created_at FROM audit_log p WHERE p.id = ${previous.id}::uuid AND p.org_id = ${orgId}::uuid)`,
     )
   } else {
     after = gte(t.createdAt, lookback)
