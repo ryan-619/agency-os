@@ -126,12 +126,69 @@ describe('the consent tools', () => {
       expect(await touches()).toBe(before)
     })
 
-    it('says consent_revoked for a paused contact', async () => {
-      await db.update(schema.contacts).set({ pausedAt: NOON_UTC, pausedReason: 'replied' }).where(eq(schema.contacts.id, priyaId))
+    /**
+     * Only the summary reaches the model. Found by review: a contact paused
+     * because they REPLIED read "consent_revoked: This contact has declined
+     * email … Nobody may approve past this", and the agent told the user an
+     * interested prospect had declined. The code stays the sender's; the
+     * words say what it is and what lifts it, first.
+     */
+    it('says a reply pause first and plainly — not a refusal of the channel — and what lifts it', async () => {
+      const reason = 'replied 2026-09-15T11:00:00.000Z'
+      await db.update(schema.contacts).set({ pausedAt: NOON_UTC, pausedReason: reason }).where(eq(schema.contacts.id, priyaId))
       const out = await check()
       if (!out.ok) throw new Error(out.message)
-      expect(out.data).toMatchObject({ code: 'consent_revoked', facts: { paused: true } })
-      expect(out.summary).toMatch(/^consent_revoked: /)
+      expect(out.data).toMatchObject({
+        code: 'consent_revoked', facts: { paused: true, pausedReason: reason, consent: 'never_asked', suppressed: false },
+      })
+      expect(out.summary).toBe(
+        `paused: they replied (${reason}); every campaign stops for them until a person answers from /inbox ` +
+          '(which resumes them) or resumes them on /contacts. This is not a refusal of email. ' +
+          'get_replies shows what they said. Nothing was queued.',
+      )
+      expect(out.summary).not.toMatch(/declined/)
+    })
+
+    it('quotes any other pause with its reason, and never calls it "not a refusal"', async () => {
+      const reason = 'unsubscribed 2026-09-15T11:00:00.000Z'
+      await db.update(schema.contacts).set({ pausedAt: NOON_UTC, pausedReason: reason }).where(eq(schema.contacts.id, priyaId))
+      const out = await check()
+      if (!out.ok) throw new Error(out.message)
+      expect(out.summary).toBe(
+        `paused (${reason}): every campaign stops for them until a person reads why and resumes them on /contacts. ` +
+          'Approving a draft does not lift a pause. Nothing was queued.',
+      )
+      expect(out.summary).not.toMatch(/not a refusal/)
+    })
+
+    /** Found by review: the paused branch skipped the suppression lookup, so this read as a pause. */
+    it('says suppressed for a paused AND suppressed contact, with the pause beside it', async () => {
+      await db.update(schema.contacts).set({ pausedAt: NOON_UTC, pausedReason: 'replied 2026-09-15' }).where(eq(schema.contacts.id, priyaId))
+      await addSuppression(db, { orgId, kind: 'email', value: 'priya@rentman.io', reason: 'replied stop', source: 'reply' })
+      const out = await check()
+      if (!out.ok) throw new Error(out.message)
+      expect(out.data).toMatchObject({ code: 'suppressed', humanCanResolve: false, facts: { suppressed: true, paused: true } })
+      expect(out.summary).toMatch(/^suppressed: .+\. Nobody may approve past this\. They are also paused \(replied 2026-09-15\)\. Nothing was queued\.$/)
+      expect(out.summary).not.toMatch(/not a refusal/)
+    })
+
+    it('says a recorded refusal as the refusal, even for a paused contact', async () => {
+      await contactsRecordConsent(db, { orgId, contactId: priyaId, channel: 'email', granted: false, source: 'said no on a call' })
+      await db.update(schema.contacts).set({ pausedAt: NOON_UTC, pausedReason: 'replied 2026-09-15' }).where(eq(schema.contacts.id, priyaId))
+      const out = await check()
+      if (!out.ok) throw new Error(out.message)
+      expect(out.data).toMatchObject({ code: 'consent_revoked', facts: { consent: 'refused', paused: true } })
+      expect(out.summary).toMatch(/^consent_revoked: This contact has declined email \(recorded: said no on a call\)/)
+      expect(out.summary).toMatch(/They are also paused \(replied 2026-09-15\)\. Nothing was queued\.$/)
+      expect(out.summary).not.toMatch(/not a refusal/)
+    })
+
+    it('says stale_evidence when the company’s last scan is past the window, for a message written now', async () => {
+      await db.insert(schema.scans).values({ orgId, companyId, ranAt: new Date('2026-08-20T09:00:00.000Z'), ok: true })
+      const out = await check()
+      if (!out.ok) throw new Error(out.message)
+      expect(out.data).toMatchObject({ code: 'stale_evidence', humanCanResolve: false, facts: { evidenceStale: true } })
+      expect(out.summary).toMatch(/^stale_evidence: .+Re-scan the company, then draft the message again\. Nobody may approve past this\. Nothing was queued\.$/)
     })
 
     it('says unknown_timezone when neither the person nor the company has a zone', async () => {
