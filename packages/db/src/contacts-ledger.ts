@@ -1,4 +1,3 @@
-// STUB — filled in wave 2 by consent-ledger-and-check-send (the two consent writers below are final; keep them)
 /**
  * The /contacts ledger: every person, their consent per channel and what the
  * send path would say about them today. Reads through `consentLedgerFor` and
@@ -14,11 +13,24 @@
  * that returns the person to NEVER ASKED (absence is no), never to granted —
  * lifting a refusal is not a grant, and the grant that may follow carries
  * its own source and evidence. The route gates the lift to owners.
+ *
+ * And one edit, `contactsUpdate`, with the rule an edit form would otherwise
+ * break: a suppression is keyed by VALUE, so changing the address a
+ * suppression matches would leave the opt-out standing against an address
+ * nobody holds any more, and the next enrolment would send. An edit may not
+ * make a suppression stop matching the person it was recorded for.
  */
-import { and, eq, sql } from 'drizzle-orm'
+import { and, asc, eq, ilike, isNotNull, isNull, ne, or, sql, type SQL } from 'drizzle-orm'
+import { z } from 'zod'
+import {
+  normaliseEmail, normaliseLinkedIn, normalisePhone, suppressionKeysFor,
+  type Channel, type SuppressionKind,
+} from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
+import type { ConsentRow, ContactRow } from './contacts.js'
+import { isUniqueViolation } from './pg-errors.js'
 
 export type ConsentWriteChannel = 'email' | 'sms' | 'voice' | 'whatsapp'
 
@@ -155,4 +167,347 @@ export async function contactsLiftRefusal(
     detail: { channel: args.channel, reason },
   })
   return { ok: true }
+}
+
+// ---------------------------------------------------------------------------
+// The ledger: every person in the org, with their company and their consents
+// ---------------------------------------------------------------------------
+
+/**
+ * One person on /contacts. The company's zone rides along because it is the
+ * zone quiet hours fall back to (`sendFactsFor`), and a page that showed only
+ * the contact's own would call a sendable person unsendable.
+ */
+export interface LedgerRow extends ContactRow {
+  readonly companyDomain: string
+  readonly companyName: string | null
+  readonly companyTimeZone: string | null
+  readonly consents: ConsentRow[]
+}
+
+export interface LedgerQuery {
+  readonly companyId?: string
+  /** true: only paused people. false: only people who are not. Absent: both. */
+  readonly paused?: boolean
+  /** Matched against name, address and company, case-insensitively. */
+  readonly q?: string
+  /** Default 100, at most 500 — the page reads a suppression answer per row. */
+  readonly limit?: number
+  readonly offset?: number
+}
+
+export const LEDGER_DEFAULT_LIMIT = 100
+export const LEDGER_MAX_LIMIT = 500
+
+/** `%` and `_` are ILIKE wildcards; a person searching for them means them. */
+function likeTerm(q: string): string {
+  return `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`
+}
+
+/**
+ * The people in one org, each with their company and every consent row.
+ *
+ * Two queries: the people joined to their company (inner — a contact's
+ * company is NOT NULL and cascades, so a contact without one does not
+ * exist), then the consents for exactly those ids. The consent rows are
+ * the raw record; turning them into never-asked / refused / granted, and
+ * asking the suppression list, is `consentLedgerFor`'s job, so the ledger
+ * and the tools cannot disagree about a person.
+ */
+export async function contactsLedger(
+  db: AgencyDb,
+  orgId: string,
+  q: LedgerQuery = {},
+): Promise<LedgerRow[]> {
+  const limit = Math.min(Math.max(Math.trunc(q.limit ?? LEDGER_DEFAULT_LIMIT), 1), LEDGER_MAX_LIMIT)
+  const offset = Math.max(Math.trunc(q.offset ?? 0), 0)
+
+  const where: SQL[] = [eq(schema.contacts.orgId, orgId)]
+  if (q.companyId) where.push(eq(schema.contacts.companyId, q.companyId))
+  if (q.paused === true) where.push(isNotNull(schema.contacts.pausedAt))
+  if (q.paused === false) where.push(isNull(schema.contacts.pausedAt))
+  const text = q.q?.trim()
+  if (text) {
+    const term = likeTerm(text.slice(0, 200))
+    where.push(
+      or(
+        ilike(schema.contacts.firstName, term),
+        ilike(schema.contacts.lastName, term),
+        ilike(schema.contacts.email, term),
+        ilike(schema.contacts.title, term),
+        ilike(schema.companies.domain, term),
+        ilike(schema.companies.name, term),
+        sql`(coalesce(${schema.contacts.firstName}, '') || ' ' || coalesce(${schema.contacts.lastName}, '')) ILIKE ${term}`,
+      )!,
+    )
+  }
+
+  const rows = await db
+    .select({
+      contact: schema.contacts,
+      companyDomain: schema.companies.domain,
+      companyName: schema.companies.name,
+      companyTimeZone: schema.companies.timeZone,
+    })
+    .from(schema.contacts)
+    // The company's org is checked too: a contact filed under another org's
+    // company would be a bug, and it must not become a leak.
+    .innerJoin(
+      schema.companies,
+      and(eq(schema.companies.id, schema.contacts.companyId), eq(schema.companies.orgId, orgId)),
+    )
+    .where(and(...where))
+    .orderBy(asc(schema.companies.domain), asc(schema.contacts.createdAt), asc(schema.contacts.id))
+    .limit(limit)
+    .offset(offset)
+  if (rows.length === 0) return []
+
+  const consents = await db
+    .select()
+    .from(schema.consents)
+    .where(
+      and(
+        eq(schema.consents.orgId, orgId),
+        sql`${schema.consents.contactId} IN (${sql.join(rows.map((r) => sql`${r.contact.id}`), sql`, `)})`,
+      ),
+    )
+  return rows.map((r) => ({
+    ...r.contact,
+    companyDomain: r.companyDomain,
+    companyName: r.companyName,
+    companyTimeZone: r.companyTimeZone,
+    consents: consents.filter((c) => c.contactId === r.contact.id),
+  }))
+}
+
+// ---------------------------------------------------------------------------
+// Editing a contact
+// ---------------------------------------------------------------------------
+
+/**
+ * The fields a person may edit on /contacts. Same bounds as `contactInput`.
+ * `undefined` leaves a field alone; `null` (or an empty string) clears it.
+ * The company, the timezone, the source and the pause are NOT here: each has
+ * its own action with its own audit row, and a general-purpose edit that
+ * could also move a person between companies is a way to file one company's
+ * contact under another's deal.
+ */
+export const contactPatchInput = z.object({
+  firstName: z.string().trim().max(80).optional().nullable(),
+  lastName: z.string().trim().max(80).optional().nullable(),
+  title: z.string().trim().max(120).optional().nullable(),
+  email: z.string().trim().max(254).optional().nullable(),
+  phone: z.string().trim().max(40).optional().nullable(),
+  linkedinUrl: z.string().trim().max(500).optional().nullable(),
+})
+
+export type ContactPatch = z.infer<typeof contactPatchInput>
+
+export type ContactsUpdateOutcome =
+  | { readonly ok: true; readonly contact: ContactRow; readonly changed: string[] }
+  | {
+      readonly ok: false
+      readonly reason: 'no_such_contact' | 'unreadable' | 'no_address' | 'duplicate' | 'suppressed' | 'changed_meanwhile'
+      readonly message: string
+    }
+
+type AddressField = 'email' | 'phone' | 'linkedinUrl'
+
+/** The channel whose key builder reads each address field. */
+const KEY_CHANNEL: Record<AddressField, Channel> = { email: 'email', phone: 'sms', linkedinUrl: 'linkedin' }
+
+const KIND_WORDS: Record<SuppressionKind, string> = {
+  email: 'email address',
+  domain: 'email domain',
+  phone: 'phone number',
+  linkedin: 'LinkedIn profile',
+}
+
+/** Every suppression key a stored value produces; none for an empty or unreadable one. */
+function keysOf(field: AddressField, value: string | null): { kind: SuppressionKind; value: string }[] {
+  if (!value) return []
+  return [...(suppressionKeysFor(value, KEY_CHANNEL[field]) ?? [])]
+}
+
+/** Blank is absent. The form sends '' for a cleared input; the column wants NULL. */
+function blankIsNull(v: string | null): string | null {
+  const t = v?.trim()
+  return t ? t : null
+}
+
+/**
+ * Change a contact's name, title or addresses, or say why not.
+ *
+ * Addresses are held to the rule `createContact` holds an email to: a value
+ * the suppression list could never match is one the send path would refuse,
+ * so the person typing it hears that now. The email is folded
+ * (`normaliseEmail`), a phone is stored in E.164, and a LinkedIn URL is kept
+ * as typed — it is a link somebody clicks — but must be one
+ * `normaliseLinkedIn` can read. A value that did not change is not
+ * re-validated, so a contact imported with a local number can still have
+ * its title corrected.
+ *
+ * The rule an edit form would otherwise break (§2.1): a suppression is keyed
+ * by value, so editing a suppressed address away leaves the opt-out matching
+ * nobody and makes the new address sendable. Every suppression row that
+ * matches this person before the edit must still match them after it, or
+ * the edit is refused and an owner decides. An email moving within a
+ * suppressed domain is allowed, because the domain row still matches. The
+ * same condition is repeated inside the UPDATE, so a "stop" that lands
+ * between the check and the write fails the edit rather than being edited
+ * past.
+ *
+ * `changed` names the fields whose stored value moved — the audit row the
+ * route writes carries those names and never the values (§2.3).
+ */
+export async function contactsUpdate(
+  db: AgencyDb,
+  orgId: string,
+  id: string,
+  patch: ContactPatch,
+): Promise<ContactsUpdateOutcome> {
+  const found = await db
+    .select()
+    .from(schema.contacts)
+    .where(and(eq(schema.contacts.orgId, orgId), eq(schema.contacts.id, id)))
+    .limit(1)
+  const old = found[0]
+  if (!old) return { ok: false, reason: 'no_such_contact', message: 'No contact with that id is in this org. Nothing was changed.' }
+
+  const next: Partial<Record<'firstName' | 'lastName' | 'title' | AddressField, string | null>> = {}
+
+  for (const field of ['firstName', 'lastName', 'title'] as const) {
+    if (patch[field] === undefined) continue
+    const v = blankIsNull(patch[field])
+    if (v !== old[field]) next[field] = v
+  }
+
+  if (patch.email !== undefined) {
+    const raw = blankIsNull(patch.email)
+    const v = raw === null ? null : normaliseEmail(raw)
+    if (raw !== null && v === null) {
+      return { ok: false, reason: 'unreadable', message: `"${raw}" could not be read as an email address.` }
+    }
+    if (v !== (old.email?.toLowerCase() ?? null)) next.email = v
+  }
+
+  if (patch.phone !== undefined) {
+    const raw = blankIsNull(patch.phone)
+    if (raw !== old.phone) {
+      const v = raw === null ? null : normalisePhone(raw)
+      if (raw !== null && v === null) {
+        return {
+          ok: false,
+          reason: 'unreadable',
+          message:
+            `"${raw}" is not a number in international form. Include the country code, like ` +
+            '+1 415 555 0100 — without one it cannot be matched against an opt-out.',
+        }
+      }
+      if (v !== old.phone) next.phone = v
+    }
+  }
+
+  if (patch.linkedinUrl !== undefined) {
+    const raw = blankIsNull(patch.linkedinUrl)
+    if (raw !== old.linkedinUrl) {
+      if (raw !== null && normaliseLinkedIn(raw) === null) {
+        return {
+          ok: false,
+          reason: 'unreadable',
+          message:
+            `"${raw}" could not be read as a LinkedIn profile. Paste the full URL, like ` +
+            'linkedin.com/in/jane-doe — a bare handle does not say whether it is a person or a company.',
+        }
+      }
+      next.linkedinUrl = raw
+    }
+  }
+
+  const changed = Object.keys(next)
+  if (changed.length === 0) return { ok: true, contact: old, changed: [] }
+
+  const after = (f: AddressField): string | null => (next[f] !== undefined ? next[f]! : old[f])
+  if (!after('email') && !after('phone') && !after('linkedinUrl')) {
+    return { ok: false, reason: 'no_address', message: 'A contact needs at least one way to reach them.' }
+  }
+
+  // The keys this person stops matching: every key an OLD address produces
+  // that the NEW one does not. If any of them is a suppression row, the
+  // edit would move the person out from under their own opt-out.
+  const dropping: { kind: SuppressionKind; value: string }[] = []
+  for (const f of ['email', 'phone', 'linkedinUrl'] as const) {
+    if (next[f] === undefined) continue
+    const kept = keysOf(f, after(f))
+    for (const k of keysOf(f, old[f])) {
+      if (!kept.some((n) => n.kind === k.kind && n.value === k.value)) dropping.push(k)
+    }
+  }
+  const suppressedAmong = (keys: readonly { kind: SuppressionKind; value: string }[]) =>
+    and(
+      eq(schema.suppressions.orgId, orgId),
+      or(...keys.map((k) => and(eq(schema.suppressions.kind, k.kind), eq(schema.suppressions.value, k.value)))),
+    )
+  if (dropping.length > 0) {
+    const hits = await db
+      .select({ kind: schema.suppressions.kind })
+      .from(schema.suppressions)
+      .where(suppressedAmong(dropping))
+      .limit(1)
+    const hit = hits[0]
+    if (hit) {
+      return {
+        ok: false,
+        reason: 'suppressed',
+        message:
+          `This contact's ${KIND_WORDS[hit.kind as SuppressionKind] ?? 'address'} is on the suppression list — ` +
+          'an owner must remove the suppression before it can be changed. Changing it here would leave the ' +
+          'opt-out matching an address they no longer have, and the next message would go to the new one.',
+      }
+    }
+  }
+
+  if (next.email) {
+    const taken = await db
+      .select({ id: schema.contacts.id })
+      .from(schema.contacts)
+      .where(and(eq(schema.contacts.orgId, orgId), sql`lower(${schema.contacts.email}) = ${next.email}`, ne(schema.contacts.id, id)))
+      .limit(1)
+    if (taken.length > 0) return { ok: false, reason: 'duplicate', message: `${next.email} is already a contact in this CRM.` }
+  }
+
+  let rows: ContactRow[]
+  try {
+    rows = await db
+      .update(schema.contacts)
+      .set({ ...next, updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(schema.contacts.orgId, orgId),
+          eq(schema.contacts.id, id),
+          // What the checks above read. If an address moved under us, or an
+          // opt-out for one we are dropping arrived, this matches nothing.
+          sql`${schema.contacts.email} IS NOT DISTINCT FROM ${old.email}`,
+          sql`${schema.contacts.phone} IS NOT DISTINCT FROM ${old.phone}`,
+          sql`${schema.contacts.linkedinUrl} IS NOT DISTINCT FROM ${old.linkedinUrl}`,
+          ...(dropping.length > 0
+            ? [sql`NOT EXISTS (SELECT 1 FROM ${schema.suppressions} WHERE ${suppressedAmong(dropping)})`]
+            : []),
+        ),
+      )
+      .returning()
+  } catch (err) {
+    // `contacts_org_email_key` — a race past the check above gets the same sentence.
+    if (isUniqueViolation(err)) return { ok: false, reason: 'duplicate', message: `${next.email} is already a contact in this CRM.` }
+    throw err
+  }
+  const contact = rows[0]
+  if (!contact) {
+    return {
+      ok: false,
+      reason: 'changed_meanwhile',
+      message: 'This contact changed while you were editing — an address, or an opt-out arriving. Reload and try again.',
+    }
+  }
+  return { ok: true, contact, changed }
 }

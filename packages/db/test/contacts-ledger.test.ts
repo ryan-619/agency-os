@@ -10,7 +10,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import { decideSend } from '@agency/core'
-import { contactsLiftRefusal, contactsRecordConsent, schema, type AgencyDb } from '../src/index.js'
+import {
+  addSuppression, consentLedgerFor, contactsLedger, contactsLiftRefusal, contactsRecordConsent,
+  contactsUpdate, contactPatchInput, previewSend, schema, type AgencyDb,
+} from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
 
 describe('the consent ledger writers', () => {
@@ -152,5 +155,256 @@ describe('the consent ledger writers', () => {
     // before the consent check — by a rule no approver can click past.
     expect(decision.code).toBe('cold_channel_forbidden')
     expect(decision.humanCanResolve).toBe(false)
+  })
+})
+
+
+/**
+ * The ledger read and the contact edit.
+ *
+ * The edit's one rule worth a paragraph: a suppression is keyed by VALUE, so
+ * editing a suppressed address away would leave the opt-out matching nobody
+ * and make the new address sendable. The last block drives that through the
+ * sender's own dry run, because "the row is still there" is not the claim —
+ * "the send path still refuses this person" is.
+ */
+describe('the contacts ledger and the contact edit', () => {
+  let test: TestDb
+  let db: AgencyDb
+  let orgId: string
+  let otherOrgId: string
+  let rentmanId: string
+  let acmeId: string
+  let priyaId: string
+  let samId: string
+
+  beforeEach(async () => {
+    test = await migratedDb()
+    db = drizzle(test.pg, { schema }) as unknown as AgencyDb
+    const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
+    orgId = org!.id
+    const [other] = await db.insert(schema.orgs).values({ name: 'Rival' }).returning({ id: schema.orgs.id })
+    otherOrgId = other!.id
+    const [rentman] = await db
+      .insert(schema.companies)
+      .values({ orgId, domain: 'rentman.io', name: 'Rentman', timeZone: 'Europe/Amsterdam' })
+      .returning({ id: schema.companies.id })
+    rentmanId = rentman!.id
+    const [acme] = await db.insert(schema.companies).values({ orgId, domain: 'acme.test' }).returning({ id: schema.companies.id })
+    acmeId = acme!.id
+    const [priya] = await db
+      .insert(schema.contacts)
+      .values({ orgId, companyId: rentmanId, firstName: 'Priya', lastName: 'Shah', title: 'CTO', email: 'priya@rentman.io', phone: '+14155550100' })
+      .returning({ id: schema.contacts.id })
+    priyaId = priya!.id
+    const [sam] = await db
+      .insert(schema.contacts)
+      .values({ orgId, companyId: acmeId, firstName: 'Sam', email: 'sam@acme.test', timeZone: 'America/New_York', pausedAt: new Date(), pausedReason: 'replied' })
+      .returning({ id: schema.contacts.id })
+    samId = sam!.id
+    const [theirs] = await db.insert(schema.companies).values({ orgId: otherOrgId, domain: 'theirs.io' }).returning({ id: schema.companies.id })
+    await db.insert(schema.contacts).values({ orgId: otherOrgId, companyId: theirs!.id, firstName: 'Priya', email: 'priya@theirs.io' })
+  }, 30_000)
+
+  afterEach(async () => {
+    await test?.close()
+  })
+
+  describe('contactsLedger', () => {
+    it('lists this org’s people with their company, and nobody from another org', async () => {
+      const rows = await contactsLedger(db, orgId)
+      expect(rows.map((r) => r.email)).toEqual(['sam@acme.test', 'priya@rentman.io'])
+      const priya = rows.find((r) => r.id === priyaId)!
+      expect(priya).toMatchObject({ companyDomain: 'rentman.io', companyName: 'Rentman', companyTimeZone: 'Europe/Amsterdam', timeZone: null })
+      expect((await contactsLedger(db, otherOrgId)).map((r) => r.email)).toEqual(['priya@theirs.io'])
+    })
+
+    it('carries each person’s consent rows, and only theirs', async () => {
+      await contactsRecordConsent(db, { orgId, contactId: priyaId, channel: 'sms', granted: false, source: 'reply' })
+      const rows = await contactsLedger(db, orgId)
+      expect(rows.find((r) => r.id === priyaId)!.consents.map((c) => [c.channel, c.granted])).toEqual([['sms', false]])
+      expect(rows.find((r) => r.id === samId)!.consents).toEqual([])
+    })
+
+    it('filters by company, by pause and by text — and treats % as a character', async () => {
+      expect((await contactsLedger(db, orgId, { companyId: rentmanId })).map((r) => r.id)).toEqual([priyaId])
+      expect((await contactsLedger(db, orgId, { paused: true })).map((r) => r.id)).toEqual([samId])
+      expect((await contactsLedger(db, orgId, { paused: false })).map((r) => r.id)).toEqual([priyaId])
+      expect((await contactsLedger(db, orgId, { q: 'RENTMAN' })).map((r) => r.id)).toEqual([priyaId])
+      expect((await contactsLedger(db, orgId, { q: 'priya shah' })).map((r) => r.id)).toEqual([priyaId])
+      expect((await contactsLedger(db, orgId, { q: 'cto' })).map((r) => r.id)).toEqual([priyaId])
+      expect(await contactsLedger(db, orgId, { q: '%' })).toEqual([])
+      // Another org's Priya is not found by searching for her name here.
+      expect((await contactsLedger(db, orgId, { q: 'theirs' }))).toEqual([])
+    })
+
+    it('pages with a bounded limit', async () => {
+      expect((await contactsLedger(db, orgId, { limit: 1 })).map((r) => r.id)).toEqual([samId])
+      expect((await contactsLedger(db, orgId, { limit: 1, offset: 1 })).map((r) => r.id)).toEqual([priyaId])
+      expect(await contactsLedger(db, orgId, { limit: 0 })).toHaveLength(1)
+    })
+  })
+
+  describe('contactsUpdate', () => {
+    const read = async (id: string) =>
+      (await db.select().from(schema.contacts).where(eq(schema.contacts.id, id)))[0]!
+
+    it('folds the address, and reports only the fields that moved', async () => {
+      const r = await contactsUpdate(db, orgId, priyaId, { email: '  Priya.Shah@Rentman.IO ', title: 'CTO' })
+      expect(r).toMatchObject({ ok: true, changed: ['email'] })
+      expect((await read(priyaId)).email).toBe('priya.shah@rentman.io')
+      expect((await read(priyaId)).updatedAt).not.toBeNull()
+    })
+
+    it('leaves an undefined field alone and clears a null or blank one', async () => {
+      const r = await contactsUpdate(db, orgId, priyaId, { title: null, lastName: '  ' })
+      expect(r).toMatchObject({ ok: true, changed: ['lastName', 'title'] })
+      const after = await read(priyaId)
+      expect(after).toMatchObject({ firstName: 'Priya', lastName: null, title: null, email: 'priya@rentman.io', phone: '+14155550100' })
+    })
+
+    it('says nothing changed when nothing did, and writes nothing', async () => {
+      const r = await contactsUpdate(db, orgId, priyaId, { firstName: 'Priya', email: 'PRIYA@rentman.io' })
+      expect(r).toMatchObject({ ok: true, changed: [] })
+      expect((await read(priyaId)).updatedAt).toBeNull()
+    })
+
+    it('refuses a duplicate address with a sentence, whatever its case', async () => {
+      const r = await contactsUpdate(db, orgId, samId, { email: 'Priya@Rentman.io' })
+      expect(r).toEqual({ ok: false, reason: 'duplicate', message: 'priya@rentman.io is already a contact in this CRM.' })
+      expect((await read(samId)).email).toBe('sam@acme.test')
+    })
+
+    it('does not count another org’s contact as a duplicate', async () => {
+      const r = await contactsUpdate(db, orgId, samId, { email: 'priya@theirs.io' })
+      expect(r.ok).toBe(true)
+    })
+
+    it('refuses an unreadable email, phone or LinkedIn, naming what to type instead', async () => {
+      expect(await contactsUpdate(db, orgId, priyaId, { email: 'not an address' })).toMatchObject({ ok: false, reason: 'unreadable' })
+      const phone = await contactsUpdate(db, orgId, priyaId, { phone: '020 7946 0000' })
+      expect(phone).toMatchObject({ ok: false, reason: 'unreadable' })
+      if (!phone.ok) expect(phone.message).toMatch(/country code/)
+      const li = await contactsUpdate(db, orgId, priyaId, { linkedinUrl: 'jane-doe' })
+      expect(li).toMatchObject({ ok: false, reason: 'unreadable' })
+      expect(await read(priyaId)).toMatchObject({ email: 'priya@rentman.io', phone: '+14155550100', linkedinUrl: null })
+    })
+
+    it('stores a phone in E.164 and a LinkedIn URL as typed', async () => {
+      const r = await contactsUpdate(db, orgId, priyaId, { phone: '+44 20 7946 0000', linkedinUrl: 'https://www.linkedin.com/in/priya-shah/' })
+      expect(r).toMatchObject({ ok: true, changed: ['phone', 'linkedinUrl'] })
+      expect(await read(priyaId)).toMatchObject({ phone: '+442079460000', linkedinUrl: 'https://www.linkedin.com/in/priya-shah/' })
+    })
+
+    it('refuses to leave a person with no way to reach them', async () => {
+      const r = await contactsUpdate(db, orgId, samId, { email: null })
+      expect(r).toMatchObject({ ok: false, reason: 'no_address' })
+      expect((await read(samId)).email).toBe('sam@acme.test')
+    })
+
+    it('cannot edit another org’s contact', async () => {
+      const r = await contactsUpdate(db, otherOrgId, priyaId, { firstName: 'Mallory' })
+      expect(r).toMatchObject({ ok: false, reason: 'no_such_contact' })
+      expect((await read(priyaId)).firstName).toBe('Priya')
+    })
+
+    it('accepts a patch shape with every field optional, and rejects one past the bounds', () => {
+      expect(contactPatchInput.parse({})).toEqual({})
+      expect(contactPatchInput.safeParse({ firstName: 'x'.repeat(81) }).success).toBe(false)
+      expect(contactPatchInput.safeParse({ linkedinUrl: 'x'.repeat(501) }).success).toBe(false)
+    })
+
+    describe('an edit cannot move a person out from under their own opt-out (§2.1)', () => {
+      let campaignId: string
+      beforeEach(async () => {
+        await db.update(schema.contacts).set({ timeZone: 'Europe/London' }).where(eq(schema.contacts.id, priyaId))
+        const [c] = await db
+          .insert(schema.campaigns)
+          .values({ orgId, name: 'Q4', channel: 'email', autoSend: false, dailyCap: 25, status: 'active' })
+          .returning({ id: schema.campaigns.id })
+        campaignId = c!.id
+      })
+      const preview = () => previewSend(db, { orgId, contactId: priyaId, campaignId, now: new Date('2026-09-15T12:00:00.000Z') })
+
+      it('refuses to change a suppressed address, and the sender still refuses the person', async () => {
+        await addSuppression(db, { orgId, kind: 'email', value: 'priya@rentman.io', reason: 'replied stop', source: 'reply' })
+        const r = await contactsUpdate(db, orgId, priyaId, { email: 'priya.new@rentman.io' })
+        expect(r.ok).toBe(false)
+        if (r.ok) return
+        expect(r.reason).toBe('suppressed')
+        expect(r.message).toMatch(/on the suppression list — an owner must remove the suppression/)
+        // The message names the kind, never the value.
+        expect(r.message).not.toContain('priya@rentman.io')
+        expect((await read(priyaId)).email).toBe('priya@rentman.io')
+        const p = await preview()
+        expect(p.ok && !p.decision.allowed && p.decision.code).toBe('suppressed')
+      })
+
+      it('refuses to clear a suppressed address too', async () => {
+        await addSuppression(db, { orgId, kind: 'phone', value: '+14155550100', reason: 'said stop on a call', source: 'voice' })
+        expect(await contactsUpdate(db, orgId, priyaId, { phone: null })).toMatchObject({ ok: false, reason: 'suppressed' })
+        expect(await contactsUpdate(db, orgId, priyaId, { phone: '+44 20 7946 0000' })).toMatchObject({ ok: false, reason: 'suppressed' })
+        // The same number, written differently, is the same key: allowed.
+        expect(await contactsUpdate(db, orgId, priyaId, { phone: '+1 (415) 555-0100' })).toMatchObject({ ok: true, changed: [] })
+      })
+
+      it('refuses to move an address out of a suppressed domain, and allows a move within it', async () => {
+        await addSuppression(db, { orgId, kind: 'domain', value: 'rentman.io', reason: 'the company asked', source: 'manual' })
+        expect(await contactsUpdate(db, orgId, priyaId, { email: 'priya@gmail.com' })).toMatchObject({ ok: false, reason: 'suppressed' })
+        const within = await contactsUpdate(db, orgId, priyaId, { email: 'p.shah@rentman.io' })
+        expect(within).toMatchObject({ ok: true, changed: ['email'] })
+        const p = await preview()
+        expect(p.ok && !p.decision.allowed && p.decision.code).toBe('suppressed')
+      })
+
+      it('refuses to edit a suppressed LinkedIn profile away', async () => {
+        await db.update(schema.contacts).set({ linkedinUrl: 'linkedin.com/in/priya-shah' }).where(eq(schema.contacts.id, priyaId))
+        await addSuppression(db, { orgId, kind: 'linkedin', value: 'linkedin.com/in/priya-shah', reason: 'asked on LinkedIn', source: 'manual' })
+        expect(await contactsUpdate(db, orgId, priyaId, { linkedinUrl: 'linkedin.com/in/someone-else' })).toMatchObject({ ok: false, reason: 'suppressed' })
+        const ledger = await consentLedgerFor(db, orgId, priyaId)
+        expect(ledger?.suppression.linkedin).toBe('suppressed')
+      })
+
+      /**
+       * The check above the UPDATE is a read, and a "stop" can land between it
+       * and the write. The same condition is inside the UPDATE, so the edit
+       * fails instead of moving the person past an opt-out that just arrived.
+       * The proxy slips the suppression in at exactly that moment.
+       */
+      it('fails an edit when an opt-out arrives between the check and the write', async () => {
+        let armed = true
+        const racing = new Proxy(db, {
+          get(target, prop, receiver) {
+            if (prop !== 'update' || !armed) return Reflect.get(target, prop, receiver)
+            armed = false
+            return (table: typeof schema.contacts) => {
+              const real = target.update(table)
+              return {
+                set: (values: Parameters<typeof real.set>[0]) => ({
+                  where: (cond: Parameters<ReturnType<typeof real.set>['where']>[0]) => ({
+                    returning: async () => {
+                      await addSuppression(target, { orgId, kind: 'email', value: 'priya@rentman.io', reason: 'replied stop', source: 'reply' })
+                      return real.set(values).where(cond).returning()
+                    },
+                  }),
+                }),
+              }
+            }
+          },
+        }) as AgencyDb
+        const r = await contactsUpdate(racing, orgId, priyaId, { email: 'priya.new@rentman.io' })
+        expect(r).toMatchObject({ ok: false, reason: 'changed_meanwhile' })
+        expect((await read(priyaId)).email).toBe('priya@rentman.io')
+        const p = await preview()
+        expect(p.ok && !p.decision.allowed && p.decision.code).toBe('suppressed')
+      })
+
+      it('lets an unsuppressed address change, and the new one is what the sender reads', async () => {
+        const r = await contactsUpdate(db, orgId, priyaId, { email: 'priya.new@rentman.io' })
+        expect(r).toMatchObject({ ok: true, changed: ['email'] })
+        const p = await preview()
+        expect(p.ok && p.facts.recipient).toBe('priya.new@rentman.io')
+      })
+    })
   })
 })
