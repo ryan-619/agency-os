@@ -15,8 +15,12 @@
  */
 import { describe, it, expect, vi } from 'vitest'
 import { randomBytes } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
 import { encrypt, type ConnectorRow } from '@agency/db'
-import { buildMcpServers, describeServers } from '../src/runtime/connectors.js'
+import {
+  buildMcpServers, describeServers, SCRUBBED_FROM_STDIO, STDIO_LAUNCHER,
+} from '../src/runtime/connectors.js'
+import { childEnv } from '../src/runtime/options.js'
 
 const KEY = randomBytes(32)
 const TOKEN = 'sk-apollo-live-9f3a2b7c1d4e'
@@ -99,6 +103,65 @@ describe('a credential', () => {
   })
 
   /**
+   * Where the credential goes is a NAME on the row (`secretHeader`,
+   * `secretPrefix`), never a value. The three shapes the catalog's presets
+   * use: a vendor header with no scheme, and Sentry's own scheme on the
+   * standard header — which its server keeps apart from `Bearer`, reserved
+   * there for OAuth tokens.
+   */
+  it.each([
+    ['x-api-key with no prefix', { secretHeader: 'x-api-key', secretPrefix: '' }, 'x-api-key', TOKEN],
+    ['a named header defaults to no prefix', { secretHeader: 'close-api-key' }, 'close-api-key', TOKEN],
+    [
+      'authorization with the Sentry-Bearer scheme',
+      { secretHeader: 'authorization', secretPrefix: 'Sentry-Bearer ' },
+      'authorization',
+      `Sentry-Bearer ${TOKEN}`,
+    ],
+  ])('is sent as %s', async (_label, placement, header, value) => {
+    const { secret } = withSecret()
+    const rows = [
+      row({
+        secretRef: '22222222-2222-4222-8222-222222222222',
+        config: { url: 'https://mcp.hunter.example/mcp', headers: {}, ...placement } as never,
+      }),
+    ]
+    const { servers } = await buildMcpServers(fakeDb(rows, secret as never), 'org-1', KEY, silent)
+    const headers = (servers['apollo'] as { headers: Record<string, string> }).headers
+    expect(headers).toEqual({ [header]: value })
+  })
+
+  it('keeps a preset’s non-secret header beside the one it injects', async () => {
+    const { secret } = withSecret()
+    const rows = [
+      row({
+        secretRef: '22222222-2222-4222-8222-222222222222',
+        config: {
+          url: 'https://mcp.close.example/mcp',
+          headers: { 'close-scope': 'mcp.read' },
+          secretHeader: 'close-api-key',
+          secretPrefix: '',
+        } as never,
+      }),
+    ]
+    const { servers } = await buildMcpServers(fakeDb(rows, secret as never), 'org-1', KEY, silent)
+    expect((servers['apollo'] as { headers: Record<string, string> }).headers).toEqual({
+      'close-scope': 'mcp.read',
+      'close-api-key': TOKEN,
+    })
+  })
+
+  it('sends no header at all when the row names a slot but holds no credential', async () => {
+    const { servers } = await buildMcpServers(
+      fakeDb([row({ config: { url: 'https://mcp.exa.example/mcp', headers: {}, secretHeader: 'x-api-key' } as never })]),
+      'org-1',
+      KEY,
+      silent,
+    )
+    expect((servers['apollo'] as { headers: Record<string, string> }).headers).toEqual({})
+  })
+
+  /**
    * §2.3: no credential in a log line. A connector's name and transport are
    * safe; a URL is not (someone will paste a token into a query string despite
    * being told not to) and a command line is not.
@@ -111,9 +174,29 @@ describe('a credential', () => {
       warn: (m: string, f?: Record<string, unknown>) => lines.push([m, f]),
       error: (m: string, f?: Record<string, unknown>) => lines.push([m, f]),
     }
-    const { rows, secret } = withSecret()
+    const { secret } = withSecret()
+    const ref = '22222222-2222-4222-8222-222222222222'
+    // Every placement, plus one row that fails to build — the skip is logged
+    // with its reason, and a reason is the likeliest place for a value to leak.
+    const rows = [
+      row({ name: 'bearer', secretRef: ref }),
+      row({
+        name: 'named',
+        secretRef: ref,
+        config: { url: 'https://mcp.hunter.example/mcp', headers: {}, secretHeader: 'x-api-key', secretPrefix: '' } as never,
+      }),
+      row({
+        name: 'env-named',
+        kind: 'stdio',
+        secretRef: ref,
+        config: { command: 'npx', args: ['-y', 'brave'], env: {}, secretEnv: 'BRAVE_API_KEY' } as never,
+      }),
+      row({ name: 'refused', secretRef: ref, config: { url: 'http://169.254.169.254/', headers: {} } as never }),
+    ]
     const { servers } = await buildMcpServers(fakeDb(rows, secret as never), 'org-1', KEY, noisy)
+    expect(Object.keys(servers)).toEqual(['bearer', 'named', 'env-named'])
     const dumped = JSON.stringify(lines) + JSON.stringify(describeServers(servers))
+    expect(lines.length).toBeGreaterThan(0)
     expect(dumped).not.toContain(TOKEN)
     expect(dumped).not.toContain('sk-apollo')
   })
@@ -173,10 +256,12 @@ describe('a stdio connector', () => {
       KEY,
       silent,
     )
+    // Through the launcher, which removes what the CLI adds (below) and then
+    // execs exactly the command and arguments the row names, after `--`.
     expect(servers['local-tools']).toEqual({
       type: 'stdio',
-      command: 'npx',
-      args: ['-y', 'some-mcp-server'],
+      command: STDIO_LAUNCHER,
+      args: [...SCRUBBED_FROM_STDIO.flatMap((n) => ['-u', n]), '--', 'npx', '-y', 'some-mcp-server'],
       env: {},
     })
   })
@@ -222,9 +307,149 @@ describe('a stdio connector', () => {
       silent,
     )
     const built = servers['local-tools'] as { args: string[]; env: Record<string, string> }
-    expect(built.env['MCP_SECRET']).toBe(TOKEN)
+    expect(built.env).toEqual({ MCP_SECRET: TOKEN })
     // A command line is visible in `ps` to anyone on the host.
     expect(built.args.join(' ')).not.toContain(TOKEN)
+  })
+
+  /**
+   * Most public stdio servers read a fixed variable (`BRAVE_API_KEY`,
+   * `SNYK_TOKEN`), so the row names it. Still exactly `config.env` plus ONE
+   * key: the name moves, nothing is added.
+   */
+  it('passes its credential under the variable the row names instead', async () => {
+    const { servers } = await buildMcpServers(
+      fakeDb(
+        [
+          row({
+            kind: 'stdio',
+            name: 'brave',
+            secretRef: '22222222-2222-4222-8222-222222222222',
+            config: { command: 'npx', args: ['-y', 'brave'], env: { LANG: 'C' }, secretEnv: 'BRAVE_API_KEY' } as never,
+          }),
+        ],
+        { ciphertext: encrypt(TOKEN, KEY), keyVersion: 1 } as never,
+      ),
+      'org-1',
+      KEY,
+      silent,
+    )
+    const built = servers['brave'] as { args: string[]; env: Record<string, string> }
+    expect(built.env).toEqual({ LANG: 'C', BRAVE_API_KEY: TOKEN })
+    expect(built.args.join(' ')).not.toContain(TOKEN)
+  })
+})
+
+/**
+ * What the child actually RECEIVES, as opposed to what this module emits.
+ *
+ * The test above ("inherits nothing") checks the object this module builds,
+ * and it was passing while every stdio connector was being handed the
+ * worker's ANTHROPIC_API_KEY: the CLI spawns a stdio server with
+ * `{ ...its own environment, ...CLAUDE_* markers, ...server.env }` — read out
+ * of the installed binary — and its own environment is `childEnv()`. So this
+ * spawns a real child the way the CLI does and reads its environment back.
+ */
+describe('a stdio child launched the way the CLI launches it', () => {
+  const CANARY = 'sk-ant-api03-worker-key-canary'
+  const PRINT_ENV = 'process.stdout.write(JSON.stringify(process.env))'
+
+  /** `childEnv()` on the api_key path, with nothing undefined in it. */
+  const cliEnv = (): Record<string, string> =>
+    Object.fromEntries(
+      Object.entries(childEnv({ kind: 'api_key', apiKey: CANARY, workspaceId: 'ws-canary' })).filter(
+        (e): e is [string, string] => typeof e[1] === 'string',
+      ),
+    )
+
+  const launch = (command: string, args: readonly string[], env: Record<string, string>) => {
+    const out = spawnSync(command, [...args], {
+      encoding: 'utf8',
+      env: { ...cliEnv(), CLAUDE_PROJECT_DIR: '/tmp', CLAUDECODE: '1', ...env },
+    })
+    expect(out.status).toBe(0)
+    return { raw: out.stdout, env: JSON.parse(out.stdout) as Record<string, string> }
+  }
+
+  it('does not receive the key that bills the agency, and does receive its own', async () => {
+    const config = { command: process.execPath, args: ['-e', PRINT_ENV], env: {}, secretEnv: 'BRAVE_API_KEY' }
+    const { servers } = await buildMcpServers(
+      fakeDb(
+        [row({ kind: 'stdio', name: 'brave', secretRef: '22222222-2222-4222-8222-222222222222', config: config as never })],
+        { ciphertext: encrypt(TOKEN, KEY), keyVersion: 1 } as never,
+      ),
+      'org-1',
+      KEY,
+      silent,
+    )
+    const built = servers['brave'] as { command: string; args: string[]; env: Record<string, string> }
+
+    // The control: without the launcher the same child gets the key. If this
+    // ever stops being true the CLI changed, and the assertion after it would
+    // be passing for a reason nobody chose.
+    const bare = launch(config.command, config.args, built.env)
+    expect(bare.env['ANTHROPIC_API_KEY']).toBe(CANARY)
+
+    const scrubbed = launch(built.command, built.args, built.env)
+    expect(scrubbed.raw).not.toContain(CANARY)
+    expect(scrubbed.raw).not.toContain('ws-canary')
+    for (const name of SCRUBBED_FROM_STDIO) expect(scrubbed.env).not.toHaveProperty(name)
+    expect(scrubbed.env['BRAVE_API_KEY']).toBe(TOKEN)
+    // Still a working environment: the launcher removes, it does not replace.
+    expect(scrubbed.env['PATH']).toBe(process.env['PATH'])
+  })
+
+  /**
+   * The list above is only as good as its coverage of `childEnv()`. Every
+   * name that function can emit is either scrubbed or on this short list of
+   * things a connector may see; a name added to it later fails here until
+   * somebody decides which.
+   */
+  it('scrubs everything childEnv() can emit that a connector has no business seeing', () => {
+    const MAY_SEE = [
+      'PATH',
+      'HOME',
+      'USER',
+      'CLAUDE_CONFIG_DIR',
+      'CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS',
+      'CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH',
+    ]
+    const emitted = [
+      ...Object.keys(childEnv({ kind: 'api_key', apiKey: CANARY, workspaceId: 'ws' })),
+      ...Object.keys(childEnv({ kind: 'local_login' })),
+    ]
+    for (const name of emitted) {
+      expect(SCRUBBED_FROM_STDIO.includes(name) || MAY_SEE.includes(name), name).toBe(true)
+    }
+    expect(emitted).toContain('ANTHROPIC_API_KEY')
+  })
+
+  it('refuses a command the launcher would read as an assignment', async () => {
+    const { servers, skipped } = await buildMcpServers(
+      fakeDb([row({ kind: 'stdio', name: 'odd', config: { command: 'A=B', args: [], env: {} } as never })]),
+      'org-1',
+      KEY,
+      silent,
+    )
+    expect(servers).toEqual({})
+    expect(skipped[0]!.why).toMatch(/"="/)
+  })
+
+  it('refuses an environment that sets a variable the launcher would remove', async () => {
+    const { servers, skipped } = await buildMcpServers(
+      fakeDb([
+        row({
+          kind: 'stdio',
+          name: 'odd',
+          config: { command: 'npx', args: [], env: { ANTHROPIC_CUSTOM_HEADERS: 'x-a: b' } } as never,
+        }),
+      ]),
+      'org-1',
+      KEY,
+      silent,
+    )
+    expect(servers).toEqual({})
+    expect(skipped[0]!.why).toMatch(/ANTHROPIC_CUSTOM_HEADERS, which belongs to the worker/)
   })
 })
 
