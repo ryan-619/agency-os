@@ -154,8 +154,12 @@ export const getScanHistory: AgencyToolSpec<typeof scanHistoryShape> = {
                 `${days} days: its evidence must be re-verified before it is quoted to anyone.`
               : `The newest scan that reached the site is from ${day(newestReached.scan.ranAt)} and is current.`
             : 'No scan has ever reached the site, so nothing has been observed about it.',
-          'A scan that did not reach the site observed nothing. It has no score — it is not a 0 — and ' +
-            'the absence of findings on it is not evidence of anything.',
+          ...(scans.some((s) => !s.reachedTheSite)
+            ? [
+                'A scan that did not reach the site observed nothing. It has no score — it is not a 0 — and ' +
+                  'the absence of findings on it is not evidence of anything.',
+              ]
+            : []),
           ...lines,
         ],
         BUDGET,
