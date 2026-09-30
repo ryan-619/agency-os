@@ -272,21 +272,22 @@ export const getCompanyTimeline: AgencyToolSpec<typeof companyTimelineShape> = {
     if (!company) return fail('not_found', `No company with domain "${domain}" is in the CRM.`)
     const limit = input.limit ?? 25
 
-    const none = async <T>(): Promise<T[]> => []
+    // A section the role may not read is not queried at all.
+    const none = async (): Promise<never[]> => []
     const [touches, scans, deals, meetings, proposals, calls, notes, tasks] = await Promise.all([
-      may.touches ? companyThread(ctx.db, ctx.orgId, company.id, limit) : none<Awaited<ReturnType<typeof companyThread>>[number]>(),
+      may.touches ? companyThread(ctx.db, ctx.orgId, company.id, limit) : none(),
       scanHistory(ctx.db, ctx.orgId, company.id, limit),
       may.deals
         ? ctx.db
             .select({ id: schema.deals.id, stage: schema.deals.stage, closedAt: schema.deals.closedAt })
             .from(schema.deals)
             .where(and(eq(schema.deals.orgId, ctx.orgId), eq(schema.deals.companyId, company.id)))
-        : none<{ id: string; stage: string; closedAt: Date | null }>(),
-      may.meetings ? meetingsForCompany(ctx.db, ctx.orgId, company.id) : none<Awaited<ReturnType<typeof meetingsForCompany>>[number]>(),
-      may.proposals ? proposalsForCompany(ctx.db, ctx.orgId, company.id) : none<Awaited<ReturnType<typeof proposalsForCompany>>[number]>(),
-      may.contacts ? callsForCompany(ctx.db, ctx.orgId, company.id) : none<Awaited<ReturnType<typeof callsForCompany>>[number]>(),
+        : none(),
+      may.meetings ? meetingsForCompany(ctx.db, ctx.orgId, company.id) : none(),
+      may.proposals ? proposalsForCompany(ctx.db, ctx.orgId, company.id) : none(),
+      may.contacts ? callsForCompany(ctx.db, ctx.orgId, company.id) : none(),
       notesFor(ctx.db, ctx.orgId, company.id, limit),
-      may.deals ? tasksList(ctx.db, ctx.orgId, { companyId: company.id, limit }) : none<Awaited<ReturnType<typeof tasksList>>[number]>(),
+      may.deals ? tasksList(ctx.db, ctx.orgId, { companyId: company.id, limit }) : none(),
     ])
     const dealRows = (await Promise.all(deals.map((d) => auditForSubject(ctx.db, ctx.orgId, 'deal', d.id, limit)))).flat()
     const names = await actorNames(ctx, dealRows)
