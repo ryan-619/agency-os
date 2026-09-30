@@ -1230,10 +1230,158 @@ larger than any real job before it is sent.
 once at boot and logs `summaries: ollama (local)` or `deterministic`; the
 session asks for a summary when the call closes and writes `endCall`'s
 deterministic one on every failure path. Only the caller's and the agent's
-turns are sent — not the system events. `classify_reply`, `draft_outreach` and
-`summarise_findings` have their task keys and no caller yet; wiring them is
+turns are sent — not the system events. The worker calls `classify_reply`
+(`apps/agent/src/outreach/classify.ts`) and `draft_outreach`
+(`apps/agent/src/outreach/draft.ts`) the same way, beside the deterministic
+answer. `summarise_findings` has its task key and no caller yet; wiring it is
 adding an `attemptText` call beside the deterministic answer that already
-exists, never in place of it.
+exists, never in place of it. (The agent TOOL named `classify_reply` is a
+different thing: it records a kind a model or a person chose, and calls no
+model itself.)
+
+### The compliance page and the audit log
+
+**The compliance page COUNTS ROWS and re-derives no rule.** `/compliance`
+reads `complianceSummary()` in `packages/db/src/compliance.ts` — the same read
+`get_compliance_summary` makes, so the page and the tool cannot disagree.
+Quiet-hours breaches are deliberately NOT recomputed: today's window and zone
+applied to yesterday's send is not an observation, so what is counted is the
+send path's own `refusal_code = 'quiet_hours'`. Approvals decided after expiry
+are labelled a clean expiry, informational, against today's rows — never a
+breach, because `decideApproval` allows it on purpose (§1). Freshness comes
+from the latest scan's `ran_at` through `isStale`, and the page shows how many
+stale companies `findings.stale` still calls fresh.
+
+The must-be-zero checks: `callsThatDidNotDisclose()`, which leads the page;
+opted-out replies and calls with no matching suppression row today (keys from
+the send path's own `suppressionKeysFor`; an unreadable key is listed, never
+read as clear), beside the count of `contact.opt_out_not_recorded` rows;
+voice/SMS/WhatsApp touches that WENT OUT with no granted consent row today,
+with the send path's own refusals counted apart as "stopped by the send path";
+and drafts awaiting approval whose company's latest successful scan is stale
+or missing. The auto-send check prints its predicate and its zero, and its
+test runs the same predicate over rows that would match. Every zero says
+"none recorded" and names the recorder `deployment()` reports absent — no
+worker, no reply path, no `UNSUBSCRIBE_SECRET`, a voice service the page
+cannot see. `COMPLIANCE_REFUSAL_HUMAN_CAN_RESOLVE` restates `decideSend`'s
+`humanCanResolve` per code (a row stores the code, not the decision), typed
+`Record<SendRefusalCode, boolean>` so a new code fails the build, and
+`compliance.test.ts` drives `decideSend` into every code and asserts they
+agree.
+
+**The audit log has a reader.** `/audit` is keyset-paged on `(created_at,
+id)`, newest first, 100 a page. The cursor comparison reads the cursor row's
+STORED `created_at` by id, because a JS `Date` holds milliseconds and
+`timestamptz` microseconds: a cursor built from the `Date` skipped rows
+written in the same millisecond. Filters: an action family (an escaped LIKE —
+`_` is a wildcard and nearly every action has one), an actor, a subject type,
+a subject id. Sentences come from `apps/web/src/lib/audit-copy.ts`, which is
+pure and reads `detail` only through `detailValue()`, refusing `SENSITIVE_KEY`
+keys and `SENSITIVE_VALUE` strings; the raw row sits behind `<details>`,
+through `redact()`, and an unknown action is shown as its raw name.
+
+**Every action a writer produces has a sentence, and a test reads the tree to
+keep it so.** `apps/web/test/audit-copy.test.ts` scans every `src/` under
+`apps/` and `packages/` for `action:` and `audit('…')` literals — a ternary
+on the lines after `action:` included — and fails for an action with no
+sentence or no detail shape in its `WRITTEN` map, for a templated action whose
+expansions nobody listed, and for a `WRITTEN` entry nothing writes. A
+convention did this job before and failed: features built in parallel wrote
+seven actions from files that were not `audit-copy.ts`, and `/audit` showed
+each as a raw name. `isAlarm` highlights an opt-out that was not recorded, a
+call with no AI disclosure, and a digest whose worker-silent alert reached
+nobody. The page's own notes say what the log cannot: an approval decision is
+written twice (the web route and the worker), scans are audited only when the
+cron or the agent ran them, and suppression changes before 0018 were never
+written at all (§4).
+
+### Notifications and the heartbeat
+
+**Slack is one seam, and it carries ids.** The `NotificationEvent` union in
+`lib/slack-message.ts` names every kind — `reply`, `booking`, `deal_closed`,
+`proposal_accepted`, `opt_out_not_recorded`, `digest`, `worker_silent`,
+`campaign_paused` — and the content rule is ids, a public domain, a kind and a
+deep link: never a body, a name, an address, a phone number, a note or a
+chosen time. A free-mail lead's `<address>.inbound` row reaches the channel in
+NO field, the link included, because Slack unfurls and logs URLs; such a
+message links to `/inbox`, `/pipeline` or an id-based page, and
+`slack-message.test.ts` asserts no payload contains `.inbound`. The webhook
+URL is a bearer credential `redact()` cannot see, so it is never logged and a
+failure is reported by error NAME or Slack's short token. One attempt, 3 s,
+no retry, and an audit row `notification.sent|failed` with actor `system`.
+
+Routes call `notify()` inside `after()`, after the write, wrapped in
+try/catch — Next `console.error`s an escaping Error whole, past `redact()` —
+and the deal and proposal routes read the company domain inside that
+callback, so a failed read cannot 500 a move that is already committed. A
+duplicate inbound delivery announces nothing; accepting a proposal closes the
+deal won inside `setProposalStatus`, and that close is not announced again.
+`opt_out_not_recorded` is the exception: it is AWAITED, on a path that is
+already answering 500. **Not built:** retries, a per-org webhook, and a
+worker-side notifier — `campaign_paused` is in the union and unwired, because
+the pause happens in the worker, which has no Slack path; it logs a warn line
+per pause and the campaigns card explains it.
+
+**The alert that the worker is silent cannot come from the worker.** The daily
+digest cron reads `worker_heartbeats` and posts a separate `worker_silent`
+message, after the digest, when a worker is configured and the newest
+heartbeat is older than the threshold that row earns (`heartbeatSilentAfter`:
+max(600 s, three of the worker's own ticks)) or there is none. Once a day,
+because that is how often the cron runs; with several orgs it posts once per
+org, which one agency with one org does not need engineered around.
+
+**A silent worker is a number in `/api/health`, not an inference.**
+`worker_heartbeats` is a SYSTEM table with no `org_id` — the worker serves
+every org — keyed `hostname:pid`, upserted every tick with `{ halted,
+lockHeld, intervalMs, version }` (`version` is null under `node
+apps/agent/dist/index.js`, which is how the image runs). `booted_at` moves on
+a re-boot with the same id. Rows older than 30 days are pruned on every write,
+BEFORE the upsert, so a write throws exactly when its row was not written —
+which `lastHeartbeatAt()`, and so `/readyz`'s `heartbeatWrittenAt`, rely on.
+A failed write is logged once per failure streak (and on a change of error
+class) and once on recovery — not 5,760 identical lines a day while 0018 is
+missing — and never stops the worker (§4: only liveness may stop a process).
+What the row says comes from `healthInputs()`, the same object `/readyz`
+answers from, so the two cannot disagree about the halt or the lock. On the
+web side a row decides `live` or `silent` whatever the configuration says — an
+observation beats configuration — `never` is a configured worker with no row,
+and `not_configured` is neither. `worker` never changes `/api/health`'s status
+or code, even under `?strict=1`.
+
+### Search, exports and records
+
+**Search excludes connectors, secrets, prompts, chat, approval payloads, audit
+detail, raw scans, users and provider ids (§2.3); `q` is content and stays out
+of logs.** `GET /api/search` has no `search` capability: each section is gated
+by the read capability that already gates its table (`searchSectionsFor`),
+outbound bodies only for `approvals:decide` and reply bodies under
+`campaigns:read`. `apps/web/test/search-source.test.ts` pins the exact
+searched-column set, so adding a column is a visible §2.3 decision rather than
+a quiet one. A driver error is logged by name only, because drizzle's message
+quotes the bound parameters. A query is 2 to 100 characters after whitespace
+is collapsed.
+
+**Exports are audited because lead data left the database; a blank is not
+false.** `GET /api/export/{companies,findings,consents}` each write one
+`export.<view>` row `{ rows, filters }` BEFORE the file is produced, and answer
+503 with nothing exported if that row cannot be written — stricter than the
+house `.catch(() => {})`, because an unrecorded movement of lead data is the
+very thing §2.3 and §5.5 care about. Over 20,000 rows is a 413, never a
+truncated file. Every file is UTF-8 with a BOM, then `# internal — never
+prospect-facing`, then RFC 4180 CRLF rows, with any cell starting `=`, `+`,
+`-`, `@`, a tab or a CR prefixed by an apostrophe. `stale` is derived from
+`ran_at` — the findings export's projection does not even carry
+`findings.stale`. In the findings file `gap` AND `weight` are blank for an
+unobserved signal, because a 0 is a number a spreadsheet sums; in the consents
+file a missing row is `never_asked`. `/companies` is a GET form run through
+`lib/company-list.ts`, and the companies export honours the same query string,
+so "export this view" is exactly the rows on screen. One known limitation: that
+file is domain-first and re-imports through `/companies/import`, whose importer
+reads everything after the first comma as the name — a NEW domain would be
+named `Acme,72,A — call first`. Existing domains are untouched.
+
+**A person's whole record is one download, and erasure keeps the
+suppression** — see the send path above.
 
 ## 3. Commands
 
