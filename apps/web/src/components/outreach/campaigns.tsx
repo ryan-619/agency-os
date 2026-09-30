@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import type { EnrolSkip } from '@agency/core'
-import { REFUSAL_WORDS } from '@/lib/refusal-words'
+import { REFUSAL_WORDS, campaignAutoPausedWords } from '@/lib/refusal-words'
 
 /**
  * Campaigns (PROMPT.md §8.4).
@@ -22,6 +22,10 @@ import { REFUSAL_WORDS } from '@/lib/refusal-words'
  * the preview says the one thing people assume it does and it does not —
  * read the suppression list. That check belongs to the send path (§2.1), so
  * a suppressed person IS enrolled and then refused at sending.
+ *
+ * A campaign the WORKER paused says so, with the numbers it paused on: too
+ * many of its addresses bounced. Nothing un-pauses it but a person setting
+ * it active again from the form below, after fixing the list.
  */
 
 export interface CampaignView {
@@ -39,6 +43,19 @@ export interface CampaignView {
     readonly waitingToSend: number
     readonly refusals: readonly { readonly code: string; readonly n: number }[]
   }
+  /**
+   * Set when the worker paused this campaign because its addresses were
+   * bouncing, and no person has set it active since (`campaignAutoPauses`).
+   * Shown only while the status is still `paused`.
+   */
+  readonly autoPaused?: {
+    readonly bouncePct: number
+    readonly threshold: number
+    readonly sentTo: number
+    readonly bounced: number
+    /** ISO time of the pause. */
+    readonly at: string
+  } | null
 }
 
 export function CampaignsPanel({
@@ -104,6 +121,15 @@ export function CampaignsPanel({
                 Up to {c.dailyCap} a day · quiet {c.quietStart.slice(0, 5)}–{c.quietEnd.slice(0, 5)} in each recipient&apos;s
                 own timezone
               </div>
+              {c.status === 'paused' && c.autoPaused ? (
+                <p
+                  className="note note-warn"
+                  style={{ margin: '8px 0 0', fontSize: 13 }}
+                  title={`The limit is ${c.autoPaused.threshold}% once twenty people have been written to.`}
+                >
+                  {campaignAutoPausedWords(c.autoPaused)}
+                </p>
+              ) : null}
               <div className="activity">
                 <span>
                   <strong>{c.activity.sent}</strong> sent

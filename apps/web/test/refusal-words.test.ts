@@ -9,7 +9,7 @@
  */
 import type { SendRefusalCode } from '@agency/core'
 import { describe, expect, it } from 'vitest'
-import { REFUSAL_WORDS, refusalWords } from '../src/lib/refusal-words'
+import { REFUSAL_WORDS, campaignAutoPausedWords, refusalWords } from '../src/lib/refusal-words'
 
 const SEND_CODES = {
   unparseable_recipient: true,
@@ -57,5 +57,14 @@ describe('refusalWords', () => {
 
   it('makes an unknown code readable rather than hiding it', () => {
     expect(refusalWords('some_new_code')).toBe('some new code')
+  })
+})
+
+describe('campaignAutoPausedWords', () => {
+  it('says what paused it, with its own numbers, and what to do', () => {
+    expect(campaignAutoPausedWords({ bouncePct: 6, bounced: 12, sentTo: 200 })).toBe(
+      'Paused automatically: 6% of addresses bounced (12 of 200). Fix the list, then activate it again.',
+    )
+    expect(campaignAutoPausedWords({ bouncePct: 5.4, bounced: 7, sentTo: 130 })).toContain('5.4% of addresses bounced (7 of 130)')
   })
 })

@@ -17,6 +17,7 @@ import { createDryRunProvider, schema, type AgencyDb, type MessageProvider } fro
 import { verifyUnsubscribeToken } from '@agency/db/queries'
 import { migratedDb,type TestDb } from '../../../packages/db/test/helpers.js'
 import type { loadEnv } from '../src/env.js'
+import type { Logger } from '../src/logger.js'
 import { outreachOptions } from '../src/outreach/options.js'
 import { runSenderTick } from '../src/outreach/sender.js'
 
@@ -332,7 +333,7 @@ describe('the sender tick', () => {
           .where(inArray(schema.contacts.id, ids.slice(0, bounced)))
       }
     }
-    const tickAt5 = (log = silent) => runSenderTick({ db, provider, log, batch: 20, now: () => NOON, bouncePausePct: 5 })
+    const tickAt5 = (log: Logger = silent) => runSenderTick({ db, provider, log, batch: 20, now: () => NOON, bouncePausePct: 5 })
     const status = async (id = campaignId) =>
       (await db.select({ s: schema.campaigns.status }).from(schema.campaigns).where(eq(schema.campaigns.id, id)))[0]!.s
     const pauses = async () => (await db.select().from(schema.auditLog)).filter((a) => a.action === 'campaign.auto_paused')
