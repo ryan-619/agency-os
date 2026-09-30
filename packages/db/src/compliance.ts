@@ -239,7 +239,12 @@ export async function complianceRefusalsByCode(
   const where = and(
     eq(schema.touches.orgId, orgId),
     eq(schema.touches.status, 'refused'),
-    since ? sql`${refusedAt} >= ${since}` : undefined,
+    since
+      ? or(
+          gte(schema.touches.updatedAt, since),
+          and(isNull(schema.touches.updatedAt), gte(schema.touches.createdAt, since)),
+        )
+      : undefined,
   )
   const [rows, recent] = await Promise.all([
     db
