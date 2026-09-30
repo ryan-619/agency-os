@@ -58,10 +58,29 @@ export interface ConnectorView {
   readonly disabledTools: DisabledToolsView
 }
 
-/** The server's own name for a tool, whichever form the probe reported it in. */
-function bareToolName(server: string, name: string): string {
+/**
+ * The bare name the GATE will see for a tool the probe listed.
+ *
+ * The CLI the SDK drives names an MCP tool `mcp__<server>__<tool>` with each
+ * part passed through `replace(/[^a-zA-Z0-9_-]/g, '_')` — read out of the
+ * shipped binary, not assumed. So a server's `github.create_issue` reaches
+ * `canUseTool` as `…__github_create_issue`, and storing the dotted spelling
+ * would disable nothing while the box said it had. The probe may report
+ * either the bare or the qualified form; both end here.
+ */
+function gateToolName(server: string, name: string): string {
   const prefix = `mcp__${server}__`
-  return name.startsWith(prefix) ? name.slice(prefix.length) : name
+  const bare = name.startsWith(prefix) ? name.slice(prefix.length) : name
+  return bare.replace(/[^a-zA-Z0-9_-]/g, '_')
+}
+
+/**
+ * The stored name's shape — `toolName` in `@agency/db`'s connector schema —
+ * restated for the browser. The route checks again and is the authority;
+ * this only keeps the screen from offering a box that could never be saved.
+ */
+function storableToolName(name: string): boolean {
+  return name.length <= 120 && /^(?!.*__)[A-Za-z0-9][A-Za-z0-9_-]*$/.test(name)
 }
 
 /** The schema's `.max(64)`: how many names one server's list may hold. */
@@ -341,8 +360,8 @@ function DisabledLine({ off, canWrite }: { off: DisabledToolsView; canWrite: boo
   if (off.source === 'catalog' && off.everyTool) {
     return (
       <div className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
-        Every tool on this server is refused until an owner turns some on: the catalog’s{' '}
-        {off.preset ?? 'entry'} says each one acts on another service.
+        Every tool on this server can send or act on another SaaS (the catalog’s{' '}
+        {off.preset ?? 'entry'} says so), and every one is disabled until you turn some on.
         {canWrite ? ' Test connection lists them.' : null}
       </div>
     )
@@ -350,7 +369,9 @@ function DisabledLine({ off, canWrite }: { off: DisabledToolsView; canWrite: boo
   if (off.source === 'catalog' && off.tools.length > 0) {
     return (
       <div className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
-        Refused until an owner turns them on, because they can send or act on another service:{' '}
+        {off.tools.length === 1
+          ? 'This tool can send or act on another SaaS and is disabled until you turn it on: '
+          : `These ${off.tools.length} tools can send or act on another SaaS and are disabled until you turn them on: `}
         {names(off.tools)}.
       </div>
     )
@@ -372,6 +393,10 @@ function DisabledLine({ off, canWrite }: { off: DisabledToolsView; canWrite: boo
  * default — so a person who saves without touching anything saves what they
  * were shown. A name on the list that the server no longer offers is shown
  * too, still ticked, so saving never drops something nobody saw.
+ *
+ * A tool whose name the schema cannot store is listed without a box, and
+ * says so: offering one would make the whole save fail, and ticking it
+ * would promise a refusal the gate could never be told about.
  */
 function ToolChecks({
   connector,
@@ -384,11 +409,16 @@ function ToolChecks({
   off: DisabledToolsView
   onSaved: (next: DisabledToolsView) => void
 }) {
-  const offered = tools.map((t) => ({ name: bareToolName(connector.name, t.name), description: t.description }))
-  const offeredNames = new Set(offered.map((t) => t.name))
-  const listedOnly = off.tools.filter((t) => !offeredNames.has(t))
+  // Two spellings the CLI folds to one name are one tool to the gate.
+  const byName = new Map<string, { name: string; description: string; storable: boolean }>()
+  for (const t of tools) {
+    const name = gateToolName(connector.name, t.name)
+    if (!byName.has(name)) byName.set(name, { name, description: t.description, storable: storableToolName(name) })
+  }
+  const offered = [...byName.values()]
+  const listedOnly = off.tools.filter((t) => !byName.has(t))
   const [ticked, setTicked] = useState<Set<string>>(
-    () => new Set(off.everyTool ? offered.map((t) => t.name) : off.tools),
+    () => new Set(off.everyTool ? offered.filter((t) => t.storable).map((t) => t.name) : off.tools),
   )
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -427,10 +457,15 @@ function ToolChecks({
     }
   }
 
-  const row = (name: string, description: string, note?: string) => (
+  const row = (name: string, description: string, note?: string, storable = true) => (
     <li key={name} style={{ listStyle: 'none' }}>
       <label className="tool-check">
-        <input type="checkbox" checked={ticked.has(name)} onChange={() => toggle(name)} disabled={busy} />
+        <input
+          type="checkbox"
+          checked={storable && ticked.has(name)}
+          onChange={() => toggle(name)}
+          disabled={busy || !storable}
+        />
         <span>
           <strong style={{ fontWeight: 500 }}>{name}</strong>
           {description ? <span className="muted"> — {description}</span> : null}
@@ -444,14 +479,25 @@ function ToolChecks({
     <>
       <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>Tick a tool to disable it.</div>
       <ul className="tools" style={{ paddingLeft: 0 }}>
-        {offered.map((t) => row(t.name, t.description))}
+        {offered.map((t) =>
+          row(
+            t.name,
+            t.description,
+            t.storable ? undefined : 'its name cannot be stored, so it cannot be turned off here; it asks a person every time',
+            t.storable,
+          ),
+        )}
         {listedOnly.map((name) => row(name, '', 'on the list, not offered by the server now'))}
       </ul>
       {off.source === 'catalog' ? (
         <div className="muted" style={{ fontSize: 12 }}>
           {off.everyTool
-            ? `Every tool is ticked because the catalog’s ${off.preset ?? 'entry'} says each one acts on another service, and until a list is saved every tool here is refused. Saving replaces that with exactly the ticked tools: one the server adds later is not on the list, and asks a person like every connector tool.`
-            : `Pre-ticked from the catalog’s ${off.preset ?? 'entry'}: these can send or act on another service, and are disabled until you turn them on.`}
+            ? `Every tool is ticked because the catalog’s ${off.preset ?? 'entry'} says each one can send or act on another SaaS, and until a list is saved every tool here is refused. Saving replaces that with exactly the ticked tools: one the server adds later is not on the list, and asks a person like every connector tool.`
+            : `Pre-ticked from the catalog’s ${off.preset ?? 'entry'}: ${
+                off.tools.length === 1 ? 'this tool' : `these ${off.tools.length} tools`
+              } can send or act on another SaaS and ${off.tools.length === 1 ? 'is' : 'are'} disabled until you turn ${
+                off.tools.length === 1 ? 'it' : 'them'
+              } on.`}
         </div>
       ) : null}
       <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
