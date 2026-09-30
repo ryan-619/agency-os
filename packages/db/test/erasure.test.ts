@@ -15,8 +15,9 @@ import { and, eq } from 'drizzle-orm'
 import { readFileSync } from 'node:fs'
 import { schema, type AgencyDb, type InboundLog } from '../src/index.js'
 import {
-  addSuppression, appendAudit, bookInbound, complianceOptOutsWithoutSuppression, erasureErase,
-  erasureInboundDomainFor, erasureRecord, ERASURE_PLACEHOLDER,
+  addSuppression, appendAudit, auditSuppressionAdded, auditSuppressionRemoved, bookInbound,
+  complianceOptOutsWithoutSuppression, erasureErase, erasureInboundDomainFor, erasureRecord, ERASURE_NOT_INCLUDED,
+  ERASURE_PLACEHOLDER, pauseReasonClass, removeSuppression, replyQueueDraft,
 } from '../src/queries.js'
 import { migratedDb, type TestDb } from './helpers.js'
 
@@ -213,6 +214,64 @@ describe('a contact’s record and their erasure', () => {
       expect(text).not.toContain(companyNote)
     })
 
+    /**
+     * The suppression list's own history is the one place the append-only
+     * audit log holds an address — and an erasure keeps it, for the reason it
+     * keeps the suppression. The record used to say the audit log held no
+     * address and left these rows out; now it carries them, and says so.
+     */
+    it('carries the audit log’s suppression history for their keys, and says it is kept', async () => {
+      // A person adds her current address, and later an owner removes it.
+      const added = await addSuppression(db, { orgId, kind: 'email', value: 'priya@rentman.io', reason: 'asked', source: 'manual' })
+      if (!added.ok) throw new Error('not added')
+      await appendAudit(db, auditSuppressionAdded({
+        orgId, actor: userId, alreadyPresent: false, kind: 'email', value: added.value, reason: 'asked',
+      }))
+      const removed = await removeSuppression(db, orgId, (await suppressions())[0]!.id)
+      if (!removed) throw new Error('not removed')
+      await appendAudit(db, auditSuppressionRemoved({ orgId, actor: userId, removed }))
+      // The address a message actually went to, and her phone, have history too.
+      await appendAudit(db, auditSuppressionAdded({
+        orgId, actor: userId, alreadyPresent: false, kind: 'email', value: 'priya.old@rentman.io', reason: 'bounced twice',
+      }))
+      // Tom's, and another org's with her address, are not hers.
+      await appendAudit(db, auditSuppressionAdded({
+        orgId, actor: userId, alreadyPresent: false, kind: 'email', value: 'tom@rentman.io', reason: 'asked',
+      }))
+      await appendAudit(db, auditSuppressionAdded({
+        orgId: otherOrgId, actor: 'system', alreadyPresent: false, kind: 'email', value: 'priya@rentman.io', reason: 'asked',
+      }))
+
+      const r = await erasureRecord(db, orgId, priya, NOON)
+      if (!r) throw new Error('no record')
+      expect(r.suppressionAudit.map((a) => [a.action, (a.detail as { value: string }).value])).toEqual([
+        ['suppression.added', 'priya@rentman.io'],
+        ['suppression.removed', 'priya@rentman.io'],
+        ['suppression.added', 'priya.old@rentman.io'],
+      ])
+      expect(r.suppressionAudit.every((a) => a.orgId === orgId)).toBe(true)
+      expect(JSON.stringify(r.suppressionAudit)).not.toContain('tom@rentman.io')
+
+      // The file's own list of what it leaves out no longer says the audit
+      // log holds no address.
+      const notIncluded = r.notIncluded.join(' ')
+      expect(notIncluded).not.toMatch(/never an address/)
+      expect(notIncluded).toMatch(/suppression list’s own history/)
+      expect(notIncluded).toMatch(/suppressionAudit/)
+      expect(r.notIncluded).toEqual(ERASURE_NOT_INCLUDED)
+
+      // And the erasure keeps those rows: the log is append-only.
+      await erase()
+      expect(await audit('suppression.added')).toHaveLength(3)
+      expect(await audit('suppression.removed')).toHaveLength(1)
+    })
+
+    it('reads the suppression list by the addresses a message went to, not only the one on the row', async () => {
+      await addSuppression(db, { orgId, kind: 'email', value: 'priya.old@rentman.io', reason: 'asked', source: 'reply' })
+      const r = await erasureRecord(db, orgId, priya, NOON)
+      expect(r!.suppressions.map((s) => s.value)).toEqual(['priya.old@rentman.io'])
+    })
+
     it('is null for another org, for an unknown id, and for something that is not an id', async () => {
       expect(await erasureRecord(db, otherOrgId, priya)).toBeNull()
       expect(await erasureRecord(db, orgId, '0b8f5a8e-2f1c-4b7e-9a4b-3c2d1e0f9a8b')).toBeNull()
@@ -314,11 +373,16 @@ describe('a contact’s record and their erasure', () => {
       expect(await suppressions()).toHaveLength(5)
     })
 
-    it('audits three counts and nothing else, and keeps the history before it', async () => {
+    it('audits three counts and ids only, and keeps the history before it', async () => {
       await erase()
       const [row] = await audit('contact.erased')
       expect(row).toMatchObject({ actor: userId, subjectType: 'contact', subjectId: priya })
-      expect(row!.detail).toEqual({ touchesScrubbed: 3, callsScrubbed: 1, suppressionsAdded: 5 })
+      const [held] = (await suppressions()).filter((s) => s.value === 'priya.old@rentman.io')
+      // The message that went out → the suppression row now holding its
+      // recipient. The queued draft had no recipient, so it names nothing.
+      expect(row!.detail).toEqual({
+        touchesScrubbed: 3, callsScrubbed: 1, suppressionsAdded: 5, suppressedRecipients: { [priyaOut]: held!.id },
+      })
       expect(JSON.stringify(row!.detail)).not.toContain('@')
       expect(await audit('contact.created')).toHaveLength(1)
     })
@@ -477,6 +541,33 @@ describe('a contact’s record and their erasure', () => {
       const [c] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, priya))
       expect(c!.pausedAt).not.toBeNull()
       expect(c!.pausedReason).toMatch(/^erasure requested 2026-09-15; not completed/)
+    })
+
+    /**
+     * The pause OVERWRITES an earlier one. Before, a person already paused by
+     * a reply kept "replied …" as their reason, and answering that reply in
+     * /inbox resumed somebody who had asked to be erased.
+     */
+    it('pauses them with the failure as the reason, over a reply’s earlier pause — and the inbox will not answer them', async () => {
+      const replied = new Date('2026-09-14T09:00:00.000Z')
+      await db
+        .update(schema.contacts)
+        .set({ pausedAt: replied, pausedReason: `replied ${replied.toISOString()}`, phone: '020 7946 0000' })
+        .where(eq(schema.contacts.id, priya))
+      const r = await erase()
+      expect(r).toMatchObject({ ok: false, reason: 'suppression_failed', paused: true })
+
+      const [c] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, priya))
+      expect(c!.pausedAt).toEqual(NOON)
+      expect(c!.pausedReason).toBe('erasure requested 2026-09-15; not completed (unreadable_phone)')
+      expect(pauseReasonClass(c!.pausedReason)).toBe('erasure')
+
+      const answer = await replyQueueDraft(db, {
+        orgId, inboundTouchId: priyaIn, subject: 'Re: A gap', body: 'Thanks!', campaignId, actor: userId, now: NOON,
+      })
+      expect(answer).toMatchObject({ ok: false, reason: 'opt_out_not_recorded' })
+      const [still] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, priya))
+      expect(still!.pausedAt).toEqual(NOON)
     })
 
     it('rolls back the suppressions already written when a later one throws', async () => {

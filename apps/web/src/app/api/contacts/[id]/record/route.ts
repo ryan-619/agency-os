@@ -11,10 +11,12 @@ import { log } from '@/lib/logger'
  *
  * `erasureRecord` reads the contact row, their consents with the evidence
  * each was recorded with, messages both ways, meetings, calls, notes, the
- * tasks hanging off their messages, and the suppression rows that match
- * them. Full rows, because the request is for what is HELD. The file says
- * what it does not include (chat transcripts, audit detail, the carrier's
- * recordings) in its own `notIncluded`.
+ * tasks hanging off their messages, the suppression rows that match them,
+ * and the audit log's history of those suppression rows — which carry the
+ * value they changed and outlive an erasure. Full rows, because the request
+ * is for what is HELD. The file says what it does not include (chat
+ * transcripts, the rest of the audit detail, the carrier's recordings) in its
+ * own `notIncluded`.
  *
  * Gated on `contacts:read`, like the consent export: it names a person.
  * Audited as `contact.exported` BEFORE the file is produced, like every

@@ -16,7 +16,9 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { and, eq } from 'drizzle-orm'
 import { schema, unsubscribeHeaders, unsubscribeToken, type AgencyDb, type InboundLog } from '../src/index.js'
-import { recordUnsubscribe, unsubscribeOrgName, verifyUnsubscribeToken } from '../src/queries.js'
+import {
+  erasureErase, pauseReasonClass, recordUnsubscribe, removeSuppression, unsubscribeOrgName, verifyUnsubscribeToken,
+} from '../src/queries.js'
 import { migratedDb, type TestDb } from './helpers.js'
 
 const SECRET = 's'.repeat(32) + '-unsubscribe-test'
@@ -295,6 +297,97 @@ describe('recording a one-click unsubscribe', () => {
     expect(r).toMatchObject({ ok: false, reason: 'not_recorded', why: 'no_recipient', contactId: null, orgId })
     expect(await audit('unsubscribe.not_recorded')).toHaveLength(1)
     expect(log.lines[0]!.message).toMatch(/^OPT-OUT NOT RECORDED/)
+  })
+
+  /**
+   * An erasure suppresses every recipient and then scrubs them, so an old
+   * link's touch names nobody. Before, that click answered 500 "We could not
+   * record this", wrote `unsubscribe.not_recorded` and paged the team — over
+   * an address the erasure had already put on the list.
+   */
+  describe('a click on a message whose person was erased', () => {
+    const eraseThem = async () => {
+      const r = await erasureErase(db, { orgId, contactId, actor: userId, now: NOON, log: capturingLog() })
+      if (!r.ok) throw new Error(`not erased: ${r.reason}`)
+    }
+
+    it('is done — no alarm, nothing written — when the erasure kept that address on the list', async () => {
+      const touchId = await sentTouch()
+      await eraseThem()
+      const [t] = await db.select().from(schema.touches).where(eq(schema.touches.id, touchId))
+      expect(t).toMatchObject({ recipient: null, contactId: null })
+      const before = await suppressions()
+
+      const log = capturingLog()
+      const r = await recordUnsubscribe(db, { touchId, now: NOON, log })
+      expect(r).toMatchObject({ ok: true, erased: true, alreadyPresent: true, contactId: null, paused: false, cancelled: 0 })
+      expect(log.lines).toEqual([])
+      expect(await audit('unsubscribe.not_recorded')).toEqual([])
+      expect(await audit('contact.unsubscribed')).toEqual([])
+      expect(await suppressions()).toEqual(before)
+      // A second click is the same answer.
+      expect(await recordUnsubscribe(db, { touchId, now: NOON, log })).toMatchObject({ ok: true, erased: true })
+    })
+
+    it('stays loud when an owner has since removed the row the erasure kept', async () => {
+      const touchId = await sentTouch()
+      await eraseThem()
+      const [kept] = (await suppressions()).filter((s) => s.value === 'priya@rentman.io')
+      await removeSuppression(db, orgId, kept!.id)
+
+      const log = capturingLog()
+      const r = await recordUnsubscribe(db, { touchId, now: NOON, log })
+      expect(r).toMatchObject({ ok: false, reason: 'not_recorded', why: 'no_recipient' })
+      expect(await audit('unsubscribe.not_recorded')).toHaveLength(1)
+      expect(log.lines[0]!.message).toMatch(/^OPT-OUT NOT RECORDED/)
+    })
+
+    it('stays loud for a message the erasure did not name — another org’s erasure record proves nothing here', async () => {
+      const touchId = await sentTouch({ recipient: null, contactId: null })
+      const [other] = await db.insert(schema.orgs).values({ name: 'Other' }).returning({ id: schema.orgs.id })
+      const [row] = await db
+        .insert(schema.suppressions)
+        .values({ orgId: other!.id, kind: 'email', value: 'priya@rentman.io', reason: 'erasure request', source: 'erasure' })
+        .returning({ id: schema.suppressions.id })
+      await db.insert(schema.auditLog).values({
+        orgId: other!.id, actor: 'system', action: 'contact.erased', subjectType: 'contact', subjectId: contactId,
+        detail: { touchesScrubbed: 1, callsScrubbed: 0, suppressionsAdded: 1, suppressedRecipients: { [touchId]: row!.id } },
+      })
+      const r = await recordUnsubscribe(db, { touchId, now: NOON, log: capturingLog() })
+      expect(r).toMatchObject({ ok: false, reason: 'not_recorded', why: 'no_recipient' })
+    })
+  })
+
+  /**
+   * A click that could not be recorded pauses them with THAT reason, over a
+   * reply's earlier one — so answering the reply in /inbox cannot resume a
+   * person whose opt-out nobody wrote down. A recorded click keeps the pause
+   * it found, as a reply does.
+   */
+  it('pauses with the failure as the reason, over an earlier reply’s pause, when nothing could be recorded', async () => {
+    const replied = new Date('2026-09-14T09:00:00.000Z')
+    await db
+      .update(schema.contacts)
+      .set({ pausedAt: replied, pausedReason: `replied ${replied.toISOString()}` })
+      .where(eq(schema.contacts.id, contactId))
+    const touchId = await sentTouch({ recipient: 'not an address' })
+    const r = await recordUnsubscribe(db, { touchId, now: NOON, log: capturingLog() })
+    expect(r).toMatchObject({ ok: false, reason: 'not_recorded' })
+    const c = await contactRow()
+    expect(c.pausedAt).toEqual(NOON)
+    expect(c.pausedReason).toBe(`opt-out not recorded: one-click unsubscribe ${NOON.toISOString()} (unparseable_address)`)
+    expect(pauseReasonClass(c.pausedReason)).toBe('opt_out_not_recorded')
+  })
+
+  it('keeps an earlier pause reason when the click WAS recorded', async () => {
+    const replied = new Date('2026-09-14T09:00:00.000Z')
+    await db
+      .update(schema.contacts)
+      .set({ pausedAt: replied, pausedReason: `replied ${replied.toISOString()}` })
+      .where(eq(schema.contacts.id, contactId))
+    const touchId = await sentTouch()
+    expect(await recordUnsubscribe(db, { touchId, now: NOON })).toMatchObject({ ok: true, paused: false })
+    expect((await contactRow()).pausedReason).toBe(`replied ${replied.toISOString()}`)
   })
 
   it('still suppresses the contact’s current address when the touch has no recipient — and still says not_recorded', async () => {

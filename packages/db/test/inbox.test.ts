@@ -18,8 +18,8 @@ import { drizzle } from 'drizzle-orm/pglite'
 import { and, eq } from 'drizzle-orm'
 import {
   approveDraft, denyDraft, dispatchTouch, handleInboundEmail, inboxKindFilter, inboxTouches,
-  inboxUnhandledCount, isCheckViolation, replyMarkHandled, replyQueueDraft, replyReclassify, schema,
-  type AgencyDb, type MessageProvider, type ReplyHumanKind,
+  inboxUnhandledCount, isCheckViolation, pauseReasonClass, recordInboundReply, replyMarkHandled, replyQueueDraft,
+  replyReclassify, schema, type AgencyDb, type MessageProvider, type ReplyHumanKind,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
 
@@ -296,13 +296,13 @@ describe('the inbox', () => {
     it('moves a reply among the five kinds a person may choose, and audits from and to', async () => {
       const id = await reply()
       expect(await replyReclassify(db, { orgId, touchId: id, kind: 'not_now', actor: userId })).toEqual({
-        ok: true, from: 'interested',
+        ok: true, from: 'interested', paused: false, cancelled: 0,
       })
       const [row] = await db.select().from(schema.touches).where(eq(schema.touches.id, id))
       expect(row!.replyKind).toBe('not_now')
       const audits = await db.select().from(schema.auditLog).where(eq(schema.auditLog.action, 'reply.reclassified'))
       expect(audits).toHaveLength(1)
-      expect(audits[0]!.detail).toEqual({ from: 'interested', to: 'not_now' })
+      expect(audits[0]!.detail).toEqual({ from: 'interested', to: 'not_now', paused: false, cancelledQueued: 0 })
       expect(audits[0]!.actor).toBe(userId)
     })
 
@@ -312,8 +312,94 @@ describe('the inbox', () => {
         .values({ orgId, contactId, companyId, channel: 'email', direction: 'in', status: 'replied', replyKind: null })
         .returning({ id: schema.touches.id })
       expect(await replyReclassify(db, { orgId, touchId: row!.id, kind: 'other', actor: userId })).toEqual({
-        ok: true, from: null,
+        ok: true, from: null, paused: false, cancelled: 0,
       })
+    })
+
+    /**
+     * The kind column is not the only record of an opt-out. A reply from a
+     * suppressed person keeps its kind, and so does an UNCLASSIFIED one — every
+     * reply before 0017 — whose own words read as a stop: its NULL means
+     * "never classified", and relabelling it `interested` would be a second,
+     * contradicting claim about a reply that asked to be left alone.
+     */
+    it('keeps the kind of a reply from somebody on the suppression list, by address or by the From', async () => {
+      const id = await reply()
+      await db.insert(schema.suppressions).values({ orgId, kind: 'email', value: 'priya@rentman.io', reason: 'unsubscribed' })
+      expect(await replyReclassify(db, { orgId, touchId: id, kind: 'not_now', actor: userId })).toEqual({
+        ok: false, reason: 'suppressed',
+      })
+      const [row] = await db.select().from(schema.touches).where(eq(schema.touches.id, id))
+      expect(row!.replyKind).toBe('interested')
+      expect(await auditActions()).not.toContain('reply.reclassified')
+
+      const other = await reply(REPLY_BODY, { from: 'priya.personal@example.org', messageId: '<reply-2@example.org>' })
+      await db.insert(schema.suppressions).values({ orgId, kind: 'domain', value: 'example.org', reason: 'asked by their CISO' })
+      expect(await replyReclassify(db, { orgId, touchId: other, kind: 'other', actor: userId })).toMatchObject({
+        ok: false, reason: 'suppressed',
+      })
+    })
+
+    it('keeps the kind of an unclassified reply whose own words read as an opt-out', async () => {
+      const [row] = await db
+        .insert(schema.touches)
+        .values({
+          orgId, contactId, companyId, channel: 'email', direction: 'in', status: 'replied', replyKind: null,
+          body: 'Please remove me', recipient: 'priya@rentman.io',
+        })
+        .returning({ id: schema.touches.id })
+      expect(await replyReclassify(db, { orgId, touchId: row!.id, kind: 'interested', actor: userId })).toEqual({
+        ok: false, reason: 'reads_as_opt_out',
+      })
+      const [after] = await db.select().from(schema.touches).where(eq(schema.touches.id, row!.id))
+      expect(after!.replyKind).toBeNull()
+    })
+
+    /**
+     * A genuine auto-reply pauses nobody (`recordInboundReply`). A person who
+     * reads it and says it was a human's is correcting that, so the move does
+     * what the reply would have done: the pause, with the reason a reply
+     * writes — so answering it later resumes them — and the cancel.
+     */
+    it('moving a reply off auto_reply pauses the person and cancels what was queued, as a reply would', async () => {
+      const recorded = await recordInboundReply(db, {
+        orgId, contactId, channel: 'email', from: 'priya@rentman.io', subject: 'Out of office',
+        body: 'I am away until Monday.', autoReply: true, now: NOON,
+      })
+      expect(recorded).toMatchObject({ replyKind: 'auto_reply', paused: false })
+      expect((await contactRow()).pausedAt).toBeNull()
+      const [queued] = await db
+        .insert(schema.touches)
+        .values({
+          orgId, campaignId, contactId, companyId, channel: 'email', direction: 'out', status: 'approved',
+          subject: 'A follow-up', body: 'Hello again.', approvedBy: userId, approvedAt: NOON,
+        })
+        .returning({ id: schema.touches.id })
+
+      const later = new Date(NOON.getTime() + 3_600_000)
+      const r = await replyReclassify(db, { orgId, touchId: recorded.touchId, kind: 'interested', actor: userId, now: later })
+      expect(r).toEqual({ ok: true, from: 'auto_reply', paused: true, cancelled: 1 })
+      const c = await contactRow()
+      expect(c.pausedAt).toEqual(later)
+      expect(c.pausedReason).toBe(`replied ${NOON.toISOString()}`)
+      expect(pauseReasonClass(c.pausedReason)).toBe('replied')
+      const [cancelled] = await db.select().from(schema.touches).where(eq(schema.touches.id, queued!.id))
+      expect(cancelled).toMatchObject({ status: 'refused', refusalCode: 'consent_revoked' })
+      const [audit] = await db.select().from(schema.auditLog).where(eq(schema.auditLog.action, 'reply.reclassified'))
+      expect(audit!.detail).toEqual({ from: 'auto_reply', to: 'interested', paused: true, cancelledQueued: 1 })
+
+      // And because the pause is a reply's, answering the reply ends it.
+      const answered = await draft(recorded.touchId, { campaignId })
+      expect(answered).toMatchObject({ ok: true, resumed: true })
+    })
+
+    it('a move between two human kinds pauses nobody', async () => {
+      const id = await reply()
+      await db.update(schema.contacts).set({ pausedAt: null, pausedReason: null }).where(eq(schema.contacts.id, contactId))
+      expect(await replyReclassify(db, { orgId, touchId: id, kind: 'other', actor: userId })).toMatchObject({
+        ok: true, paused: false, cancelled: 0,
+      })
+      expect((await contactRow()).pausedAt).toBeNull()
     })
 
     it('never clears an opt-out', async () => {
@@ -383,8 +469,56 @@ describe('the inbox', () => {
         .from(schema.auditLog)
         .where(and(eq(schema.auditLog.action, 'contact.resumed'), eq(schema.auditLog.subjectId, contactId)))
       expect(resumed!.actor).toBe(userId)
-      expect(resumed!.detail).toMatchObject({ reason: 'answering their reply from the inbox', inboundTouchId: id })
+      // The pause's CLASS, never its text: a reason can carry a teammate's
+      // address and the contact's words, and this log outlives an erasure.
+      expect(resumed!.detail).toEqual({
+        reason: 'answering their reply from the inbox', inboundTouchId: id, pausedFor: 'replied',
+      })
+      expect(JSON.stringify(resumed!.detail)).not.toContain('replied 20')
       expect(await auditActions()).toContain('reply.answer_drafted')
+    })
+
+    /**
+     * Answering ends only the pause the reply caused. A pause somebody else
+     * put on them — a teammate, or a failure path that paused them because
+     * an opt-out could not be recorded — is refused, and stays exactly as it
+     * was, reason included.
+     */
+    describe('ends only the pause the reply caused', () => {
+      for (const reason of [
+        'asked us to hold until Q1 (by sam@agency.test)',
+        'replied on the phone, wants no email (by sam@agency.test)',
+        'erasure requested 2026-09-15; not completed (unreadable_phone)',
+        'unsubscribed 2026-09-15T11:00:00.000Z',
+      ]) {
+        it(`refuses a person paused "${reason.slice(0, 32)}…"`, async () => {
+          const id = await reply()
+          await db.update(schema.contacts).set({ pausedReason: reason }).where(eq(schema.contacts.id, contactId))
+          const before = await contactRow()
+
+          const r = await draft(id)
+          expect(r).toMatchObject({ ok: false, reason: 'paused_for_another_reason' })
+          if (r.ok) return
+          expect(r.message).toMatch(/\/contacts/)
+          expect(await answersTo(id)).toEqual([])
+          const after = await contactRow()
+          expect(after.pausedAt).toEqual(before.pausedAt)
+          expect(after.pausedReason).toBe(reason)
+          expect(await auditActions()).not.toContain('contact.resumed')
+        })
+      }
+
+      it('classes each writer’s reason by its shape', () => {
+        expect(pauseReasonClass(`replied ${NOON.toISOString()}`)).toBe('replied')
+        expect(pauseReasonClass('replied on the phone (by sam@agency.test)')).toBe('manual')
+        expect(pauseReasonClass('unsubscribed 2026-09-15T11:00:00.000Z')).toBe('unsubscribed')
+        expect(pauseReasonClass('erasure requested 2026-09-15; not completed (Error)')).toBe('erasure')
+        expect(pauseReasonClass('opt-out not recorded: one-click unsubscribe 2026-09-15T11:00:00.000Z (Error)')).toBe(
+          'opt_out_not_recorded',
+        )
+        expect(pauseReasonClass('something else')).toBe('other')
+        expect(pauseReasonClass(null)).toBe('other')
+      })
     })
 
     it('takes a chosen campaign for a reply matched by address, and refuses without one', async () => {
@@ -476,6 +610,50 @@ describe('the inbox', () => {
         })
         expect(await draft(id)).toMatchObject({ ok: false, reason: 'opted_out' })
         expect((await contactRow()).pausedAt).not.toBeNull()
+      })
+
+      /**
+       * An opt-out that FAILED to record leaves no suppression row — only
+       * the audit row that says so. Nothing else stands between that person
+       * and an answer, so it is refused however old the row is.
+       */
+      for (const [action, subject] of [
+        ['unsubscribe.not_recorded', 'touch'],
+        ['contact.erasure_failed', 'contact'],
+        ['contact.opt_out_not_recorded', 'contact'],
+      ] as const) {
+        it(`refuses a person with ${action} on the audit log, however old`, async () => {
+          const id = await reply()
+          await db.insert(schema.auditLog).values({
+            orgId,
+            actor: 'system',
+            action,
+            subjectType: subject,
+            subjectId: subject === 'touch' ? outboundId : contactId,
+            detail: subject === 'touch' ? { touchId: outboundId, contactId, why: 'Error' } : { why: 'Error' },
+            createdAt: new Date('2025-01-01T00:00:00.000Z'),
+          })
+          const before = (await contactRow()).pausedAt
+
+          const r = await draft(id)
+          expect(r).toMatchObject({ ok: false, reason: 'opt_out_not_recorded' })
+          expect(await answersTo(id)).toEqual([])
+          expect((await contactRow()).pausedAt).toEqual(before)
+          expect(await auditActions()).not.toContain('contact.resumed')
+        })
+      }
+
+      it('is not refused by another contact’s unrecorded opt-out', async () => {
+        const id = await reply()
+        const [someone] = await db
+          .insert(schema.contacts)
+          .values({ orgId, companyId, firstName: 'Sam', email: 'sam@rentman.io' })
+          .returning({ id: schema.contacts.id })
+        await db.insert(schema.auditLog).values({
+          orgId, actor: 'system', action: 'unsubscribe.not_recorded', subjectType: 'touch', subjectId: outboundId,
+          detail: { touchId: outboundId, contactId: someone!.id, why: 'Error' },
+        })
+        expect(await draft(id)).toMatchObject({ ok: true })
       })
 
       it('refuses a person with a recorded refusal of the channel, and rolls the resume back', async () => {

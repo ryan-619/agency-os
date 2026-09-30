@@ -9,7 +9,10 @@
  * a tool cannot record it, change it, or take it back. The enum is the first
  * refusal; the handler refuses an `opted_out` ROW whatever kind it is asked
  * for; and `replyReclassify`'s own predicate refuses both again, so a caller
- * that skipped the parse still cannot get past the query.
+ * that skipped the parse still cannot get past the query. `replyReclassify`
+ * also keeps the kind of a reply from somebody on the suppression list, and
+ * of an unclassified reply (every one before 0017) whose own words read as a
+ * stop — a NULL kind is "never classified", not "not an opt-out".
  *
  * Both read and write through the inbox's own functions (`inboxTouches`,
  * `replyReclassify`, `replyMarkHandled`), so the model and /inbox cannot
@@ -214,6 +217,15 @@ const OPTED_OUT_ROW =
   'the suppression list enforces it, so its kind cannot be changed — by you or by anyone. Nothing was ' +
   'changed and nothing was sent.'
 
+const SUPPRESSED_SENDER =
+  'This person is on the suppression list, so this reply keeps its kind: relabelling it would make a reply ' +
+  'from somebody who asked to stop read as something else. Nothing was changed and nothing was sent.'
+
+const READS_AS_OPT_OUT =
+  'This reply was never classified, and its own words read as a request to stop, so its kind cannot be ' +
+  'changed from here. A person can put the address on the suppression list. Nothing was changed and ' +
+  'nothing was sent.'
+
 /** A users.id is a uuid; anything else cannot name a row and must not reach a uuid column. */
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -294,16 +306,33 @@ export const classifyReply: AgencyToolSpec<typeof classifyReplyShape> = {
       } else {
         // `actor: 'agent'`, the same actor every tool's own audit row names;
         // `replyReclassify` writes `reply.reclassified` with it.
-        const out = await replyReclassify(ctx.db, { orgId: ctx.orgId, touchId: row.id, kind, actor: 'agent' })
+        const out = await replyReclassify(ctx.db, {
+          orgId: ctx.orgId, touchId: row.id, kind, actor: 'agent', now: ctx.now(),
+        })
         if (!out.ok) {
-          return out.reason === 'not_found'
-            ? fail('not_found', 'That reply is no longer in this inbox. Nothing was changed.')
-            : fail('invalid_state', OPTED_OUT_ROW)
+          switch (out.reason) {
+            case 'not_found':
+              return fail('not_found', 'That reply is no longer in this inbox. Nothing was changed.')
+            case 'suppressed':
+              return fail('invalid_state', SUPPRESSED_SENDER)
+            case 'reads_as_opt_out':
+              return fail('invalid_state', READS_AS_OPT_OUT)
+            default:
+              return fail('invalid_state', OPTED_OUT_ROW)
+          }
         }
         previousKind = out.from
         kindNow = kind
         changed = true
         said.push(`Its kind is now ${kind} (it was ${out.from ?? 'unclassified'}).`)
+        // A reply that was filed as automatic paused nobody; read as a
+        // person's, it does what their reply would have.
+        if (out.paused || out.cancelled > 0) {
+          said.push(
+            `Read as a person’s reply, it ${out.paused ? 'paused them in every campaign' : 'found them already paused'}` +
+              `${out.cancelled > 0 ? ` and cancelled ${out.cancelled} queued message${out.cancelled === 1 ? '' : 's'} to them` : ''}.`,
+          )
+        }
       }
     }
 

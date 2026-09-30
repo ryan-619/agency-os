@@ -4,9 +4,9 @@
  *
  * Two functions. `erasureRecord` reads a person's whole file — the contact
  * row, consents with their evidence, messages both ways, meetings, calls,
- * notes, the tasks hanging off their messages, and what the suppression list
- * says about them — for the "download their record" button. `erasureErase`
- * removes them.
+ * notes, the tasks hanging off their messages, what the suppression list
+ * says about them and the audit log's history of those suppression rows —
+ * for the "download their record" button. `erasureErase` removes them.
  *
  * ## Erasure keeps the suppression
  *
@@ -65,9 +65,18 @@
  *
  * NOT scrubbed, and the page says so: chat transcripts (the agent's
  * conversations are the team's record, and the agent was told only ids);
- * audit detail (ids and counts by design, §2.3); a call recording stored at
+ * audit detail (ids and counts by design, §2.3 — with two exceptions the
+ * record names: a reason a teammate typed, and the suppression list's own
+ * history, whose `suppression.*` rows carry the value they changed and are
+ * kept for the same reason the suppression is); a call recording stored at
  * the carrier, which this product only ever held a link to — the result
  * names the call SIDs so a person can delete it there.
+ *
+ * The `contact.erased` row names, for every message to them whose recipient
+ * went on the list, the suppression row that now holds it
+ * (`suppressedRecipients`, ids only). That is how a click on an old
+ * unsubscribe link — whose touch no longer names anybody — is recognised as
+ * already recorded rather than raised as an opt-out nobody wrote down.
  *
  * ## Failing loudly
  *
@@ -78,7 +87,9 @@
  * `recordUnsubscribe` meets it: an audit row (`contact.erasure_failed`, a
  * reason class and never a value), `OPT-OUT NOT RECORDED` at error, and the
  * contact PAUSED — the safe direction, so nothing goes to a person who asked
- * to be erased while somebody fixes it. The caller adds the notification.
+ * to be erased while somebody fixes it. The pause OVERWRITES any earlier
+ * reason: an older `replied …` left in place let answering that reply resume
+ * a person who had asked to be erased. The caller adds the notification.
  */
 import { and, asc, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm'
 import {
@@ -88,13 +99,14 @@ import {
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
+import { auditSuppressionHistory, type AuditRow } from './audit.js'
 import { addSuppression, type SuppressionRow } from './campaigns.js'
 import type { ConsentRow, ContactRow } from './contacts.js'
 import type { CallRow } from './calls.js'
 import type { MeetingRow } from './meetings.js'
 import type { NoteRow } from './notes.js'
 import type { TaskRow } from './tasks.js'
-import { pauseContact, type InboundLog, type TouchRow } from './outreach.js'
+import type { InboundLog, TouchRow } from './outreach.js'
 
 /** What an erased message's subject, body and From read as afterwards. */
 export const ERASURE_PLACEHOLDER = '[erased at the person’s request]'
@@ -102,7 +114,10 @@ export const ERASURE_PLACEHOLDER = '[erased at the person’s request]'
 /** Said inside the record, so the file is honest about its own edges. */
 export const ERASURE_NOT_INCLUDED: readonly string[] = Object.freeze([
   'Chat transcripts with the agent. They are the team’s conversations, and the agent is given ids rather than a person’s words.',
-  'Audit log detail. It records ids and counts, never an address or a message.',
+  'Audit log detail. It records ids, counts and kinds rather than messages, with two exceptions that are kept: a reason ' +
+    'a teammate typed (pausing a person, lifting a refusal), and the suppression list’s own history — a row saying an ' +
+    'address, number or profile was added to or removed from the list carries that value, and is kept after an erasure ' +
+    'for the same reason the suppression is. Those suppression rows are in this record, under suppressionAudit.',
   'Call recordings stored at the carrier. Only a link to them is kept here, and it is included on each call.',
   'Company-level notes, deals and proposals, which are about the company rather than about this person.',
 ])
@@ -132,8 +147,19 @@ export interface ContactRecord {
   readonly company: { readonly id: string; readonly domain: string; readonly name: string | null } | null
   /** One row per channel with a recorded answer. A channel with no row was never asked. */
   readonly consents: readonly ConsentRow[]
-  /** The suppression rows their address, its domain, their number or their profile match today. */
+  /**
+   * The suppression rows any of their keys match today: the address, number
+   * and profile on their row, every address a message to them went to, the
+   * address an opt-out of theirs came from, the number on each of their calls
+   * — and each address's domain, which the send path honours too.
+   */
   readonly suppressions: readonly SuppressionRow[]
+  /**
+   * The audit log's history of the suppression list for those same keys —
+   * `suppression.added`, `.already_present` and `.removed`, oldest first.
+   * Each carries the value it changed, and each is kept after an erasure.
+   */
+  readonly suppressionAudit: readonly AuditRow[]
   /** Messages both ways, oldest first. */
   readonly touches: readonly TouchRow[]
   readonly meetings: readonly MeetingRow[]
@@ -205,26 +231,22 @@ export async function erasureRecord(
         .orderBy(asc(schema.tasks.createdAt))
     : []
 
-  // The send path's own keys for each thing on the row, so the record shows
-  // what the send path would find — including a domain row, which the
-  // erasure never writes but the send path does honour.
-  const keys = [
-    ...(contact.email ? suppressionKeysFor(contact.email, 'email') ?? [] : []),
-    ...(contact.phone ? suppressionKeysFor(contact.phone, 'sms') ?? [] : []),
-    ...(contact.linkedinUrl ? suppressionKeysFor(contact.linkedinUrl, 'linkedin') ?? [] : []),
-  ]
-  const suppressions = keys.length
-    ? await db
-        .select()
-        .from(schema.suppressions)
-        .where(
-          and(
-            eq(schema.suppressions.orgId, orgId),
-            or(...keys.map((k) => and(eq(schema.suppressions.kind, k.kind), eq(schema.suppressions.value, k.value)))),
-          ),
-        )
-        .orderBy(asc(schema.suppressions.createdAt))
-    : []
+  const keys = recordKeys(contact, touches, calls)
+  const [suppressions, suppressionAudit] = await Promise.all([
+    keys.length
+      ? db
+          .select()
+          .from(schema.suppressions)
+          .where(
+            and(
+              eq(schema.suppressions.orgId, orgId),
+              or(...keys.map((k) => and(eq(schema.suppressions.kind, k.kind), eq(schema.suppressions.value, k.value)))),
+            ),
+          )
+          .orderBy(asc(schema.suppressions.createdAt))
+      : Promise.resolve([] as SuppressionRow[]),
+    auditSuppressionHistory(db, orgId, keys),
+  ])
 
   return {
     format: 'agency-os.contact-record',
@@ -234,6 +256,7 @@ export async function erasureRecord(
     company: companies[0] ?? null,
     consents,
     suppressions,
+    suppressionAudit,
     touches,
     meetings,
     calls,
@@ -241,6 +264,38 @@ export async function erasureRecord(
     tasks,
     notIncluded: ERASURE_NOT_INCLUDED,
   }
+}
+
+/**
+ * Every key the record reads the suppression list, and its audit history, by
+ * — the send path's own keys (`suppressionKeysFor`, so an email brings its
+ * domain, which the send path honours though an erasure never writes one)
+ * for the values an erasure keeps: the address, number and profile on their
+ * row, every address a message to them went to, the address an opt-out of
+ * theirs came from, and the number on each of their calls. Not the From of
+ * an ordinary reply, which may be a colleague's (see the header). A value
+ * that cannot be read contributes nothing: this is a read, and the record
+ * still has to be produced.
+ */
+function recordKeys(
+  contact: Pick<ContactRow, 'email' | 'phone' | 'linkedinUrl'>,
+  touches: readonly Pick<TouchRow, 'direction' | 'channel' | 'recipient' | 'replyKind'>[],
+  calls: readonly Pick<CallRow, 'direction' | 'fromNumber' | 'toNumber'>[],
+): { kind: SuppressionKind; value: string }[] {
+  const keys = new Map<string, { kind: SuppressionKind; value: string }>()
+  const add = (raw: string | null, channel: Channel): void => {
+    if (!raw || !raw.trim()) return
+    for (const k of suppressionKeysFor(raw, channel) ?? []) keys.set(`${k.kind}\u0000${k.value}`, k)
+  }
+  add(contact.email, 'email')
+  add(contact.phone, 'sms')
+  add(contact.linkedinUrl, 'linkedin')
+  for (const t of touches) {
+    if (!CHANNELS.has(t.channel)) continue
+    if (t.direction === 'out' || t.replyKind === 'opted_out') add(t.recipient, t.channel as Channel)
+  }
+  for (const c of calls) add(c.direction === 'in' ? c.fromNumber : c.toNumber, 'sms')
+  return [...keys.values()]
 }
 
 // ---------------------------------------------------------------------------
@@ -312,12 +367,18 @@ function kindForChannel(channel: string): ErasureKeyKind | null {
  */
 function erasureKeys(
   contact: Pick<ContactRow, 'email' | 'phone' | 'linkedinUrl'>,
-  touches: readonly Pick<TouchRow, 'direction' | 'channel' | 'recipient' | 'status' | 'sentAt' | 'replyKind'>[],
+  touches: readonly Pick<TouchRow, 'id' | 'direction' | 'channel' | 'recipient' | 'status' | 'sentAt' | 'replyKind'>[],
   calls: readonly Pick<CallRow, 'direction' | 'fromNumber' | 'toNumber' | 'optedOutAt'>[],
-): { keys: ErasureKey[]; skipped: ErasureSkipped[] } {
+): {
+  keys: ErasureKey[]
+  skipped: ErasureSkipped[]
+  /** Each outbound message whose recipient became a key: its id, and that key. */
+  delivered: Map<string, ErasureKey>
+} {
   const keys = new Map<string, ErasureKey>()
   const skipped: ErasureSkipped[] = []
-  const add = (k: ErasureKey): void => void keys.set(`${k.kind}\u0000${k.value}`, k)
+  const delivered = new Map<string, ErasureKey>()
+  const add = (k: ErasureKey): void => void keys.set(keyId(k), k)
 
   const fields: readonly [ErasureKeyKind, string | null, ErasureFailure][] = [
     ['email', contact.email, 'unreadable_email'],
@@ -338,7 +399,10 @@ function erasureKeys(
     if (!kind) continue
     if (t.direction === 'out') {
       const r = keyFor(kind, t.recipient)
-      if ('key' in r) add(r.key)
+      if ('key' in r) {
+        add(r.key)
+        delivered.set(t.id, r.key)
+      }
       // A row that never went out reached nobody; only one that did is worth saying.
       else if (t.sentAt !== null || WENT_OUT.has(t.status)) skipped.push({ from: 'message', why: r.skip })
     } else if (t.replyKind === 'opted_out') {
@@ -358,8 +422,10 @@ function erasureKeys(
     else skipped.push({ from: c.optedOutAt ? 'opt_out' : 'call', why: r.skip })
   }
 
-  return { keys: [...keys.values()], skipped }
+  return { keys: [...keys.values()], skipped, delivered }
 }
+
+const keyId = (k: { readonly kind: string; readonly value: string }): string => `${k.kind}\u0000${k.value}`
 
 // ---------------------------------------------------------------------------
 // The erasure
@@ -515,7 +581,7 @@ export async function erasureErase(
       ])
 
       // (1) The suppression rows. Everything below is conditional on these.
-      const { keys, skipped } = erasureKeys(contact, touches, calls)
+      const { keys, skipped, delivered } = erasureKeys(contact, touches, calls)
       const reason = `erasure request, ${now.toISOString().slice(0, 10)}`
       let suppressionsNew = 0
       for (const key of keys) {
@@ -524,6 +590,31 @@ export async function erasureErase(
         const r = await addSuppression(tx, { orgId, kind: key.kind, value: key.value, reason, source: 'erasure' })
         if (!r.ok) throw new ErasureAborted(`unreadable_${key.kind}`)
         if (!r.alreadyPresent) suppressionsNew++
+      }
+
+      // Which suppression row now holds each message's recipient — written
+      // above, or already there. Read back by id because the scrub below
+      // takes the recipient off the message, and an unsubscribe click on an
+      // old link must still be able to tell that its address was kept
+      // (`recordUnsubscribe`), and that the row is STILL there.
+      const held = keys.length
+        ? await tx
+            .select({ id: schema.suppressions.id, kind: schema.suppressions.kind, value: schema.suppressions.value })
+            .from(schema.suppressions)
+            .where(
+              and(
+                eq(schema.suppressions.orgId, orgId),
+                or(...keys.map((k) => and(eq(schema.suppressions.kind, k.kind), eq(schema.suppressions.value, k.value)))),
+              ),
+            )
+        : []
+      const heldBy = new Map(held.map((h) => [keyId(h), h.id]))
+      const suppressedRecipients: Record<string, string> = {}
+      for (const [touchId, key] of delivered) {
+        const id = heldBy.get(keyId(key))
+        // Every key was written or found above, inside this transaction, so a
+        // miss is a bug; it would only leave that touch on the loud path.
+        if (id) suppressedRecipients[touchId] = id
       }
 
       // (2) Anything still waiting to go to them is refused, as a reply
@@ -629,14 +720,16 @@ export async function erasureErase(
 
       const touchesScrubbed = new Set([...inbound, ...outbound].map((t) => t.id)).size
       // Not `.catch`-ed: an erasure with no record that it happened should
-      // not happen. §2.3 — three counts, and nothing else.
+      // not happen. §2.3 — three counts, and ids: the message → suppression
+      // row map is what lets a later unsubscribe click on one of their
+      // messages answer "done" instead of raising an alarm (see the header).
       await appendAudit(tx, {
         orgId,
         actor: args.actor,
         action: 'contact.erased',
         subjectType: 'contact',
         subjectId: contactId,
-        detail: { touchesScrubbed, callsScrubbed: scrubbedCalls.length, suppressionsAdded: keys.length },
+        detail: { touchesScrubbed, callsScrubbed: scrubbedCalls.length, suppressionsAdded: keys.length, suppressedRecipients },
       })
 
       return {
@@ -661,13 +754,13 @@ export async function erasureErase(
     const why: ErasureFailure = err instanceof ErasureAborted ? err.why : errorName(err)
 
     // Rolled back: nothing erased, nothing suppressed. The safe direction
-    // first — nothing more goes to a person who asked to be erased.
-    // `pauseContact` answers false for a contact who was already paused,
-    // which is the same state; only a throw leaves them unpaused.
+    // first — nothing more goes to a person who asked to be erased — and
+    // with THIS reason, over any earlier one (see the header).
     let paused = false
     try {
-      await pauseContact(db, orgId, contactId, `erasure requested ${now.toISOString().slice(0, 10)}; not completed (${why})`, now)
-      paused = true
+      paused = await pauseOverriding(
+        db, orgId, contactId, `erasure requested ${now.toISOString().slice(0, 10)}; not completed (${why})`, now,
+      )
     } catch (pauseErr) {
       log.error('erasure could not pause the contact', { contactId, orgId, error: errorName(pauseErr) })
     }
@@ -700,6 +793,26 @@ export async function erasureErase(
     })
     return { ok: false, reason: 'suppression_failed', message: failureMessage(why, paused), why, paused, latestTouchId }
   }
+}
+
+/**
+ * Pause them with THIS reason, whether or not they were already paused.
+ *
+ * `pauseContact` keeps the first reason on purpose — a second reply must not
+ * replace the one that explains the pause — and that is wrong here: an
+ * erasure that could not finish is the reason that matters now. Left behind
+ * an older `replied …`, it let answering that reply in /inbox resume a person
+ * who had asked to be erased (the inbox ends only a reply's own pause). The
+ * UPDATE is written here rather than as a parameter on `pauseContact`,
+ * which outreach.ts owns.
+ */
+async function pauseOverriding(db: AgencyDb, orgId: string, contactId: string, reason: string, now: Date): Promise<boolean> {
+  const rows = await db
+    .update(schema.contacts)
+    .set({ pausedAt: now, pausedReason: reason.slice(0, 500) })
+    .where(and(eq(schema.contacts.orgId, orgId), eq(schema.contacts.id, contactId)))
+    .returning({ id: schema.contacts.id })
+  return rows.length === 1
 }
 
 /** Exposed for the test that keeps it in step with `booking.ts`. */

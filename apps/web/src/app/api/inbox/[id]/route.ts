@@ -14,10 +14,14 @@ import { INBOX_MAX_REQUEST_BYTES, RECLASSIFY_HINT, firstIssue, inboxActionSchema
  *  - `reclassify`: a person disagrees with the deterministic kind. Any of the
  *    five, and never `opted_out` in either direction (§2.1): the zod enum
  *    refuses it here, and `replyReclassify`'s predicate refuses it again in
- *    the UPDATE, so a caller that skipped this route still cannot.
+ *    the UPDATE, so a caller that skipped this route still cannot. A reply
+ *    from somebody on the suppression list, or an unclassified one whose own
+ *    words read as a stop, keeps its kind too — both a 409.
  *
- * Neither sends anything, and neither changes whether the person is paused —
- * that is the contacts route, and a separate button, on purpose.
+ * Neither sends anything. Neither ends a pause — that is the contacts route,
+ * and a separate button, on purpose. One reclassification STARTS one: moving
+ * a reply off "automatic reply" pauses the person and cancels what was queued
+ * for them, as the reply would have if it had been read as theirs.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -67,12 +71,28 @@ export async function PATCH(
 
   const r = await replyReclassify(db, { orgId: user.orgId, touchId: id, kind: parsed.data.kind, actor: user.id })
   if (!r.ok) {
-    return r.reason === 'not_found'
-      ? NextResponse.json({ error: 'That reply is not in this inbox.', reason: r.reason }, { status: 404 })
-      : NextResponse.json(
+    switch (r.reason) {
+      case 'not_found':
+        return NextResponse.json({ error: 'That reply is not in this inbox.', reason: r.reason }, { status: 404 })
+      case 'suppressed':
+        return NextResponse.json({ error: RECLASSIFY_SUPPRESSED, reason: r.reason }, { status: 409 })
+      case 'reads_as_opt_out':
+        return NextResponse.json({ error: RECLASSIFY_READS_AS_OPT_OUT, reason: r.reason }, { status: 409 })
+      default:
+        return NextResponse.json(
           { error: `This reply asked to stop, and ${RECLASSIFY_HINT.replace(/\.$/, '')}.`, reason: r.reason },
           { status: 409 },
         )
+    }
   }
-  return NextResponse.json({ kind: parsed.data.kind, from: r.from })
+  return NextResponse.json({ kind: parsed.data.kind, from: r.from, paused: r.paused, cancelled: r.cancelled })
 }
+
+const RECLASSIFY_SUPPRESSED =
+  'This person is on the suppression list, so this reply keeps its kind: relabelling it would make a reply from ' +
+  'somebody who asked to stop read as something else.'
+
+const RECLASSIFY_READS_AS_OPT_OUT =
+  'This reply was never classified, and its own words read as a request to stop, so its kind is not changed here. ' +
+  'If it is one, put the address on the suppression list.'
+

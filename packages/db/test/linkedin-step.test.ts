@@ -17,7 +17,7 @@ import { drizzle } from 'drizzle-orm/pglite'
 import { and, eq } from 'drizzle-orm'
 import {
   dispatchTouch, linkedinFinishStep, linkedinHumanProvider, linkedinPerformStep, linkedinProfileUrl,
-  linkedinStepsDue, LINKEDIN_STEP_STUCK_ERROR, LINKEDIN_STEP_STUCK_MINUTES, schema,
+  linkedinStepsDue, LINKEDIN_HANDOVER_HOURS, LINKEDIN_STEP_STUCK_ERROR, LINKEDIN_STEP_STUCK_MINUTES, schema,
   type AgencyDb, type MessageProvider,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
@@ -354,6 +354,106 @@ describe('the LinkedIn step', () => {
       expect(text).not.toContain('jane-doe')
       expect(text).not.toContain('Jane')
     })
+  })
+
+  /**
+   * Start hands the words over, but the message leaves when the person gets
+   * to it. Before, a handed step kept its words and "Every rule passed" for
+   * ever — past an opt-out on another channel, a pause, or a night in their
+   * quiet hours. Now every read re-asks the send path, and the words are
+   * withheld (never sent to the screen) when the answer is a refusal nobody
+   * may approve past, the person is paused, or the hand-over is a day old.
+   * The row is never marked failed for it: they may have sent it already.
+   */
+  describe('a hand-over, read again later', () => {
+    const HOUR = 3_600_000
+    const handed = async () => {
+      const t = await approved()
+      expect(await start(t.id)).toMatchObject({ status: 'sent' })
+      return t
+    }
+    const stepAt = async (at: Date) => {
+      const steps = await linkedinStepsDue(db, orgId, at)
+      expect(steps).toHaveLength(1)
+      return steps[0]!
+    }
+
+    it('keeps the words while every rule still passes, and says it checked', async () => {
+      await handed()
+      const step = await stepAt(new Date(NOON.getTime() + HOUR))
+      expect(step).toMatchObject({ state: 'handed', withheld: null, words: { body: BODY } })
+      expect(step.recheck).toMatchObject({ ok: true, decision: { allowed: true } })
+      // `preview` stays the ready-only forecast; the re-check is its own field.
+      expect(step.preview).toBeNull()
+    })
+
+    it('withholds the words once they are on the suppression list, and leaves the row sent', async () => {
+      const t = await handed()
+      await db.insert(schema.suppressions).values({ orgId, kind: 'linkedin', value: 'in/jane-doe', reason: 'asked on LinkedIn' })
+      const step = await stepAt(new Date(NOON.getTime() + HOUR))
+      expect(step).toMatchObject({ state: 'handed', withheld: 'refused', words: null })
+      expect(step.recheck).toMatchObject({ ok: true, decision: { code: 'suppressed', humanCanResolve: false } })
+      expect(JSON.stringify(step)).not.toContain(BODY)
+      // Never failed by a guess: the person may already have sent it.
+      expect((await reread(t.id)).status).toBe('sent')
+      expect(await openTasks(t.id)).toHaveLength(1)
+      // And they can still say what happened.
+      expect(await finish(t.id, 'sent')).toEqual({ ok: true, alreadyDone: false })
+    })
+
+    it('withholds the words once the person is paused — a reply on another channel', async () => {
+      const t = await handed()
+      await db
+        .update(schema.contacts)
+        .set({ pausedAt: NOON, pausedReason: `replied ${NOON.toISOString()}` })
+        .where(eq(schema.contacts.id, contactId))
+      const step = await stepAt(new Date(NOON.getTime() + HOUR))
+      expect(step).toMatchObject({ withheld: 'paused', words: null })
+      expect(await finish(t.id, 'not_sent')).toEqual({ ok: true, alreadyDone: false })
+      expect((await reread(t.id)).status).toBe('failed')
+    })
+
+    it('withholds the words a day after the hand-over, whatever the rules say now', async () => {
+      const t = await handed()
+      const justInside = await stepAt(new Date(NOON.getTime() + (LINKEDIN_HANDOVER_HOURS - 1) * HOUR))
+      expect(justInside).toMatchObject({ withheld: null, words: { body: BODY } })
+      const past = await stepAt(new Date(NOON.getTime() + (LINKEDIN_HANDOVER_HOURS + 1) * HOUR))
+      expect(past).toMatchObject({ state: 'handed', withheld: 'expired', words: null })
+      expect(past.recheck).toMatchObject({ ok: true, decision: { allowed: true } })
+      expect((await reread(t.id)).status).toBe('sent')
+    })
+
+    it('withholds the words when the contact is gone and the rules cannot be asked', async () => {
+      const t = await handed()
+      await db.delete(schema.contacts).where(eq(schema.contacts.id, contactId))
+      const step = await stepAt(new Date(NOON.getTime() + HOUR))
+      expect(step).toMatchObject({ withheld: 'unchecked', words: null, recheck: null })
+      expect((await reread(t.id)).status).toBe('sent')
+    })
+
+    it('keeps the words inside their quiet hours — a refusal a person can wait out — and reports it', async () => {
+      await handed()
+      const step = await stepAt(NIGHT)
+      expect(step).toMatchObject({ withheld: null, words: { body: BODY } })
+      expect(step.recheck).toMatchObject({ ok: true, decision: { code: 'quiet_hours', humanCanResolve: true } })
+    })
+  })
+
+  /**
+   * "An earlier Start was deferred" is decided on the server, at the list's
+   * own `now`: a client that compared `scheduledFor` with its own clock
+   * during render could disagree with the server's render and fail hydration.
+   */
+  it('says whether a deferral is still ahead, at the time the list was read', async () => {
+    const t = await approved()
+    expect(await start(t.id, NIGHT)).toMatchObject({ status: 'deferred' })
+    const [ahead] = await linkedinStepsDue(db, orgId, NIGHT)
+    expect(ahead).toMatchObject({ touchId: t.id, state: 'ready', deferred: true })
+    const [past] = await linkedinStepsDue(db, orgId, new Date(NIGHT.getTime() + 2 * 3_600_000))
+    expect(past).toMatchObject({ touchId: t.id, deferred: false })
+    const fresh = await approved()
+    const steps = await linkedinStepsDue(db, orgId, NOON)
+    expect(steps.find((s) => s.touchId === fresh.id)).toMatchObject({ scheduledFor: null, deferred: false })
   })
 
   describe('finishing a step', () => {

@@ -205,6 +205,50 @@ function stoppedBecause(step: LinkedinStep): string {
 }
 
 function stepItem(step: LinkedinStep): LinkedinStepItem {
+  // A handed step's rules, re-asked when `linkedinStepsDue` read the list —
+  // the person sends when they get to it, not when Start was pressed.
+  const again = step.recheck?.ok ? step.recheck : null
+  const recheck = (): LinkedinStepItem['recheck'] => {
+    if (step.state !== 'handed' || step.withheld !== null || !again) return null
+    const d = again.decision
+    // The cap already counts this message: it was sent when it was handed.
+    if (d.allowed || d.code === 'daily_cap') {
+      return { kind: 'clear', text: 'Checked again just now: nothing about this person has changed that stops it.' }
+    }
+    switch (d.code) {
+      case 'quiet_hours':
+        return {
+          kind: 'hold',
+          text: `Checked again just now: it is inside their quiet hours — send it after ${clock(again.facts.quietEnd)} their time (${again.facts.recipientTimeZone ?? 'their zone'}).`,
+        }
+      case 'campaign_inactive':
+        return {
+          kind: 'hold',
+          text: `Checked again just now: the campaign is ${again.facts.campaignStatus}. Pausing a campaign is how the team stops its messages — check before sending.`,
+        }
+      default:
+        return { kind: 'hold', text: `Checked again just now: ${refusalWords(d.code)} — sort that out before sending.` }
+    }
+  }
+  const withheld = (): string | null => {
+    switch (step.withheld) {
+      case null:
+        return null
+      case 'expired':
+        return 'Handed over more than a day ago; the rules were checked then, not now, so the words are no longer shown.'
+      case 'paused':
+        return 'This person is paused now — a reply, an unsubscribe or a teammate stopped their messages after the hand-over — so the words are no longer shown.'
+      case 'unchecked':
+        return 'The contact or the campaign is no longer in the CRM, so the rules cannot be checked again, and the words are no longer shown.'
+      case 'refused': {
+        const d = again?.decision
+        const why = d && !d.allowed
+          ? d.code === 'suppressed' ? 'they are on the suppression list and asked to be left alone' : refusalWords(d.code)
+          : 'a rule nobody may approve past'
+        return `The send rules now refuse this message — ${why} — so the words are no longer shown.`
+      }
+    }
+  }
   return {
     touchId: step.touchId,
     state: step.state,
@@ -214,10 +258,13 @@ function stepItem(step: LinkedinStep): LinkedinStepItem {
     campaignName: step.campaignName,
     profileUrl: step.profileUrl,
     scheduledFor: step.scheduledFor ? step.scheduledFor.toISOString() : null,
+    deferred: step.deferred,
     check: step.state === 'ready' ? checkOf(step) : null,
     words: step.words ? { subject: step.words.subject, body: step.words.body } : null,
     handedTo: step.handedTo ? (step.handedTo.label ?? 'a former teammate') : null,
     handedAt: step.handedAt ? step.handedAt.toISOString() : null,
+    recheck: recheck(),
+    withheld: withheld(),
     stoppedBecause: step.state === 'stopped' ? stoppedBecause(step) : null,
   }
 }
