@@ -1,4 +1,5 @@
 import { NextResponse, after } from 'next/server'
+import { mailSignalInput } from '@agency/core'
 import { handleInboundEmail, type AgencyDb } from '@agency/db/queries'
 import { getDb } from '@/lib/db'
 import { env } from '@/lib/env'
@@ -32,6 +33,18 @@ import { replyNotification } from './notification'
  * is a few lines in that provider's configuration and this route stays the
  * same for all of them. Unknown fields are ignored; a missing `from` is a
  * 400.
+ *
+ * Two more when the provider has them: `headers` (an object of strings —
+ * the whole map is fine) and `dsn` (the text of a `message/delivery-status`
+ * part). They are what let an out-of-office be recorded without pausing
+ * anybody, and a bounce mark an address (packages/core/src/mail-signals.ts).
+ * For a bounce, the Message-ID of the message it returns goes in
+ * `references` or `inReplyTo`: a report is acted on only when it names a
+ * message this system sent. Both are BOUNDED, never refused
+ * (`mailSignalInput`): only the few headers the readers read are kept, each
+ * cut to 2,000 characters, and the report to 20,000 — a delivery rejected
+ * over its header count might be the reply that says stop. Without them,
+ * nothing about this route changes.
  *
  * ## The team hears about it — after the answer
  *
@@ -76,12 +89,16 @@ export async function POST(request: Request): Promise<NextResponse> {
       ? [o['inReplyTo']]
       : []
 
+  const signals = mailSignalInput({ headers: o['headers'], dsn: o['dsn'] })
+
   const outcome = await handleInboundEmail(getDb() as unknown as AgencyDb, {
     from,
     subject: typeof o['subject'] === 'string' ? o['subject'] : null,
     text: typeof o['text'] === 'string' ? o['text'].slice(0, 20_000) : null,
     messageId: typeof o['messageId'] === 'string' ? o['messageId'] : null,
     references,
+    ...(signals.headers ? { headers: signals.headers } : {}),
+    dsn: signals.dsn,
   })
 
   const event = replyNotification(outcome)
@@ -95,10 +112,18 @@ export async function POST(request: Request): Promise<NextResponse> {
 
   // 200 either way. "This address is not a contact" is the ANSWER to a
   // webhook delivery, not a failure of it — a 4xx would make the provider
-  // retry a message that will never match.
+  // retry a message that will never match. A delivery report is `none` —
+  // it is not a reply — and says what it did: the status and whether an
+  // address was marked, never which one.
   return NextResponse.json(
     outcome.matched === 'none'
-      ? { matched: 'none', why: outcome.why }
+      ? {
+          matched: 'none',
+          why: outcome.why,
+          ...(outcome.bounce
+            ? { bounce: { permanent: outcome.bounce.permanent, code: outcome.bounce.code, marked: outcome.bounce.marked } }
+            : {}),
+        }
       : { matched: outcome.matched, paused: outcome.paused, suppressed: outcome.suppressed },
   )
 }

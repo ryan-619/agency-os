@@ -9,11 +9,12 @@
  */
 import type { SendRefusalCode } from '@agency/core'
 import { describe, expect, it } from 'vitest'
-import { REFUSAL_WORDS, refusalWords } from '../src/lib/refusal-words'
+import { REFUSAL_WORDS, campaignAutoPausedWords, refusalWords } from '../src/lib/refusal-words'
 
 const SEND_CODES = {
   unparseable_recipient: true,
   suppressed: true,
+  bounced: true,
   cold_channel_forbidden: true,
   no_consent: true,
   consent_revoked: true,
@@ -24,8 +25,8 @@ const SEND_CODES = {
   needs_approval: true,
 } satisfies Record<SendRefusalCode, true>
 
-/** The send path's ten, plus the one that arrives with bounce handling. */
-const CODES: readonly string[] = [...Object.keys(SEND_CODES), 'bounced']
+/** Every code the send path produces — `bounced` among them since bounce handling landed. */
+const CODES: readonly string[] = Object.keys(SEND_CODES)
 
 describe('REFUSAL_WORDS', () => {
   it.each(CODES)('has words for %s', (code) => {
@@ -51,9 +52,19 @@ describe('refusalWords', () => {
   it('returns the words for a known code', () => {
     expect(refusalWords('daily_cap')).toBe('daily cap')
     expect(refusalWords('campaign_inactive')).toBe('campaign paused or not active')
+    expect(refusalWords('bounced')).toBe('address bounced')
   })
 
   it('makes an unknown code readable rather than hiding it', () => {
     expect(refusalWords('some_new_code')).toBe('some new code')
+  })
+})
+
+describe('campaignAutoPausedWords', () => {
+  it('says what paused it, with its own numbers, and what to do', () => {
+    expect(campaignAutoPausedWords({ bouncePct: 6, bounced: 12, sentTo: 200 })).toBe(
+      'Paused automatically: 6% of addresses bounced (12 of 200). Fix the list, then activate it again.',
+    )
+    expect(campaignAutoPausedWords({ bouncePct: 5.4, bounced: 7, sentTo: 130 })).toContain('5.4% of addresses bounced (7 of 130)')
   })
 })

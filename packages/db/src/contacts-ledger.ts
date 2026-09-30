@@ -19,6 +19,12 @@
  * suppression matches would leave the opt-out standing against an address
  * nobody holds any more, and the next enrolment would send. An edit may not
  * make a suppression stop matching the person it was recorded for.
+ *
+ * The same edit is the one way a BOUNCE mark is lifted. A permanent bounce is
+ * evidence about the address (0018's `email_bounced_at`), so correcting the
+ * address is what clears it — and nothing else does: not approving a
+ * message, not resuming the contact. The opposite of the suppression rule,
+ * on purpose: an opt-out follows the person, a bounce follows the address.
  */
 import { and, asc, eq, ilike, isNotNull, isNull, ne, or, sql, type SQL } from 'drizzle-orm'
 import { z } from 'zod'
@@ -304,7 +310,13 @@ export const contactPatchInput = z.object({
 export type ContactPatch = z.infer<typeof contactPatchInput>
 
 export type ContactsUpdateOutcome =
-  | { readonly ok: true; readonly contact: ContactRow; readonly changed: string[] }
+  | {
+      readonly ok: true
+      readonly contact: ContactRow
+      readonly changed: string[]
+      /** True when the email changed on a contact whose address had bounced, and the mark was lifted. */
+      readonly bounceCleared: boolean
+    }
   | {
       readonly ok: false
       readonly reason: 'no_such_contact' | 'unreadable' | 'no_address' | 'duplicate' | 'suppressed' | 'changed_meanwhile'
@@ -359,12 +371,19 @@ function blankIsNull(v: string | null): string | null {
  *
  * `changed` names the fields whose stored value moved — the audit row the
  * route writes carries those names and never the values (§2.3).
+ *
+ * A changed email lifts a bounce mark in the same UPDATE — the mark was
+ * about the old address — and writes `contact.bounce_cleared` naming the
+ * code it lifted. The same-address-different-case edit changes nothing and
+ * so lifts nothing.
  */
 export async function contactsUpdate(
   db: AgencyDb,
   orgId: string,
   id: string,
   patch: ContactPatch,
+  /** Who is editing, for the `contact.bounce_cleared` row. The route's own `contact.updated` row names them too. */
+  opts: { readonly actor?: string } = {},
 ): Promise<ContactsUpdateOutcome> {
   const found = await db
     .select()
@@ -425,7 +444,7 @@ export async function contactsUpdate(
   }
 
   const changed = Object.keys(next)
-  if (changed.length === 0) return { ok: true, contact: old, changed: [] }
+  if (changed.length === 0) return { ok: true, contact: old, changed: [], bounceCleared: false }
 
   const after = (f: AddressField): string | null => (next[f] !== undefined ? next[f]! : old[f])
   if (!after('email') && !after('phone') && !after('linkedinUrl')) {
@@ -476,11 +495,24 @@ export async function contactsUpdate(
     if (taken.length > 0) return { ok: false, reason: 'duplicate', message: `${next.email} is already a contact in this CRM.` }
   }
 
+  // A mark is about the address being replaced; the new one has not
+  // bounced. Cleared in the same statement as the change, so there is no
+  // moment where the new address carries the old address's mark — and
+  // cleared whenever the email changes, not only when the read above saw a
+  // mark: a bounce landing between that read and this write was about the
+  // OLD address too. The audit row names what the read saw.
+  const emailChanges = next.email !== undefined
+  const clearsBounce = emailChanges && old.emailBouncedAt !== null
+
   let rows: ContactRow[]
   try {
     rows = await db
       .update(schema.contacts)
-      .set({ ...next, updatedAt: sql`now()` })
+      .set({
+        ...next,
+        ...(emailChanges ? { emailBouncedAt: null, emailBounceCode: null } : {}),
+        updatedAt: sql`now()`,
+      })
       .where(
         and(
           eq(schema.contacts.orgId, orgId),
@@ -509,5 +541,16 @@ export async function contactsUpdate(
       message: 'This contact changed while you were editing — an address, or an opt-out arriving. Reload and try again.',
     }
   }
-  return { ok: true, contact, changed }
+  if (clearsBounce) {
+    await appendAudit(db, {
+      orgId,
+      actor: opts.actor ?? 'system',
+      action: 'contact.bounce_cleared',
+      subjectType: 'contact',
+      subjectId: id,
+      // The code that was lifted, never either address (§2.3).
+      detail: { code: old.emailBounceCode },
+    }).catch(() => {})
+  }
+  return { ok: true, contact, changed, bounceCleared: clearsBounce }
 }

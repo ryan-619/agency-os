@@ -9,10 +9,10 @@
  * underscores taken out, which is honest and ugly rather than wrong.
  *
  * Every `SendRefusalCode` is here, and `refusal-words.test.ts` pins that by
- * naming them. `bounced` is a code the send path does not produce yet — a
- * bounce is evidence about an address that arrives from the mail headers —
- * and it is here so that the day it lands, the screens already have words
- * for it rather than showing `bounced` in a monospace font.
+ * naming them. `bounced` is the address a delivery report said does not
+ * exist — evidence about an address, read from a report that named a message
+ * this system sent, and never a suppression: the fix is a corrected address,
+ * not an owner lifting an opt-out.
  */
 export const REFUSAL_WORDS: Readonly<Record<string, string>> = {
   unparseable_recipient: 'no usable address',
@@ -31,4 +31,22 @@ export const REFUSAL_WORDS: Readonly<Record<string, string>> = {
 /** The words for a code, or the code itself made readable. */
 export function refusalWords(code: string): string {
   return REFUSAL_WORDS[code] ?? code.replace(/_/g, ' ')
+}
+
+/**
+ * Why a campaign is paused when nobody paused it: the numbers the worker
+ * paused it on (the `campaign.auto_paused` audit row), and the one thing to
+ * do. Every message in it is held as `campaign_inactive` until a person sets
+ * it active again — the sentence says so, because a paused campaign that
+ * nobody remembers pausing is otherwise a mystery.
+ */
+export function campaignAutoPausedWords(p: {
+  readonly bouncePct: number
+  readonly bounced: number
+  readonly sentTo: number
+}): string {
+  return (
+    `Paused automatically: ${p.bouncePct}% of addresses bounced (${p.bounced} of ${p.sentTo}). ` +
+    'Fix the list, then activate it again.'
+  )
 }

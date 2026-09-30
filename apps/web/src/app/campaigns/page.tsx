@@ -1,6 +1,6 @@
 import { redirect } from 'next/navigation'
 import { can, parseIcpDefinition } from '@agency/core'
-import { campaignActivity, listCampaigns, type AgencyDb } from '@agency/db/queries'
+import { campaignActivity, campaignAutoPauses, listCampaigns, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { CampaignsPanel, type CampaignView } from '@/components/outreach/campaigns'
@@ -19,6 +19,10 @@ import { icpForOrg } from '@/lib/queries'
  * freshly scanned company — previewed first, and parked on a person unless
  * the campaign auto-sends. Enrolling sends nothing; the worker does, and on
  * a deployment with no worker the card says that nothing will.
+ *
+ * A campaign the worker paused because its addresses bounced carries the
+ * numbers from that `campaign.auto_paused` audit row, so the card can say
+ * why it stopped and what to do.
  */
 export const dynamic = 'force-dynamic'
 
@@ -30,6 +34,7 @@ export default async function CampaignsPage() {
 
   const db = getDb() as unknown as AgencyDb
   const rows = await listCampaigns(db, user.orgId)
+  const autoPauses = await campaignAutoPauses(db, user.orgId)
   const views: CampaignView[] = await Promise.all(
     rows.map(async (c) => ({
       id: c.id,
@@ -41,6 +46,12 @@ export default async function CampaignsPage() {
       autoSend: c.autoSend,
       status: c.status as CampaignView['status'],
       activity: await campaignActivity(db, user.orgId, c.id),
+      autoPaused: (() => {
+        const p = c.status === 'paused' ? autoPauses.get(c.id) : undefined
+        return p
+          ? { bouncePct: p.bouncePct, threshold: p.threshold, sentTo: p.sentTo, bounced: p.bounced, at: p.at.toISOString() }
+          : null
+      })(),
     })),
   )
 

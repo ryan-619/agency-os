@@ -17,6 +17,7 @@ import { z } from 'zod'
 import { normaliseSuppressionValue, type SuppressionKind, type SuppressionSource } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
+import { appendAudit } from './approvals.js'
 
 export type SuppressionRow = typeof schema.suppressions.$inferSelect
 
@@ -175,6 +176,199 @@ export async function campaignActivity(
   }
   refusals.sort((a, b) => b.n - a.n)
   return { sent, awaitingApproval, waitingToSend, refusals }
+}
+
+// ---------------------------------------------------------------------------
+// A campaign that bounces pauses itself
+// ---------------------------------------------------------------------------
+
+/**
+ * One campaign's bounce rate: of the people it wrote to, how many addresses
+ * have since bounced permanently.
+ *
+ * Counted in PEOPLE, not messages — a follow-up to a dead address is the
+ * same dead address — and a person counts as bounced only when their mark
+ * came AFTER this campaign wrote to them, so an address that was already
+ * dead (and so refused, never sent) cannot count against a campaign that
+ * never reached it.
+ */
+export interface CampaignBounceRate {
+  readonly orgId: string
+  readonly campaignId: string
+  readonly sentTo: number
+  readonly bounced: number
+  /** `bounced ÷ sentTo × 100`, to one decimal. For display; the decision uses the counts. */
+  readonly pct: number
+}
+
+/**
+ * Bounce rates for every ACTIVE email campaign, across every org — the
+ * worker's view, like `dueTouches`.
+ *
+ * The window is `since` (the caller passes thirty days ago), moved forward
+ * to the campaign's last `campaign.auto_paused` row when there is one. That
+ * is what lets a person re-activate a campaign after fixing its list: the
+ * people it bounced on before the pause were the reason for the pause, and
+ * counting them again would pause it on the next tick for the problem the
+ * person just fixed. After re-activation it needs `minSentTo` NEW people
+ * before it can be judged again.
+ *
+ * Campaigns with fewer than `minSentTo` people in the window are left out:
+ * two bounces in five sends is not a rate, it is two bounces.
+ */
+export async function campaignBounceRates(
+  db: AgencyDb,
+  args: { readonly since: Date; readonly minSentTo: number },
+): Promise<CampaignBounceRate[]> {
+  const since = args.since.toISOString()
+  const res: unknown = await db.execute(sql`
+    SELECT k.org_id AS "orgId", k.id AS "campaignId", s.sent_to AS "sentTo", s.bounced AS "bounced"
+      FROM campaigns k
+     CROSS JOIN LATERAL (
+       SELECT max(a.created_at) AS at
+         FROM audit_log a
+        WHERE a.subject_type = 'campaign' AND a.subject_id = k.id
+          AND a.org_id = k.org_id AND a.action = 'campaign.auto_paused'
+     ) p
+     CROSS JOIN LATERAL (
+       SELECT count(DISTINCT t.contact_id)::int AS sent_to,
+              count(DISTINCT t.contact_id) FILTER (WHERE c.email_bounced_at >= t.sent_at)::int AS bounced
+         FROM touches t
+         JOIN contacts c ON c.id = t.contact_id AND c.org_id = t.org_id
+        WHERE t.campaign_id = k.id AND t.org_id = k.org_id
+          AND t.direction = 'out' AND t.channel = 'email' AND t.sent_at IS NOT NULL
+          AND t.sent_at >= greatest(${since}::timestamptz, coalesce(p.at, ${since}::timestamptz))
+     ) s
+     WHERE k.status = 'active' AND k.channel = 'email' AND s.sent_to >= ${Math.max(1, Math.trunc(args.minSentTo))}
+     ORDER BY k.org_id, k.id`)
+  // node-postgres and PGlite both answer `{ rows }` (see enrolment.ts).
+  const rows = (Array.isArray(res) ? res : ((res as { rows?: unknown[] } | null)?.rows ?? [])) as {
+    orgId: string
+    campaignId: string
+    sentTo: number
+    bounced: number
+  }[]
+  return rows.map((r) => ({
+    orgId: r.orgId,
+    campaignId: r.campaignId,
+    sentTo: Number(r.sentTo),
+    bounced: Number(r.bounced),
+    pct: Math.round((Number(r.bounced) / Number(r.sentTo)) * 1000) / 10,
+  }))
+}
+
+/** What the audit row records, and what the campaigns page reads back. */
+export interface CampaignAutoPauseDetail {
+  readonly bouncePct: number
+  readonly threshold: number
+  readonly sentTo: number
+  readonly bounced: number
+}
+
+/**
+ * Pause a campaign because its addresses are bouncing — once.
+ *
+ * One UPDATE whose predicate carries `status = 'active'`, so a second tick,
+ * a second worker, or a person who paused it by hand a moment ago all match
+ * nothing, and only the pause that actually happened is audited. The pause
+ * IS the existing refusal: `campaign_inactive` defers every message in it,
+ * and a person sets it active again from the campaigns page. Nothing here
+ * can re-activate anything.
+ *
+ * The update and its audit row are one transaction, because the row is load
+ * bearing: it is what the campaigns page quotes, and it is where
+ * `campaignBounceRates` restarts its window after a person re-activates.
+ */
+export async function campaignAutoPause(
+  db: AgencyDb,
+  args: { readonly orgId: string; readonly campaignId: string; readonly detail: CampaignAutoPauseDetail },
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    const rows = await tx
+      .update(schema.campaigns)
+      .set({ status: 'paused', updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(schema.campaigns.orgId, args.orgId),
+          eq(schema.campaigns.id, args.campaignId),
+          eq(schema.campaigns.status, 'active'),
+        ),
+      )
+      .returning({ id: schema.campaigns.id })
+    if (rows.length === 0) return false
+    await appendAudit(tx, {
+      orgId: args.orgId,
+      actor: 'system',
+      action: 'campaign.auto_paused',
+      subjectType: 'campaign',
+      subjectId: args.campaignId,
+      // Counts and the threshold. Never who bounced.
+      detail: {
+        bouncePct: args.detail.bouncePct,
+        threshold: args.detail.threshold,
+        sentTo: args.detail.sentTo,
+        bounced: args.detail.bounced,
+      },
+    })
+    return true
+  })
+}
+
+/**
+ * The campaigns in one org that are paused BECAUSE they bounced, with the
+ * numbers the pause was made on — for the sentence on the campaigns page.
+ *
+ * The latest `campaign.auto_paused` row per campaign that no person has
+ * re-activated since. A save that set the campaign active is the end of the
+ * automatic pause; a save that only renamed it while paused is not. The
+ * caller shows it only while the campaign's status is still `paused`.
+ */
+export async function campaignAutoPauses(
+  db: AgencyDb,
+  orgId: string,
+): Promise<Map<string, CampaignAutoPauseDetail & { readonly at: Date }>> {
+  const rows = await db
+    .selectDistinctOn([schema.auditLog.subjectId], {
+      campaignId: schema.auditLog.subjectId,
+      detail: schema.auditLog.detail,
+      at: schema.auditLog.createdAt,
+    })
+    .from(schema.auditLog)
+    .where(
+      and(
+        eq(schema.auditLog.orgId, orgId),
+        eq(schema.auditLog.subjectType, 'campaign'),
+        eq(schema.auditLog.action, 'campaign.auto_paused'),
+        // The route's save writes one of these three actions with the
+        // campaign's resulting status in `detail`.
+        sql`NOT EXISTS (
+          SELECT 1 FROM audit_log later
+           WHERE later.org_id = ${schema.auditLog.orgId}
+             AND later.subject_type = 'campaign'
+             AND later.subject_id = ${schema.auditLog.subjectId}
+             AND later.action IN ('campaign.updated', 'campaign.auto_send_on', 'campaign.auto_send_off')
+             AND later.detail->>'status' = 'active'
+             AND later.created_at > ${schema.auditLog.createdAt}
+        )`,
+      ),
+    )
+    .orderBy(schema.auditLog.subjectId, desc(schema.auditLog.createdAt))
+
+  const out = new Map<string, CampaignAutoPauseDetail & { readonly at: Date }>()
+  for (const r of rows) {
+    if (!r.campaignId) continue
+    const d = (r.detail ?? {}) as Record<string, unknown>
+    const n = (k: string): number | null => (typeof d[k] === 'number' && Number.isFinite(d[k]) ? (d[k] as number) : null)
+    const bouncePct = n('bouncePct')
+    const threshold = n('threshold')
+    const sentTo = n('sentTo')
+    const bounced = n('bounced')
+    // A row missing its numbers is not quoted: a sentence with a blank in it
+    // is worse than the plain "paused" the card already shows.
+    if (bouncePct === null || threshold === null || sentTo === null || bounced === null) continue
+    out.set(r.campaignId, { bouncePct, threshold, sentTo, bounced, at: r.at })
+  }
+  return out
 }
 
 // ---------------------------------------------------------------------------

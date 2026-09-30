@@ -29,6 +29,7 @@ import {
 const SEND_CODES = {
   unparseable_recipient: true,
   suppressed: false,
+  bounced: true,
   cold_channel_forbidden: false,
   no_consent: false,
   consent_revoked: false,

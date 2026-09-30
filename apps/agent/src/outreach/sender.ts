@@ -31,9 +31,23 @@
  * `sending` forever. `recoverStuckSends` at boot marks those `failed` with a
  * reason — the SAFE direction, because the alternative is guessing whether the
  * provider was reached and sending it again.
+ *
+ * ## A campaign that bounces pauses itself
+ *
+ * After each pass, every active email campaign that has written to at least
+ * twenty people in the last thirty days is checked: if more than
+ * `OUTREACH_BOUNCE_PAUSE_PCT` of their addresses have bounced since, the
+ * campaign is set `paused` — once, audited, and said in one log line. There
+ * is no new stop mechanism: `campaign_inactive` already defers everything in
+ * a paused campaign, and a person sets it active again after fixing the
+ * list. A mailbox that keeps writing to dead addresses stops being one that
+ * reaches anybody, and that is the whole agency's outreach, not one list's.
  */
 import { and, eq, inArray } from 'drizzle-orm'
-import { dispatchTouch, dueTouches, schema, type AgencyDb, type MessageProvider, type TouchRow } from '@agency/db'
+import {
+  campaignAutoPause, campaignBounceRates, dispatchTouch, dueTouches, schema,
+  type AgencyDb, type MessageProvider, type TouchRow,
+} from '@agency/db'
 import type { Logger } from '../logger.js'
 
 export interface SenderDeps {
@@ -51,6 +65,13 @@ export interface SenderDeps {
    * adds nothing.
    */
   readonly headersFor?: (touch: TouchRow) => Readonly<Record<string, string>> | null
+  /**
+   * `OUTREACH_BOUNCE_PAUSE_PCT`: a campaign whose addresses bounce past this
+   * percentage — strictly more than it, once it has written to at least
+   * `BOUNCE_PAUSE_MIN_SENT_TO` people — is paused after the tick. Absent
+   * turns the check off; `100` can never be exceeded, so it is off too.
+   */
+  readonly bouncePausePct?: number
 }
 
 export interface TickSummary {
@@ -59,6 +80,64 @@ export interface TickSummary {
   readonly refused: number
   readonly deferred: number
   readonly failed: number
+  /** Campaigns this tick paused because their addresses were bouncing. */
+  readonly autoPaused: number
+}
+
+/** Below this many people written to, a bounce rate is noise: two in five is not a rate. */
+export const BOUNCE_PAUSE_MIN_SENT_TO = 20
+/** The window a campaign's rate is read over. */
+const BOUNCE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
+
+/**
+ * Pause every active campaign bouncing past the threshold. Returns how many
+ * it paused.
+ *
+ * Never throws — a failed check must not take the send tick with it — and
+ * never un-pauses anything: only a person does that. The decision is made
+ * in whole counts (`bounced × 100 > threshold × sentTo`), so a rounding in
+ * the displayed percentage can never be what paused a campaign.
+ */
+export async function pauseBouncingCampaigns(
+  deps: Pick<SenderDeps, 'db' | 'log' | 'bouncePausePct'>,
+  now: Date,
+): Promise<number> {
+  const threshold = deps.bouncePausePct
+  if (threshold === undefined || !Number.isFinite(threshold)) return 0
+
+  let rates
+  try {
+    rates = await campaignBounceRates(deps.db, {
+      since: new Date(now.getTime() - BOUNCE_WINDOW_MS),
+      minSentTo: BOUNCE_PAUSE_MIN_SENT_TO,
+    })
+  } catch (err) {
+    deps.log.warn('bounce check could not read the rates', { error: err instanceof Error ? err.name : 'UnknownError' })
+    return 0
+  }
+
+  let paused = 0
+  for (const r of rates) {
+    if (r.bounced * 100 <= threshold * r.sentTo) continue
+    const detail = { bouncePct: r.pct, threshold, sentTo: r.sentTo, bounced: r.bounced }
+    try {
+      if (await campaignAutoPause(deps.db, { orgId: r.orgId, campaignId: r.campaignId, detail })) {
+        paused += 1
+        // Counts and ids. Never who bounced.
+        deps.log.warn('campaign paused automatically: too many of its addresses bounced', {
+          orgId: r.orgId,
+          campaignId: r.campaignId,
+          ...detail,
+        })
+      }
+    } catch (err) {
+      deps.log.warn('could not pause a bouncing campaign', {
+        campaignId: r.campaignId,
+        error: err instanceof Error ? err.name : 'UnknownError',
+      })
+    }
+  }
+  return paused
 }
 
 /**
@@ -71,7 +150,7 @@ export interface TickSummary {
  */
 export async function runSenderTick(deps: SenderDeps): Promise<TickSummary> {
   const now = deps.now?.() ?? new Date()
-  const summary = { picked: 0, sent: 0, refused: 0, deferred: 0, failed: 0 }
+  const summary = { picked: 0, sent: 0, refused: 0, deferred: 0, failed: 0, autoPaused: 0 }
 
   let due
   try {
@@ -145,7 +224,11 @@ export async function runSenderTick(deps: SenderDeps): Promise<TickSummary> {
     }
   }
 
-  if (summary.picked > 0) deps.log.info('sender tick', summary)
+  // After the pass, not before: a campaign paused here defers from the next
+  // tick on, and nothing this tick already decided is second-guessed.
+  summary.autoPaused = await pauseBouncingCampaigns(deps, deps.now?.() ?? new Date())
+
+  if (summary.picked > 0 || summary.autoPaused > 0) deps.log.info('sender tick', summary)
   return summary
 }
 

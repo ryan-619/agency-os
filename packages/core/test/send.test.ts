@@ -400,6 +400,44 @@ describe('§2.1 rule 4 — the daily cap', () => {
   })
 })
 
+/**
+ * A permanent bounce is evidence about an ADDRESS (0018's
+ * `contacts.email_bounced_at`, read from a delivery report that named a
+ * message this system sent). It is not a suppression — a typo is not a
+ * request to be left alone — so it is its own fact and its own code, and a
+ * person resolves it by correcting the address. Never by approving.
+ */
+describe('a bounced address', () => {
+  it('is refused as bounced, and a person can resolve it', () => {
+    const d = decideSend(facts({ recipientBounced: true }))
+    expect(d.allowed).toBe(false)
+    if (d.allowed) return
+    expect(d.code).toBe('bounced')
+    expect(d.humanCanResolve).toBe(true)
+    // It says what the fix is, and that approving is not it.
+    expect(d.reason).toMatch(/correct the address/i)
+    expect(d.reason).toMatch(/approving does not/i)
+  })
+
+  /** Absent is false. Every caller written before the fact existed is unchanged. */
+  it('changes nothing when the fact is absent or false', () => {
+    expect(decideSend(facts())).toEqual({ allowed: true, code: 'send_now' })
+    expect(decideSend(facts({ recipientBounced: false }))).toEqual({ allowed: true, code: 'send_now' })
+  })
+
+  it('is not lifted by a person approving the message', () => {
+    const d = decideSend(facts({ recipientBounced: true, autoSend: false, approvedByHuman: true }))
+    expect(d.allowed).toBe(false)
+    if (!d.allowed) expect(d.code).toBe('bounced')
+  })
+
+  it('is not lifted by auto-send either', () => {
+    const d = decideSend(facts({ recipientBounced: true, autoSend: true }))
+    expect(d.allowed).toBe(false)
+    if (!d.allowed) expect(d.code).toBe('bounced')
+  })
+})
+
 describe('the campaign’s own status', () => {
   /**
    * Found by review: the campaign form offered draft / active / paused / done
@@ -458,6 +496,7 @@ describe('§2.4 — the approval gate is the default', () => {
 
   it.each([
     ['suppression', { suppressed: true }, 'suppressed'],
+    ['a bounced address', { recipientBounced: true }, 'bounced'],
     ['a declined channel', { consent: { granted: false, source: 'reply' } }, 'consent_revoked'],
     ['quiet hours', { now: new Date('2026-09-15T22:30:00.000Z') }, 'quiet_hours'],
     ['the daily cap', { sentToday: 25 }, 'daily_cap'],
@@ -476,6 +515,7 @@ describe('§2.4 — the approval gate is the default', () => {
    */
   it.each([
     ['suppression', { suppressed: true }, 'suppressed'],
+    ['a bounced address', { recipientBounced: true }, 'bounced'],
     ['a declined channel', { consent: { granted: false, source: 'reply' } }, 'consent_revoked'],
     ['quiet hours', { now: new Date('2026-09-15T22:30:00.000Z') }, 'quiet_hours'],
     ['the daily cap', { sentToday: 25 }, 'daily_cap'],
@@ -506,6 +546,63 @@ describe('the ORDER the rules fire in', () => {
     )
     expect(d.allowed).toBe(false)
     if (!d.allowed) expect(d.code).toBe('suppressed')
+  })
+
+  /**
+   * The bounce sits between the two: after suppression, because an opt-out
+   * is the reason nobody may approve past and it must be what is logged;
+   * before consent, because an address that does not exist makes every later
+   * rule moot and "declined" would send the reader to the wrong fix.
+   */
+  it('reports suppression before a bounce', () => {
+    const d = decideSend(facts({ suppressed: true, recipientBounced: true }))
+    expect(d.allowed).toBe(false)
+    if (!d.allowed) expect(d.code).toBe('suppressed')
+  })
+
+  it('reports a bounce before consent, quiet hours, the cap, the campaign and approval', () => {
+    const d = decideSend(
+      facts({
+        recipientBounced: true,
+        consent: { granted: false, source: 'reply' },
+        now: new Date('2026-09-15T23:00:00.000Z'),
+        sentToday: 99,
+        campaignStatus: 'paused',
+        autoSend: false,
+      }),
+    )
+    expect(d.allowed).toBe(false)
+    if (!d.allowed) expect(d.code).toBe('bounced')
+  })
+
+  it('reports an unparseable recipient before a bounce it could not have matched', () => {
+    const d = decideSend(facts({ recipient: 'nope', recipientBounced: true }))
+    expect(d.allowed).toBe(false)
+    if (!d.allowed) expect(d.code).toBe('unparseable_recipient')
+  })
+
+  /** And the whole order, in one table: each row violates its rule and every rule after it. */
+  it('fires in exactly this order', () => {
+    const midnightInLondon = new Date('2026-09-15T23:00:00.000Z')
+    const steps: [Partial<SendFacts>, string][] = [
+      [{ channel: 'sms', recipient: '+14155550100' }, 'cold_channel_forbidden'],
+      [{ recipient: 'nope' }, 'unparseable_recipient'],
+      [{ suppressed: true }, 'suppressed'],
+      [{ recipientBounced: true }, 'bounced'],
+      [{ consent: { granted: false, source: 'reply' } }, 'consent_revoked'],
+      [{ recipientTimeZone: null }, 'unknown_timezone'],
+      [{ now: midnightInLondon }, 'quiet_hours'],
+      [{ sentToday: 99 }, 'daily_cap'],
+      [{ campaignStatus: 'paused' }, 'campaign_inactive'],
+      [{ autoSend: false }, 'needs_approval'],
+    ]
+    // Every rule from row i onwards is violated at once; row i must win.
+    for (let i = 0; i < steps.length; i += 1) {
+      const over = Object.assign({}, ...steps.slice(i).map(([o]) => o), steps[i]![0]) as Partial<SendFacts>
+      const d = decideSend(facts(over))
+      expect(d.allowed, steps[i]![1]).toBe(false)
+      if (!d.allowed) expect(d.code, steps[i]![1]).toBe(steps[i]![1])
+    }
   })
 
   it('reports consent before quiet hours, the cap, and approval', () => {
@@ -550,6 +647,7 @@ describe('what a refusal says', () => {
   it('always says what happened and what was not done', () => {
     const cases: SendFacts[] = [
       facts({ suppressed: true }),
+      facts({ recipientBounced: true }),
       facts({ consent: { granted: false, source: 'reply' } }),
       facts({ recipientTimeZone: null }),
       facts({ now: new Date('2026-09-15T23:00:00.000Z') }),

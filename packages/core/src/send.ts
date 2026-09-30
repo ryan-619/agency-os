@@ -65,6 +65,7 @@ export const OPT_IN_ONLY_CHANNELS: ReadonlySet<Channel> = new Set<Channel>([
 export type SendRefusalCode =
   | 'unparseable_recipient'
   | 'suppressed'
+  | 'bounced'
   | 'cold_channel_forbidden'
   | 'no_consent'
   | 'consent_revoked'
@@ -113,6 +114,18 @@ export interface SendFacts {
    * matches — an email is suppressed by its address AND by its domain.
    */
   readonly suppressed: boolean
+  /**
+   * The receiving server said this ADDRESS does not exist — a permanent
+   * bounce, read from a delivery-status report that named a message this
+   * system sent, and stored on the contact with the report's own status code
+   * as the evidence (`contacts.email_bounced_at`, 0018).
+   *
+   * Evidence about an address, not a person asking to be left alone: that is
+   * why it is a fact of its own rather than a suppression, and why a person
+   * CAN resolve it — by correcting the address, which clears the mark. Never
+   * by approving: the step sits above the approval gate. Absent means false.
+   */
+  readonly recipientBounced?: boolean
   /**
    * The consent row for THIS channel, or null when there is none.
    *
@@ -200,6 +213,22 @@ export function decideSend(facts: SendFacts): SendDecision {
       'suppressed',
       'This recipient is on the suppression list. Nothing was sent, and no one can approve ' +
         'sending to them — a suppression is somebody asking to be left alone.',
+    )
+  }
+  // A permanent bounce, after suppression and before consent. After, because
+  // a person who opted out AND whose address bounced must be logged as the
+  // opt-out — that is the reason nobody may approve past. Before consent,
+  // because a recorded refusal is a statement about a person and this is a
+  // statement about whether the address works at all: an address that does
+  // not exist makes every later rule moot, and "declined" would send the
+  // reader to the wrong fix.
+  if (facts.recipientBounced === true) {
+    return refuse(
+      'bounced',
+      'The last message to this address bounced permanently — the receiving server said it ' +
+        'does not accept mail for it. Nothing was sent. Correct the address on the contact; ' +
+        'changing it clears the mark. Approving does not.',
+      true,
     )
   }
 
