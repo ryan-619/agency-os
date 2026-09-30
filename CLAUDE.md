@@ -956,14 +956,108 @@ writes carry the form's exact wording as `evidence`, imported from the same
 module the form renders (`lib/booking-copy.ts`) — a consent whose recorded
 wording is not what the person saw is a claim. A free-mail address does not
 name a company, so the row is `<address>.inbound` named after the person, for
-a human to fix. Rate limiting belongs at the reverse proxy, like `/api/health`.
+a human to fix. Rate limiting belongs at the edge — on Vercel, the WAF rule
+DEPLOYING.md's public-surface section asks for — like `/api/health`.
+
+**Deals have owners.** `setDealOwner` writes `deals.owner_user_id`, the board's
+card sets it, and the change is a `deal.updated` audit row naming who. (An
+earlier version of this file listed ownership as not built; it was built
+before 0018.)
+
+**Rotting means "untouched", not "in stage".** It is measured from
+`updated_at`, which every change writes — a move, a next action, an owner, a
+due date — so the honest label is "untouched for N days", and
+`deals.stage_entered_at` was rejected: it would have been a second clock that
+disagreed with the first. **`next_action_at` has a writer**: `PATCH
+/api/deals/[id]/next-action` (`deals:write`), one UPDATE whose self-join reads
+the value it replaces, plus the audit row `deal.next_action_set { companyId,
+from, to }`, in one transaction. A date on a closed deal is a 409; clearing is
+always allowed. A due date set from the board is the END of the chosen day in
+the setter's zone, and "due today, or overdue" is `next_action_at <= now +
+24h`, which is today in any zone for a board-set date — the server does not
+know the viewer's.
+
+**`advanceDeal` audits its own moves.** Every automatic creation and advance
+writes `deal.created`/`deal.advanced` `{ companyId, from, to }`, actor
+`system` unless the caller names one, with the caller's `db` — so inside a
+transaction it commits or rolls back with the move. Before, a send, a reply,
+a booking or a generated proposal recorded the move only inside its own
+action, none of which says the stage the deal LEFT, so analytics could not
+count it. `POST /api/deals` still writes its own `{ companyId, stage }` row
+beside advanceDeal's; `analyticsTransitions` leaves those out in SQL (they
+have no `to`), so one move is neither counted twice nor reported unreadable.
+Still NOT recorded as deal rows: a stage set by the agent's `update_deal`
+(audited as `agent.update_deal` with no `from`), a proposal accepted as won,
+and every automatic move made before this change.
+
+**Analytics are lower bounds and say so.** `/pipeline/analytics` computes win
+rate and velocity (median days from creation to won) from `deals`, so those
+are exact; conversion and time in stage come from the recorded moves, and time
+in stage counts only stays whose arrival AND departure were both recorded.
+Every figure is shown beside its denominator, and below five it reads
+"insufficient data (< 5)".
+
+**A meeting has an outcome, once it has started.** `meetings.outcome` is
+`held`, `no_show` or `rescheduled`, and `starts_at <= now` sits in the one
+UPDATE beside `cancelled_at IS NULL`. A no-show does not move the deal. A
+recorded outcome can be corrected, and each correction writes its own
+`meeting.outcome_recorded`. `rescheduleMeeting` marks the old meeting
+`rescheduled` and records the new one through `createMeeting` in ONE
+transaction — a "rescheduled" that names no new meeting would be a claim with
+no evidence — and the replacement keeps the original's source, contact,
+title, length, notes and review flag; the two are linked only through audit
+rows (`rescheduledTo`, `rescheduledFrom`), read by `meetingRescheduleLinks`.
+`cancelMeeting` refuses a meeting whose outcome is recorded, because held and
+cancelled are opposite facts.
+
+**An `.ics` file is a download for the team member's own calendar**, not an
+invitation: `METHOD:PUBLISH`, no ATTENDEE, no ORGANIZER, and it says "Nobody
+is invited by it." It carries nothing from notes or `external_ref` and names
+no contact; a booking-page title is rebuilt from the company, because the
+system writes it from the visitor's name, and an `.inbound` company appears as
+"an inbound lead".
+
+**A proposal can be printed and downloaded; it still cannot be sent from
+here.** `/proposals/[id]/print` renders the STORED document through
+`<ProposalDocument audience="team">` with no Shell, and prints the stale
+banner, taken from `scans.ran_at`. `GET /api/proposals/[id]/markdown`
+(`deals:read`) returns the buyer's content — no score, tier or per-item weight
+— plus the stale banner, because Markdown is the form most likely to be pasted
+into a mail and removing the banner should take a deliberate edit; it refuses
+a DRAFT whose evidence is stale (409). Both write `proposal.exported`.
+`ProposalDocument` carries an `audience`: the buyer copy omits score, tier,
+weights and the word "stale"; both keep the "not the case here (…)" and "not
+assessed" sentences verbatim.
+
+**A share link is the proposal's own document behind an unguessable,
+revocable token; accepting it is the same `setProposalStatus` a person
+clicks.** A link is minted only from `sent` — never an implicit draft → sent,
+because marking a proposal sent is the human act §2.4 means — and only while
+the evidence is fresh. `expires_at` is capped at `scan.ran_at +
+stale_after_days`, and the read and the accept re-derive `isStale(ran_at)`,
+because the threshold can be lowered after a link is minted; the buyer is
+then told "being re-verified", never "stale". A view is a count and two
+timestamps. The public page returns 404 for an unknown, revoked or expired
+token alike (a page cannot answer 410; the accept route does).
+
+**Notes and tasks are internal state with no outbound side.** Kickoff and
+renewal templates are created by a click, never by a stage change — the board
+should not fill with work nobody asked for — and are refused without a won
+deal or while a set of the same kind is still open, in one transaction under
+`pg_advisory_xact_lock`, so a double click makes one set on real Postgres.
+`packages/core/test/documents-never-read-notes.test.ts` keeps notes out of the
+proposal and the brief; its predicate is the notes MODULE and TABLE, not the
+word "notes" (a meeting has its own notes column), and it runs over
+fabricated leaks so it is shown to be able to fail. Lengths count code points,
+as Postgres `length()` does. "Due today" in `tasksCounts` is the next 24 hours,
+because the org has no zone. A `linkedin_send` task cannot be ticked from
+`/tasks` (409): ticking it would claim a message went that no rule checked.
 
 **Not built:** calendar invitations (a meeting recorded here moves the deal;
 the invite goes from a person's calendar or the calendar connector, and
-`book_meeting`'s summary says so), a proposal PDF or e-mail send (the document
-is the JSON; sending anything is Phase 4's single path), and deal ownership
-(`deals.owner_user_id` exists and nothing sets it yet — a two-person agency
-did not need it to close).
+`book_meeting`'s summary says so — an `.ics` download is not an invitation),
+and a proposal PDF or e-mail send (the document is the JSON; sending anything
+is Phase 4's single path — a share link is not a send).
 
 ### Voice (Phase 6, §8.5)
 
