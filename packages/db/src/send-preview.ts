@@ -29,6 +29,15 @@ export interface SendPreviewInput {
   readonly campaignId: string
   /** Injectable for tests; the caller passes `new Date()`. */
   readonly now?: Date
+  /**
+   * When the words being asked about were written, for the stale-evidence
+   * step (§2.2). Omitted: a message written NOW — the question a screen asks
+   * about a person, before any draft exists. A Date: a STORED draft's
+   * `created_at`, so the preview asks what the sender will ask about those
+   * words (`evidenceAsOfFor(touch)` gives it). Null: an answer to a reply,
+   * which quotes no scan.
+   */
+  readonly writtenAt?: Date | null
 }
 
 /** The sender's facts, plus how each one was arrived at, for a screen to show. */
@@ -40,11 +49,25 @@ export interface SendPreviewFacts {
   /** Every key the suppression lookup used. Null means the recipient could
    *  not be normalised, so no row could ever have matched (a refusal). */
   readonly suppressionKeys: readonly { kind: SuppressionKind; value: string }[] | null
+  /**
+   * The consent fact the DECISION read. For a paused contact with no
+   * recorded refusal this is the pause standing in for one (see
+   * `sendFactsFor`); `consentRecorded` is the row as stored.
+   */
   readonly consent: { granted: boolean; source: string } | null
+  /** The consent row for this channel as recorded — null when nobody asked. */
+  readonly consentRecorded: { granted: boolean; source: string } | null
   readonly recipientTimeZone: string | null
   /** Whose zone quiet hours were evaluated in. Null is the `unknown_timezone` refusal. */
   readonly zoneFrom: 'contact' | 'company' | null
   readonly paused: boolean
+  /** Why they are paused, as recorded (`replied <iso>` for a reply). Null when not paused. */
+  readonly pausedReason: string | null
+  /**
+   * Whether the scan the words could quote is past its re-verification
+   * deadline now (§2.2) — judged at `writtenAt`, from the scan's `ran_at`.
+   */
+  readonly evidenceStale: boolean
   readonly quietStart: string
   readonly quietEnd: string
   readonly sentToday: number
@@ -73,8 +96,9 @@ export type SendPreview =
 
 /**
  * The dry run. Builds the SAME facts `dispatchTouch` builds (through
- * `sendFactsFor`), for a hypothetical human-approved touch, and calls
- * `decideSend`. Writes nothing.
+ * `sendFactsFor`), for a hypothetical human-approved touch whose words were
+ * written at `writtenAt` (now, unless the caller names a stored draft's
+ * moment), and calls `decideSend`. Writes nothing.
  */
 export async function previewSend(db: AgencyDb, input: SendPreviewInput): Promise<SendPreview> {
   const now = input.now ?? new Date()
@@ -103,11 +127,12 @@ export async function previewSend(db: AgencyDb, input: SendPreviewInput): Promis
     campaignId: input.campaignId,
     contactId: input.contactId,
     approvedByHuman: true,
+    evidenceAsOf: input.writtenAt === undefined ? now : input.writtenAt,
     now,
   })
   if ('missing' in gathered) return { ok: false, reason: 'missing', message: gathered.missing }
 
-  const { facts, recipient, zoneFrom, paused } = gathered
+  const { facts, recipient, zoneFrom, paused, pausedReason, consentRecorded } = gathered
   const decision = decideSend(facts)
   return {
     ok: true,
@@ -119,9 +144,12 @@ export async function previewSend(db: AgencyDb, input: SendPreviewInput): Promis
       suppressed: facts.suppressed,
       suppressionKeys: suppressionKeysFor(recipient, facts.channel),
       consent: facts.consent,
+      consentRecorded,
       recipientTimeZone: facts.recipientTimeZone,
       zoneFrom,
       paused,
+      pausedReason,
+      evidenceStale: facts.evidenceStale,
       quietStart: facts.quietStart,
       quietEnd: facts.quietEnd,
       sentToday: facts.sentToday,

@@ -7,11 +7,14 @@
  * database, and this file cannot reorder them, skip one, or add a special
  * case — it does not perform the checks, it only supplies their inputs.
  *
- * §8.4's order, end to end:
+ * §8.4's order, end to end, with the two steps it does not name (a bounce,
+ * and evidence past its re-verification deadline — see `decideSend`):
  *
- *   suppression → bounce → consent → quiet hours → daily cap → approval gate
- *      ↑ gathered here, decided in core ↑         ↑ this file, from here on ↑
- *   → provider send → write `touches` → write `audit_log`
+ *   suppression → consent → bounce → stale evidence → quiet hours →
+ *   daily cap → campaign status → approval gate
+ *      ↑ gathered here, decided in core ↑
+ *   → last look → provider send → write `touches` → write `audit_log`
+ *      ↑ this file, from here on ↑
  *
  * ## The shape of a message's life
  *
@@ -30,11 +33,12 @@
  */
 import { and, asc, count, desc, eq, gte, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm'
 import {
-  decideSend, normaliseEmail, parseDsn, readMailSignals, suppressionKeysFor,
-  type Channel, type MailSignal, type SendDecision, type SendFacts, classifyReply, type ReplyKind,
+  DEFAULT_STALE_AFTER_DAYS, decideSend, isStale, mentionsRemovalOrDeparture, normaliseEmail, ownWords, parseDsn,
+  parseIcpDefinition, readMailSignals, suppressionKeysFor,
+  type Channel, type MailSignal, type SendDecision, type SendFacts, type SuppressionKind, classifyReply, type ReplyKind,
 } from '@agency/core'
 import * as schema from './schema.js'
-import type { AgencyDb } from './repository.js'
+import { activeIcpProfile, type AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
 import { addSuppression } from './campaigns.js'
 import { advanceDeal } from './deals.js'
@@ -288,15 +292,36 @@ export async function dispatchTouch(
   // Past every check. One last look before the wire: a reply can land
   // between `gatherFacts` reading the contact and this line, and the cancel
   // that reply performs skips rows that are already `sending`. Cheap, and
-  // it closes the window to the width of the provider call itself. A bounce
-  // recorded in the same window is the same race, and gets the same look.
+  // it closes the window to the width of the provider call itself. A bounce,
+  // a suppression and an erasure recorded in the same window are the same
+  // race, and get the same look.
   if (touch.contactId) {
     const [fresh] = await db
       .select({ pausedAt: schema.contacts.pausedAt, emailBouncedAt: schema.contacts.emailBouncedAt })
       .from(schema.contacts)
       .where(eq(schema.contacts.id, touch.contactId))
       .limit(1)
-    if (fresh?.pausedAt) {
+    if (!fresh) {
+      // The contact is GONE — an erasure committed between the facts and
+      // here (erasure leaves a `sending` row alone; this worker owns it).
+      // Undefined is not "not paused": it is a person who asked to be
+      // forgotten, whose suppression rows went in first. Refused as a
+      // revoked consent — the answer to them is no, and nobody may approve
+      // past it — and the recipient is NOT written back: the erasure blanked
+      // it on purpose. Found by review.
+      await settle(db, touch.id, { status: 'refused', refusalCode: 'consent_revoked' })
+      return {
+        touchId: touch.id,
+        decision: {
+          allowed: false,
+          code: 'consent_revoked',
+          reason: 'This contact was erased or deleted a moment ago. Nothing was sent.',
+          humanCanResolve: false,
+        },
+        sent: false,
+      }
+    }
+    if (fresh.pausedAt) {
       await settle(db, touch.id, { status: 'refused', refusalCode: 'consent_revoked', recipient: facts.recipient })
       return {
         touchId: touch.id,
@@ -304,11 +329,26 @@ export async function dispatchTouch(
         sent: false,
       }
     }
-    if (fresh?.emailBouncedAt && facts.facts.channel === 'email') {
+    if (fresh.emailBouncedAt && facts.facts.channel === 'email') {
       await settle(db, touch.id, { status: 'refused', refusalCode: 'bounced', recipient: facts.recipient })
       return {
         touchId: touch.id,
         decision: { allowed: false, code: 'bounced', reason: 'This address bounced a moment ago. Nothing was sent. Correct the address.', humanCanResolve: true },
+        sent: false,
+      }
+    }
+    // An unsubscribe click or a "stop" landing in the same window writes a
+    // suppression row and nothing this look would otherwise see.
+    if (await anySuppressionMatches(db, touch.orgId, suppressionKeysFor(facts.recipient, facts.facts.channel) ?? [])) {
+      await settle(db, touch.id, { status: 'refused', refusalCode: 'suppressed', recipient: facts.recipient })
+      return {
+        touchId: touch.id,
+        decision: {
+          allowed: false,
+          code: 'suppressed',
+          reason: 'This recipient was added to the suppression list a moment ago. Nothing was sent.',
+          humanCanResolve: false,
+        },
         sent: false,
       }
     }
@@ -373,10 +413,28 @@ export async function dispatchTouch(
     throw err
   }
 
-  await db
+  // The message went. Recorded only while the row is still IN FLIGHT — the
+  // claim this dispatch holds (`sending`, which every production caller
+  // takes first) or, for a direct caller that did not claim, the status it
+  // was handed — so a row somebody else settled meanwhile is not
+  // overwritten. And the recipient is not written back to a row whose
+  // contact is gone: an erasure during the provider call blanked it on
+  // purpose. Found by review.
+  const recorded = await db
     .update(schema.touches)
-    .set({ status: 'sent', sentAt: now, providerId, recipient: facts.recipient })
-    .where(eq(schema.touches.id, touch.id))
+    .set({ status: 'sent', sentAt: now, providerId, recipient: recipientUnlessErased(facts.recipient) })
+    .where(and(eq(schema.touches.id, touch.id), inArray(schema.touches.status, ['sending', touch.status])))
+    .returning({ id: schema.touches.id })
+  if (recorded.length === 0) {
+    // The provider took it; the row had already been settled by someone
+    // else (a stuck-send recovery, a person marking a hand-over not sent).
+    // The audit row below still says it went, which is the truth.
+    stderrLog.error('a sent message found its row already settled; the row was left as it was', {
+      touchId: touch.id,
+      orgId: touch.orgId,
+      provider: provider.name,
+    })
+  }
 
   // A company that has been written to is `contacted`, unless it is already
   // further along. Forward only, so a follow-up never knocks a deal back.
@@ -416,10 +474,44 @@ async function settle(
     .set({
       status: state.status,
       refusalCode: state.refusalCode,
-      ...(state.recipient !== undefined ? { recipient: state.recipient } : {}),
+      ...(state.recipient !== undefined ? { recipient: recipientUnlessErased(state.recipient) } : {}),
       ...(state.error !== undefined ? { error: state.error } : {}),
     })
     .where(eq(schema.touches.id, touchId))
+}
+
+/**
+ * The recipient to record on a row — unless its contact is gone.
+ *
+ * Every row `dispatchTouch` handles names a contact (it refuses one that
+ * does not), so a NULL `contact_id` at the moment of writing means the
+ * contact was deleted in between, and an erasure blanks `recipient` on every
+ * outbound row as part of forgetting the person. Writing the address back
+ * would undo that. Evaluated in the UPDATE itself, so there is no window
+ * between a read and the write.
+ */
+function recipientUnlessErased(recipient: string) {
+  return sql<string | null>`CASE WHEN ${schema.touches.contactId} IS NULL THEN ${schema.touches.recipient} ELSE ${recipient} END`
+}
+
+/** Whether any suppression row in this org matches one of these keys. */
+async function anySuppressionMatches(
+  db: AgencyDb,
+  orgId: string,
+  keys: readonly { readonly kind: SuppressionKind; readonly value: string }[],
+): Promise<boolean> {
+  if (keys.length === 0) return false
+  const hits = await db
+    .select({ id: schema.suppressions.id })
+    .from(schema.suppressions)
+    .where(
+      and(
+        eq(schema.suppressions.orgId, orgId),
+        or(...keys.map((k) => and(eq(schema.suppressions.kind, k.kind), eq(schema.suppressions.value, k.value)))),
+      ),
+    )
+    .limit(1)
+  return hits.length > 0
 }
 
 async function subjectExists(
@@ -465,12 +557,23 @@ async function gatherFacts(
     campaignId: touch.campaignId,
     contactId: touch.contactId,
     approvedByHuman: touch.status === 'approved' && touch.approvedBy !== null,
+    evidenceAsOf: evidenceAsOfFor(touch),
     now,
   })
 }
 
 /**
- * Everything `decideSend` needs, in three queries.
+ * The moment a stored message's WORDS were written, for the stale-evidence
+ * step: its `created_at` — or null for an answer to a reply, which quotes no
+ * scan. Exported so a screen previewing a stored draft asks the question
+ * the sender will ask about it (`previewSend`'s `writtenAt`).
+ */
+export function evidenceAsOfFor(touch: { readonly createdAt: Date; readonly answersTouchId: string | null }): Date | null {
+  return touch.answersTouchId ? null : touch.createdAt
+}
+
+/**
+ * Everything `decideSend` needs, gathered in one place.
  *
  * Deliberately gathered in ONE place. A caller assembling these itself is a
  * caller that can forget the domain half of the suppression lookup, or read
@@ -481,9 +584,10 @@ async function gatherFacts(
  * the sender reads and writes nothing. Every screen that says "could we
  * message this person?" reads it from here, through that; a screen with its
  * own idea of the facts is a screen that can disagree with the sender at the
- * moment somebody trusted it. Beside the facts it reports HOW two of them
- * were arrived at — whose zone, and whether the contact is paused — for the
- * screen to show; the decision does not read those.
+ * moment somebody trusted it. Beside the facts it reports HOW some of them
+ * were arrived at — whose zone, whether the contact is paused and why, and
+ * the consent row as recorded — for the screen to show; the decision does
+ * not read those.
  */
 export async function sendFactsFor(
   db: AgencyDb,
@@ -492,10 +596,32 @@ export async function sendFactsFor(
     readonly campaignId: string
     readonly contactId: string
     readonly approvedByHuman: boolean
+    /**
+     * When the WORDS were written — a stored message's `created_at`
+     * (`evidenceAsOfFor`), or the moment a hypothetical one would be. Null
+     * for a message that quotes no scan: an answer to a reply.
+     *
+     * Required, so a caller cannot forget the question. The evidence behind
+     * the words is the latest SUCCESSFUL scan of the contact's company at or
+     * before this moment — the scan a draft written then could have quoted —
+     * and it is judged stale by `isStale` on that scan's `ran_at` at `now`,
+     * never by `findings.stale`. A later re-scan does not freshen words that
+     * were written before it; a new draft does.
+     */
+    readonly evidenceAsOf: Date | null
     readonly now: Date
   },
 ): Promise<
-  | { facts: SendFacts; recipient: string; zoneFrom: 'contact' | 'company' | null; paused: boolean }
+  | {
+      facts: SendFacts
+      recipient: string
+      zoneFrom: 'contact' | 'company' | null
+      paused: boolean
+      /** Why they are paused, as recorded — null when they are not. */
+      pausedReason: string | null
+      /** The consent row for this channel AS STORED, whatever the pause stands in for. */
+      consentRecorded: { granted: boolean; source: string } | null
+    }
   | { missing: string }
 > {
   const { orgId, campaignId, contactId, now } = args
@@ -523,69 +649,14 @@ export async function sendFactsFor(
   // The contact's zone, or their company's. Never the sender's, and never
   // derived from a country (§2.1; see 0010).
   const zoneFrom = row.contact.timeZone ? 'contact' : row.companyTimeZone ? 'company' : null
-  const base = {
-    channel,
-    recipient,
-    /**
-     * A permanent bounce is about the EMAIL address, so it refuses email and
-     * nothing else: the person may still be reachable on LinkedIn. The mark
-     * is cleared by correcting the address (`contactsUpdate`), which is the
-     * only thing that could make the next message land.
-     */
-    recipientBounced: channel === 'email' && row.contact.emailBouncedAt !== null,
-    recipientTimeZone: row.contact.timeZone ?? row.companyTimeZone ?? null,
-    quietStart: row.campaign.quietStart,
-    quietEnd: row.campaign.quietEnd,
-    dailyCap: row.campaign.dailyCap,
-    autoSend: row.campaign.autoSend,
-    campaignStatus: row.campaign.status as SendFacts['campaignStatus'],
-    approvedByHuman: args.approvedByHuman,
-    now,
-  }
-
-  /**
-   * A paused contact replied, and a follow-up after a reply reads as nobody
-   * having read what they wrote (§8.4). Modelled as a revoked consent rather
-   * than a new refusal code: to this contact, on this channel, right now, the
-   * answer is no — which is exactly what a revoked consent means, and it
-   * routes through the same "nobody may approve past this" rule.
-   */
-  if (row.contact.pausedAt) {
-    return {
-      recipient,
-      zoneFrom,
-      paused: true,
-      facts: {
-        ...base,
-        suppressed: false,
-        consent: { granted: false, source: row.contact.pausedReason ?? 'paused' },
-        sentToday: 0,
-      },
-    }
-  }
 
   // The suppression lookup, over EVERY key this recipient matches — an email
   // is suppressed by its address and by its domain. `suppressionKeysFor`
-  // builds them so no caller has to remember the second one.
-  const keys = suppressionKeysFor(recipient, channel)
-  let suppressed = false
-  if (keys !== null && keys.length > 0) {
-    const hits = await db
-      .select({ id: schema.suppressions.id })
-      .from(schema.suppressions)
-      .where(
-        and(
-          eq(schema.suppressions.orgId, orgId),
-          or(
-            ...keys.map((k) =>
-              and(eq(schema.suppressions.kind, k.kind), eq(schema.suppressions.value, k.value)),
-            ),
-          ),
-        ),
-      )
-      .limit(1)
-    suppressed = hits.length > 0
-  }
+  // builds them so no caller has to remember the second one. Run for a
+  // paused contact too: it used to be skipped there, so a paused AND
+  // suppressed person read as "not suppressed" on every preview and was
+  // logged as a revoked consent rather than as the opt-out. Found by review.
+  const suppressed = await anySuppressionMatches(db, orgId, suppressionKeysFor(recipient, channel) ?? [])
 
   const consentRows = await db
     .select({ granted: schema.consents.granted, source: schema.consents.source })
@@ -598,6 +669,7 @@ export async function sendFactsFor(
       ),
     )
     .limit(1)
+  const consentRecorded = consentRows[0] ?? null
 
   // The cap is per campaign per DAY, counted from rows that actually went.
   // Counted in the database rather than tracked in a column: a counter is a
@@ -617,17 +689,107 @@ export async function sendFactsFor(
       ),
     )
 
+  const evidenceStale =
+    args.evidenceAsOf === null ? false : await evidenceIsStale(db, orgId, row.contact.companyId, args.evidenceAsOf, now)
+
+  /**
+   * A paused contact replied, and a follow-up after a reply reads as nobody
+   * having read what they wrote (§8.4). Modelled as a revoked consent rather
+   * than a new refusal code: to this contact, on this channel, right now, the
+   * answer is no — which is exactly what a revoked consent means, and it
+   * routes through the same "nobody may approve past this" rule. A refusal
+   * they RECORDED is the stronger statement and stands in its own words.
+   * Every other fact is gathered as for anyone, so `decideSend` orders the
+   * refusals — a suppression still wins.
+   */
+  const paused = row.contact.pausedAt !== null
+  const pausedReason = paused ? row.contact.pausedReason ?? 'paused' : null
+  const consent = paused
+    ? consentRecorded && !consentRecorded.granted
+      ? consentRecorded
+      : { granted: false, source: pausedReason ?? 'paused' }
+    : consentRecorded
+
   return {
     recipient,
     zoneFrom,
-    paused: false,
+    paused,
+    pausedReason,
+    consentRecorded,
     facts: {
-      ...base,
+      channel,
+      recipient,
       suppressed,
-      consent: consentRows[0] ?? null,
+      /**
+       * A permanent bounce is about the EMAIL address, so it refuses email and
+       * nothing else: the person may still be reachable on LinkedIn. The mark
+       * is cleared by correcting the address (`contactsUpdate`), which is the
+       * only thing that could make the next message land.
+       */
+      recipientBounced: channel === 'email' && row.contact.emailBouncedAt !== null,
+      consent,
+      evidenceStale,
+      recipientTimeZone: row.contact.timeZone ?? row.companyTimeZone ?? null,
+      quietStart: row.campaign.quietStart,
+      quietEnd: row.campaign.quietEnd,
       sentToday: sentTodayRows[0]?.n ?? 0,
+      dailyCap: row.campaign.dailyCap,
+      autoSend: row.campaign.autoSend,
+      campaignStatus: row.campaign.status as SendFacts['campaignStatus'],
+      approvedByHuman: args.approvedByHuman,
+      now,
     },
   }
+}
+
+/**
+ * Whether the evidence words written at `writtenAt` could have quoted is
+ * past its re-verification deadline at `now` (§2.2).
+ *
+ * The evidence is the latest `ok` scan of the company at or before the
+ * moment of writing; with none, no scan could have been quoted, and there
+ * is nothing to be stale. The threshold is the active ICP's
+ * `freshness.stale_after_days`, read the way every other reader of it does
+ * — `activeIcpProfile`, then `DEFAULT_STALE_AFTER_DAYS` when there is no
+ * profile, it will not parse, or the value is not a positive number
+ * (`isStale` throws on one, and a bad ICP value must not stop the sender).
+ */
+async function evidenceIsStale(
+  db: AgencyDb,
+  orgId: string,
+  companyId: string,
+  writtenAt: Date,
+  now: Date,
+): Promise<boolean> {
+  const [scan] = await db
+    .select({ ranAt: schema.scans.ranAt })
+    .from(schema.scans)
+    .where(
+      and(
+        eq(schema.scans.orgId, orgId),
+        eq(schema.scans.companyId, companyId),
+        eq(schema.scans.ok, true),
+        lte(schema.scans.ranAt, writtenAt),
+      ),
+    )
+    .orderBy(desc(schema.scans.ranAt))
+    .limit(1)
+  if (!scan) return false
+  return isStale(scan.ranAt, await staleAfterDays(db, orgId), now)
+}
+
+async function staleAfterDays(db: AgencyDb, orgId: string): Promise<number> {
+  const icp = await activeIcpProfile(db, orgId)
+  if (!icp) return DEFAULT_STALE_AFTER_DAYS
+  let configured: unknown
+  try {
+    configured = parseIcpDefinition(icp.definition).freshness?.stale_after_days
+  } catch {
+    return DEFAULT_STALE_AFTER_DAYS
+  }
+  return typeof configured === 'number' && Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_STALE_AFTER_DAYS
 }
 
 /** Where a message on this channel is addressed. */
@@ -937,7 +1099,9 @@ export async function resumeContact(db: AgencyDb, orgId: string, contactId: stri
  * strongest thing this system can do, so the bar is a clear statement. A
  * reply that is not clearly an opt-out still pauses the contact, so nothing
  * further goes to them either way; the difference is whether they can ever be
- * contacted again without a person removing a suppression.
+ * contacted again without a person removing a suppression. (The one reply
+ * that does not pause is a genuine auto-reply, and "genuine" is decided by
+ * the BROAD reader, `mentionsRemovalOrDeparture` — see `recordInboundReply`.)
  */
 const OPT_OUT =
   /^\s*(?:please\s+)?(?:stop|unsubscribe(?:\s+me)?|remove\s+me|opt(?:\s+me)?[\s-]?out|do\s+not\s+(?:contact|email)\s+me(?:\s+again)?|no\s+more\s+emails?|take\s+me\s+off\s+(?:your|the)\s+list|leave\s+me\s+alone)\b[\s.!,]*$/i
@@ -946,8 +1110,8 @@ export function looksLikeOptOut(body: string | null | undefined): boolean {
   if (!body) return false
   // The person's own words: everything above a quoted reply. A quoted
   // "unsubscribe" link in the message they are replying to must not be read
-  // as theirs.
-  const own = body.split(/\r?\n(?:>|On .+ wrote:|-{2,}\s*Original Message)/)[0] ?? body
+  // as theirs. The same cut the broad reader makes.
+  const own = ownWords(body)
   const first = own.split(/\r?\n/).find((l) => l.trim().length > 0) ?? ''
   return OPT_OUT.test(first) || (own.trim().length <= 60 && OPT_OUT.test(own.trim()))
 }
@@ -1047,12 +1211,19 @@ export async function recordInboundReply(
    *
    * The ORDER is §2.1's, not the mail's. The opt-out reader runs FIRST on
    * every inbound; an auto-reply flag from the headers is consulted only
-   * for a body that did not ask to be left alone. An out-of-office that
-   * says "I have left — remove me from your list" is an opt-out that
-   * happens to be automatic, and filing it as `auto_reply` would store no
-   * suppression for a person who asked for one. Only a genuine automatic
+   * for a body that did not ask to be left alone. Only a GENUINE automatic
    * answer skips the pause, the cancel and the deal move: nobody read
    * anything, so nothing about the conversation changed.
+   *
+   * "Genuine" is decided by a second, BROAD reader. The narrow opt-out
+   * reader is built to be sure before it writes a suppression, so it misses
+   * "I have left — remove me from your list", "remove me from your list"
+   * and an out-of-office ending "please remove me from your mailing list";
+   * with only it, each of those skipped the pause while asking to be taken
+   * off. Found by review. `mentionsRemovalOrDeparture` catches them and
+   * makes the mail an ordinary reply — paused, queue cancelled, deal
+   * advanced, as every inbound was before headers were read. It never
+   * writes a suppression: that is still the narrow reader's alone.
    *
    * The deterministic kind is always stored. A model may improve on it
    * afterwards (§5.5) and can only ever move it AMONG the non-opt-out
@@ -1060,7 +1231,7 @@ export async function recordInboundReply(
    * model is consulted (§2.1).
    */
   const optedOut = looksLikeOptOut(args.body)
-  const automatic = !optedOut && args.autoReply === true
+  const automatic = !optedOut && args.autoReply === true && !mentionsRemovalOrDeparture(args.body)
   const replyKind: ReplyKind = automatic ? 'auto_reply' : classifyReply(args.body, optedOut)
   await db
     .update(schema.touches)
@@ -1181,6 +1352,15 @@ export type InboundOutcome =
       readonly duplicate: boolean
       readonly companyId: string | null
       readonly companyDomain: string | null
+      /**
+       * The reply asked to be left alone and the suppression row could NOT
+       * be written (`recordInboundReply`'s flag). Already audited and logged;
+       * a caller with a way to reach a person — the web routes' Slack
+       * notice — raises the alarm instead of announcing an ordinary reply,
+       * because "asked to stop … paused" reads as handled, and it was not.
+       * False on a duplicate: the first delivery raised it.
+       */
+      readonly optOutNotRecorded: boolean
     }
   | {
       readonly matched: 'none'
@@ -1462,7 +1642,9 @@ const DSN_ACTIONS = new Set(['failed', 'delayed', 'delivered', 'relayed', 'expan
  *    an out-of-office is not somebody answering. This is a behaviour change:
  *    before, every inbound paused. The opt-out reader still runs first
  *    inside `recordInboundReply`; an automatic mail that says "unsubscribe"
- *    is an opt-out and is suppressed.
+ *    is an opt-out and is suppressed, and one whose words mention removal
+ *    or departure at all (`mentionsRemovalOrDeparture`) is handled as an
+ *    ordinary reply and pauses.
  *
  * Without headers or a DSN nothing here changes, and the rest is as it was.
  *
@@ -1554,6 +1736,7 @@ export async function handleInboundEmail(
         duplicate: true,
         companyId: dup[0].companyId,
         companyDomain: dup[0].companyDomain,
+        optOutNotRecorded: false,
       }
     }
   }
@@ -1598,6 +1781,7 @@ export async function handleInboundEmail(
         duplicate: false,
         companyId: r.companyId,
         companyDomain: r.companyDomain,
+        optOutNotRecorded: r.optOutNotRecorded,
       }
     }
   }
@@ -1629,6 +1813,7 @@ export async function handleInboundEmail(
     matched: 'contact', contactId: only.id, orgId: only.orgId,
     touchId: r.touchId, paused: r.paused, suppressed: r.suppressed, replyKind: r.replyKind,
     duplicate: false, companyId: r.companyId, companyDomain: r.companyDomain,
+    optOutNotRecorded: r.optOutNotRecorded,
   }
 }
 

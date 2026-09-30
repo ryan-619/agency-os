@@ -187,6 +187,7 @@ export const COMPLIANCE_REFUSAL_HUMAN_CAN_RESOLVE: Readonly<Record<SendRefusalCo
   cold_channel_forbidden: false,
   no_consent: false,
   consent_revoked: false,
+  stale_evidence: false,
   quiet_hours: true,
   unknown_timezone: true,
   daily_cap: true,

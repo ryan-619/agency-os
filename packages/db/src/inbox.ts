@@ -646,7 +646,7 @@ export async function replyQueueDraft(
       }
 
       // The sender's own answer, as if a person had approved this minute.
-      const preview = await previewSend(tx, { orgId: args.orgId, contactId: contact.id, campaignId: campaign.id, now })
+      const preview = await previewSend(tx, { orgId: args.orgId, contactId: contact.id, campaignId: campaign.id, now, writtenAt: null })
       if (!preview.ok) refuse('no_contact', preview.message)
       const decision = preview.ok ? preview.decision : null
       let wouldHold: { code: SendRefusalCode; reason: string } | null = null
