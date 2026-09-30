@@ -270,8 +270,9 @@ Two more §2.2 links, both added in 0006 and after:
 
 ```
 apps/
-  web/          Next.js 16 App Router — UI + BFF routes + Auth.js
-  agent/        the long-running worker (Phase 2 gives it the query() loop)
+  web/          Next.js 16 App Router — UI + BFF routes + Auth.js + two Vercel crons
+  agent/        the long-running worker: agent turns, the send tick, IMAP, recovery
+  voice/        inbound voice over Twilio ConversationRelay (Phase 6, not switched on)
 packages/
   core/         domain logic. NO I/O, no framework, no database.
   db/           schema, reversible SQL migrations, typed queries, seed
@@ -312,14 +313,100 @@ test bans spreading the row outright (the same instrument that keeps
 - **the worker's own environment.** A `stdio` connector is a process an owner
   chose through a web form; inheriting `process.env` would hand it
   `ANTHROPIC_API_KEY`, `DATABASE_URL` and `SECRETS_KEY`. Its env is built from
-  scratch, and its credential goes in `MCP_SECRET` rather than on a command
-  line, which is visible in `ps` to anyone on the host.
+  scratch, and its credential goes in an environment variable (`MCP_SECRET`
+  unless the config names another) rather than on a command line, which is
+  visible in `ps` to anyone on the host.
+
+  **"Built from scratch" was true of the object `buildConnector` emits and
+  not of the process, and a research pass found it.** The installed CLI
+  spawns a stdio server with `{ ...its own env, CLAUDE_PROJECT_DIR, …,
+  ...server.env }`, and its own env is `childEnv()` — which on the API-key
+  path carries `ANTHROPIC_API_KEY` and `ANTHROPIC_CUSTOM_HEADERS`. Every stdio
+  connector received the agency's key. `buildConnector` now launches each one
+  as `/usr/bin/env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN
+  -u ANTHROPIC_CUSTOM_HEADERS -u CLAUDE_CODE_OAUTH_TOKEN -- <command> <args>`
+  (`SCRUBBED_FROM_STDIO`, `STDIO_LAUNCHER`); `env` execs the real command, so
+  its argv is unchanged. The test spawns a real child the way the CLI does,
+  with a control proving the bare command WOULD get the key, and fails if
+  `childEnv()` ever emits a name nobody has classified. A command containing
+  `=` (which `env` would read as an assignment) and a `config.env` that sets a
+  scrubbed name are two new skip reasons.
 - **the network the worker runs in.** `isReachableConnectorUrl` refuses the
   same hosts the scanner does, for a worse reason: the worker would send the
   connector's CREDENTIAL to whatever answered `169.254.169.254`. Re-checked at
   BUILD time, not only when the row was written.
 - **the log.** Names and transports only. A URL carries a token in a query
   string sooner or later, whatever the form says.
+
+**One leak is NOT fixed, and is stated rather than hidden (§13).** `sdk.mjs`
+passes the whole `mcpServers` object to the CLI as `--mcp-config <json>` on the
+`claude` process's argv — the decrypted `authorization`/`x-api-key` header and
+the stdio credential included, for every transport, for as long as a turn
+runs. Anyone who can list processes on the worker host can read it. The
+catalog's intro says so. A possible fix — the SDK's `setMcpServers` control
+request, which its settings text lists as a separate MCP entry point — is
+outside this repo's code and unverified.
+
+### Connector catalog, credentials and tool disable
+
+**Settings → Connectors → "Add from the catalog"** shows the presets in
+`packages/core/src/connector-catalog.ts` (34, from the verified catalog only)
+in four groups: *works today* (a Bearer token, or no credential at all, like
+DeepWiki and Cloudflare's docs), *named header* (Hunter and Apollo
+`x-api-key`, Close `close-api-key` plus a non-secret `close-scope`, Pipedrive
+`x-api-token`, Sentry's `Sentry-Bearer` scheme), *runs on the worker host*
+(four stdio servers) and *needs a connect flow — not built* (seven OAuth-only
+servers, listed with a docs link and no Install button; OAuth is its own
+piece of work, flagged here under §13). Install posts the preset to the
+existing `POST /api/connectors` — no new route — and the connector is created
+DISABLED; Test and Enable happen in place.
+
+**A stdio preset is one click only when its package is pinned to an exact
+version** (`npx pkg@1.2.3`, `uvx pkg==1.2.3`). None of the four is pinned
+today, so each fills in the manual form for an owner to name the version they
+reviewed. Pinning one in the catalog turns its Install button on with no web
+change. The catalog's own versions were not looked up and written in, because
+a version nobody verified is a claim in a file whose rule is "only claims that
+were checked".
+
+**Why a NAME is not a credential.** `secretHeader`, `secretPrefix` and
+`secretEnv` say WHERE the worker puts the decrypted secret, never what it is;
+`refuseCredentialShapedKeys` refuses a `headers`/`env` entry under the slot's
+own name, a credential-shaped key, or a credential-shaped value (documented
+prefixes like `sk-`, `ghp_`, `xox*`, `whsec_`, and hand-typed `Bearer`/`Basic`
+schemes — `SENSITIVE_VALUE` alone would not have caught `sk-ant-…`). A tool
+name may not contain `__`. `POST /api/connectors` now answers the
+`connectors_name_is_not_agency` CHECK with a 409 sentence, keeps the
+duplicate-name 409, answers 500 for anything else (before, every failure read
+as a duplicate name), and deletes the credential it stored a moment earlier
+when the insert fails.
+
+**Settings → Credentials exists** (the connector DELETE route already pointed
+at it). It lists stored credentials — label, date, key version, the connectors
+using each, or *orphaned* — deletes orphans only, and re-enters a connector's
+credential. Re-entering disables the connector until it is tested again, and
+deletes the old row unless another connector still holds it. It is the only
+place a credential can be added to an existing connector. Without
+`SECRETS_KEY` it refuses, 503, like the connector form.
+
+**A per-tool review that can only DISABLE.** A name in `config.disabledTools`
+is refused in both gate rings (`canUseTool` and `PreToolUse`) before
+`classifyRisk` — no card, no approval row — and nothing here allows anything;
+`allowedTools` stays `[]`. A catalog server nobody has reviewed carries the
+catalog's `sendTools` as its default, DERIVED from the row's endpoint every
+turn (so a hand-typed Zapier URL is still Zapier), and `'*'` crosses to the
+gate as `mcp__<name>__*`, which no real tool name can collide with. An EMPTY
+saved list is an owner's decision and overrides the default. The deny sentence
+says the tool "is disabled in Settings → Connectors", not that an owner did
+it: a catalog default was chosen by nobody, and the model repeats the sentence
+to people.
+
+**The panel stores the CLI's spelling of a tool name.** The CLI names an MCP
+tool `mcp__<server>__<tool>` with each part passed through
+`replace(/[^a-zA-Z0-9_-]/g, '_')` (read from the shipped binary), so a probe's
+`github.create_issue` is stored as `github_create_issue`. A name that still
+cannot be stored — one with a double underscore — is listed without a checkbox
+and keeps asking a person.
 
 ### Skills, and the one bypass that is genuinely unavoidable (§6)
 
@@ -372,10 +459,6 @@ is capped at a 5s connect timeout and changes how the server's tools load into
 a real turn; a probe should not need a different config from the thing it
 tests.)
 
-Not yet created, because their phase has not arrived (§12 — do not scaffold all
-seven phases at once): `apps/voice` (Phase 6, and only after A2P 10DLC
-registration clears).
-
 ### packages/tools
 The tools as PLAIN DATA, with **no import of the Agent SDK anywhere in the
 package**. `apps/agent/src/mcp/agency.ts` is the only file that adapts them to
@@ -386,14 +469,62 @@ recorded-session mode, so anything needing the SDK to be *defined* is also
 untestable — and a package that CANNOT import the SDK cannot drag it into the
 Next module graph, which CI builds with no secrets on purpose.
 
-Nine tools ship: `get_icp`, `search_companies`, `get_company`, `scan_company`,
-`score_company`, `get_pipeline` (low risk), `update_deal`, `book_meeting`
-(medium — they write internal state, never anything outbound) and
-`queue_touch` (high). `get_pipeline` and `update_deal` arrived with Phase 5,
-once `deals` was a table something writes — before that a tool that reliably
-returned `[]` would have taught the model a false shape of the business.
-`draft_outreach` is the one §6 tool that does not exist by that name: a draft
-is `queue_touch` parked on a human, which is Phase 4's single send path.
+Twenty-three tools ship (`AGENCY_TOOL_NAMES`). Seventeen are low risk:
+`get_icp`, `search_companies`, `get_company`, `scan_company`, `score_company`,
+`get_pipeline`, `check_send`, `get_consent`, `get_replies`, `get_scan_history`,
+`get_evidence_changes`, `get_stale_companies`, `get_pipeline_metrics`,
+`get_company_timeline`, `get_compliance_summary`, `search_crm`, `list_tasks`.
+Five are medium — they write internal state, never anything outbound, and
+their summaries say nothing was sent: `update_deal`, `book_meeting`,
+`classify_reply`, `add_note`, `create_task`. One is high: `queue_touch`.
+`get_pipeline` and `update_deal` arrived with Phase 5, once `deals` was a
+table something writes — before that a tool that reliably returned `[]` would
+have taught the model a false shape of the business. `draft_outreach` is the
+one §6 tool that does not exist by that name: a draft is `queue_touch` parked
+on a human, which is Phase 4's single send path.
+
+The fourteen added with 0018, one line each:
+
+- **`check_send` and `get_consent`** make the gate's rule visible to the
+  model; both queue nothing. `get_consent` reports a suppression match by kind
+  and recording path, never the value.
+- **`get_scan_history`** lists every scan newest first with the score whose
+  `scan_id` names it; an unreachable scan is "unreachable", never a 0.
+- **`get_evidence_changes`** compares the two newest scans that reached the
+  site through `diffFindings`; not-assessed is never "fixed", and
+  informational signals are reported apart, as context.
+- **`get_stale_companies`** lists stale, unreachable and never-scanned
+  companies, judged by `isStale` on `ran_at` and never by `findings.stale`.
+- **`get_replies`** reads `inboxTouches` newest first and shows a reply's
+  first line only — at most 200 characters, labelled as the sender's own
+  words, never the address.
+- **`classify_reply`** records a kind through `replyReclassify` (actor
+  `agent`) or marks a reply handled by the principal through
+  `replyMarkHandled`. It can never name `opted_out`: the enum has no such
+  value, a row that is `opted_out` is refused whatever kind is asked, and
+  `replyReclassify`'s own predicate refuses both again.
+- **`get_pipeline_metrics`** is `pipelineMetrics` over `listDeals` and
+  `analyticsTransitions`, windowed: moves recorded in `sinceDays`, and deals
+  open now or closed inside it. Below five it prints "insufficient data".
+- **`get_company_timeline`** merges touches, scans with THAT scan's score,
+  deal audit rows, meetings, proposals, calls, notes and tasks, newest first.
+  A message is its subject and first line; a note is `note by <name>: "…"`,
+  and the summary says a note is a teammate's words, not evidence. A meeting
+  is printed in its own zone with the UTC instant beside it.
+- **`get_compliance_summary`** is `complianceSummary` at the ICP's stale
+  window — counts only, gated on `audit:read` like the page.
+- **`search_crm`** is `searchOrg` with `searchSectionsFor(principal)`
+  intersected with the sections asked for, never wider; the query is not
+  audited.
+- **`add_note`** (`companies:write`), **`create_task`** (`deals:write`, kind
+  `todo`, the assignee resolved in THIS org and not revoked) and
+  **`list_tasks`** (`deals:read`; `open: false` includes done ones).
+
+Each asks `can()` the question its page or route asks, which only matters for
+a role `can()` does not know — that role gets `not_permitted`. **Only the tool
+summary reaches the model (§5.5)**: a reply's words appear there only as a
+bounded first line, never the body or the reply's own subject, and no audit
+detail carries any of its text.
 
 ### packages/scanner
 `fetch.ts` does the I/O; `extract.ts` is pure. That split is not cosmetic — it
@@ -414,6 +545,55 @@ tools that write to that table. It does not resolve DNS, so a public name
 pointing at a private address is still out of scope; that needs a connect-time
 check and should be added if the scanner is ever aimed at untrusted input.
 
+### Informational signals
+
+**Thirteen additive keys, read from bytes already captured** — no new request
+class (`ADDITIVE_SIGNAL_KEYS`): `csp_report_only`, `csp_quality`,
+`cookie_flags`, `referrer_policy_quality`, `permissions_policy_quality`,
+`content_type_options_quality`, `cross_origin_policies`, `sri_third_party`,
+`mixed_content`, `stack_disclosure`, `deprecated_headers`, `hsts_quality`,
+`reporting_endpoints`. They are posture CONTEXT from the homepage response,
+stored as findings with `scored = false` and weight 0 (§1), shown in their own
+section of the company page, and returned by `get_company` — observed ones
+only, each labelled. **Promotion is a data change:** add the key to the ICP
+with a weight. `weight: 0` in an ICP is refused.
+
+Parity's guarantee moved from "no extra keys" to "no unexpected keys", and the
+parity ICP is frozen in `packages/scanner/test/icp-parity.json` so an ICP edit
+cannot move the goldens. `cookie_flags` reads `home.setCookies`, which the
+sixteen recorded fixtures do not hold, so there it reads "not captured" — no
+fixture was re-recorded and no golden changed; a re-record ships alone, with
+its diff read (§5).
+
+The words are honest in both directions. "No cookies" reads *not applicable*,
+never as a pass. An `http://` `<link rel=canonical>` is a pointer, not a load,
+so only stylesheet/preload/modulepreload links count as blockable mixed
+content, and a `<noscript>` reference is left out. A short documented list of
+tag-manager hosts is counted in the SRI ratio and never flagged, because an
+SRI-less tag manager is a ratio, not a gap. `recordScan`'s observed and
+unobserved counts are over scored signals only; `informationalCount` counts
+the rest.
+
+### Evidence: history, the diff and the timeline
+
+**A diff never turns a blocked fetch into a fix.** `diffFindings` calls a
+signal `unchanged` only when BOTH scans observed it; a signal neither saw is
+`not_assessed_this_time`, and one scan's failure to observe is never a change
+in either direction. `scanHistory` joins the score on `scan_id` (the newest
+score for that scan, by a lateral join — `scores` has no unique `scan_id`) and
+reports `score: null` for every `ok: false` scan, although `recordScan` stores
+a 0 with `unreachable (…)` for one: a timeout is never charted as a 0.
+
+**The company page shows history, the diff and a timeline.** The timeline
+reads deal moves from deal rows AND from the labels inside `contact.replied`,
+`meeting.booked` and `proposal.accepted(_via_share)` — `setDealStage` writes
+no row for a won — and folds a companion into the first-class row it repeats
+within 60 seconds; two first-class rows are never folded. It is cut at
+`completeSince()`, the latest oldest-row among the sources that hit their
+read limit, and says so, rather than showing a truncated source's gap as a
+quiet stretch. Every panel dates evidence from `scans.ran_at` through
+`isStale`, never from `findings.stale`.
+
 ### What lands in `packages/core`, and when
 | Phase | Domain rules |
 |---|---|
@@ -424,6 +604,7 @@ check and should be added if the scanner is ever aimed at untrusted input.
 | 4 ✅ | consent, suppression, quiet hours, daily caps — the one send path |
 | 5 ✅ | `proposalFromFindings` and `meetingBrief` — the two documents the pipeline writes, pure, refusing stale evidence |
 | 6 ✅ | the AI disclosure, the opt-out/handoff/sentiment readers, the scripted turn, and §5.5's `decideLlmCall` |
+| 0018 release ✅ | the informational signals' words, `diffFindings`, rotting and `pipelineMetrics`, enrolment's gate and draft, the kickoff and renewal templates, the bounce and auto-reply readers, the connector catalog as data, suppression sources |
 
 ---
 
