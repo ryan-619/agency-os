@@ -222,7 +222,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'contact.unsubscribed': { contactId: SUBJECT, touchId: SUBJECT, addresses: 1, paused: true, cancelledQueued: 0 },
   'unsubscribe.not_recorded': { touchId: SUBJECT, contactId: SUBJECT, why: 'Error', paused: true, cancelledQueued: 0 },
   'contact.exported': { contactId: SUBJECT },
-  'contact.erased': { touchesScrubbed: 4, callsScrubbed: 1, suppressionsAdded: 2 },
+  'contact.erased': { touchesScrubbed: 4, callsScrubbed: 1, suppressionsAdded: 2, suppressedRecipients: { [SUBJECT]: OTHER_USER } },
   'contact.erasure_failed': { why: 'unreadable_phone', paused: true },
   'connector.tools_disabled': {
     name: 'zapier', tools: ['send_email'], before: { source: 'catalog', tools: [], everyTool: true },
