@@ -116,6 +116,15 @@ function words(d: unknown, key: string): string[] | null {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+/**
+ * A lookup by a string that came out of a row. A plain `map[key]` answers
+ * `Object.prototype`'s members too, so an action or channel spelled
+ * `constructor` would reach a function where a word was expected.
+ */
+function own<T>(map: Readonly<Record<string, T>>, key: string | null | undefined): T | undefined {
+  return key != null && Object.prototype.hasOwnProperty.call(map, key) ? map[key] : undefined
+}
+
 // ---------------------------------------------------------------------------
 // Words
 // ---------------------------------------------------------------------------
@@ -137,12 +146,12 @@ const CHANNEL_NAME: Readonly<Record<string, string>> = {
 
 /** "an email", "a LinkedIn message", "a message". */
 function aMessage(channel: string | null): string {
-  const noun = channel ? CHANNEL_NOUN[channel] : undefined
+  const noun = own(CHANNEL_NOUN, channel)
   if (!noun) return 'a message'
   return /^[aeiou]/i.test(noun) || noun === 'SMS' ? `an ${noun}` : `a ${noun}`
 }
 const channelName = (channel: string | null): string =>
-  channel ? CHANNEL_NAME[channel] ?? spaced(channel) : 'a channel'
+  channel ? own(CHANNEL_NAME, channel) ?? spaced(channel) : 'a channel'
 
 const SUPPRESSION_KIND: Readonly<Record<string, string>> = {
   email: 'an email address',
@@ -175,7 +184,7 @@ export const UNRECORDED_SOURCE: SourceWords = { tag: 'unrecorded', explain: 'rec
 export function suppressionSource(source: string | null): SourceWords {
   if (!source) return UNRECORDED_SOURCE
   // 0018's CHECK admits only the five; anything else is shown as itself, not mapped to one of them.
-  return (SUPPRESSION_SOURCE_WORDS as Readonly<Record<string, SourceWords>>)[source] ?? { tag: source, explain: source }
+  return own(SUPPRESSION_SOURCE_WORDS, source) ?? { tag: source, explain: source }
 }
 
 const REPLY_KIND: Readonly<Record<string, string>> = {
@@ -375,7 +384,7 @@ const SENTENCES: Readonly<Record<string, Template>> = {
 
   // --- outreach -----------------------------------------------------------
   ...SEND,
-  'draft.approved': (c) => `approved a draft ${CHANNEL_NOUN[word(c.d, 'channel') ?? ''] ?? 'message'} to a contact at ${c.co}`,
+  'draft.approved': (c) => `approved a draft ${own(CHANNEL_NOUN, word(c.d, 'channel')) ?? 'message'} to a contact at ${c.co}`,
   'draft.denied': (c) => {
     const note = text(c.d, 'note', 80)
     return `denied a draft about ${c.co}${note ? `: ${quoted(note)}` : ''}`
@@ -384,7 +393,7 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     const kind = word(c.d, 'replyKind')
     const channel = word(c.d, 'channel')
     const cancelled = num(c.d, 'cancelledQueued')
-    return `recorded ${(kind && REPLY_KIND[kind]) || 'a reply'}${channel ? ` by ${channelName(channel)}` : ''} from a contact at ${c.co}${tail([
+    return `recorded ${own(REPLY_KIND, kind) ?? 'a reply'}${channel ? ` by ${channelName(channel)}` : ''} from a contact at ${c.co}${tail([
       flag(c.d, 'suppressed') && 'the address went on the suppression list',
       flag(c.d, 'paused') && 'paused them in every campaign',
       cancelled !== null && cancelled > 0 && `cancelled ${cancelled} queued`,
@@ -465,14 +474,14 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     const limit = num(c.d, 'threshold')
     return `paused a campaign automatically${pct !== null ? `: ${pct}% of recent messages bounced` : ''}${limit !== null ? ` (the limit is ${limit}%)` : ''}`
   },
-  'suppression.added': (c) => `added ${SUPPRESSION_KIND[word(c.d, 'kind') ?? ''] ?? 'a value'} to the suppression list`,
+  'suppression.added': (c) => `added ${own(SUPPRESSION_KIND, word(c.d, 'kind')) ?? 'a value'} to the suppression list`,
   'suppression.already_present': (c) =>
-    `tried to add ${SUPPRESSION_KIND[word(c.d, 'kind') ?? ''] ?? 'a value'} that was already on the suppression list; nothing changed`,
+    `tried to add ${own(SUPPRESSION_KIND, word(c.d, 'kind')) ?? 'a value'} that was already on the suppression list; nothing changed`,
   'suppression.removed': (c) => {
     // Only a removal recorded after 0018 carries `hadSource`; its null means
     // the ROW predated sources, which the tag says in the same word as the list.
     const source = has(c.d, 'hadSource') ? ` (source: ${suppressionSource(word(c.d, 'hadSource')).tag})` : ''
-    return `removed ${SUPPRESSION_KIND[word(c.d, 'kind') ?? ''] ?? 'a value'} from the suppression list${source}; it may be contacted again`
+    return `removed ${own(SUPPRESSION_KIND, word(c.d, 'kind')) ?? 'a value'} from the suppression list${source}; it may be contacted again`
   },
   'unsubscribe.not_recorded': () =>
     'could not record a one-click unsubscribe — the address is NOT on the suppression list; follow up by hand',
@@ -659,7 +668,7 @@ export function isAlarm(row: AuditLine): boolean {
 
 /** The predicate for one row: "moved rentman.io from replied to meeting". Unknown → the raw name. */
 export function sentenceFor(row: AuditLine, lookups: AuditLookups = {}): string {
-  const template = SENTENCES[row.action]
+  const template = own(SENTENCES, row.action)
   if (!template) return row.action
   const person = (id: unknown): string | null =>
     typeof id === 'string' && UUID.test(id) ? (lookups.person?.(id) ?? null) : null
@@ -689,6 +698,11 @@ export const ACTOR_LITERALS: Readonly<Record<string, string>> = {
   share_link: 'share link',
 }
 
+/** A process rather than a person — `agent`, `system`, `voice`, the booking page, a share link. */
+export function isActorLiteral(actor: string): boolean {
+  return own(ACTOR_LITERALS, actor) !== undefined
+}
+
 export interface ResolvedActor {
   readonly email: string | null
   readonly name: string | null
@@ -704,7 +718,7 @@ export function actorLabel(
   actor: string,
   resolved: ReadonlyMap<string, ResolvedActor>,
 ): { readonly label: string; readonly note: string | null } {
-  const literal = ACTOR_LITERALS[actor]
+  const literal = own(ACTOR_LITERALS, actor)
   if (literal) return { label: literal, note: null }
   if (UUID.test(actor)) {
     const u = resolved.get(actor)
@@ -760,7 +774,7 @@ const FAMILY_LABEL: Readonly<Record<string, string>> = {
 export const AUDIT_FAMILIES: readonly { readonly value: string; readonly label: string }[] = Object.freeze(
   [...new Set(AUDIT_ACTIONS.map((a) => a.split('.')[0] ?? a))].map((value) => ({
     value,
-    label: FAMILY_LABEL[value] ?? value,
+    label: own(FAMILY_LABEL, value) ?? value,
   })),
 )
 

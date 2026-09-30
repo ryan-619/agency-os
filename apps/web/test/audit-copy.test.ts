@@ -28,6 +28,7 @@ import {
   companyLabel,
   detailForDisplay,
   detailValue,
+  isActorLiteral,
   isAlarm,
   sentenceFor,
   subjectHref,
@@ -207,6 +208,22 @@ describe('sentenceFor', () => {
   it('falls back to the raw action name for an action it has no sentence for', () => {
     expect(sentenceFor(line('thing.happened', { anything: 'at all' }), lookups)).toBe('thing.happened')
     expect(sentenceFor(line('deal', {}), lookups)).toBe('deal')
+  })
+
+  it('does not mistake Object.prototype for the catalogue', () => {
+    // A plain `map[key]` answers `constructor` with a function.
+    expect(sentenceFor(line('constructor'), lookups)).toBe('constructor')
+    expect(sentenceFor(line('toString'), lookups)).toBe('toString')
+    expect(sentenceFor(line('draft.approved', { channel: 'constructor' }), lookups)).toBe(
+      'approved a draft message to a contact at rentman.io',
+    )
+    expect(sentenceFor(line('suppression.added', { kind: 'hasOwnProperty' }), lookups)).toBe(
+      'added a value to the suppression list',
+    )
+    expect(actorLabel('constructor', new Map())).toEqual({ label: 'constructor', note: null })
+    expect(isActorLiteral('constructor')).toBe(false)
+    expect(isActorLiteral('booking_page')).toBe(true)
+    expect(suppressionSource('constructor')).toEqual({ tag: 'constructor', explain: 'constructor' })
   })
 
   it('falls back to the raw name, not a crash, when a detail shape throws', () => {
