@@ -431,6 +431,23 @@ describe('the LinkedIn step', () => {
       expect((await reread(t.id)).status).toBe('sent')
     })
 
+    it('withholds the words once the scan they quote goes stale, judged from when they were written', async () => {
+      const DAY = 24 * HOUR
+      // Fresh when the words were written and when Start handed them over;
+      // stale (default window, no active ICP here) two days later.
+      await db.insert(schema.scans).values({ orgId, companyId, ranAt: new Date(NOON.getTime() - 13 * DAY), ok: true })
+      const t = await approved({ createdAt: NOON })
+      expect(await start(t.id)).toMatchObject({ status: 'sent' })
+      // A re-scan AFTER the words were written does not freshen them: they
+      // quote the old scan, so the old scan is the one judged.
+      await db.insert(schema.scans).values({ orgId, companyId, ranAt: new Date(NOON.getTime() + DAY), ok: true })
+      const step = await stepAt(new Date(NOON.getTime() + 2 * DAY))
+      expect(step).toMatchObject({ state: 'handed', withheld: 'refused', words: null })
+      expect(step.recheck).toMatchObject({ ok: true, decision: { code: 'stale_evidence', humanCanResolve: false } })
+      expect(JSON.stringify(step)).not.toContain(BODY)
+      expect((await reread(t.id)).status).toBe('sent')
+    })
+
     it('keeps the words inside their quiet hours — a refusal a person can wait out — and reports it', async () => {
       await handed()
       const step = await stepAt(NIGHT)

@@ -334,7 +334,7 @@ export async function linkedinStepsDue(
     const handedUser = state === 'handed' ? t.providerId!.slice(HUMAN_PREFIX.length) : null
     // Re-asked on every read: the person sends when they get to it.
     const recheck = state === 'handed' && t.contactId && t.campaignId
-      ? await previewSend(db, { orgId, contactId: t.contactId, campaignId: t.campaignId, now })
+      ? await previewSend(db, { orgId, contactId: t.contactId, campaignId: t.campaignId, now, writtenAt: evidenceAsOfFor(t) })
       : null
     const withheld = state === 'handed' ? withheldFor(recheck, t.sentAt ?? t.updatedAt ?? t.createdAt, now) : null
     steps.push({
