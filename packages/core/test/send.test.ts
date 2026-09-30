@@ -27,6 +27,7 @@ function facts(over: Partial<SendFacts> = {}): SendFacts {
     recipient: 'priya@rentman.io',
     suppressed: false,
     consent: null,
+    evidenceStale: false,
     recipientTimeZone: 'Europe/London',
     quietStart: '21:00',
     quietEnd: '08:00',
@@ -438,6 +439,61 @@ describe('a bounced address', () => {
   })
 })
 
+/**
+ * §2.2: "Findings older than 14 days are marked stale and must be
+ * re-verified before appearing in any outbound draft." A draft quotes the
+ * scan that was current when it was written, and a deferral can hold it for
+ * weeks — so the send path asks, at the moment of sending, whether the
+ * evidence behind the words is still fresh. Found by review: an auto-send
+ * row held by the cap or a paused campaign went out quoting weeks-old
+ * findings with nobody reading it.
+ */
+describe('stale evidence', () => {
+  it('is refused as stale_evidence, and nobody may approve past it', () => {
+    const d = decideSend(facts({ evidenceStale: true }))
+    expect(d.allowed).toBe(false)
+    if (d.allowed) return
+    expect(d.code).toBe('stale_evidence')
+    expect(d.humanCanResolve).toBe(false)
+    // It names the rule and the fix — a re-scan and a new draft — and that
+    // approving is not the fix.
+    expect(d.reason).toMatch(/§2\.2/)
+    expect(d.reason).toMatch(/re-scan the company, then draft the message again/i)
+    expect(d.reason).toMatch(/approving does not make them current/i)
+  })
+
+  it('changes nothing when the evidence is fresh', () => {
+    expect(decideSend(facts({ evidenceStale: false }))).toEqual({ allowed: true, code: 'send_now' })
+  })
+
+  it('is not lifted by a person approving the words, nor by auto-send', () => {
+    for (const over of [{ autoSend: false, approvedByHuman: true }, { autoSend: true }]) {
+      const d = decideSend(facts({ evidenceStale: true, ...over }))
+      expect(d.allowed).toBe(false)
+      if (!d.allowed) expect(d.code).toBe('stale_evidence')
+    }
+  })
+
+  /**
+   * Refused, never deferred: the clock steps come after it, so a stale
+   * message is not held until morning to go staler — and the sender puts
+   * back only what the clock or the campaign refused.
+   */
+  it('is refused before quiet hours, the cap and a paused campaign could defer it', () => {
+    const d = decideSend(
+      facts({
+        evidenceStale: true,
+        now: new Date('2026-09-15T23:00:00.000Z'),
+        sentToday: 99,
+        campaignStatus: 'paused',
+        autoSend: false,
+      }),
+    )
+    expect(d.allowed).toBe(false)
+    if (!d.allowed) expect(d.code).toBe('stale_evidence')
+  })
+})
+
 describe('the campaign’s own status', () => {
   /**
    * Found by review: the campaign form offered draft / active / paused / done
@@ -498,6 +554,7 @@ describe('§2.4 — the approval gate is the default', () => {
     ['suppression', { suppressed: true }, 'suppressed'],
     ['a bounced address', { recipientBounced: true }, 'bounced'],
     ['a declined channel', { consent: { granted: false, source: 'reply' } }, 'consent_revoked'],
+    ['stale evidence', { evidenceStale: true }, 'stale_evidence'],
     ['quiet hours', { now: new Date('2026-09-15T22:30:00.000Z') }, 'quiet_hours'],
     ['the daily cap', { sentToday: 25 }, 'daily_cap'],
     ['an unknown timezone', { recipientTimeZone: null }, 'unknown_timezone'],
@@ -517,6 +574,7 @@ describe('§2.4 — the approval gate is the default', () => {
     ['suppression', { suppressed: true }, 'suppressed'],
     ['a bounced address', { recipientBounced: true }, 'bounced'],
     ['a declined channel', { consent: { granted: false, source: 'reply' } }, 'consent_revoked'],
+    ['stale evidence', { evidenceStale: true }, 'stale_evidence'],
     ['quiet hours', { now: new Date('2026-09-15T22:30:00.000Z') }, 'quiet_hours'],
     ['the daily cap', { sentToday: 25 }, 'daily_cap'],
   ])('does not let auto-send past %s', (_label, over, code) => {
@@ -538,6 +596,8 @@ describe('the ORDER the rules fire in', () => {
     const d = decideSend(
       facts({
         suppressed: true,
+        recipientBounced: true,
+        evidenceStale: true,
         consent: { granted: false, source: 'reply' },
         now: new Date('2026-09-15T23:00:00.000Z'),
         sentToday: 99,
@@ -549,10 +609,13 @@ describe('the ORDER the rules fire in', () => {
   })
 
   /**
-   * The bounce sits between the two: after suppression, because an opt-out
-   * is the reason nobody may approve past and it must be what is logged;
-   * before consent, because an address that does not exist makes every later
-   * rule moot and "declined" would send the reader to the wrong fix.
+   * The bounce sits after BOTH refusals about a person: suppression, and a
+   * recorded refusal (or a pause, which the sender models as one). Those are
+   * the reasons nobody may approve past, and they must be what is logged —
+   * reported as `bounced`, a declined contact read as resolvable, so
+   * /approvals enabled Approve and the inbox resumed them. Found by review.
+   * Before the clock, because a message held until morning would bounce all
+   * the same.
    */
   it('reports suppression before a bounce', () => {
     const d = decideSend(facts({ suppressed: true, recipientBounced: true }))
@@ -560,11 +623,19 @@ describe('the ORDER the rules fire in', () => {
     if (!d.allowed) expect(d.code).toBe('suppressed')
   })
 
-  it('reports a bounce before consent, quiet hours, the cap, the campaign and approval', () => {
+  it('reports a recorded refusal before a bounce: refused AND bounced is consent_revoked', () => {
+    const d = decideSend(facts({ consent: { granted: false, source: 'reply' }, recipientBounced: true }))
+    expect(d.allowed).toBe(false)
+    if (d.allowed) return
+    expect(d.code).toBe('consent_revoked')
+    expect(d.humanCanResolve).toBe(false)
+  })
+
+  it('reports a bounce before stale evidence, quiet hours, the cap, the campaign and approval', () => {
     const d = decideSend(
       facts({
         recipientBounced: true,
-        consent: { granted: false, source: 'reply' },
+        evidenceStale: true,
         now: new Date('2026-09-15T23:00:00.000Z'),
         sentToday: 99,
         campaignStatus: 'paused',
@@ -573,6 +644,26 @@ describe('the ORDER the rules fire in', () => {
     )
     expect(d.allowed).toBe(false)
     if (!d.allowed) expect(d.code).toBe('bounced')
+  })
+
+  it('reports a recorded refusal before stale evidence', () => {
+    const d = decideSend(facts({ consent: { granted: false, source: 'reply' }, evidenceStale: true }))
+    expect(d.allowed).toBe(false)
+    if (!d.allowed) expect(d.code).toBe('consent_revoked')
+  })
+
+  it('reports stale evidence before an unknown timezone, quiet hours, the cap, the campaign and approval', () => {
+    const d = decideSend(
+      facts({
+        evidenceStale: true,
+        recipientTimeZone: null,
+        sentToday: 99,
+        campaignStatus: 'paused',
+        autoSend: false,
+      }),
+    )
+    expect(d.allowed).toBe(false)
+    if (!d.allowed) expect(d.code).toBe('stale_evidence')
   })
 
   it('reports an unparseable recipient before a bounce it could not have matched', () => {
@@ -588,8 +679,9 @@ describe('the ORDER the rules fire in', () => {
       [{ channel: 'sms', recipient: '+14155550100' }, 'cold_channel_forbidden'],
       [{ recipient: 'nope' }, 'unparseable_recipient'],
       [{ suppressed: true }, 'suppressed'],
-      [{ recipientBounced: true }, 'bounced'],
       [{ consent: { granted: false, source: 'reply' } }, 'consent_revoked'],
+      [{ recipientBounced: true }, 'bounced'],
+      [{ evidenceStale: true }, 'stale_evidence'],
       [{ recipientTimeZone: null }, 'unknown_timezone'],
       [{ now: midnightInLondon }, 'quiet_hours'],
       [{ sentToday: 99 }, 'daily_cap'],
@@ -649,6 +741,7 @@ describe('what a refusal says', () => {
       facts({ suppressed: true }),
       facts({ recipientBounced: true }),
       facts({ consent: { granted: false, source: 'reply' } }),
+      facts({ evidenceStale: true }),
       facts({ recipientTimeZone: null }),
       facts({ now: new Date('2026-09-15T23:00:00.000Z') }),
       facts({ sentToday: 99 }),
@@ -667,10 +760,11 @@ describe('what a refusal says', () => {
   })
 
   it('says plainly which refusals nobody can approve past', () => {
-    const noOverride = ['suppressed', 'consent_revoked', 'cold_channel_forbidden']
+    const noOverride = ['suppressed', 'consent_revoked', 'stale_evidence', 'cold_channel_forbidden']
     for (const f of [
       facts({ suppressed: true }),
       facts({ consent: { granted: false, source: 'reply' } }),
+      facts({ evidenceStale: true }),
       facts({ channel: 'voice', recipient: '+14155550100' }),
     ]) {
       const d = decideSend(f)
