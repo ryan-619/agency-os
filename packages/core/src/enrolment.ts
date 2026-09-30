@@ -53,6 +53,18 @@ export const ENROL_SKIPS = [
 ] as const
 export type EnrolSkip = (typeof ENROL_SKIPS)[number]
 
+/**
+ * How many were skipped for each reason — the only shape a skip list takes
+ * in an audit row or on a screen. Counts, never ids or addresses (§2.3).
+ */
+export function enrolSkipCounts(
+  skipped: readonly { readonly why: EnrolSkip }[],
+): Partial<Record<EnrolSkip, number>> {
+  const counts: Partial<Record<EnrolSkip, number>> = {}
+  for (const s of skipped) counts[s.why] = (counts[s.why] ?? 0) + 1
+  return counts
+}
+
 /** The two cold channels (§2.1). A campaign on any other is refused before this. */
 export type EnrolChannel = 'email' | 'linkedin'
 
