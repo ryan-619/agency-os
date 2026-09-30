@@ -75,7 +75,7 @@ export function untouchedLabel(days: number): string {
  * one" and "it is late" are different facts, and only one of them is a
  * reproach. Exactly `now` is not yet past.
  */
-export function isOverdue(nextActionAt: Date | null | undefined, now: Date): boolean {
+export function dealIsOverdue(nextActionAt: Date | null | undefined, now: Date): boolean {
   if (nextActionAt === null || nextActionAt === undefined) return false
   const at = nextActionAt.getTime()
   if (!Number.isFinite(at)) return false
