@@ -384,6 +384,9 @@ export async function receiveResendWebhook(request: Request, deps: ResendWebhook
     paused: outcome.paused,
     suppressed: outcome.suppressed,
     duplicate: outcome.duplicate,
+    // True means a "stop" whose suppression could not be written: the route
+    // raises the opt_out_not_recorded alarm from `outcome`.
+    optOutNotRecorded: outcome.optOutNotRecorded,
     references: mail.references?.length ?? 0,
   })
   return answer(200, { matched: outcome.matched, paused: outcome.paused, suppressed: outcome.suppressed }, outcome)

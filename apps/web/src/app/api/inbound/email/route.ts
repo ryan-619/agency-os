@@ -6,7 +6,7 @@ import { env } from '@/lib/env'
 import { log } from '@/lib/logger'
 import { secretMatches } from '@/lib/secret'
 import { notify } from '@/lib/slack'
-import { replyNotification } from './notification'
+import { optOutNotRecordedNotification, replyNotification } from './notification'
 
 /**
  * Inbound email by webhook (PROMPT.md §8.4, "or the provider webhook").
@@ -56,6 +56,11 @@ import { replyNotification } from './notification'
  * is already recorded into a 500 the provider would retry. A retried
  * delivery is recognised by its Message-ID and announces nothing
  * (`./notification.ts`).
+ *
+ * One reply is not announced that way: a "stop" whose suppression row could
+ * not be written. It raises the `opt_out_not_recorded` alarm instead, AWAITED
+ * like the unsubscribe and erasure routes' — the answer is still 200, since
+ * a retry would be recognised as a duplicate and record nothing more.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -100,6 +105,13 @@ export async function POST(request: Request): Promise<NextResponse> {
     ...(signals.headers ? { headers: signals.headers } : {}),
     dsn: signals.dsn,
   })
+
+  // A reply that said stop and could not be suppressed raises the alarm,
+  // AWAITED — never `after()`, which a host without `waitUntil` drops — in
+  // place of the ordinary message, which would read as handled. `notify` is
+  // bounded (3 s) and never throws.
+  const alarm = optOutNotRecordedNotification(outcome)
+  if (alarm) await notify(alarm)
 
   const event = replyNotification(outcome)
   if (event) {

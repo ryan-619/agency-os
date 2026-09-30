@@ -23,6 +23,7 @@ const SEND_CODES = {
   daily_cap: true,
   campaign_inactive: true,
   needs_approval: true,
+  stale_evidence: true,
 } satisfies Record<SendRefusalCode, true>
 
 /** Every code the send path produces — `bounced` among them since bounce handling landed. */
@@ -53,6 +54,7 @@ describe('refusalWords', () => {
     expect(refusalWords('daily_cap')).toBe('daily cap')
     expect(refusalWords('campaign_inactive')).toBe('campaign paused or not active')
     expect(refusalWords('bounced')).toBe('address bounced')
+    expect(refusalWords('stale_evidence')).toBe('the evidence it quotes is stale')
   })
 
   it('makes an unknown code readable rather than hiding it', () => {

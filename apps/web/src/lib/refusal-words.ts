@@ -12,7 +12,10 @@
  * naming them. `bounced` is the address a delivery report said does not
  * exist — evidence about an address, read from a report that named a message
  * this system sent, and never a suppression: the fix is a corrected address,
- * not an owner lifting an opt-out.
+ * not an owner lifting an opt-out. `stale_evidence` is a message whose words
+ * quote a scan past its re-verification deadline at the moment of sending
+ * (§2.2): nobody may approve past it, and the fix is a re-scan and a new
+ * draft.
  */
 export const REFUSAL_WORDS: Readonly<Record<string, string>> = {
   unparseable_recipient: 'no usable address',
@@ -26,6 +29,7 @@ export const REFUSAL_WORDS: Readonly<Record<string, string>> = {
   campaign_inactive: 'campaign paused or not active',
   needs_approval: 'denied by a person',
   bounced: 'address bounced',
+  stale_evidence: 'the evidence it quotes is stale',
 }
 
 /** The words for a code, or the code itself made readable. */
