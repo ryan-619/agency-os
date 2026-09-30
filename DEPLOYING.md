@@ -575,8 +575,8 @@ an opt-out — the worst possible place for one.
 
 **0018 is the current one, and the widest.** It adds `findings.scored`, which
 every company page reads first, and the tables and columns behind `/inbox`,
-`/tasks`, `/contacts` and the dashboard's counters. Code deployed ahead of it
-boots, serves `/signin`, and answers those pages with a 500. The release, in
+`/tasks`, `/contacts` and the dashboard. Code deployed ahead of it boots,
+serves `/signin`, and answers each of those pages with a 500. The release, in
 order — GO-LIVE.md has the same steps as a runbook:
 
 1. **Apply 0018 before deploying the code** — `./tools/remote-setup.sh` below,

@@ -249,9 +249,9 @@ The same hidden prompt and the same **direct (unpooled)** string as Step 3.
 `findings.scored`, which is the first column a page reads — every company page
 selects it — and creates `tasks`, `notes`, `proposal_shares` and
 `worker_heartbeats`. Deployed against a database without them, the code boots
-and serves `/signin` and the dashboard shell, and then `/inbox`, `/tasks`,
-`/contacts` and every company page answer with a 500. Migrating first costs
-nothing: code that is behind its schema never reads the new columns.
+and serves `/signin` — and then the dashboard, `/inbox`, `/tasks`, `/contacts`
+and every company page answer with a 500. Migrating first costs nothing: code
+that is behind its schema never reads the new columns.
 
 Then show me it worked, exactly as in Step 3b:
 
