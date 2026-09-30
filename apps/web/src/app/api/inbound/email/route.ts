@@ -1,8 +1,11 @@
-import { timingSafeEqual } from 'node:crypto'
-import { NextResponse } from 'next/server'
+import { NextResponse, after } from 'next/server'
 import { handleInboundEmail, type AgencyDb } from '@agency/db/queries'
 import { getDb } from '@/lib/db'
 import { env } from '@/lib/env'
+import { log } from '@/lib/logger'
+import { secretMatches } from '@/lib/secret'
+import { notify } from '@/lib/slack'
+import { replyNotification } from './notification'
 
 /**
  * Inbound email by webhook (PROMPT.md §8.4, "or the provider webhook").
@@ -29,17 +32,20 @@ import { env } from '@/lib/env'
  * is a few lines in that provider's configuration and this route stays the
  * same for all of them. Unknown fields are ignored; a missing `from` is a
  * 400.
+ *
+ * ## The team hears about it — after the answer
+ *
+ * A recorded reply posts one Slack message when `SLACK_WEBHOOK_URL` is set:
+ * ids, the company's domain and a link, never the text (`lib/slack-message.ts`).
+ * It is scheduled with `after()`, so it runs once the provider has its 200,
+ * and the scheduling itself sits in a try/catch: a host with no `waitUntil`
+ * throws from `after()` synchronously, and that must not turn a reply that
+ * is already recorded into a 500 the provider would retry. A retried
+ * delivery is recognised by its Message-ID and announces nothing
+ * (`./notification.ts`).
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
-
-function secretMatches(expected: string, given: string | null): boolean {
-  if (!given) return false
-  const a = Buffer.from(expected)
-  const b = Buffer.from(given)
-  if (a.length !== b.length) return false
-  return timingSafeEqual(a, b)
-}
 
 export async function POST(request: Request): Promise<NextResponse> {
   const secret = env().INBOUND_WEBHOOK_SECRET
@@ -77,6 +83,15 @@ export async function POST(request: Request): Promise<NextResponse> {
     messageId: typeof o['messageId'] === 'string' ? o['messageId'] : null,
     references,
   })
+
+  const event = replyNotification(outcome)
+  if (event) {
+    try {
+      after(() => notify(event))
+    } catch (err) {
+      log.warn('reply notification not scheduled', { error: err instanceof Error ? err.name : 'UnknownError' })
+    }
+  }
 
   // 200 either way. "This address is not a contact" is the ANSWER to a
   // webhook delivery, not a failure of it — a 4xx would make the provider

@@ -1,8 +1,12 @@
-import { NextResponse } from 'next/server'
+import { NextResponse, after } from 'next/server'
+import { and, eq } from 'drizzle-orm'
 import { assertCan } from '@agency/core'
-import { readProposal, setProposalStatus, type AgencyDb, type ProposalStatus } from '@agency/db/queries'
+import { readProposal, schema, setProposalStatus, type AgencyDb, type ProposalStatus } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
+import { log } from '@/lib/logger'
+import { notify } from '@/lib/slack'
+import { proposalAcceptedNotification } from './notification'
 
 /**
  * Record what happened to a proposal (PROMPT.md §8.6).
@@ -12,6 +16,11 @@ import { getDb } from '@/lib/db'
  * won; `declined` and `withdrawn` are the other two ways it ends. A decided
  * proposal is not reopened by this route: a buyer who accepted and then did
  * not sign is a new proposal, and its history stays legible.
+ *
+ * `accepted` also posts one Slack message when `SLACK_WEBHOOK_URL` is set,
+ * from `after()`, once the person who pressed the button has their answer.
+ * The company's domain is read inside that callback, so neither the read nor
+ * the post can change the status of a decision already written.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -64,5 +73,30 @@ export async function PATCH(
 
   const row = await setProposalStatus(db, { orgId: user.orgId, id, status: to, actor: user.id })
   if (!row) return NextResponse.json({ error: 'No such proposal.' }, { status: 404 })
+
+  if (row.status === 'accepted') {
+    const orgId = user.orgId
+    try {
+      after(async () => {
+        try {
+          const [company] = await db
+            .select({ domain: schema.companies.domain })
+            .from(schema.companies)
+            .where(and(eq(schema.companies.orgId, orgId), eq(schema.companies.id, row.companyId)))
+            .limit(1)
+          if (!company) return
+          const event = proposalAcceptedNotification({ orgId, row, companyDomain: company.domain })
+          if (event) await notify(event)
+        } catch (err) {
+          // Caught here, not left to `after()`: Next prints an escaping
+          // Error whole — message and cause — past the logger's redaction.
+          log.warn('proposal_accepted notification failed', { error: err instanceof Error ? err.name : 'UnknownError' })
+        }
+      })
+    } catch (err) {
+      log.warn('proposal_accepted notification not scheduled', { error: err instanceof Error ? err.name : 'UnknownError' })
+    }
+  }
+
   return NextResponse.json({ id, status: row.status, decidedAt: row.decidedAt ? row.decidedAt.toISOString() : null })
 }
