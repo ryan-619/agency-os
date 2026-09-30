@@ -68,8 +68,10 @@ const HOUR_MS = 3_600_000
 /**
  * The `digest` notification's fields, less `kind`, `orgId` and `worker`
  * (`apps/web/src/lib/slack-message.ts` owns the event; the worker's status
- * is the web's to read). Nothing here can hold a person: counts, refusal
- * codes, a dollar figure and company domains.
+ * is the web's to read). Counts, refusal codes, a dollar figure and
+ * company domains — no field can hold a name, an address or a body. The
+ * one domain that is not a company's, a free-mail lead's `<address>.inbound`
+ * row, may appear in `topRotting`; `slackMessage` never says it.
  */
 export interface DigestFacts {
   /** Tool calls parked on a person (unexpired) plus drafts awaiting approval — the /approvals page's two lists. */

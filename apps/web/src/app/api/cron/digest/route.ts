@@ -53,10 +53,29 @@ import { digestNotification, workerSilentNotification } from './notification'
  * events in `slack-message.ts` have no field for anything else, and a free-
  * mail lead's `<address>.inbound` row is called "a personal address" there.
  * The log line carries the route and the outcome and nothing else.
+ *
+ * ## What it answers
+ *
+ * 200 with each org's outcome — posted, not posted and why, or skipped
+ * because it already ran — once the work is done. A Slack failure is still
+ * a 200: the run did what it could and recorded it, and the
+ * `notification.failed` row carries Slack's own short reason. An org whose
+ * run threw, or that was not started for lack of time, makes the answer a
+ * 500 so the platform's cron log shows it.
  */
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
+
+/**
+ * What one org may take, worst case: its reads, two Slack posts at their
+ * three-second timeout, and the writes. An org is not STARTED with less than
+ * this left, because a function killed between the post and the COMMIT
+ * leaves a message in the channel and no row saying so — and the next
+ * delivery would send it again. An org passed over has no row, so a re-run
+ * picks it up.
+ */
+const ORG_BUDGET_MS = 15_000
 
 type Outcome =
   | { readonly posted: true; readonly workerSilent: boolean }
@@ -65,9 +84,11 @@ type Outcome =
 type OrgAnswer =
   | ({ readonly orgId: string } & Outcome)
   | { readonly orgId: string; readonly skipped: 'already_ran' }
+  | { readonly orgId: string; readonly notRun: 'out_of_time' }
   | { readonly orgId: string; readonly failed: string }
 
 export async function GET(request: Request): Promise<NextResponse> {
+  const started = Date.now()
   const check = cronRequest({
     authorization: request.headers.get('authorization'),
     secret: env().CRON_SECRET,
@@ -81,7 +102,8 @@ export async function GET(request: Request): Promise<NextResponse> {
   const db = getDb() as unknown as AgencyDb
   const now = new Date()
   const since = new Date(now.getTime() - DIGEST_WINDOW_HOURS * 3_600_000)
-  const slack = env().SLACK_WEBHOOK_URL ? { webhookUrl: env().SLACK_WEBHOOK_URL!, origin: env().AUTH_URL } : null
+  const webhookUrl = env().SLACK_WEBHOOK_URL
+  const slack = webhookUrl ? { webhookUrl, origin: env().AUTH_URL } : null
   const configured = deployment().worker
   const orgs: OrgAnswer[] = []
 
@@ -102,6 +124,10 @@ export async function GET(request: Request): Promise<NextResponse> {
   )
 
   for (const orgId of orgIds) {
+    if (Date.now() - started > maxDuration * 1000 - ORG_BUDGET_MS) {
+      orgs.push({ orgId, notRun: 'out_of_time' })
+      continue
+    }
     try {
       const run = await digestOnce(db, orgId, since, async (tx): Promise<Outcome> => {
         const facts = await digestFacts(tx, orgId, { now, staleDays: await staleDaysFor(tx, orgId) })
@@ -139,7 +165,7 @@ export async function GET(request: Request): Promise<NextResponse> {
     }
   }
 
-  const failed = orgs.some((o) => 'failed' in o)
+  const failed = orgs.some((o) => 'failed' in o || 'notRun' in o)
   const outcome = failed ? 'failed' : !slack ? 'no_slack' : orgs.some((o) => 'why' in o) ? 'slack_failed' : 'ok'
   if (outcome === 'ok' || outcome === 'no_slack') log.info('cron digest finished', { route: 'cron.digest', outcome })
   else if (outcome === 'slack_failed') log.warn('cron digest finished', { route: 'cron.digest', outcome })
