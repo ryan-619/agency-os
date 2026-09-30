@@ -41,17 +41,26 @@
  *    normalised — so no suppression row could ever have matched them. That is
  *    a refusal that needs a human, not a clear result.
  *
- * ## Two steps §8.4 does not name, and where they sit
+ * ## Three steps §8.4 does not name, and where they sit
  *
- * The order below is §8.4's with two additions, both after consent and
- * before the clock: a permanent BOUNCE (evidence that the address does not
- * work) and STALE EVIDENCE (§2.2: the findings the words quote are past
- * their re-verification deadline). Neither is a person asking to be left
- * alone, so neither may outrank suppression or a recorded refusal — the
- * reason logged for somebody who opted out must be the opt-out. And both
- * come before quiet hours, because the clock DEFERS a message and these do
- * not: a message held until morning would still bounce, and would still
- * quote something that is no longer known to be true.
+ * The order below is §8.4's with three additions, all after consent and
+ * before the clock: a PAUSE (the person replied, or a teammate is holding
+ * them — §8.4's "pauses the sequence"), STALE EVIDENCE (§2.2: the findings
+ * the words quote are past their re-verification deadline) and a permanent
+ * BOUNCE (evidence that the address does not work). None of them is a
+ * person asking to be left alone, so none may outrank suppression or a
+ * recorded refusal — the reason logged for somebody who opted out must be
+ * the opt-out. Among themselves, the two nobody may approve past come
+ * before the one a person resolves, so the reason reported is never one
+ * that reads as fixable while another that is not still stands. And all
+ * three come before quiet hours, because the clock DEFERS a message and
+ * these do not: a message held until morning would still be to somebody
+ * paused, would still quote something no longer known to be true, and
+ * would still bounce.
+ *
+ *   cold channel → unparseable → suppressed → consent → paused →
+ *   stale evidence → bounced → timezone / quiet hours → cap → campaign →
+ *   approval
  */
 
 import { normalisePhone, suppressionKeysFor, type SuppressionKind } from './normalise.js'
@@ -81,6 +90,7 @@ export type SendRefusalCode =
   | 'cold_channel_forbidden'
   | 'no_consent'
   | 'consent_revoked'
+  | 'paused'
   | 'stale_evidence'
   | 'quiet_hours'
   | 'unknown_timezone'
@@ -101,10 +111,11 @@ export interface SendRefusal {
    * True when a human could legitimately resolve this by deciding.
    *
    * False for the rules that no human may override: a suppression is someone's
-   * opt-out, a cold call is illegal, and a finding past its re-verification
-   * deadline is not known to be true however many people approve the words.
-   * Offering those to an approver would turn a policy into a habit of
-   * clicking yes.
+   * opt-out, a cold call is illegal, a paused person is lifted by a person
+   * deciding to (never by approving one message past it), and a finding past
+   * its re-verification deadline is not known to be true however many people
+   * approve the words. Offering those to an approver would turn a policy into
+   * a habit of clicking yes.
    */
   readonly humanCanResolve: boolean
 }
@@ -166,6 +177,25 @@ export interface SendFacts {
    * no", and the second is the one that must never be re-asked.
    */
   readonly consent: { readonly granted: boolean; readonly source: string } | null
+  /**
+   * The contact is paused (`contacts.paused_at`): they replied, a teammate
+   * is holding them, or an opt-out or an erasure could not be completed.
+   * Every campaign stops for them until a person lifts it — by answering
+   * the reply from /inbox, or resuming them on /contacts.
+   *
+   * Required, and its own fact rather than a stand-in for a revoked
+   * consent. It used to be modelled as one, so a teammate's hold was logged
+   * `consent_revoked` — the recipient's own no — and enrolment read it that
+   * way for ever after the hold was lifted. Found by review.
+   */
+  readonly paused: boolean
+  /**
+   * What paused them, as a CLASS (`pauseReasonClass`), for the refusal's
+   * sentence only — the decision does not read it. Never the reason's text:
+   * a teammate's reason can carry their address and the contact's words.
+   * Absent reads as `other`.
+   */
+  readonly pausedFor?: PauseReasonClass
   /** The recipient's IANA zone. Null means unknown, which is a refusal. */
   readonly recipientTimeZone: string | null
   /** Local wall-clock times, from the campaign. */
@@ -265,21 +295,15 @@ export function decideSend(facts: SendFacts): SendDecision {
     )
   }
 
-  // 2a. A permanent bounce, after consent. A person who declined — or who is
-  //     paused, which the caller models as a revoked consent — and whose
-  //     address ALSO bounced must be reported as the refusal, because that is
-  //     the one nobody may approve past: reported as `bounced` it read as
-  //     resolvable, so /approvals enabled Approve and the inbox resumed them.
-  //     Found by review. Before the clock, because a message held until
-  //     morning would bounce all the same.
-  if (facts.recipientBounced === true) {
-    return refuse(
-      'bounced',
-      'The last message to this address bounced permanently — the receiving server said it ' +
-        'does not accept mail for it. Nothing was sent. Correct the address on the contact; ' +
-        'changing it clears the mark. Approving does not.',
-      true,
-    )
+  // 2a. A paused contact, right after consent. A recorded refusal and a
+  //     suppression are the stronger statements and outrank it in the log;
+  //     a pause is not the person saying no to the channel, and must not be
+  //     logged as if it were — `consent_revoked` is what enrolment reads as
+  //     the recipient's own no. Nobody may approve past it: the pause ends
+  //     when a person decides it does (answering the reply, or resuming
+  //     them), and that decision is audited where it is made.
+  if (facts.paused) {
+    return refuse('paused', pausedSentence(facts.pausedFor ?? 'other'))
   }
 
   // 2b. Stale evidence (§2.2). The words quote findings that are past their
@@ -289,13 +313,33 @@ export function decideSend(facts: SendFacts): SendDecision {
   //     appearing in any outbound draft" is kept for a message nobody reads
   //     again — an auto-send row a deferral held for weeks. Before quiet
   //     hours, so a stale message is refused, never deferred to go stale
-  //     further.
+  //     further. Before the bounce, which a person CAN resolve: a stale draft
+  //     whose address also bounced read as "fix this first" with Approve
+  //     enabled, and flipped to a blocked stale_evidence once the address
+  //     was corrected. Found by review.
   if (facts.evidenceStale) {
     return refuse(
       'stale_evidence',
       'The findings this message quotes come from a scan past its re-verification deadline (§2.2), ' +
         'so they are no longer known to be true. Nothing was sent, and approving does not make ' +
         'them current. Re-scan the company, then draft the message again.',
+    )
+  }
+
+  // 2c. A permanent bounce, after every refusal nobody may approve past. A
+  //     person who declined, is paused or would be sent stale words, and
+  //     whose address ALSO bounced, must be reported as that refusal:
+  //     reported as `bounced` it read as resolvable, so /approvals enabled
+  //     Approve and the inbox resumed them. Found by review. Before the
+  //     clock, because a message held until morning would bounce all the
+  //     same.
+  if (facts.recipientBounced === true) {
+    return refuse(
+      'bounced',
+      'The last message to this address bounced permanently — the receiving server said it ' +
+        'does not accept mail for it. Nothing was sent. Correct the address on the contact; ' +
+        'changing it clears the mark. Approving does not.',
+      true,
     )
   }
 
@@ -366,6 +410,80 @@ export function decideSend(facts: SendFacts): SendDecision {
   }
 
   return { allowed: true, code: 'send_now' }
+}
+
+/**
+ * What paused a person, as a CLASS — the reason's text never leaves the
+ * contact row (§2.3). Derived from the shape each writer gives the reason:
+ *
+ *  - `replied`       `recordInboundReply`: exactly `replied <ISO instant>`
+ *  - `opt_out_not_recorded`  an opt-out whose suppression could not be
+ *                    written: a reply's, or a one-click unsubscribe's
+ *  - `manual`        the contacts route: `<why> (by <who>)`
+ *  - `erasure`       an erasure that could not finish
+ *  - `unsubscribed`  a one-click unsubscribe that was recorded
+ *  - `other`         anything else, or no reason at all
+ *
+ * `replied` is matched in full rather than by prefix, because a teammate's
+ * reason can begin with the word too ("replied on the phone (by …)") and
+ * only a pause a REPLY caused is one answering the reply may end. Pure, and
+ * here rather than beside the inbox, because the send path's own refusal
+ * words by it: `packages/db` re-exports it.
+ */
+export type PauseReasonClass = 'replied' | 'unsubscribed' | 'erasure' | 'manual' | 'opt_out_not_recorded' | 'other'
+
+const REPLY_PAUSE = /^replied \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/
+
+export function pauseReasonClass(reason: string | null | undefined): PauseReasonClass {
+  if (!reason) return 'other'
+  if (REPLY_PAUSE.test(reason)) return 'replied'
+  if (reason.startsWith('opt-out not recorded')) return 'opt_out_not_recorded'
+  if (/\(by [^()]*\)$/.test(reason)) return 'manual'
+  if (reason.startsWith('erasure ')) return 'erasure'
+  if (reason.startsWith('unsubscribed ')) return 'unsubscribed'
+  return 'other'
+}
+
+/**
+ * The `paused` refusal's sentence, by what paused them. Each says what lifts
+ * it — and an opt-out nobody could record, or an erasure that did not
+ * finish, is never "resume them": the fix there is to record the opt-out or
+ * finish the erasure, and resuming the person would be contacting somebody
+ * who asked not to be.
+ */
+function pausedSentence(pausedFor: PauseReasonClass): string {
+  switch (pausedFor) {
+    case 'replied':
+      return (
+        'This contact replied, and every campaign stops for them until a person answers the reply from /inbox ' +
+        '(which resumes them) or resumes them on /contacts. Nothing was sent, and approving does not lift a pause.'
+      )
+    case 'manual':
+      return (
+        'A teammate paused this contact; /contacts says why. Every campaign stops for them until a person resumes ' +
+        'them there. Nothing was sent, and approving does not lift a pause.'
+      )
+    case 'unsubscribed':
+      return (
+        'This contact unsubscribed and is paused. Nothing was sent, and approving does not lift a pause — a person ' +
+        'reads why on /contacts, and an unsubscribe is not something to undo.'
+      )
+    case 'opt_out_not_recorded':
+      return (
+        'This contact asked to stop and the opt-out could not be recorded, so there is no suppression row yet. ' +
+        'Nothing was sent, and approving does not lift a pause. Record the opt-out by hand on /suppressions.'
+      )
+    case 'erasure':
+      return (
+        'This contact asked to be erased and the erasure did not complete. Nothing was sent, and approving does ' +
+        'not lift a pause. Complete the erasure from their record on /contacts.'
+      )
+    case 'other':
+      return (
+        'This contact is paused. Nothing was sent, and approving does not lift a pause — a person reads why on ' +
+        '/contacts and resumes them there if that is right.'
+      )
+  }
 }
 
 /**

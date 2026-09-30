@@ -13,9 +13,9 @@
  */
 import { describe, it, expect } from 'vitest'
 import {
-  COLD_CHANNELS, OPT_IN_ONLY_CHANNELS, classifyReply, decideSend, isQuiet, localMinutes,
+  COLD_CHANNELS, OPT_IN_ONLY_CHANNELS, classifyReply, decideSend, isQuiet, localMinutes, pauseReasonClass,
   suppressionKeysFor,
-  type Channel, type SendFacts,
+  type Channel, type PauseReasonClass, type SendFacts,
 } from '../src/index.js'
 
 /** Midday UTC on a Tuesday, which is midday in London and 08:00 in New York. */
@@ -27,6 +27,7 @@ function facts(over: Partial<SendFacts> = {}): SendFacts {
     recipient: 'priya@rentman.io',
     suppressed: false,
     consent: null,
+    paused: false,
     evidenceStale: false,
     recipientTimeZone: 'Europe/London',
     quietStart: '21:00',
@@ -402,6 +403,94 @@ describe('§2.1 rule 4 — the daily cap', () => {
 })
 
 /**
+ * A paused contact (§8.4: a reply "pauses the sequence for that contact
+ * immediately"; a teammate may pause somebody by hand). It used to be
+ * modelled as a revoked consent, so every pause — a teammate's hold
+ * included — was logged `consent_revoked`, which enrolment then read as the
+ * person's own no and never drafted them again. Found by review. A pause is
+ * its own fact and its own code now: nobody approves past it, and a person
+ * lifts it — by answering the reply from /inbox or resuming them on
+ * /contacts — which is a decision that is audited where it is made.
+ */
+describe('a paused contact', () => {
+  it('is refused as paused, and nobody may approve past it', () => {
+    const d = decideSend(facts({ paused: true, pausedFor: 'manual' }))
+    expect(d.allowed).toBe(false)
+    if (d.allowed) return
+    expect(d.code).toBe('paused')
+    expect(d.humanCanResolve).toBe(false)
+    expect(d.reason).toMatch(/Nothing was sent/)
+    expect(d.reason).toMatch(/approving does not lift a pause/i)
+  })
+
+  it('changes nothing when the contact is not paused', () => {
+    expect(decideSend(facts({ paused: false }))).toEqual({ allowed: true, code: 'send_now' })
+  })
+
+  it('is not lifted by a person approving the words, nor by auto-send', () => {
+    for (const over of [{ autoSend: false, approvedByHuman: true }, { autoSend: true }]) {
+      const d = decideSend(facts({ paused: true, pausedFor: 'replied', ...over }))
+      expect(d.allowed).toBe(false)
+      if (!d.allowed) expect(d.code).toBe('paused')
+    }
+  })
+
+  /**
+   * A pause is not a refusal of the channel. A person with SMS consent
+   * GRANTED who is paused is refused as paused — before, the pause stood in
+   * for a revoked consent and read as a cold SMS.
+   */
+  it('is not read as a missing opt-in on an opt-in channel', () => {
+    const d = decideSend(
+      facts({ channel: 'sms', recipient: '+14155550100', consent: { granted: true, source: 'form' }, paused: true, pausedFor: 'manual' }),
+    )
+    expect(d.allowed).toBe(false)
+    if (!d.allowed) expect(d.code).toBe('paused')
+  })
+
+  /**
+   * The sentence names the pause's CLASS and what lifts it — never the
+   * reason's text, which can carry a teammate's address and the contact's
+   * words, and is logged nowhere. An opt-out the system could not record,
+   * and an erasure that did not finish, are never "resume them".
+   */
+  it('says what lifts each class of pause, and never suggests resuming an opt-out or an erasure', () => {
+    const say = (pausedFor: PauseReasonClass | undefined): string => {
+      const d = decideSend(facts({ paused: true, pausedFor }))
+      if (d.allowed) throw new Error('allowed')
+      expect(d.code).toBe('paused')
+      expect(d.reason).toMatch(/Nothing was sent/)
+      expect(d.reason).toMatch(/[.]$/)
+      return d.reason
+    }
+    expect(say('replied')).toMatch(/replied/)
+    expect(say('replied')).toMatch(/\/inbox/)
+    expect(say('manual')).toMatch(/teammate/)
+    expect(say('manual')).toMatch(/\/contacts/)
+    expect(say('manual')).not.toMatch(/\/inbox/)
+    for (const cls of ['opt_out_not_recorded', 'erasure'] as const) {
+      expect(say(cls), cls).not.toMatch(/resum/i)
+    }
+    expect(say('opt_out_not_recorded')).toMatch(/record the opt-out by hand/i)
+    expect(say('erasure')).toMatch(/complete the erasure/i)
+    expect(say('unsubscribed')).toMatch(/unsubscribed/)
+    // No class at all reads as the careful generic sentence.
+    expect(say(undefined)).toMatch(/\/contacts/)
+    expect(say('other')).toBe(say(undefined))
+  })
+
+  it('classes each writer’s reason by its shape', () => {
+    expect(pauseReasonClass('replied 2026-09-15T12:00:00.000Z')).toBe('replied')
+    expect(pauseReasonClass('replied on the phone (by sam@agency.test)')).toBe('manual')
+    expect(pauseReasonClass('opt-out not recorded: reply 2026-09-15T12:00:00.000Z')).toBe('opt_out_not_recorded')
+    expect(pauseReasonClass('erasure requested 2026-09-15; not completed (Error)')).toBe('erasure')
+    expect(pauseReasonClass('unsubscribed 2026-09-15T11:00:00.000Z')).toBe('unsubscribed')
+    expect(pauseReasonClass('')).toBe('other')
+    expect(pauseReasonClass(null)).toBe('other')
+  })
+})
+
+/**
  * A permanent bounce is evidence about an ADDRESS (0018's
  * `contacts.email_bounced_at`, read from a delivery report that named a
  * message this system sent). It is not a suppression — a typo is not a
@@ -554,6 +643,7 @@ describe('§2.4 — the approval gate is the default', () => {
     ['suppression', { suppressed: true }, 'suppressed'],
     ['a bounced address', { recipientBounced: true }, 'bounced'],
     ['a declined channel', { consent: { granted: false, source: 'reply' } }, 'consent_revoked'],
+    ['a paused contact', { paused: true, pausedFor: 'manual' as const }, 'paused'],
     ['stale evidence', { evidenceStale: true }, 'stale_evidence'],
     ['quiet hours', { now: new Date('2026-09-15T22:30:00.000Z') }, 'quiet_hours'],
     ['the daily cap', { sentToday: 25 }, 'daily_cap'],
@@ -574,6 +664,7 @@ describe('§2.4 — the approval gate is the default', () => {
     ['suppression', { suppressed: true }, 'suppressed'],
     ['a bounced address', { recipientBounced: true }, 'bounced'],
     ['a declined channel', { consent: { granted: false, source: 'reply' } }, 'consent_revoked'],
+    ['a paused contact', { paused: true, pausedFor: 'manual' as const }, 'paused'],
     ['stale evidence', { evidenceStale: true }, 'stale_evidence'],
     ['quiet hours', { now: new Date('2026-09-15T22:30:00.000Z') }, 'quiet_hours'],
     ['the daily cap', { sentToday: 25 }, 'daily_cap'],
@@ -598,6 +689,7 @@ describe('the ORDER the rules fire in', () => {
         suppressed: true,
         recipientBounced: true,
         evidenceStale: true,
+        paused: true,
         consent: { granted: false, source: 'reply' },
         now: new Date('2026-09-15T23:00:00.000Z'),
         sentToday: 99,
@@ -609,13 +701,14 @@ describe('the ORDER the rules fire in', () => {
   })
 
   /**
-   * The bounce sits after BOTH refusals about a person: suppression, and a
-   * recorded refusal (or a pause, which the sender models as one). Those are
-   * the reasons nobody may approve past, and they must be what is logged —
-   * reported as `bounced`, a declined contact read as resolvable, so
-   * /approvals enabled Approve and the inbox resumed them. Found by review.
-   * Before the clock, because a message held until morning would bounce all
-   * the same.
+   * The bounce sits after every refusal nobody may approve past:
+   * suppression, a recorded refusal, a pause and stale evidence. Those must
+   * be what is logged — reported as `bounced`, a declined contact read as
+   * resolvable, so /approvals enabled Approve and the inbox resumed them;
+   * and a stale draft whose address bounced read as "fix this first", then
+   * flipped to a blocked stale_evidence once the address was corrected.
+   * Both found by review. Before the clock, because a message held until
+   * morning would bounce all the same.
    */
   it('reports suppression before a bounce', () => {
     const d = decideSend(facts({ suppressed: true, recipientBounced: true }))
@@ -631,11 +724,38 @@ describe('the ORDER the rules fire in', () => {
     expect(d.humanCanResolve).toBe(false)
   })
 
-  it('reports a bounce before stale evidence, quiet hours, the cap, the campaign and approval', () => {
+  it('reports a recorded refusal before a pause: refused AND paused is consent_revoked', () => {
+    const d = decideSend(facts({ consent: { granted: false, source: 'said no on a call' }, paused: true, pausedFor: 'replied' }))
+    expect(d.allowed).toBe(false)
+    if (!d.allowed) expect(d.code).toBe('consent_revoked')
+  })
+
+  it('reports suppression before a pause', () => {
+    const d = decideSend(facts({ suppressed: true, paused: true, pausedFor: 'unsubscribed' }))
+    expect(d.allowed).toBe(false)
+    if (!d.allowed) expect(d.code).toBe('suppressed')
+  })
+
+  it('reports a pause before stale evidence and a bounce: paused AND stale AND bounced is paused', () => {
+    const d = decideSend(facts({ paused: true, pausedFor: 'manual', evidenceStale: true, recipientBounced: true }))
+    expect(d.allowed).toBe(false)
+    if (d.allowed) return
+    expect(d.code).toBe('paused')
+    expect(d.humanCanResolve).toBe(false)
+  })
+
+  it('reports stale evidence before a bounce: stale AND bounced is stale_evidence, which nobody may approve past', () => {
+    const d = decideSend(facts({ evidenceStale: true, recipientBounced: true }))
+    expect(d.allowed).toBe(false)
+    if (d.allowed) return
+    expect(d.code).toBe('stale_evidence')
+    expect(d.humanCanResolve).toBe(false)
+  })
+
+  it('reports a bounce before quiet hours, the cap, the campaign and approval', () => {
     const d = decideSend(
       facts({
         recipientBounced: true,
-        evidenceStale: true,
         now: new Date('2026-09-15T23:00:00.000Z'),
         sentToday: 99,
         campaignStatus: 'paused',
@@ -680,8 +800,9 @@ describe('the ORDER the rules fire in', () => {
       [{ recipient: 'nope' }, 'unparseable_recipient'],
       [{ suppressed: true }, 'suppressed'],
       [{ consent: { granted: false, source: 'reply' } }, 'consent_revoked'],
-      [{ recipientBounced: true }, 'bounced'],
+      [{ paused: true, pausedFor: 'manual' }, 'paused'],
       [{ evidenceStale: true }, 'stale_evidence'],
+      [{ recipientBounced: true }, 'bounced'],
       [{ recipientTimeZone: null }, 'unknown_timezone'],
       [{ now: midnightInLondon }, 'quiet_hours'],
       [{ sentToday: 99 }, 'daily_cap'],
@@ -741,6 +862,7 @@ describe('what a refusal says', () => {
       facts({ suppressed: true }),
       facts({ recipientBounced: true }),
       facts({ consent: { granted: false, source: 'reply' } }),
+      facts({ paused: true, pausedFor: 'manual' }),
       facts({ evidenceStale: true }),
       facts({ recipientTimeZone: null }),
       facts({ now: new Date('2026-09-15T23:00:00.000Z') }),
@@ -760,10 +882,11 @@ describe('what a refusal says', () => {
   })
 
   it('says plainly which refusals nobody can approve past', () => {
-    const noOverride = ['suppressed', 'consent_revoked', 'stale_evidence', 'cold_channel_forbidden']
+    const noOverride = ['suppressed', 'consent_revoked', 'paused', 'stale_evidence', 'cold_channel_forbidden']
     for (const f of [
       facts({ suppressed: true }),
       facts({ consent: { granted: false, source: 'reply' } }),
+      facts({ paused: true, pausedFor: 'replied' }),
       facts({ evidenceStale: true }),
       facts({ channel: 'voice', recipient: '+14155550100' }),
     ]) {
