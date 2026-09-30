@@ -42,9 +42,12 @@
  * keys is on the list, gets `{ ok: false, reason: 'opted_out' }`; a person who
  * has a recorded refusal of the channel gets `consent_refused`. A person with
  * an opt-out the system FAILED to record — an unsubscribe, an erasure or a
- * reply whose suppression could not be written, on the audit log as such —
- * gets `opt_out_not_recorded`, however long ago it was: nothing else stands
- * between them and the answer, because no suppression row exists. The
+ * reply whose suppression could not be written, on the audit log as such, or
+ * an earlier reply of theirs read as an opt-out that no suppression row
+ * matches today (the compliance page's own check, which survives a fault
+ * that failed the audit row too) — gets `opt_out_not_recorded`, however long
+ * ago it was: nothing else stands between them and the answer, because no
+ * suppression row exists. The
  * contact is NOT resumed on any of these paths. The send path would refuse
  * most of them anyway, but refusing HERE keeps the message off the
  * approver's screen, and keeps the pause exactly where it was.
@@ -578,8 +581,9 @@ export type ReplyDraftRefusal =
  * from `ReplyDraftRefusal`, whose statuses and words the web app keeps.
  *
  * - `paused_for_another_reason` the person is paused, and not by a reply.
- * - `opt_out_not_recorded`      somebody asked to stop and the system could
- *                               not record it (the audit log says so).
+ * - `opt_out_not_recorded`      somebody asked to stop and no suppression
+ *                               row records it (the audit log says so, or
+ *                               an opted_out reply matches none).
  */
 export type ReplyDraftHold = 'paused_for_another_reason' | 'opt_out_not_recorded'
 
@@ -614,9 +618,10 @@ class DraftRefused extends Error {
 const STOPPED = 'This person asked to stop. The suppression row is what enforces it; do not answer.'
 
 const NOT_RECORDED =
-  'This person asked to stop — by unsubscribing, asking to be erased, or in a reply — and the system could not ' +
-  'record it: there is no suppression row, and the audit log says so. Record the opt-out by hand on ' +
-  '/suppressions (or finish the erasure). Answering them is not the fix. Nothing was drafted and nobody was resumed.'
+  'This person asked to stop — by unsubscribing, asking to be erased, or in a reply — and there is no suppression ' +
+  'row for it: the audit log says it could not be recorded, or a reply of theirs read as an opt-out matches no ' +
+  'suppression row today. Record the opt-out by hand on /suppressions (or finish the erasure). Answering them is ' +
+  'not the fix. Nothing was drafted and nobody was resumed.'
 
 const PAUSED_ELSEWHERE =
   'This person is paused for another reason, not by this reply. Resume them on /contacts first, if that is right — ' +
