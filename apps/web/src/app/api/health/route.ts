@@ -7,7 +7,9 @@ import {
   parseAppliedMigration,
 } from '@agency/db/schema-version'
 import type { SchemaAgreement } from '@agency/db/schema-version'
+import type { AgencyDb } from '@agency/db/queries'
 import { getDb } from '@/lib/db'
+import { workerStatus, type WorkerStatus } from '@/lib/worker-status'
 
 /**
  * Liveness + readiness for the web container.
@@ -41,6 +43,22 @@ import { getDb } from '@/lib/db'
  *
  * `?strict=1` asks the second question and answers it with the status code,
  * for a deploy gate or a human. Nothing automated points at it by default.
+ *
+ * ── The worker, reported the same way ──────────────────────────────────────
+ *
+ * `worker` is the newest heartbeat any worker has written to this database:
+ * when, how long ago, and what it said it was doing. It exists because Fly
+ * scales a machine to zero and a worker that was scaled away answers its own
+ * `/readyz` fine the moment something wakes it — so "is the tick running?"
+ * had no answer anywhere except a queue somebody noticed had stopped moving.
+ *
+ * It never changes this endpoint's status or code, not even under strict.
+ * Strict asks whether THIS deployment agrees with its database; whether a
+ * different process is alive is a fact to read, and a web container
+ * restarted because a worker elsewhere went quiet would serve nothing and
+ * fix nothing. A heartbeat that cannot be read — 0018 not applied, most
+ * likely, which `schema` above will already be saying — is `worker: null`
+ * with the error's class, never a 5xx.
  */
 export const dynamic = 'force-dynamic'
 export const revalidate = 0
@@ -88,6 +106,24 @@ async function appliedMigration(): Promise<string | null> {
   }
 }
 
+/** `WorkerStatus` as JSON: the instant as an ISO string. */
+type WorkerReport = Omit<WorkerStatus, 'lastSeenAt'> & { lastSeenAt: string | null }
+
+/**
+ * The worker's heartbeat, or null with the reason's class. Swallowed here and
+ * not in the outer handler, because the outer handler's answer is 503 and a
+ * missing heartbeat table is not a reason for this process to look dead.
+ */
+async function workerReport(now: Date): Promise<{ worker: WorkerReport | null; workerError?: string }> {
+  try {
+    const s = await workerStatus(getDb() as unknown as AgencyDb, now)
+    return { worker: { ...s, lastSeenAt: s.lastSeenAt?.toISOString() ?? null } }
+  } catch (err) {
+    // The class only: a driver error can carry the DSN (§2.3).
+    return { worker: null, workerError: err instanceof Error ? err.name : 'UnknownError' }
+  }
+}
+
 export async function GET(request: Request): Promise<NextResponse> {
   const startedAt = Date.now()
   const strict = new URL(request.url).searchParams.get('strict') === '1'
@@ -109,12 +145,15 @@ export async function GET(request: Request): Promise<NextResponse> {
     // passes through this state every time.
     const disagrees = state === 'behind' || state === 'unknown'
 
+    const worker = await workerReport(new Date())
+
     return NextResponse.json(
       {
         status: disagrees ? 'degraded' : 'ok',
         service: 'web',
         database: 'ok',
         schema,
+        ...worker,
         latencyMs: Date.now() - startedAt,
       },
       { status: strict && disagrees ? 503 : 200 },
@@ -128,6 +167,9 @@ export async function GET(request: Request): Promise<NextResponse> {
         service: 'web',
         database: 'unreachable',
         error: err instanceof Error ? err.name : 'UnknownError',
+        // Present on every answer, and null is one: with no database there
+        // is no heartbeat to read.
+        worker: null,
       },
       { status: 503 },
     )
