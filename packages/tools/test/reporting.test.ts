@@ -355,6 +355,33 @@ describe('the reporting tools', () => {
       expect(audited).toEqual([{ action: 'agent.search_crm', detail: { sections: ['contacts'], returned: 1, truncated: false } }])
     })
 
+    /**
+     * The shape admits `[]`, and `?? SEARCH_SECTION_NAMES` does not replace
+     * it: an owner asking with an empty list used to be told "The person you
+     * are helping cannot read ." — a permission refusal for nothing refused.
+     */
+    it('reads an empty list of sections as all of them, never as a refusal', async () => {
+      await db.insert(schema.contacts).values({ orgId, companyId, email: 'kestrel@rentman.io', firstName: 'Kestrel' })
+      const out = await run(searchCrm, { query: 'rentman', sections: [] })
+      if (!out.ok) throw new Error(`${out.code}: ${out.message}`)
+      const hits = hitsOf(out.data)
+      expect(hits).toContainEqual(expect.objectContaining({ kind: 'company', domain: 'rentman.io' }))
+      expect(hits).toContainEqual(expect.objectContaining({ kind: 'contact', domain: 'rentman.io' }))
+      expect(out.summary).toContain('Searched companies, contacts, deals, campaigns, meetings, proposals, touches.')
+      expect(out.summary).not.toContain('not permitted')
+      expect(audited[0]?.detail).toMatchObject({
+        sections: ['companies', 'contacts', 'deals', 'campaigns', 'meetings', 'proposals', 'touches'],
+      })
+    })
+
+    it('still refuses a role that may read nothing, with a sentence rather than an empty list', async () => {
+      const out = await run(searchCrm, { query: 'rentman', sections: [] }, stranger())
+      expect(out).toMatchObject({ ok: false, code: 'not_permitted' })
+      if (out.ok) return
+      expect(out.message).not.toMatch(/read \.$/)
+      expect(audited).toEqual([])
+    })
+
     it('does not audit the query, which is somebody’s words', async () => {
       await run(searchCrm, { query: 'Priya Shah' })
       expect(JSON.stringify(audited)).not.toContain('Priya')

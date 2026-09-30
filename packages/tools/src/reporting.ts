@@ -496,7 +496,7 @@ const searchCrmShape = {
   sections: z
     .array(z.enum(['companies', 'contacts', 'deals', 'campaigns', 'meetings', 'proposals', 'touches']))
     .optional()
-    .describe('Which kinds of record to search. Default: all of them.'),
+    .describe('Which kinds of record to search. Omitted or empty: all of them.'),
 }
 
 /** A hit's company, from the link the search module built — the domain `get_company` takes. */
@@ -522,7 +522,10 @@ export const searchCrm: AgencyToolSpec<typeof searchCrmShape> = {
     // Asking for a section narrows it; it cannot open one `can()` closed.
     const allowed = searchSectionsFor(ctx.principal)
     if (!allowed) return fail('not_permitted', 'The person you are helping cannot search the CRM.')
-    const asked = new Set<SearchSectionName>(input.sections ?? SEARCH_SECTION_NAMES)
+    // An EMPTY list is read as an omitted one. The shape admits `[]`, and
+    // `??` does not replace it, so it used to search nothing and then answer
+    // "cannot read ." — telling the model an owner may not search the CRM.
+    const asked = new Set<SearchSectionName>(input.sections?.length ? input.sections : SEARCH_SECTION_NAMES)
     const on = (s: SearchSectionName): boolean => asked.has(s) && allowed[s]
     const sections: SearchSections = {
       companies: on('companies'),
@@ -536,7 +539,9 @@ export const searchCrm: AgencyToolSpec<typeof searchCrmShape> = {
     }
     const searched = SEARCH_SECTION_NAMES.filter(on)
     const refused = [...asked].filter((s) => !allowed[s])
-    if (searched.length === 0) {
+    // A refusal names what was refused; with `asked` never empty, nothing
+    // searched means everything asked for was refused.
+    if (searched.length === 0 && refused.length > 0) {
       return fail('not_permitted', `The person you are helping cannot read ${refused.join(', ')}.`)
     }
 
