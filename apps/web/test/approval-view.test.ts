@@ -12,8 +12,8 @@
 import type { SendRefusalCode } from '@agency/core'
 import { describe, expect, it } from 'vitest'
 import {
-  APPROVE_DOES_NOT_SEND, DEFERRED_CODES, EVIDENCE_LINES_SHOWN, MISSING_EVIDENCE_NOTE, OTHER_CAMPAIGN_NOTE,
-  STALE_EVIDENCE_NOTE,
+  APPROVE_DOES_NOT_SEND, DEFERRED_CODES, EVIDENCE_LINES_SHOWN, MISSING_EVIDENCE_NOTE, NO_WORKER_FOOTNOTE,
+  OTHER_CAMPAIGN_NOTE, STALE_EVIDENCE_NOTE,
   addressedByLabel, addressedByOf, approvability, approveBlock, approveFootnote, campaignToCheck, candidateLine,
   checkedUnderLabel, decisionView, evidenceHeading, evidenceLine, evidenceNote, keyAction, nextFocus,
   uncheckedDecision,
@@ -227,9 +227,10 @@ describe('approving does not send', () => {
     expect(APPROVE_DOES_NOT_SEND).toBe('Approving does not send. The worker re-checks every rule at the moment of sending.')
   })
 
-  it('carries the deployment note instead when nothing will send', () => {
+  it('does not promise a worker the deployment does not have', () => {
     const note = 'No agent worker is connected to this deployment.'
-    expect(approveFootnote(note)).toBe(`Approving does not send. ${note}`)
+    expect(approveFootnote(note)).toBe(NO_WORKER_FOOTNOTE)
+    expect(NO_WORKER_FOOTNOTE.startsWith('Approving does not send')).toBe(true)
     expect(approveFootnote(note)).not.toContain('The worker re-checks')
   })
 })

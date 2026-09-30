@@ -148,8 +148,8 @@ export function campaignToCheck(
 export function checkedUnderLabel(checked: CheckedUnder | null, channel: string): string {
   if (checked === null) return `Not checked: there is no ${channel} campaign to check against.`
   return checked.own
-    ? `Checked just now under this draft's campaign, ${checked.name}.`
-    : `Checked just now under ${checked.name}, the first ${channel} campaign — the draft has none of its own yet.`
+    ? `Checked when this page loaded, under this draft's campaign, ${checked.name}.`
+    : `Checked when this page loaded, under ${checked.name} — the first ${channel} campaign; the draft has none of its own yet.`
 }
 
 /**
@@ -271,12 +271,17 @@ export function evidenceHeading(evidence: DraftEvidence): string {
 
 export const APPROVE_DOES_NOT_SEND = 'Approving does not send. The worker re-checks every rule at the moment of sending.'
 
+export const NO_WORKER_FOOTNOTE =
+  'Approving does not send, and nothing on this deployment will until a worker is connected — ' +
+  'every rule is checked again at that moment, not now.'
+
 /**
- * The line beside Approve. With no worker, `nothingWillSendNote()` is the
- * truth and the worker sentence is not, so the note replaces it.
+ * The line beside Approve. With no worker, "the worker re-checks" describes
+ * something that is not there, so the line says what is: the queue shows
+ * `nothingWillSendNote()` once, above the cards, and each card says this.
  */
 export function approveFootnote(noSenderNote: string | null): string {
-  return noSenderNote ? `Approving does not send. ${noSenderNote}` : APPROVE_DOES_NOT_SEND
+  return noSenderNote ? NO_WORKER_FOOTNOTE : APPROVE_DOES_NOT_SEND
 }
 
 // ---------------------------------------------------------------------------
