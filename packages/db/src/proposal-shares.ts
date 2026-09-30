@@ -53,7 +53,7 @@
  * person writes, from their own mail.
  */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
-import { and, desc, eq, gt, isNull, sql } from 'drizzle-orm'
+import { and, desc, eq, gt, isNull, ne, sql } from 'drizzle-orm'
 import { DEFAULT_STALE_AFTER_DAYS, isStale, parseIcpDefinition } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
@@ -144,8 +144,16 @@ async function scanRanAt(db: AgencyDb, orgId: string, scanId: string): Promise<D
  * generated from — the rule `quotableFindings` applies to an outbound draft:
  * only the most recent successful scan is quoted. A newer scan that did not
  * reach the site observed nothing and supersedes nothing.
+ *
+ * Compared in SQL against the STORED `ran_at` of the proposal's own scan, and
+ * never against that value read back into JavaScript. `scans.ran_at` is
+ * `DEFAULT now()`, which a real Postgres stores to the microsecond, and a
+ * `Date` keeps milliseconds: `ran_at > <the same instant, truncated>` matched
+ * the proposal's own scan, so every proposal was superseded by itself — no
+ * link could be minted, and every live one read "being re-verified". The
+ * scan itself is excluded by id as well, so an equal instant is never newer.
  */
-async function scanSuperseded(db: AgencyDb, orgId: string, companyId: string, ranAt: Date): Promise<boolean> {
+async function scanSuperseded(db: AgencyDb, orgId: string, companyId: string, scanId: string): Promise<boolean> {
   const [newer] = await db
     .select({ id: schema.scans.id })
     .from(schema.scans)
@@ -153,7 +161,8 @@ async function scanSuperseded(db: AgencyDb, orgId: string, companyId: string, ra
       eq(schema.scans.orgId, orgId),
       eq(schema.scans.companyId, companyId),
       eq(schema.scans.ok, true),
-      gt(schema.scans.ranAt, ranAt),
+      ne(schema.scans.id, scanId),
+      sql`${schema.scans.ranAt} > (SELECT own.ran_at FROM scans own WHERE own.id = ${scanId}::uuid AND own.org_id = ${orgId}::uuid)`,
     ))
     .limit(1)
   return newer !== undefined
@@ -162,16 +171,16 @@ async function scanSuperseded(db: AgencyDb, orgId: string, companyId: string, ra
 /**
  * Whether a proposal's evidence has been superseded by a newer successful
  * scan — for the team's proposal page, so the Create button can say why
- * before it is pressed. False for an unknown proposal.
+ * before it is pressed, and each listed link can say what its buyer sees.
+ * False for an unknown proposal.
  */
 export async function shareEvidenceSuperseded(db: AgencyDb, orgId: string, proposalId: string): Promise<boolean> {
   const [row] = await db
-    .select({ companyId: schema.proposals.companyId, ranAt: schema.scans.ranAt })
+    .select({ companyId: schema.proposals.companyId, scanId: schema.proposals.scanId })
     .from(schema.proposals)
-    .innerJoin(schema.scans, and(eq(schema.scans.id, schema.proposals.scanId), eq(schema.scans.orgId, orgId)))
     .where(and(eq(schema.proposals.orgId, orgId), eq(schema.proposals.id, proposalId)))
     .limit(1)
-  return row ? scanSuperseded(db, orgId, row.companyId, row.ranAt) : false
+  return row ? scanSuperseded(db, orgId, row.companyId, row.scanId) : false
 }
 
 /**
@@ -269,7 +278,7 @@ export async function shareMint(
         'The evidence under this proposal has aged out: re-verify before it appears in anything outbound (§2.2). Re-scan the company and generate a fresh proposal; no link was created.',
     }
   }
-  if (await scanSuperseded(db, args.orgId, proposal.companyId, ranAt!)) {
+  if (await scanSuperseded(db, args.orgId, proposal.companyId, proposal.scanId)) {
     return {
       ok: false,
       reason: 'superseded',
@@ -464,7 +473,7 @@ export async function shareReadByToken(db: AgencyDb, token: string, now: Date = 
   if (
     !ranAt ||
     isStale(ranAt, await staleAfterDaysFor(db, row.orgId), now) ||
-    (await scanSuperseded(db, row.orgId, proposal.companyId, ranAt))
+    (await scanSuperseded(db, row.orgId, proposal.companyId, proposal.scanId))
   ) {
     return { state: 'reverifying', org: { name: org.name } }
   }
@@ -570,7 +579,7 @@ export async function shareAccept(
       if (
         !ranAt ||
         isStale(ranAt, await staleAfterDaysFor(txDb, row.orgId), now) ||
-        (await scanSuperseded(txDb, row.orgId, proposal.companyId, ranAt))
+        (await scanSuperseded(txDb, row.orgId, proposal.companyId, proposal.scanId))
       ) {
         throw new Refused('reverifying')
       }

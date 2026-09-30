@@ -490,6 +490,84 @@ describe('proposal share links', () => {
     })
   })
 
+  // scans.ran_at is `DEFAULT now()`, and a real Postgres stores it to the
+  // MICROSECOND; a JS Date holds milliseconds. Comparing the proposal's own
+  // ran_at, read back as a Date, against the stored column made the scan
+  // newer than itself — every proposal was "superseded" by its own scan in
+  // production, so no link could be minted, read or accepted. The fixture
+  // above stores whole milliseconds, which is exactly why no test saw it.
+  describe('a ran_at stored to the microsecond, as Postgres stores now()', () => {
+    const subMillisecond = async () => {
+      await test.pg.query(`UPDATE scans SET ran_at = ran_at + interval '321 microseconds' WHERE company_id = $1`, [companyId])
+      const { rows } = await test.pg.query<{ micros: string }>(
+        `SELECT to_char(ran_at AT TIME ZONE 'UTC', 'US') AS micros FROM scans WHERE company_id = $1`, [companyId],
+      )
+      // The premise, checked rather than assumed: a sub-millisecond part is stored.
+      expect(rows.map((r) => r.micros)).toEqual(['000321'])
+    }
+    /** A later scan, `micros` after the proposal's own, written in SQL so no Date rounds it. */
+    const rescanAfter = async (micros: number, ok = true) => {
+      await test.pg.query(
+        `INSERT INTO scans (org_id, company_id, ran_at, ok, error)
+           SELECT org_id, company_id, ran_at + make_interval(secs => $2::double precision / 1000000), $3, $4
+             FROM scans WHERE company_id = $1 ORDER BY ran_at DESC LIMIT 1`,
+        [companyId, micros, ok, ok ? null : 'TimeoutError'],
+      )
+    }
+
+    it('is not superseded by its own scan: mint, read and accept all work', async () => {
+      await subMillisecond()
+      await markSent()
+      expect(await shareEvidenceSuperseded(db, orgId, proposalId)).toBe(false)
+      const { token } = await minted()
+      expect(await shareReadByToken(db, token, at(3))).toMatchObject({ state: 'open' })
+      expect(await shareAccept(db, { token, acceptedByName: 'Priya Shah', now: at(4) })).toMatchObject({ ok: true })
+      expect((await readProposal(db, orgId, proposalId))!.status).toBe('accepted')
+    })
+
+    it('a link minted before the evidence gained its microseconds still reads and accepts', async () => {
+      await markSent()
+      const { token } = await minted()
+      await subMillisecond()
+      expect(await shareReadByToken(db, token, at(3))).toMatchObject({ state: 'open' })
+      expect((await shareAccept(db, { token, acceptedByName: 'Priya Shah', now: at(4) })).ok).toBe(true)
+    })
+
+    it('is still superseded by a genuinely newer successful scan — even one inside the same millisecond', async () => {
+      await subMillisecond()
+      await markSent()
+      const { token } = await minted()
+      // 333µs later: .000654 against .000321 — the same JS millisecond, a
+      // later instant to Postgres, and so a later observation of the site.
+      await rescanAfter(333)
+      expect(await shareEvidenceSuperseded(db, orgId, proposalId)).toBe(true)
+      expect(await mint({ now: at(3) })).toMatchObject({ ok: false, reason: 'superseded' })
+      expect(await shareReadByToken(db, token, at(3))).toEqual({ state: 'reverifying', org: { name: 'Northwind Security' } })
+      expect(await shareAccept(db, { token, acceptedByName: 'Priya Shah', now: at(4) })).toEqual({
+        ok: false, reason: 'reverifying', status: 410,
+      })
+    })
+
+    it('is not superseded by a newer scan that never reached the site', async () => {
+      await subMillisecond()
+      await markSent()
+      await rescanAfter(333, false)
+      expect(await shareEvidenceSuperseded(db, orgId, proposalId)).toBe(false)
+      expect((await mint()).ok).toBe(true)
+    })
+
+    it('is not superseded by an OLDER successful scan', async () => {
+      await subMillisecond()
+      await markSent()
+      await test.pg.query(
+        `INSERT INTO scans (org_id, company_id, ran_at, ok) SELECT org_id, company_id, ran_at - interval '1 microsecond', true FROM scans WHERE company_id = $1`,
+        [companyId],
+      )
+      expect(await shareEvidenceSuperseded(db, orgId, proposalId)).toBe(false)
+      expect((await mint()).ok).toBe(true)
+    })
+  })
+
   describe('the team’s side', () => {
     it('lists every link newest first, and never the hash', async () => {
       await markSent()
