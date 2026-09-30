@@ -6,7 +6,8 @@
  * back: the record existed and nobody could see it. These are its readers —
  * for /audit, and for any page that wants one entity's history. Nothing here
  * writes; `appendAudit` in approvals.ts is the one writer, and 0007's trigger
- * makes the table append-only underneath both.
+ * makes the table append-only underneath both. (The two suppression entry
+ * builders at the bottom only BUILD a row for it — see why there.)
  *
  * Four things a reader of this table has to get right, each of which looks
  * fine and is not:
@@ -34,9 +35,14 @@
  */
 import { and, desc, eq, inArray, like, or, sql, type SQL } from 'drizzle-orm'
 import * as schema from './schema.js'
+import type { appendAudit } from './approvals.js'
+import type { SuppressionRow } from './campaigns.js'
 import type { AgencyDb } from './repository.js'
 
 export type AuditRow = typeof schema.auditLog.$inferSelect
+
+/** What `appendAudit` takes. */
+export type AuditEntry = Parameters<typeof appendAudit>[1]
 
 /** A page is bounded: nothing prunes this table, so "all of it" is not a page. */
 export const AUDIT_PAGE_MAX = 200
@@ -308,4 +314,66 @@ export async function auditResolveActors(
     .where(and(eq(schema.users.orgId, orgId), inArray(schema.users.id, ids)))
   for (const u of rows) out.set(u.id, { email: u.email, name: u.name, revoked: u.revokedAt !== null })
   return out
+}
+
+/*
+ * The suppression routes' audit entries.
+ *
+ * They are built here, not inline in the routes, because the inline version
+ * was wrong for as long as it existed and nothing could see it: both routes
+ * passed the normalised address as `subjectId`, `audit_log.subject_id` is a
+ * uuid, and Postgres refused every insert — behind the `.catch(() => {})`
+ * that correctly stops an audit failure from undoing the decision. So no
+ * suppression was ever added to or removed from the list on the record,
+ * including the removals, which are the one write in this area that means
+ * contacting somebody who asked not to be. `suppression-audit.test.ts` runs
+ * THESE through `appendAudit` against a real engine, which is what makes it
+ * a test of the routes rather than of a copy of them.
+ *
+ * The value is in `detail`. The audience is the same one that can read the
+ * suppression list itself (`audit:read` and the list are both every member),
+ * and for a removal the audit row is the only place the value survives.
+ */
+
+/** A person added (or re-added) a value on the suppressions page. */
+export function auditSuppressionAdded(args: {
+  readonly orgId: string
+  readonly actor: string
+  readonly alreadyPresent: boolean
+  readonly kind: string
+  /** The NORMALISED value `addSuppression` stored — never what was typed. */
+  readonly value: string
+  readonly reason: string
+}): AuditEntry {
+  return {
+    orgId: args.orgId,
+    actor: args.actor,
+    action: args.alreadyPresent ? 'suppression.already_present' : 'suppression.added',
+    subjectType: 'suppression',
+    subjectId: null,
+    detail: { kind: args.kind, value: args.value, reason: args.reason.trim().slice(0, 200) },
+  }
+}
+
+/** An owner removed a row. Everything the row said, since the row is gone. */
+export function auditSuppressionRemoved(args: {
+  readonly orgId: string
+  readonly actor: string
+  readonly removed: Pick<SuppressionRow, 'kind' | 'value' | 'reason' | 'source' | 'createdAt'>
+}): AuditEntry {
+  return {
+    orgId: args.orgId,
+    actor: args.actor,
+    action: 'suppression.removed',
+    subjectType: 'suppression',
+    subjectId: null,
+    detail: {
+      kind: args.removed.kind,
+      value: args.removed.value,
+      hadReason: args.removed.reason,
+      // Null for a row written before 0018 tracked it; kept as null, not guessed.
+      hadSource: args.removed.source,
+      addedAt: args.removed.createdAt.toISOString(),
+    },
+  }
 }
