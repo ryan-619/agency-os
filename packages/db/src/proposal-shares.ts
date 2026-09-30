@@ -269,7 +269,14 @@ export async function shareMint(
  */
 export async function shareRevoke(
   db: AgencyDb,
-  args: { readonly orgId: string; readonly shareId: string; readonly actor: string; readonly now?: Date },
+  args: {
+    readonly orgId: string
+    readonly shareId: string
+    readonly actor: string
+    /** When given, the share must belong to this proposal too — the route names one in its path. */
+    readonly proposalId?: string
+    readonly now?: Date
+  },
 ): Promise<boolean> {
   const now = args.now ?? new Date()
   return db.transaction(async (tx) => {
@@ -280,6 +287,7 @@ export async function shareRevoke(
       .where(and(
         eq(schema.proposalShares.orgId, args.orgId),
         eq(schema.proposalShares.id, args.shareId),
+        ...(args.proposalId ? [eq(schema.proposalShares.proposalId, args.proposalId)] : []),
         isNull(schema.proposalShares.revokedAt),
       ))
       .returning({ id: schema.proposalShares.id, proposalId: schema.proposalShares.proposalId })

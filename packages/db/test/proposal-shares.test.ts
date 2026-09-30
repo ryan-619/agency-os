@@ -436,7 +436,10 @@ describe('proposal share links', () => {
       const { share } = await minted()
       const [other] = await db.insert(schema.orgs).values({ name: 'Rival' }).returning({ id: schema.orgs.id })
       expect(await shareRevoke(db, { orgId: other!.id, shareId: share.id, actor: userId })).toBe(false)
-      expect(await shareRevoke(db, { orgId, shareId: share.id, actor: userId, now: at(3) })).toBe(true)
+      expect(await shareRevoke(db, {
+        orgId, shareId: share.id, actor: userId, proposalId: '00000000-0000-4000-8000-000000000000',
+      })).toBe(false)
+      expect(await shareRevoke(db, { orgId, shareId: share.id, actor: userId, proposalId, now: at(3) })).toBe(true)
       expect(await shareRevoke(db, { orgId, shareId: share.id, actor: userId, now: at(4) })).toBe(false)
       const audit = (await auditRows()).filter((a) => a.action === 'proposal.share_revoked')
       expect(audit).toHaveLength(1)
