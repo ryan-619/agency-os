@@ -14,7 +14,7 @@
  * consulted — and that is a statement about the process, not about the turn.
  */
 import { randomUUID } from 'node:crypto'
-import { and, eq } from 'drizzle-orm'
+import { and, eq, isNull } from 'drizzle-orm'
 import type { Options } from '@anthropic-ai/claude-agent-sdk'
 import { parseIcpDefinition, type ChatEventBody, type Principal } from '@agency/core'
 import {
@@ -273,6 +273,11 @@ export async function buildTurnRuntime(
  * the conversation and checks it actually belongs to them. So the worst a
  * forged body can do is address a thread that already exists and already
  * belongs to the user it claims.
+ *
+ * A REVOKED person resolves to nobody (0018's `users.revoked_at`). The web
+ * refuses their session, but the worker is a separate process with its own
+ * door and a turn can run for half an hour — so it asks for itself, per
+ * turn, from the row, exactly as it already reads the role.
  */
 export async function resolvePrincipal(
   db: AgencyDb,
@@ -290,7 +295,11 @@ export async function resolvePrincipal(
     .from(schema.chatSessions)
     .innerJoin(schema.users, eq(schema.users.id, schema.chatSessions.userId))
     .innerJoin(schema.orgs, eq(schema.orgs.id, schema.chatSessions.orgId))
-    .where(and(eq(schema.chatSessions.id, chatSessionId), eq(schema.chatSessions.userId, userId)))
+    .where(and(
+      eq(schema.chatSessions.id, chatSessionId),
+      eq(schema.chatSessions.userId, userId),
+      isNull(schema.users.revokedAt),
+    ))
     .limit(1)
 
   const row = rows[0]
