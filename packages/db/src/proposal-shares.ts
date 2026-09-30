@@ -54,7 +54,7 @@
  */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { and, desc, eq, gt, isNull, ne, sql } from 'drizzle-orm'
-import { DEFAULT_STALE_AFTER_DAYS, isStale, parseIcpDefinition } from '@agency/core'
+import { isStale, staleAfterDaysOf } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 import { activeIcpProfile } from './repository.js'
@@ -117,17 +117,13 @@ function hashesMatch(stored: string, given: string): boolean {
 }
 
 /**
- * The org's `stale_after_days`, read the way the proposal page reads it: the
- * active ICP's, or the default when there is none or it will not parse.
+ * The org's stale threshold, read the way the proposal page reads it:
+ * `staleAfterDaysOf` the active ICP — the default when there is none, it will
+ * not parse, or its value is one `isStale` would throw on. Taking the raw
+ * value made a hand-edited `0` a 500 on mint, read and accept.
  */
 async function staleAfterDaysFor(db: AgencyDb, orgId: string): Promise<number> {
-  const row = await activeIcpProfile(db, orgId)
-  if (!row) return DEFAULT_STALE_AFTER_DAYS
-  try {
-    return parseIcpDefinition(row.definition).freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
-  } catch {
-    return DEFAULT_STALE_AFTER_DAYS
-  }
+  return staleAfterDaysOf((await activeIcpProfile(db, orgId))?.definition)
 }
 
 async function scanRanAt(db: AgencyDb, orgId: string, scanId: string): Promise<Date | null> {

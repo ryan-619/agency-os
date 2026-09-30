@@ -12,7 +12,7 @@
  */
 import { and, desc, eq } from 'drizzle-orm'
 import {
-  DEFAULT_STALE_AFTER_DAYS, isStale, parseIcpDefinition, proposalFromFindings,
+  isStale, parseIcpDefinition, proposalFromFindings, staleAfterDaysOf,
   type Proposal, type ProposalOutcome,
 } from '@agency/core'
 import * as schema from './schema.js'
@@ -61,7 +61,8 @@ export async function generateProposal(
   const icpRow = await activeIcpProfile(db, args.orgId)
   if (!icpRow) return { ok: false, reason: 'no_scan', message: 'There is no active ICP profile to write scope from.' }
   const icp = parseIcpDefinition(icpRow.definition)
-  const staleAfter = icp.freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
+  // Never the raw value: `isStale` throws on one that is not a positive number.
+  const staleAfter = staleAfterDaysOf(icp)
 
   const found = await latestScanWithFindings(db, args.orgId, args.companyId)
   if (!found) {
