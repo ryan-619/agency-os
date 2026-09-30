@@ -41,6 +41,25 @@ export interface IcpTierView {
   readonly pill: TierPill
 }
 
+/**
+ * The disqualifiers the scorer actually evaluates (`scoreCompany` in
+ * packages/core/src/scoring.ts): `unreachable` from the fetch itself, the
+ * other three from what the scan observed. A profile can name more — the seed
+ * names `enterprise_scale` — and the page must not present those as applied,
+ * because nothing checks them. `apps/web/test/icp-view.test.ts` reads
+ * scoring.ts and fails if this list and the scorer disagree.
+ */
+export const SCORER_DISQUALIFIERS: ReadonlySet<string> = new Set([
+  'unreachable', 'is_security_vendor', 'has_security_team', 'no_public_product',
+])
+
+export interface IcpDisqualifierView {
+  readonly key: string
+  readonly why: string
+  /** The scorer evaluates this key. False: it is written in the profile and checked by nothing. */
+  readonly applied: boolean
+}
+
 export interface IcpOutreachView {
   readonly channels: readonly string[] | null
   readonly maxPerDay: number | null
@@ -61,7 +80,7 @@ export interface IcpView {
   readonly qualifyAt: number
   readonly tiers: readonly IcpTierView[]
   readonly scoringNote: string | null
-  readonly disqualifiers: readonly (readonly [string, string])[]
+  readonly disqualifiers: readonly IcpDisqualifierView[]
   readonly staleAfterDays: number
   /** False when the profile sets no freshness and the product default applies. */
   readonly staleAfterDaysIsDefault: boolean
@@ -158,7 +177,7 @@ export function icpView(definition: unknown): IcpViewResult {
   // Sorted by key so the table does not depend on jsonb's key order either.
   const disqualifiers = Object.keys(def.disqualifiers)
     .sort()
-    .map((k) => [k, def.disqualifiers[k] ?? ''] as const)
+    .map((k) => ({ key: k, why: def.disqualifiers[k] ?? '', applied: SCORER_DISQUALIFIERS.has(k) }))
   const firmographics = def.firmographics
     ? Object.keys(def.firmographics).sort().map((k) => [k, describeValue(def.firmographics![k])] as const)
     : []

@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { activeProfilesNote, describeValue, icpView, tierPill } from '../src/lib/icp-view'
+import { SCORER_DISQUALIFIERS, activeProfilesNote, describeValue, icpView, tierPill } from '../src/lib/icp-view'
 
 const SEED = JSON.parse(
   readFileSync(
@@ -85,7 +85,7 @@ describe('icpView', () => {
 
   it('lists disqualifiers and firmographics sorted by key, with ranges and lists as text', () => {
     const v = view(SEED)
-    expect(v.disqualifiers.map(([k]) => k)).toEqual([
+    expect(v.disqualifiers.map((d) => d.key)).toEqual([
       'enterprise_scale', 'has_security_team', 'is_security_vendor', 'no_public_product', 'unreachable',
     ])
     const firmo = Object.fromEntries(v.firmographics)
@@ -125,6 +125,35 @@ describe('icpView', () => {
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.problem).toMatch(/label must be a non-empty string/)
     expect(icpView(null).ok).toBe(false)
+  })
+})
+
+/**
+ * A disqualifier the profile names and the scorer never evaluates must not be
+ * shown as applied. The seed names `enterprise_scale`; nothing checks it.
+ */
+describe('disqualifiers the scorer applies', () => {
+  const scoring = readFileSync(
+    resolve(dirname(fileURLToPath(import.meta.url)), '../../../packages/core/src/scoring.ts'),
+    'utf8',
+  )
+
+  it('agree with the keys scoreCompany reads', () => {
+    const read = new Set([...scoring.matchAll(/icp\.disqualifiers\.(\w+)/g)].map((m) => m[1]!))
+    // `unreachable` is applied from the fetch itself, before any key is read.
+    expect(scoring).toMatch(/if \(!profile\.fetchOk\)/)
+    expect(new Set([...read, 'unreachable'])).toEqual(new Set(SCORER_DISQUALIFIERS))
+  })
+
+  it('marks the seed’s enterprise_scale as not applied, and the rest as applied', () => {
+    const byKey = Object.fromEntries(view(SEED).disqualifiers.map((d) => [d.key, d.applied]))
+    expect(byKey).toEqual({
+      enterprise_scale: false,
+      has_security_team: true,
+      is_security_vendor: true,
+      no_public_product: true,
+      unreachable: true,
+    })
   })
 })
 
