@@ -226,7 +226,7 @@ describe('the evidence', () => {
     expect(note?.text).toContain('12 Sep 2026')
   })
 
-  it('warns when the company was never scanned successfully', () => {
+  it('warns when no successful scan had run when the draft was written', () => {
     expect(evidenceNote(null, true)).toEqual({ tone: 'warn', text: MISSING_EVIDENCE_NOTE })
     expect(MISSING_EVIDENCE_NOTE).toContain('§2.2')
   })

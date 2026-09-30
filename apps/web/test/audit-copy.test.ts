@@ -218,6 +218,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'linkedin.dismissed': { touchId: SUBJECT, taskId: SUBJECT, campaignId: SUBJECT },
   'send.bounced': { campaignId: SUBJECT, channel: 'email', code: 'bounced' },
   'send.stale_evidence': { campaignId: SUBJECT, channel: 'email', code: 'stale_evidence' },
+  'send.paused': { campaignId: SUBJECT, channel: 'email', code: 'paused' },
   'contact.bounced': { code: '5.1.1', cancelledQueued: 1, touchId: SUBJECT },
   'contact.bounce_transient': { code: '4.2.2', touchId: SUBJECT },
   'contact.bounce_cleared': { code: '5.1.1' },
@@ -355,6 +356,8 @@ describe('sentenceFor', () => {
     expect(say('send.stale_evidence')).toBe(
       'refused an email to a contact at rentman.io: the evidence it quotes is stale; nothing was sent',
     )
+    // A pause is not the person's no, and the log does not call it one.
+    expect(say('send.paused')).toBe('refused an email to a contact at rentman.io: contact paused; nothing was sent')
     expect(say('campaign.auto_paused')).toBe(
       'paused a campaign automatically: 12% of the addresses it wrote to bounced (3 of 25; the limit is 5%); a person re-activates it',
     )
