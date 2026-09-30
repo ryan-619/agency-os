@@ -1,4 +1,4 @@
-import { isStale } from '@agency/core'
+import { DEFAULT_STALE_AFTER_DAYS, isStale, parseIcpDefinition, type IcpDefinition } from '@agency/core'
 import type { CompanyListRow } from '@agency/db/repository'
 import type { DealStage } from '@agency/db/queries'
 
@@ -59,6 +59,38 @@ export type CompanyListItem = CompanyListRow & { readonly openDealStage: string 
 export interface CompanyListClock {
   readonly staleAfterDays: number
   readonly now: Date
+}
+
+/**
+ * The active ICP and the freshness threshold it sets — without throwing.
+ *
+ * `parseIcpDefinition` throws on a malformed row, and the companies page
+ * called it unguarded, so one bad edit to the profile made the list a 500.
+ * It also does not check `freshness.stale_after_days`, which `isStale()`
+ * throws on unless it is a positive number. Either way the list and the
+ * exports fall back to the documented default and the page says so
+ * (`unreadable`), rather than failing or guessing a threshold.
+ */
+export function readIcp(definition: unknown): {
+  readonly icp: IcpDefinition | null
+  readonly unreadable: boolean
+  readonly staleAfterDays: number
+} {
+  if (definition === undefined || definition === null) {
+    return { icp: null, unreadable: false, staleAfterDays: DEFAULT_STALE_AFTER_DAYS }
+  }
+  let icp: IcpDefinition
+  try {
+    icp = parseIcpDefinition(definition)
+  } catch {
+    return { icp: null, unreadable: true, staleAfterDays: DEFAULT_STALE_AFTER_DAYS }
+  }
+  const days: unknown = icp.freshness?.stale_after_days
+  if (days === undefined) return { icp, unreadable: false, staleAfterDays: DEFAULT_STALE_AFTER_DAYS }
+  if (typeof days !== 'number' || !Number.isFinite(days) || days <= 0) {
+    return { icp, unreadable: true, staleAfterDays: DEFAULT_STALE_AFTER_DAYS }
+  }
+  return { icp, unreadable: false, staleAfterDays: days }
 }
 
 /** The longest search string kept; anything past it is not a search, it is a paste. */

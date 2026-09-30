@@ -4,9 +4,12 @@
  * as if it scored zero, "not qualified" swallowing companies nobody scanned,
  * and "stale" being read from anything but the scan's own time.
  */
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
-  applyCompanyQuery, companyQueryFilters, companyQueryString, parseCompanyQuery, scanState, tierLabel,
+  applyCompanyQuery, companyQueryFilters, companyQueryString, parseCompanyQuery, readIcp, scanState, tierLabel,
   type CompanyListItem,
 } from '../src/lib/company-list'
 
@@ -149,5 +152,36 @@ describe('applyCompanyQuery — filtering', () => {
 
   it('combines filters', () => {
     expect(domains({ q: 'a', qualified: 'yes', state: 'stale' })).toEqual(['gamma.example'])
+  })
+})
+
+describe('readIcp', () => {
+  const seed = JSON.parse(
+    readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../packages/db/seed/icp-security-gap-saas.json'), 'utf8'),
+  ) as Record<string, unknown>
+
+  it('reads the seeded profile and its threshold', () => {
+    const r = readIcp(seed)
+    expect(r.unreadable).toBe(false)
+    expect(r.icp?.scoring.qualify_at).toBe(45)
+    expect(r.staleAfterDays).toBe(14)
+  })
+
+  it('has no ICP and no complaint when there is no profile row', () => {
+    expect(readIcp(undefined)).toEqual({ icp: null, unreadable: false, staleAfterDays: 14 })
+  })
+
+  it('falls back instead of throwing on a malformed profile — the list was a 500 for this', () => {
+    expect(readIcp({ label: '' })).toEqual({ icp: null, unreadable: true, staleAfterDays: 14 })
+    expect(readIcp('not an object')).toMatchObject({ icp: null, unreadable: true })
+  })
+
+  it('refuses a threshold isStale() would throw on, and says the profile is unreadable', () => {
+    for (const bad of [0, -3, Number.NaN, '14']) {
+      const r = readIcp({ ...seed, freshness: { stale_after_days: bad } })
+      expect(r).toMatchObject({ unreadable: true, staleAfterDays: 14 })
+      expect(r.icp?.label).toBe(seed.label)
+    }
+    expect(readIcp({ ...seed, freshness: { stale_after_days: 30 } }).staleAfterDays).toBe(30)
   })
 })
