@@ -12,7 +12,8 @@ import { log } from '@/lib/logger'
  * `{ action: 'create' }` mints a link for a proposal a person has ALREADY
  * marked `sent` — a draft is refused, never promoted, because the human act
  * that makes a proposal outbound is that explicit decision (§2.4) — and only
- * while its evidence is fresh (§2.2). The response carries the URL ONCE: the
+ * while its evidence is fresh and still the latest successful scan (§2.2; a
+ * superseded proposal is refused `superseded`, 409). The response carries the URL ONCE: the
  * database keeps only the token's sha256, so it cannot be shown again. It is
  * built from `AUTH_URL`, never the request's Host header, which a forged
  * header could otherwise point at somebody else's origin.
