@@ -18,9 +18,9 @@
  *    one with nothing observed to quote. A draft written anyway would state
  *    something nobody checked, which is §2.2's one rule.
  *  - the person half, mirroring the approvals page's candidate rule: no
- *    usable address on the channel, paused (they replied), a recorded refusal
- *    of the channel, an email address that bounced, and no zone to evaluate
- *    quiet hours in. Each is a message the sender would refuse on sight, so
+ *    usable address on the channel, a recorded refusal of the channel, a
+ *    pause (a reply, or a teammate's hold), an email address that bounced,
+ *    and no zone to evaluate quiet hours in — the send path's own order. Each is a message the sender would refuse on sight, so
  *    drafting it only hands a person something they cannot approve.
  *  - an earlier row for the same person: in this campaign, and — under
  *    auto-send, where nobody reads the words — in any campaign on the same
@@ -47,8 +47,8 @@ export const ENROL_SKIPS = [
   'no_evidence',
   'no_contact',
   'no_address',
-  'paused',
   'declined',
+  'paused',
   'bounced',
   'no_timezone',
   'already_enrolled',

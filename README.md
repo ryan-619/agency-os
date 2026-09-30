@@ -100,7 +100,7 @@ with `curl` and the bearer, as `docker-compose.yml` shows.
 ```bash
 npm install
 npm run typecheck     # packages and tests, strict
-npm test              # 3875 tests, no Docker required
+npm test              # 4246 tests, no Docker required
 npx vitest run --maxWorkers=1 --minWorkers=1   # the same, on a machine short of memory
 ```
 

@@ -1852,7 +1852,7 @@ has actually run in the last 36 hours.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 3875 tests in 148 files: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice + the 0018 release and its review round
+npm test                 # 4246 tests in 154 files: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice + the 0018 release and its two review rounds
 npx vitest run --maxWorkers=1 --minWorkers=1   # the same suite on a machine short of memory
 npm run build            # packages, then the Next app
 
@@ -1961,8 +1961,8 @@ process, keeps the finished data directory, and hands each test a COPY via
 a new instance rather than attaching to one. Measured: the whole suite went
 from **290s to 97s** single-worker, with the same tests passing, and
 `apps/voice` alone from 9.8s to 4.4s. The suite has more than doubled since:
-at 0018, after its review round, it is 3,875 tests in 148 files, and a
-single-worker run took 1,021 s on a four-core container that was running
+at 0018, after its two review rounds, it is 4,246 tests in 154 files, and a
+single-worker run took 1,088 s on a four-core container that was running
 other work beside it — every test green, and the same suite green in CI.
 
 `freshDb()` remains and `migrations.test.ts` and `schema-parity.test.ts`
