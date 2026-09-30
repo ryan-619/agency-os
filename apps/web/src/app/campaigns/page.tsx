@@ -5,7 +5,7 @@ import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { CampaignsPanel, type CampaignView } from '@/components/outreach/campaigns'
 import { getDb } from '@/lib/db'
-import { deployment } from '@/lib/deployment'
+import { deployment, nothingWillSendNote } from '@/lib/deployment'
 import { icpForOrg } from '@/lib/queries'
 
 /**
@@ -14,6 +14,11 @@ import { icpForOrg } from '@/lib/queries'
  * The list, what each has actually done, and the builder. The numbers beside
  * a campaign are read from `touches`, not kept on the campaign row: a counter
  * is a second source of truth and its drift always favours sending.
+ *
+ * Each card can also ENROL — one draft per person at every qualifying,
+ * freshly scanned company — previewed first, and parked on a person unless
+ * the campaign auto-sends. Enrolling sends nothing; the worker does, and on
+ * a deployment with no worker the card says that nothing will.
  */
 export const dynamic = 'force-dynamic'
 
@@ -49,6 +54,8 @@ export default async function CampaignsPage() {
     }
   }
 
+  const d = deployment()
+
   const signOutAction = async () => {
     'use server'
     await signOut({ redirectTo: '/signin' })
@@ -67,7 +74,9 @@ export default async function CampaignsPage() {
         campaigns={views}
         canWrite={can(principal, 'campaigns:write')}
         canAutoSend={can(principal, 'campaigns:set_auto_send')}
-        senderConnected={deployment().worker}
+        canEnrol={can(principal, 'campaigns:write')}
+        senderConnected={d.worker}
+        noSenderNote={nothingWillSendNote(d)}
       />
     </Shell>
   )
