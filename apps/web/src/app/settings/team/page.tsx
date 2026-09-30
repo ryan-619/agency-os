@@ -62,7 +62,8 @@ export default async function TeamPage() {
       <p className="muted" style={{ fontSize: 13 }}>
         Granting access sends nothing. The person goes to <code>{signInUrl}</code>, enters this
         address, and a sign-in link is mailed to it. Revoking signs them out of every browser at once
-        and refuses their next link; restoring gives back the role they had.
+        and refuses their next link; restoring gives back the role they had, and they sign in again
+        with a new link.
       </p>
       {mailIsLocalSink ? (
         <div className="note warn" style={{ marginBottom: 14 }}>
