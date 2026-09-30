@@ -96,7 +96,14 @@ export function candidateLine(decision: CandidateDecision | null): string {
  *
  * Stale evidence has its own sentence, because "choose someone else" is no
  * fix for it: every person at the company gets the same words, and the
- * words are what aged.
+ * words are what aged. Denying such a draft records it as `stale_evidence`
+ * (`denyDraft`), which a re-scan resolves, so enrolment can draft them again.
+ *
+ * A pause has its own too, because "deny the draft" is the wrong advice for
+ * it: a pause is lifted by a person (the rule's own sentence says how, by
+ * what paused them), after which the draft can simply be approved — and a
+ * denial is a person's no, which stops them being drafted on that campaign
+ * again.
  */
 export function approveBlock(decision: CandidateDecision | null): string | null {
   if (decision === null || decision.humanCanResolve) return null
@@ -104,6 +111,12 @@ export function approveBlock(decision: CandidateDecision | null): string | null 
     return (
       `Approving is pointless: ${decision.words} — the scan it was written from is past its re-verification ` +
       'deadline, and nobody may approve past that. Deny it, re-scan the company, then draft it again.'
+    )
+  }
+  if (decision.code === 'paused') {
+    return (
+      `Approving is pointless: ${decision.words}, and nobody may approve past a pause — the worker would refuse it. ` +
+      'The rule below says what lifts it; the draft can wait here until then, or choose someone else.'
     )
   }
   return (
@@ -211,13 +224,95 @@ export function addressedByLabel(by: AddressedBy): string | null {
 // The evidence the draft may quote
 // ---------------------------------------------------------------------------
 
+/**
+ * The evidence behind ONE draft, judged the way the sender judges its words
+ * (`evidenceAsOfFor` in packages/db): by the latest successful scan at or
+ * before the moment the words were written, aged at now — or, for an answer
+ * to a reply, by no scan at all. It used to be the company's LATEST scan for
+ * every card, so the panel and the decision beside it could describe two
+ * different scans: after a re-scan it listed the new scan's lines under
+ * words written from the old one, and it warned "the send path refuses"
+ * over an answer the sender never judges by scan age. Found by review.
+ */
 export interface DraftEvidence {
-  /** When the scan whose findings are listed ran (ISO). */
-  readonly asOf: string
-  /** Derived from the scan's `ran_at` by `isStale`, never read from `findings.stale`. */
+  /**
+   * When the scan described ran (ISO): the one the words were written from,
+   * or — for an answer — the company's latest. Null only for an answer about
+   * a company with no successful scan.
+   */
+  readonly asOf: string | null
+  /**
+   * Derived from that scan's `ran_at` by `isStale` at now, never read from
+   * `findings.stale`. For a draft it is the sender's own `stale_evidence`
+   * question; for an answer it is only a caution, which the sender does not
+   * ask.
+   */
   readonly stale: boolean
-  /** One line per quotable finding. Empty when stale — nothing stale is quotable. */
+  /**
+   * One line per quotable finding — `quotableFindings`, the draft
+   * generator's own filter, which reads the company's LATEST scan. So there
+   * are lines only when that is the scan described, and it is fresh: nothing
+   * stale is quotable, and a newer scan's lines are not what these words
+   * were written from.
+   */
   readonly lines: readonly string[]
+  /** An answer to a reply (`answers_touch_id`): the sender judges it by no scan. */
+  readonly answersReply?: boolean
+  /** A successful scan newer than the one the words were written from, when there is one. */
+  readonly newer?: { readonly asOf: string; readonly stale: boolean } | null
+}
+
+/**
+ * A scan, as the page reads it: its id, when it ran, and whether it is past
+ * its re-verification deadline now — judged by the page with `isStale` on
+ * `ran_at` (this file imports nothing from the server or from core's
+ * runtime, because a client component imports it).
+ */
+export interface EvidenceScan {
+  readonly id: string
+  readonly ranAt: Date
+  readonly stale: boolean
+}
+
+/**
+ * The evidence panel for one draft, from what the page read. Pure: the page
+ * does the reads — the latest successful scan at or before the draft's
+ * `created_at` (`writtenFrom`), the company's latest successful scan
+ * (`latest`) and that scan's quotable lines — and this decides which of them
+ * describes the draft.
+ *
+ * Null for a draft written before any successful scan of its company: the
+ * sender has no scan to judge its words by, and `evidenceNote` says so.
+ */
+export function draftEvidenceFrom(input: {
+  readonly answersReply: boolean
+  readonly writtenFrom: EvidenceScan | null
+  readonly latest: EvidenceScan | null
+  /** `quotableFindings` over `latest`, as lines — empty when it is stale or there is none. */
+  readonly latestLines: readonly string[]
+}): DraftEvidence | null {
+  const { latest } = input
+  if (input.answersReply) {
+    if (!latest) return { asOf: null, stale: false, lines: [], answersReply: true }
+    return {
+      asOf: latest.ranAt.toISOString(),
+      stale: latest.stale,
+      lines: latest.stale ? [] : input.latestLines,
+      answersReply: true,
+    }
+  }
+  const written = input.writtenFrom
+  if (!written) return null
+  const newer =
+    latest && latest.id !== written.id && latest.ranAt.getTime() > written.ranAt.getTime()
+      ? { asOf: latest.ranAt.toISOString(), stale: latest.stale }
+      : null
+  return {
+    asOf: written.ranAt.toISOString(),
+    stale: written.stale,
+    lines: written.stale || newer ? [] : input.latestLines,
+    newer,
+  }
 }
 
 /**
@@ -230,9 +325,25 @@ export const STALE_EVIDENCE_NOTE =
   'This draft is about a company whose findings are stale; §2.2 says re-verify before anything outbound — ' +
   're-scan, then draft it again. The send path refuses a draft written from a stale scan, and approving does not change that.'
 
+/**
+ * A draft written before any successful scan of its company. Not "never
+ * scanned": the company may have been scanned since, and these words were
+ * still not written from it.
+ */
 export const MISSING_EVIDENCE_NOTE =
-  'This draft is about a company this product has never scanned successfully, so nothing it says about them ' +
-  'was observed here; §2.2 says re-verify before anything outbound — scan, then approve.'
+  'No successful scan of this company had run when this draft was written, so nothing it says about them ' +
+  'was observed here; §2.2 says re-verify before anything outbound — check every claim against the company page, ' +
+  'or scan and draft it again.'
+
+/**
+ * An answer to a reply. The sender does not judge it by the age of a scan
+ * (`evidenceAsOfFor` is null for it), so the card must not say the send path
+ * refuses it — that steered approvers to deny legitimate answers. What is
+ * left is the person's own check. Found by review.
+ */
+export const ANSWER_EVIDENCE_NOTE =
+  'This is an answer to their reply. The send path does not judge an answer by the age of a scan, so the ' +
+  'evidence does not stop it — check that it repeats no finding that is no longer known to be true.'
 
 /** How many evidence lines a card shows before pointing at the company page. */
 export const EVIDENCE_LINES_SHOWN = 6
@@ -259,30 +370,74 @@ export type EvidenceNote =
  * is enabled comes from the candidates' `previewSend` answers, and those ask
  * the sender's own question — is the scan these words were WRITTEN from past
  * its deadline now? — so a draft written from a stale scan is blocked there,
- * as `stale_evidence`, and a draft about a never-scanned company is not (no
- * scan could have been quoted). A fresh scan with no gaps is plain: nothing
- * is wrong, but a draft claiming a gap has nothing behind it.
+ * as `stale_evidence`, and a draft written before any scan is not (no scan
+ * could have been quoted). The panel describes that same scan
+ * (`draftEvidenceFrom`), so the two cannot disagree. A fresh scan with no
+ * gaps is plain: nothing is wrong, but a draft claiming a gap has nothing
+ * behind it. An answer to a reply never gets the stale sentence, because
+ * the sender never refuses one as stale.
  */
 export function evidenceNote(evidence: DraftEvidence | null, hasCompany: boolean): EvidenceNote | null {
   if (!hasCompany) {
     return { tone: 'plain', text: 'This draft is not about a company, so there is no scan evidence to check it against.' }
   }
-  if (evidence === null) return { tone: 'warn', text: MISSING_EVIDENCE_NOTE }
+  if (evidence?.answersReply) return answerNote(evidence)
+  if (evidence === null || evidence.asOf === null) return { tone: 'warn', text: MISSING_EVIDENCE_NOTE }
+  const written = shortDate(evidence.asOf)
   if (evidence.stale) {
-    return { tone: 'warn', text: `${STALE_EVIDENCE_NOTE} The last successful scan ran ${shortDate(evidence.asOf)}.` }
+    // Re-scanned since, and the new scan is fresh: "re-scan" has been done,
+    // and only a new draft freshens the words.
+    if (evidence.newer && !evidence.newer.stale) {
+      return {
+        tone: 'warn',
+        text:
+          `The scan this draft was written from (${written}) is past its re-verification deadline, and the send ` +
+          'path refuses words written from it; approving does not change that. The company was re-scanned ' +
+          `${shortDate(evidence.newer.asOf)} — deny this draft and draft it again from that scan.`,
+      }
+    }
+    return { tone: 'warn', text: `${STALE_EVIDENCE_NOTE} The scan it was written from ran ${written}.` }
+  }
+  if (evidence.newer) {
+    return {
+      tone: 'plain',
+      text:
+        `Written from the scan of ${written}. A newer scan ran ${shortDate(evidence.newer.asOf)}, so its lines are ` +
+        'not listed as what these words may quote — check them against the company page, which shows what changed.',
+    }
   }
   if (evidence.lines.length === 0) {
     return {
       tone: 'plain',
-      text: `The latest successful scan (${shortDate(evidence.asOf)}) observed no gaps, so the draft has none to quote.`,
+      text: `The scan this draft was written from (${written}) observed no gaps, so the draft has none to quote.`,
     }
   }
   return null
 }
 
+/** The note on an answer to a reply: the person's own check, and the latest scan's standing. */
+function answerNote(evidence: DraftEvidence): EvidenceNote {
+  if (evidence.asOf === null) {
+    return { tone: 'plain', text: `${ANSWER_EVIDENCE_NOTE} This company has no successful scan.` }
+  }
+  const latest = shortDate(evidence.asOf)
+  if (evidence.stale) {
+    return {
+      tone: 'warn',
+      text:
+        `${ANSWER_EVIDENCE_NOTE} The last successful scan ran ${latest} and is past its re-verification deadline, ` +
+        'so nothing it observed may be repeated as current.',
+    }
+  }
+  if (evidence.lines.length === 0) {
+    return { tone: 'plain', text: `${ANSWER_EVIDENCE_NOTE} The latest successful scan (${latest}) observed no gaps.` }
+  }
+  return { tone: 'plain', text: ANSWER_EVIDENCE_NOTE }
+}
+
 /** The heading over the evidence lines, with the scan's date. */
 export function evidenceHeading(evidence: DraftEvidence): string {
-  return `What the draft may quote — observed ${shortDate(evidence.asOf)}`
+  return `What the draft may quote — observed ${evidence.asOf ? shortDate(evidence.asOf) : 'an unknown date'}`
 }
 
 // ---------------------------------------------------------------------------

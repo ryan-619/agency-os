@@ -7,10 +7,11 @@
  * database, and this file cannot reorder them, skip one, or add a special
  * case — it does not perform the checks, it only supplies their inputs.
  *
- * §8.4's order, end to end, with the two steps it does not name (a bounce,
- * and evidence past its re-verification deadline — see `decideSend`):
+ * §8.4's order, end to end, with the three steps it does not name (a pause,
+ * evidence past its re-verification deadline, and a bounce — see
+ * `decideSend`):
  *
- *   suppression → consent → bounce → stale evidence → quiet hours →
+ *   suppression → consent → pause → stale evidence → bounce → quiet hours →
  *   daily cap → campaign status → approval gate
  *      ↑ gathered here, decided in core ↑
  *   → last look → provider send → write `touches` → write `audit_log`
@@ -34,7 +35,7 @@
 import { and, asc, count, desc, eq, gte, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm'
 import {
   DEFAULT_STALE_AFTER_DAYS, decideSend, isStale, mentionsRemovalOrDeparture, normaliseEmail, ownWords, parseDsn,
-  parseIcpDefinition, readMailSignals, suppressionKeysFor,
+  parseIcpDefinition, pauseReasonClass, pausedSentence, readMailSignals, suppressionKeysFor,
   type Channel, type MailSignal, type SendDecision, type SendFacts, type SuppressionKind, classifyReply, type ReplyKind,
 } from '@agency/core'
 import * as schema from './schema.js'
@@ -294,10 +295,16 @@ export async function dispatchTouch(
   // that reply performs skips rows that are already `sending`. Cheap, and
   // it closes the window to the width of the provider call itself. A bounce,
   // a suppression and an erasure recorded in the same window are the same
-  // race, and get the same look.
+  // race, and get the same look — in `decideSend`'s order, so the reason
+  // recorded is the one the decision would have given a moment later: an
+  // unsubscribe writes a suppression AND a pause, and is the opt-out.
   if (touch.contactId) {
     const [fresh] = await db
-      .select({ pausedAt: schema.contacts.pausedAt, emailBouncedAt: schema.contacts.emailBouncedAt })
+      .select({
+        pausedAt: schema.contacts.pausedAt,
+        pausedReason: schema.contacts.pausedReason,
+        emailBouncedAt: schema.contacts.emailBouncedAt,
+      })
       .from(schema.contacts)
       .where(eq(schema.contacts.id, touch.contactId))
       .limit(1)
@@ -321,24 +328,9 @@ export async function dispatchTouch(
         sent: false,
       }
     }
-    if (fresh.pausedAt) {
-      await settle(db, touch.id, { status: 'refused', refusalCode: 'consent_revoked', recipient: facts.recipient })
-      return {
-        touchId: touch.id,
-        decision: { allowed: false, code: 'consent_revoked', reason: 'This contact replied a moment ago. Nothing was sent.', humanCanResolve: false },
-        sent: false,
-      }
-    }
-    if (fresh.emailBouncedAt && facts.facts.channel === 'email') {
-      await settle(db, touch.id, { status: 'refused', refusalCode: 'bounced', recipient: facts.recipient })
-      return {
-        touchId: touch.id,
-        decision: { allowed: false, code: 'bounced', reason: 'This address bounced a moment ago. Nothing was sent. Correct the address.', humanCanResolve: true },
-        sent: false,
-      }
-    }
     // An unsubscribe click or a "stop" landing in the same window writes a
-    // suppression row and nothing this look would otherwise see.
+    // suppression row — and a pause beside it, which must not be what is
+    // recorded: the opt-out is the stronger statement.
     if (await anySuppressionMatches(db, touch.orgId, suppressionKeysFor(facts.recipient, facts.facts.channel) ?? [])) {
       await settle(db, touch.id, { status: 'refused', refusalCode: 'suppressed', recipient: facts.recipient })
       return {
@@ -349,6 +341,31 @@ export async function dispatchTouch(
           reason: 'This recipient was added to the suppression list a moment ago. Nothing was sent.',
           humanCanResolve: false,
         },
+        sent: false,
+      }
+    }
+    // A pause — a reply, or a teammate's hold — is refused as the pause it
+    // is, never as a revoked consent: that code is the recipient's own no,
+    // and enrolment reads it as one for good. Worded by its class, never its
+    // text.
+    if (fresh.pausedAt) {
+      await settle(db, touch.id, { status: 'refused', refusalCode: 'paused', recipient: facts.recipient })
+      return {
+        touchId: touch.id,
+        decision: {
+          allowed: false,
+          code: 'paused',
+          reason: `This contact was paused a moment ago. ${pausedSentence(pauseReasonClass(fresh.pausedReason))}`,
+          humanCanResolve: false,
+        },
+        sent: false,
+      }
+    }
+    if (fresh.emailBouncedAt && facts.facts.channel === 'email') {
+      await settle(db, touch.id, { status: 'refused', refusalCode: 'bounced', recipient: facts.recipient })
+      return {
+        touchId: touch.id,
+        decision: { allowed: false, code: 'bounced', reason: 'This address bounced a moment ago. Nothing was sent. Correct the address.', humanCanResolve: true },
         sent: false,
       }
     }
@@ -420,15 +437,42 @@ export async function dispatchTouch(
   // overwritten. And the recipient is not written back to a row whose
   // contact is gone: an erasure during the provider call blanked it on
   // purpose. Found by review.
+  //
+  // One settled state IS corrected: a row a stuck-send recovery gave up on
+  // while the provider had it — `failed`, never sent, no refusal. That
+  // recovery means "may or may not have gone", and the provider's
+  // acceptance is better evidence than that. Left as it was, the row kept
+  // no `sent_at`, `provider_id` or recipient, so a reply or a bounce could
+  // not be tied to this message by its Message-ID, an unsubscribe click on
+  // it took the loud no-recipient path, and a supervised re-enrolment
+  // drafted the same opener again. Found by review. The recovery's
+  // sentence ("re-approve to send it again") is cleared with it: on a row
+  // that went, it is an instruction to send a duplicate.
+  const recovered = and(
+    eq(schema.touches.status, 'failed'),
+    isNull(schema.touches.sentAt),
+    isNull(schema.touches.refusalCode),
+  )
   const recorded = await db
     .update(schema.touches)
-    .set({ status: 'sent', sentAt: now, providerId, recipient: recipientUnlessErased(facts.recipient) })
-    .where(and(eq(schema.touches.id, touch.id), inArray(schema.touches.status, ['sending', touch.status])))
+    .set({
+      status: 'sent',
+      sentAt: now,
+      providerId,
+      recipient: recipientUnlessErased(facts.recipient),
+      error: sql`CASE WHEN ${schema.touches.status} = 'failed' THEN NULL ELSE ${schema.touches.error} END`,
+    })
+    .where(
+      and(
+        eq(schema.touches.id, touch.id),
+        or(inArray(schema.touches.status, ['sending', touch.status]), recovered),
+      ),
+    )
     .returning({ id: schema.touches.id })
   if (recorded.length === 0) {
     // The provider took it; the row had already been settled by someone
-    // else (a stuck-send recovery, a person marking a hand-over not sent).
-    // The audit row below still says it went, which is the truth.
+    // else, in a state the provider's acceptance does not correct. The
+    // audit row below still says it went, which is the truth.
     stderrLog.error('a sent message found its row already settled; the row was left as it was', {
       touchId: touch.id,
       orgId: touch.orgId,
@@ -619,7 +663,7 @@ export async function sendFactsFor(
       paused: boolean
       /** Why they are paused, as recorded — null when they are not. */
       pausedReason: string | null
-      /** The consent row for this channel AS STORED, whatever the pause stands in for. */
+      /** The consent row for this channel AS STORED — the same value as `facts.consent`. */
       consentRecorded: { granted: boolean; source: string } | null
     }
   | { missing: string }
@@ -693,22 +737,19 @@ export async function sendFactsFor(
     args.evidenceAsOf === null ? false : await evidenceIsStale(db, orgId, row.contact.companyId, args.evidenceAsOf, now)
 
   /**
-   * A paused contact replied, and a follow-up after a reply reads as nobody
-   * having read what they wrote (§8.4). Modelled as a revoked consent rather
-   * than a new refusal code: to this contact, on this channel, right now, the
-   * answer is no — which is exactly what a revoked consent means, and it
-   * routes through the same "nobody may approve past this" rule. A refusal
-   * they RECORDED is the stronger statement and stands in its own words.
-   * Every other fact is gathered as for anyone, so `decideSend` orders the
-   * refusals — a suppression still wins.
+   * A paused contact — they replied, a teammate is holding them, or an
+   * opt-out or an erasure could not be completed. Its own fact, and the
+   * consent fact is the row as recorded, exactly as for anybody else. It
+   * used to be modelled as a revoked consent, so a teammate's hold was
+   * refused `consent_revoked` — the recipient's own no — and enrolment read
+   * it that way for ever after the hold was lifted. Found by review. Every
+   * other fact is gathered as for anyone, so `decideSend` orders the
+   * refusals: a suppression and a recorded refusal still outrank the pause.
+   * The reason goes to `decideSend` as its CLASS only; its text can carry a
+   * teammate's address and the contact's words.
    */
   const paused = row.contact.pausedAt !== null
   const pausedReason = paused ? row.contact.pausedReason ?? 'paused' : null
-  const consent = paused
-    ? consentRecorded && !consentRecorded.granted
-      ? consentRecorded
-      : { granted: false, source: pausedReason ?? 'paused' }
-    : consentRecorded
 
   return {
     recipient,
@@ -727,7 +768,9 @@ export async function sendFactsFor(
        * only thing that could make the next message land.
        */
       recipientBounced: channel === 'email' && row.contact.emailBouncedAt !== null,
-      consent,
+      consent: consentRecorded,
+      paused,
+      ...(paused ? { pausedFor: pauseReasonClass(row.contact.pausedReason) } : {}),
       evidenceStale,
       recipientTimeZone: row.contact.timeZone ?? row.companyTimeZone ?? null,
       quietStart: row.campaign.quietStart,
@@ -966,6 +1009,17 @@ export async function approveDraft(
 /**
  * Deny a draft. The reason is recorded on the row: a draft denied with no note
  * is one the agent will rewrite the same way.
+ *
+ * The refusal code says WHOSE no it was. Usually a person's
+ * (`needs_approval`), which enrolment reads as a no and never drafts past.
+ * But a draft whose own words the sender would refuse as `stale_evidence` —
+ * judged as the sender judges it, at the moment the words were written
+ * (`evidenceAsOfFor`) — is denied because the evidence aged out, and
+ * /approvals tells the person exactly that: deny it, re-scan, draft again.
+ * Recorded as `needs_approval`, that advice was a dead end: the re-scan
+ * happened and enrolment still skipped them as already contacted, for good.
+ * Found by review. So it is recorded as `stale_evidence`, a refusal a re-scan
+ * resolves, and the audit row names the code.
  */
 export async function denyDraft(
   db: AgencyDb,
@@ -974,13 +1028,16 @@ export async function denyDraft(
     readonly touchId: string
     readonly decidedBy: string
     readonly note?: string | null
+    /** Injectable for tests; the moment the staleness is judged at. */
+    readonly now?: Date
   },
 ): Promise<DraftDecision> {
+  const refusalCode = await denialCode(db, args.orgId, args.touchId, args.now ?? new Date())
   const updated = await db
     .update(schema.touches)
     .set({
       status: 'refused',
-      refusalCode: 'needs_approval',
+      refusalCode,
       decisionNote: args.note?.trim() || 'denied',
     })
     .where(
@@ -1007,9 +1064,57 @@ export async function denyDraft(
     action: 'draft.denied',
     subjectType: 'touch',
     subjectId: row.id,
-    detail: { note: row.decisionNote },
+    // `refusalCode` is `stale_evidence` when the draft was denied on words
+    // quoting a scan that had aged out, and `needs_approval` otherwise.
+    detail: { note: row.decisionNote, refusalCode: row.refusalCode },
   }).catch(() => {})
   return { ok: true, touch: row }
+}
+
+/**
+ * What denying this draft records: `stale_evidence` when the sender's own
+ * answer about its words — the facts `previewSend` would gather, at the
+ * draft's written-at moment — is that refusal, and a person's
+ * `needs_approval` otherwise. That includes a draft that cannot be checked
+ * (no contact or campaign yet), and one refused for anything else first: a
+ * suppression, a recorded refusal or a pause outranks the evidence, and a
+ * person's no beside it is the safe record. An answer to a reply quotes no
+ * scan (`evidenceAsOfFor` is null), so it is never denied as stale.
+ */
+async function denialCode(
+  db: AgencyDb,
+  orgId: string,
+  touchId: string,
+  now: Date,
+): Promise<'needs_approval' | 'stale_evidence'> {
+  const [draft] = await db
+    .select({
+      contactId: schema.touches.contactId,
+      campaignId: schema.touches.campaignId,
+      createdAt: schema.touches.createdAt,
+      answersTouchId: schema.touches.answersTouchId,
+    })
+    .from(schema.touches)
+    .where(
+      and(
+        eq(schema.touches.id, touchId),
+        eq(schema.touches.orgId, orgId),
+        eq(schema.touches.status, 'awaiting_approval'),
+      ),
+    )
+    .limit(1)
+  if (!draft?.contactId || !draft.campaignId) return 'needs_approval'
+  const gathered = await sendFactsFor(db, {
+    orgId,
+    campaignId: draft.campaignId,
+    contactId: draft.contactId,
+    approvedByHuman: true,
+    evidenceAsOf: evidenceAsOfFor(draft),
+    now,
+  })
+  if ('missing' in gathered) return 'needs_approval'
+  const decision = decideSend(gathered.facts)
+  return !decision.allowed && decision.code === 'stale_evidence' ? 'stale_evidence' : 'needs_approval'
 }
 
 /**
@@ -1076,6 +1181,36 @@ export async function pauseContact(
         sql`${schema.contacts.pausedAt} IS NULL`,
       ),
     )
+    .returning({ id: schema.contacts.id })
+  return rows.length === 1
+}
+
+/**
+ * Pause a contact with THIS reason, whether or not they were already paused.
+ *
+ * `pauseContact` keeps the first reason on purpose — a second reply must not
+ * replace the one that explains the pause — and that is wrong in exactly one
+ * kind of case: an opt-out that could not be recorded, or an erasure that
+ * could not finish. That is the reason that matters now, and left behind an
+ * older `replied …` it let answering that reply in /inbox resume a person who
+ * had asked to stop (the inbox ends only a reply's own pause). The one
+ * writer, shared by the three paths that need it: a reply's opt-out whose
+ * suppression failed (`recordInboundReply`), a one-click unsubscribe that
+ * could not be recorded (unsubscribe.ts), and an erasure rolled back whole
+ * (erasure.ts). Each gives a reason `pauseReasonClass` reads as
+ * `opt_out_not_recorded` or `erasure`.
+ */
+export async function pauseContactOverriding(
+  db: AgencyDb,
+  orgId: string,
+  contactId: string,
+  reason: string,
+  now: Date = new Date(),
+): Promise<boolean> {
+  const rows = await db
+    .update(schema.contacts)
+    .set({ pausedAt: now, pausedReason: reason.slice(0, 500) })
+    .where(and(eq(schema.contacts.orgId, orgId), eq(schema.contacts.id, contactId)))
     .returning({ id: schema.contacts.id })
   return rows.length === 1
 }
@@ -1238,7 +1373,7 @@ export async function recordInboundReply(
     .set({ replyKind })
     .where(eq(schema.touches.id, touchId))
 
-  const paused = automatic
+  let paused = automatic
     ? false
     : await pauseContact(db, args.orgId, args.contactId, `replied ${now.toISOString()}`, now)
 
@@ -1292,6 +1427,25 @@ export async function recordInboundReply(
       // the audit row is what the digest and the compliance page count; the
       // log line is what a person sees today. Never silently.
       optOutNotRecorded = true
+      // And the pause says so, over the `replied …` just written (or any
+      // earlier reason), as an unsubscribe's and an erasure's failure does.
+      // Left as `replied …`, answering a later reply from /inbox resumed a
+      // person whose opt-out was never recorded — and a fault that failed
+      // the suppression can fail the audit row below too, leaving the inbox
+      // nothing else to find. Found by review.
+      try {
+        const overridden = await pauseContactOverriding(
+          db, args.orgId, args.contactId, `opt-out not recorded: reply ${now.toISOString()} (${why})`, now,
+        )
+        paused = paused || overridden
+      } catch (err) {
+        ;(args.log ?? stderrLog).error('an opt-out that was not recorded could not pause the contact', {
+          touchId,
+          contactId: args.contactId,
+          orgId: args.orgId,
+          error: err instanceof Error ? err.name : 'UnknownError',
+        })
+      }
       await appendAudit(db, {
         orgId: args.orgId,
         actor: 'system',

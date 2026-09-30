@@ -16,8 +16,8 @@
  */
 import { and, eq, or } from 'drizzle-orm'
 import {
-  decideSend, suppressionKeysFor,
-  type Channel, type SendDecision, type SuppressionKind,
+  decideSend, pauseReasonClass, suppressionKeysFor,
+  type Channel, type PauseReasonClass, type SendDecision, type SuppressionKind,
 } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
@@ -50,9 +50,9 @@ export interface SendPreviewFacts {
    *  not be normalised, so no row could ever have matched (a refusal). */
   readonly suppressionKeys: readonly { kind: SuppressionKind; value: string }[] | null
   /**
-   * The consent fact the DECISION read. For a paused contact with no
-   * recorded refusal this is the pause standing in for one (see
-   * `sendFactsFor`); `consentRecorded` is the row as stored.
+   * The consent fact the DECISION read: the row as recorded, for a paused
+   * contact too. A pause is its own fact (`paused`) and its own refusal
+   * (`paused`); it no longer stands in for a revoked consent.
    */
   readonly consent: { granted: boolean; source: string } | null
   /** The consent row for this channel as recorded — null when nobody asked. */
@@ -63,6 +63,12 @@ export interface SendPreviewFacts {
   readonly paused: boolean
   /** Why they are paused, as recorded (`replied <iso>` for a reply). Null when not paused. */
   readonly pausedReason: string | null
+  /**
+   * What paused them, as a CLASS (`pauseReasonClass`) — what a screen or the
+   * agent words its advice by, since only a reply's own pause is ended by
+   * answering it. Null when not paused.
+   */
+  readonly pausedFor: PauseReasonClass | null
   /**
    * Whether the scan the words could quote is past its re-verification
    * deadline now (§2.2) — judged at `writtenAt`, from the scan's `ran_at`.
@@ -149,6 +155,7 @@ export async function previewSend(db: AgencyDb, input: SendPreviewInput): Promis
       zoneFrom,
       paused,
       pausedReason,
+      pausedFor: paused ? pauseReasonClass(pausedReason) : null,
       evidenceStale: facts.evidenceStale,
       quietStart: facts.quietStart,
       quietEnd: facts.quietEnd,

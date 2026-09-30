@@ -1,6 +1,6 @@
 import { redirect } from 'next/navigation'
 import { DEFAULT_STALE_AFTER_DAYS, can, isStale, parseIcpDefinition, type IcpDefinition } from '@agency/core'
-import { and, desc, eq } from 'drizzle-orm'
+import { and, desc, eq, lte } from 'drizzle-orm'
 import {
   evidenceAsOfFor, listCampaigns, listContactsForCompany, pendingApprovals, pendingDrafts, previewSend, quotableFindings,
   readContact, schema, type AgencyDb,
@@ -11,8 +11,8 @@ import { getDb } from '@/lib/db'
 import { deployment, nothingWillSendNote } from '@/lib/deployment'
 import { icpForOrg } from '@/lib/queries'
 import {
-  addressedByOf, campaignToCheck, decisionView, evidenceLine, uncheckedDecision,
-  type CandidateDecision, type DraftEvidence,
+  addressedByOf, campaignToCheck, decisionView, draftEvidenceFrom, evidenceLine, uncheckedDecision,
+  type CandidateDecision, type DraftEvidence, type EvidenceScan,
 } from '@/lib/approval-view'
 import { ApprovalQueue } from '@/components/chat/queue'
 import { DraftQueue, type DraftView } from '@/components/outreach/drafts'
@@ -200,13 +200,21 @@ export default async function ApprovalsPage() {
   )
 
   /**
-   * The evidence each company's drafts may quote, dated by the scan it came
-   * from. `quotableFindings` is the draft generator's own filter — observed,
-   * a gap, scored, the latest SUCCESSFUL scan, fresh by `isStale` on its
-   * `ran_at` — so a line shown here is a line a draft may say, and nothing a
-   * draft may not. A stale scan quotes nothing, and the card says so.
+   * The evidence behind each draft, judged as the sender judges its words
+   * (`evidenceAsOfFor`): the latest successful scan at or before the draft
+   * was WRITTEN, aged at now — or, for an answer to a reply, no scan at all.
+   * It used to be each company's LATEST scan for every card, so after a
+   * re-scan the panel listed the new scan's lines under words written from
+   * the old one, and an answer about a stale company was told "the send path
+   * refuses" what the sender never judges by scan age. Found by review.
+   *
+   * The lines are `quotableFindings` — the draft generator's own filter:
+   * observed, a gap, scored, from the latest SUCCESSFUL scan, fresh by
+   * `isStale` on its `ran_at` — so they are shown only when that latest scan
+   * is the one the words were written from (`draftEvidenceFrom`), and a line
+   * shown is a line a draft may say.
    */
-  const evidenceByCompany = new Map<string, DraftEvidence | null>(
+  const latestByCompany = new Map<string, { readonly scan: EvidenceScan | null; readonly lines: readonly string[] }>(
     await Promise.all(
       companyIds.map(async (companyId) => {
         const latest = await db
@@ -216,30 +224,81 @@ export default async function ApprovalsPage() {
           .orderBy(desc(schema.scans.ranAt))
           .limit(1)
         const scan = latest[0]
-        if (!scan) return [companyId, null] as const
+        if (!scan) return [companyId, { scan: null, lines: [] }] as const
         if (isStale(scan.ranAt, staleAfter, now)) {
-          return [companyId, { asOf: scan.ranAt.toISOString(), stale: true, lines: [] }] as const
+          return [companyId, { scan: { ...scan, stale: true }, lines: [] }] as const
         }
         const found = await quotableFindings(db, user.orgId, companyId, staleAfter, now)
         // `quotableFindings` reads "latest" again; if a scan landed between the
-        // two reads, the lines are that scan's, so they carry its date.
-        let asOf = scan.ranAt
+        // two reads, the lines are that scan's, so it is the latest one.
+        let current: EvidenceScan = { ...scan, stale: false }
         const first = found[0]
         if (first && first.scanId !== scan.id) {
           const newer = await db
-            .select({ ranAt: schema.scans.ranAt })
+            .select({ id: schema.scans.id, ranAt: schema.scans.ranAt })
             .from(schema.scans)
             .where(and(eq(schema.scans.orgId, user.orgId), eq(schema.scans.id, first.scanId)))
             .limit(1)
-          asOf = newer[0]?.ranAt ?? asOf
+          if (newer[0]) current = { ...newer[0], stale: isStale(newer[0].ranAt, staleAfter, now) }
         }
         const lines = found.map((f) =>
           evidenceLine({ signalKey: f.signalKey, why: icp?.signals[f.signalKey]?.why ?? null, detail: f.detail }),
         )
-        return [companyId, { asOf: asOf.toISOString(), stale: false, lines }] as const
+        return [companyId, { scan: current, lines }] as const
       }),
     ),
   )
+
+  /**
+   * The scan each draft's words were written from. Most drafts were written
+   * after their company's latest scan, and that IS the one; only a draft
+   * older than the latest scan needs a read of its own, one per distinct
+   * (company, moment), four at a time — the pool is one connection on Vercel.
+   */
+  const writtenKey = (companyId: string, at: Date) => `${companyId}:${at.toISOString()}`
+  const olderThanLatest = [
+    ...new Map(
+      drafts.flatMap((d) => {
+        const at = evidenceAsOfFor(d.touch)
+        if (!d.company || !at) return []
+        const latest = latestByCompany.get(d.company.id)?.scan
+        if (!latest || latest.ranAt.getTime() <= at.getTime()) return []
+        return [[writtenKey(d.company.id, at), { companyId: d.company.id, at }] as const]
+      }),
+    ).values(),
+  ]
+  const writtenFromOlder = new Map<string, EvidenceScan | null>(
+    await mapLimit(olderThanLatest, PREVIEW_CONCURRENCY, async ({ companyId, at }) => {
+      const rows = await db
+        .select({ id: schema.scans.id, ranAt: schema.scans.ranAt })
+        .from(schema.scans)
+        .where(
+          and(
+            eq(schema.scans.orgId, user.orgId),
+            eq(schema.scans.companyId, companyId),
+            eq(schema.scans.ok, true),
+            lte(schema.scans.ranAt, at),
+          ),
+        )
+        .orderBy(desc(schema.scans.ranAt))
+        .limit(1)
+      const scan = rows[0]
+      return [writtenKey(companyId, at), scan ? { ...scan, stale: isStale(scan.ranAt, staleAfter, now) } : null] as const
+    }),
+  )
+
+  const evidenceFor = (d: (typeof drafts)[number]): DraftEvidence | null => {
+    if (!d.company) return null
+    const latest = latestByCompany.get(d.company.id) ?? { scan: null, lines: [] }
+    const at = evidenceAsOfFor(d.touch)
+    const writtenFrom =
+      at === null
+        ? null
+        : latest.scan && latest.scan.ranAt.getTime() <= at.getTime()
+          ? latest.scan
+          : writtenFromOlder.get(writtenKey(d.company.id, at)) ?? null
+    return draftEvidenceFrom({ answersReply: at === null, writtenFrom, latest: latest.scan, latestLines: latest.lines })
+  }
 
   const draftViews: DraftView[] = planned.map(({ d, people, checked }) => {
     // Preselect only what the selects can show: a campaign on the draft's
@@ -274,7 +333,7 @@ export default async function ApprovalsPage() {
           decision: checked ? decisions.get(key(c.id, checked.id, evidenceAsOfFor(d.touch))) ?? notChecked : null,
         }
       }),
-      evidence: d.company ? evidenceByCompany.get(d.company.id) ?? null : null,
+      evidence: evidenceFor(d),
     }
   })
 

@@ -449,9 +449,10 @@ export function pauseReasonClass(reason: string | null | undefined): PauseReason
  * it — and an opt-out nobody could record, or an erasure that did not
  * finish, is never "resume them": the fix there is to record the opt-out or
  * finish the erasure, and resuming the person would be contacting somebody
- * who asked not to be.
+ * who asked not to be. Exported for the sender's last look before the wire,
+ * which refuses a pause that landed after the decision in the same words.
  */
-function pausedSentence(pausedFor: PauseReasonClass): string {
+export function pausedSentence(pausedFor: PauseReasonClass): string {
   switch (pausedFor) {
     case 'replied':
       return (

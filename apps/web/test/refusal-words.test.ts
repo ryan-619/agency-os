@@ -18,6 +18,7 @@ const SEND_CODES = {
   cold_channel_forbidden: true,
   no_consent: true,
   consent_revoked: true,
+  paused: true,
   quiet_hours: true,
   unknown_timezone: true,
   daily_cap: true,
@@ -55,6 +56,9 @@ describe('refusalWords', () => {
     expect(refusalWords('campaign_inactive')).toBe('campaign paused or not active')
     expect(refusalWords('bounced')).toBe('address bounced')
     expect(refusalWords('stale_evidence')).toBe('the evidence it quotes is stale')
+    // A pause is not the person's no, and is not called one.
+    expect(refusalWords('paused')).toBe('contact paused')
+    expect(refusalWords('paused')).not.toMatch(/declin/)
   })
 
   it('makes an unknown code readable rather than hiding it', () => {

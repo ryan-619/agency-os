@@ -12,10 +12,10 @@
 import type { SendRefusalCode } from '@agency/core'
 import { describe, expect, it } from 'vitest'
 import {
-  APPROVE_DOES_NOT_SEND, DEFERRED_CODES, EVIDENCE_LINES_SHOWN, MISSING_EVIDENCE_NOTE, NO_WORKER_FOOTNOTE,
-  OTHER_CAMPAIGN_NOTE, STALE_EVIDENCE_NOTE,
+  ANSWER_EVIDENCE_NOTE, APPROVE_DOES_NOT_SEND, DEFERRED_CODES, EVIDENCE_LINES_SHOWN, MISSING_EVIDENCE_NOTE,
+  NO_WORKER_FOOTNOTE, OTHER_CAMPAIGN_NOTE, STALE_EVIDENCE_NOTE,
   addressedByLabel, addressedByOf, approvability, approveBlock, approveFootnote, campaignToCheck, candidateLine,
-  checkedUnderLabel, decisionView, evidenceHeading, evidenceLine, evidenceNote, keyAction, nextFocus,
+  checkedUnderLabel, decisionView, draftEvidenceFrom, evidenceHeading, evidenceLine, evidenceNote, keyAction, nextFocus,
   uncheckedDecision,
   type Approvability, type CandidateDecision,
 } from '../src/lib/approval-view'
@@ -33,6 +33,7 @@ const SEND_CODES = {
   cold_channel_forbidden: false,
   no_consent: false,
   consent_revoked: false,
+  paused: false,
   quiet_hours: true,
   unknown_timezone: true,
   daily_cap: true,
@@ -117,6 +118,21 @@ describe('approveBlock', () => {
         're-verification deadline, and nobody may approve past that. Deny it, re-scan the company, then draft it again.',
     )
     expect(candidateLine(refusal('stale_evidence', false))).toBe('the evidence it quotes is stale — nobody may approve past this')
+  })
+
+  /**
+   * A pause is lifted by a person, after which the same draft can simply be
+   * approved — and a denial is a person's no, which stops enrolment drafting
+   * them again. So the block does not tell anyone to deny it.
+   */
+  it('says a paused contact waits for the pause to be lifted, and does not say to deny', () => {
+    const block = approveBlock(refusal('paused', false))
+    expect(block).toBe(
+      'Approving is pointless: contact paused, and nobody may approve past a pause — the worker would refuse it. ' +
+        'The rule below says what lifts it; the draft can wait here until then, or choose someone else.',
+    )
+    expect(block).not.toMatch(/deny/i)
+    expect(candidateLine(refusal('paused', false))).toBe('contact paused — nobody may approve past this')
   })
 
   it('leaves Approve enabled when nothing stops the message', () => {
@@ -231,6 +247,88 @@ describe('the evidence', () => {
 
   it('dates the heading', () => {
     expect(evidenceHeading({ asOf, stale: false, lines: ['x'] })).toContain('observed 12 Sep 2026')
+  })
+
+  /**
+   * The panel describes the scan the DECISION judges. It used to be the
+   * company's latest scan for every card, so an answer about a stale company
+   * read "the send path refuses" beside an enabled Approve, and a re-scanned
+   * company's card listed the new scan's lines under words written from the
+   * old one. Found by review.
+   */
+  describe('per draft, as the sender judges its words', () => {
+    const scanA = { id: 'a', ranAt: new Date('2026-09-01T09:00:00.000Z'), stale: false }
+    const scanB = { id: 'b', ranAt: new Date('2026-09-20T09:00:00.000Z'), stale: false }
+    const lines = ['No Content-Security-Policy: header absent']
+
+    it('lists the lines when the scan the words were written from is the latest, and fresh', () => {
+      const e = draftEvidenceFrom({ answersReply: false, writtenFrom: scanB, latest: scanB, latestLines: lines })
+      expect(e).toEqual({ asOf: scanB.ranAt.toISOString(), stale: false, lines, newer: null })
+      expect(evidenceNote(e, true)).toBeNull()
+    })
+
+    it('never lists a newer scan\'s lines under words written from an older one', () => {
+      const e = draftEvidenceFrom({ answersReply: false, writtenFrom: scanA, latest: scanB, latestLines: lines })
+      expect(e?.asOf).toBe(scanA.ranAt.toISOString())
+      expect(e?.lines).toEqual([])
+      expect(e?.newer).toEqual({ asOf: scanB.ranAt.toISOString(), stale: false })
+      const note = evidenceNote(e, true)
+      expect(note?.tone).toBe('plain')
+      expect(note?.text).toContain('Written from the scan of 1 Sep 2026')
+      expect(note?.text).toContain('A newer scan ran 20 Sep 2026')
+    })
+
+    it('is stale by the scan the words were written from, even after a fresh re-scan — and says to draft again, not to re-scan', () => {
+      const e = draftEvidenceFrom({
+        answersReply: false, writtenFrom: { ...scanA, stale: true }, latest: scanB, latestLines: lines,
+      })
+      expect(e?.stale).toBe(true)
+      expect(e?.lines).toEqual([])
+      const note = evidenceNote(e, true)
+      expect(note?.tone).toBe('warn')
+      expect(note?.text).toContain('The scan this draft was written from (1 Sep 2026) is past its re-verification deadline')
+      expect(note?.text).toContain('re-scanned 20 Sep 2026 — deny this draft and draft it again from that scan')
+      expect(note?.text).not.toMatch(/re-scan, then/)
+    })
+
+    it('uses the §2.2 sentence when there is no fresh scan since', () => {
+      const e = draftEvidenceFrom({
+        answersReply: false, writtenFrom: { ...scanA, stale: true }, latest: { ...scanA, stale: true }, latestLines: [],
+      })
+      const note = evidenceNote(e, true)
+      expect(note?.text.startsWith(STALE_EVIDENCE_NOTE)).toBe(true)
+      expect(note?.text).toContain('The scan it was written from ran 1 Sep 2026.')
+    })
+
+    it('is missing for a draft written before any scan, even when the company was scanned since', () => {
+      expect(draftEvidenceFrom({ answersReply: false, writtenFrom: null, latest: scanB, latestLines: lines })).toBeNull()
+      expect(MISSING_EVIDENCE_NOTE).toMatch(/had run when this draft was written/)
+      expect(MISSING_EVIDENCE_NOTE).not.toMatch(/never scanned/)
+    })
+
+    /**
+     * An answer is judged by no scan (`evidenceAsOfFor` is null), so the send
+     * path never refuses it as stale — the card must not say it does.
+     */
+    it('never gives an answer to a reply the stale-evidence sentence, however old the scan', () => {
+      const stale = draftEvidenceFrom({ answersReply: true, writtenFrom: null, latest: { ...scanA, stale: true }, latestLines: [] })
+      expect(stale).toEqual({ asOf: scanA.ranAt.toISOString(), stale: true, lines: [], answersReply: true })
+      const note = evidenceNote(stale, true)
+      expect(note?.text.startsWith(ANSWER_EVIDENCE_NOTE)).toBe(true)
+      expect(note?.text).not.toContain(STALE_EVIDENCE_NOTE)
+      expect(note?.text).not.toMatch(/refuses/)
+      expect(note?.text).toContain('The last successful scan ran 1 Sep 2026 and is past its re-verification deadline')
+      expect(ANSWER_EVIDENCE_NOTE).toMatch(/does not judge an answer by the age of a scan/)
+      expect(ANSWER_EVIDENCE_NOTE).toMatch(/repeats no finding that is no longer known to be true/)
+    })
+
+    it('shows an answer the latest fresh lines to check it against, and says so when there is no scan', () => {
+      const fresh = draftEvidenceFrom({ answersReply: true, writtenFrom: null, latest: scanB, latestLines: lines })
+      expect(fresh?.lines).toEqual(lines)
+      expect(evidenceNote(fresh, true)).toEqual({ tone: 'plain', text: ANSWER_EVIDENCE_NOTE })
+      const none = draftEvidenceFrom({ answersReply: true, writtenFrom: null, latest: null, latestLines: [] })
+      expect(evidenceNote(none, true)).toEqual({ tone: 'plain', text: `${ANSWER_EVIDENCE_NOTE} This company has no successful scan.` })
+    })
   })
 
   it("quotes the ICP's reason and what was observed, and invents no detail", () => {
