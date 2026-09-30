@@ -470,16 +470,17 @@ export async function complianceEvidenceFreshness(
 }
 
 // ---------------------------------------------------------------------------
-// 6. Drafts awaiting approval on evidence that is stale or missing
+// 6. Messages not yet sent on evidence that is stale or missing
 // ---------------------------------------------------------------------------
 
 /**
  * Every status an outbound row holds before it goes. `awaiting_approval`
  * waits on a person; the other three do NOT: an auto-send row is `queued`,
- * a person approved the words of an `approved` one (the worker re-checks the
- * rules at sending, not the evidence the words quote), and `sending` is the
- * worker's claim in flight. They leave with no further human look, which is
- * why they are measured too.
+ * a person approved the words of an `approved` one, and `sending` is the
+ * worker's claim in flight. Nobody reads them again, which is why they are
+ * measured too. The worker does re-check every rule at sending — the evidence
+ * under the words included (`stale_evidence`) — so what a row's evidence
+ * means for it is reported beside it (`refusedAtSending`).
  */
 export const COMPLIANCE_UNSENT_STATUSES = Object.freeze(['awaiting_approval', 'approved', 'queued', 'sending'] as const)
 export type ComplianceUnsentStatus = (typeof COMPLIANCE_UNSENT_STATUSES)[number]
@@ -492,9 +493,24 @@ export interface ComplianceDraftOnStaleEvidence {
   /** Which of the not-yet-sent statuses the row is in — only the first waits on a person. */
   readonly status: ComplianceUnsentStatus
   readonly createdAt: Date
-  /** `no_evidence`: the company has no successful scan at all. */
-  readonly why: 'stale' | 'no_evidence'
+  readonly why: ComplianceStaleEvidenceWhy
+  /** The company's latest successful scan. */
   readonly lastOkScanAt: Date | null
+  /**
+   * The latest successful scan of the contact's company at or before the
+   * moment the words were written — the scan the send path judges them by.
+   * Null for an answer to a reply, which it does not judge by a scan.
+   */
+  readonly writtenFromScanAt: Date | null
+  /**
+   * Whether the send path refuses this row at sending as `stale_evidence`
+   * (unless an earlier rule refuses it first): the scan its words were
+   * written from is past its deadline now. Nobody can approve past it; the
+   * fix is a re-scan and a new draft. False for a row the send path does not
+   * judge by evidence — no successful scan behind the words, or an answer to
+   * a reply — which goes as written unless another rule stops it.
+   */
+  readonly refusedAtSending: boolean
   /**
    * An answer to a reply (0018) — a person wrote it, in answer to what the
    * company said. Listed and tagged rather than left out: nothing marks
@@ -503,6 +519,19 @@ export interface ComplianceDraftOnStaleEvidence {
   readonly answersReply: boolean
 }
 
+/**
+ * Why a not-yet-sent row is listed:
+ *
+ *  - `stale`: the company's latest successful scan is past its deadline;
+ *  - `no_evidence`: the company has no successful scan at all;
+ *  - `rescanned_since`: the company's latest scan is fresh, but the words
+ *    were written from an older one that is past its deadline now. A re-scan
+ *    after the words were written does not freshen them; the send path
+ *    refuses them and `/approvals` blocks them, so they are counted too.
+ */
+export const COMPLIANCE_STALE_EVIDENCE_WHY = Object.freeze(['stale', 'no_evidence', 'rescanned_since'] as const)
+export type ComplianceStaleEvidenceWhy = (typeof COMPLIANCE_STALE_EVIDENCE_WHY)[number]
+
 export interface ComplianceDraftsOnStaleEvidence {
   /** Every outbound draft awaiting a person, about a company or not. */
   readonly awaiting: number
@@ -510,6 +539,14 @@ export interface ComplianceDraftsOnStaleEvidence {
   readonly unsent: number
   /** The listed rows — those on stale or missing evidence — counted per status, zeros included. */
   readonly byStatus: Readonly<Record<ComplianceUnsentStatus, number>>
+  /** The listed rows counted by why they are listed, zeros included. */
+  readonly byWhy: Readonly<Record<ComplianceStaleEvidenceWhy, number>>
+  /** Listed rows the send path refuses at sending (`stale_evidence`): waiting to be refused, or denied and re-drafted. */
+  readonly refusedAtSending: number
+  /** Listed rows the send path does not judge by evidence: they go as written unless another rule stops them. */
+  readonly notJudgedAtSending: number
+  /** Of `notJudgedAtSending`, the ones no person looks at again — approved, queued or sending. */
+  readonly notJudgedNoFurtherLook: number
   readonly count: number
   readonly rows: readonly ComplianceDraftOnStaleEvidence[]
 }
@@ -518,14 +555,24 @@ export interface ComplianceDraftsOnStaleEvidence {
  * §2.2: stale findings "must be re-verified before appearing in any outbound
  * draft". Measured the way `quotableFindings` measures it — the company's
  * most recent SUCCESSFUL scan, aged with `isStale()` from `ran_at` — so this
- * lists exactly the messages whose company the draft generator could not
- * quote today. A message names its company directly, or through its contact.
+ * lists the messages whose company the draft generator could not quote
+ * today; and, as the send path measures it, the messages whose words were
+ * written from a scan that has gone stale since, re-scanned or not. A message
+ * names its company directly, or through its contact.
  *
  * Every outbound row not yet sent is measured, not only the drafts awaiting a
- * person: a queued auto-send row and an approved-but-deferred one go out with
- * nobody looking again, so they are the ones this count most needs to see.
- * Each row is tagged with its status. This is the reporting half; refusing
- * such a row at the moment of sending is the send path's.
+ * person, and each row is tagged with its status. The send path refuses a
+ * row at sending when the scan its words were written from is stale
+ * (`stale_evidence`), whoever approved it — so most listed rows are waiting
+ * to be refused, or to be denied and drafted again after a re-scan. Each row
+ * says whether it is one of those (`refusedAtSending`), judged exactly as
+ * `sendFactsFor` judges it: the latest successful scan of the CONTACT's
+ * company at or before the row's `created_at`, compared in SQL against the
+ * stored values, and none for an answer to a reply. The rest — no successful
+ * scan behind the words, or an answer — go as written unless another rule
+ * stops them, and the approved, queued and sending ones among them go with
+ * nobody looking again. This is the reporting half; refusing is the send
+ * path's.
  */
 export async function complianceDraftsOnStaleEvidence(
   db: AgencyDb,
@@ -534,6 +581,14 @@ export async function complianceDraftsOnStaleEvidence(
   now: Date,
 ): Promise<ComplianceDraftsOnStaleEvidence> {
   const companyId = sql<string | null>`coalesce(${schema.touches.companyId}, ${schema.contacts.companyId})`
+  // The scan the send path judges the words by (`sendFactsFor`): the latest
+  // successful scan of the contact's company at or before the moment they
+  // were written. In SQL, against the stored microseconds, never a Date.
+  const writtenFrom = sql<Date | null>`(
+    SELECT max(s.ran_at) FROM scans s
+     WHERE s.org_id = ${orgId}::uuid AND s.company_id = ${schema.contacts.companyId}
+       AND s.ok AND s.ran_at <= ${schema.touches.createdAt}
+  )`.mapWith(schema.scans.ranAt)
   const drafts = await db
     .select({
       touchId: schema.touches.id,
@@ -542,6 +597,7 @@ export async function complianceDraftsOnStaleEvidence(
       status: schema.touches.status,
       createdAt: schema.touches.createdAt,
       answersTouchId: schema.touches.answersTouchId,
+      writtenFrom,
     })
     .from(schema.touches)
     .leftJoin(
@@ -559,8 +615,13 @@ export async function complianceDraftsOnStaleEvidence(
 
   const awaiting = drafts.filter((d) => d.status === 'awaiting_approval').length
   const byStatus = Object.fromEntries(COMPLIANCE_UNSENT_STATUSES.map((st) => [st, 0])) as Record<ComplianceUnsentStatus, number>
+  const byWhy = Object.fromEntries(COMPLIANCE_STALE_EVIDENCE_WHY.map((w) => [w, 0])) as Record<ComplianceStaleEvidenceWhy, number>
+  const empty = {
+    awaiting, unsent: drafts.length, byStatus, byWhy,
+    refusedAtSending: 0, notJudgedAtSending: 0, notJudgedNoFurtherLook: 0, count: 0, rows: [],
+  }
   const companyIds = [...new Set(drafts.map((d) => d.companyId).filter((id): id is string => Boolean(id)))]
-  if (companyIds.length === 0) return { awaiting, unsent: drafts.length, byStatus, count: 0, rows: [] }
+  if (companyIds.length === 0) return empty
 
   const [companies, lastOk] = await Promise.all([
     db
@@ -583,15 +644,25 @@ export async function complianceDraftsOnStaleEvidence(
   const lastOkAt = new Map(lastOk.map((s) => [s.companyId, s.ranAt]))
 
   const rows: ComplianceDraftOnStaleEvidence[] = []
+  let refusedAtSending = 0
+  let notJudgedNoFurtherLook = 0
   for (const d of drafts) {
     if (!d.companyId) continue
     const domain = domainOf.get(d.companyId)
     if (!domain) continue
     const ranAt = lastOkAt.get(d.companyId) ?? null
-    const why = ranAt === null ? 'no_evidence' : isStale(ranAt, staleDays, now) ? 'stale' : null
+    const answersReply = d.answersTouchId !== null
+    // `evidenceAsOfFor`: an answer to a reply is judged by no scan.
+    const writtenFromScanAt = answersReply ? null : d.writtenFrom
+    const refused = writtenFromScanAt !== null && isStale(writtenFromScanAt, staleDays, now)
+    const why: ComplianceStaleEvidenceWhy | null =
+      ranAt === null ? 'no_evidence' : isStale(ranAt, staleDays, now) ? 'stale' : refused ? 'rescanned_since' : null
     if (!why) continue
     const status = d.status as ComplianceUnsentStatus
     byStatus[status] += 1
+    byWhy[why] += 1
+    if (refused) refusedAtSending += 1
+    else if (status !== 'awaiting_approval') notJudgedNoFurtherLook += 1
     rows.push({
       touchId: d.touchId,
       companyId: d.companyId,
@@ -601,10 +672,19 @@ export async function complianceDraftsOnStaleEvidence(
       createdAt: d.createdAt,
       why,
       lastOkScanAt: ranAt,
-      answersReply: d.answersTouchId !== null,
+      writtenFromScanAt,
+      refusedAtSending: refused,
+      answersReply,
     })
   }
-  return { awaiting, unsent: drafts.length, byStatus, count: rows.length, rows }
+  return {
+    ...empty,
+    refusedAtSending,
+    notJudgedAtSending: rows.length - refusedAtSending,
+    notJudgedNoFurtherLook,
+    count: rows.length,
+    rows,
+  }
 }
 
 // ---------------------------------------------------------------------------

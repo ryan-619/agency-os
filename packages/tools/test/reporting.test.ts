@@ -307,7 +307,9 @@ describe('the reporting tools', () => {
 
     // The two counts a review found under-reporting: a queued auto-send row
     // leaves with nobody looking again, and a failed unsubscribe is an
-    // unrecorded opt-out as much as a failed reply is.
+    // unrecorded opt-out as much as a failed reply is. A message on MISSING
+    // evidence is one the send path does not judge by evidence — the one
+    // kind of listed row that really does go as written.
     it('counts a queued message on missing evidence and an unsubscribe that failed to store', async () => {
       await db.insert(schema.touches).values({ orgId, companyId, channel: 'email', direction: 'out', status: 'queued' })
       await db.insert(schema.auditLog).values({
@@ -317,9 +319,38 @@ describe('the reporting tools', () => {
       if (!out.ok) throw new Error(out.message)
       expect(out.summary).toContain('Opt-outs that failed to store: 1 in the last 30 days, 1 all time.')
       expect(out.summary).toContain(
-        'Outbound messages not yet sent on stale or missing evidence: 1 of 1 not yet sent (must be 0) — 0 awaiting approval; ' +
-          '0 approved, 1 queued and 0 sending, which go with no further look.',
+        'Outbound messages not yet sent on stale or missing evidence: 1 of 1 not yet sent (must be 0) — 0 awaiting approval, ' +
+          '0 approved, 1 queued, 0 sending. 0 were written from a scan that is stale now and are refused at sending ' +
+          '(stale_evidence) — waiting to be refused, or to be re-drafted after a re-scan; 1 have no successful scan behind ' +
+          'them or answer a reply, so the send path does not judge them by evidence and they go as written unless another ' +
+          'rule stops them — 1 of those with nobody looking again (approved, queued or sending).',
       )
+    })
+
+    // The round-1 review made the send path refuse, at sending, a message
+    // whose words were written from a scan that is stale now. The summary
+    // said such approved and queued rows "go with no further look" — the
+    // opposite of what the sender does, repeated by the model to a person.
+    it('says a message written from a stale scan is refused at sending, not that it goes unlooked-at', async () => {
+      const [contact] = await db.insert(schema.contacts).values({ orgId, companyId, email: 'p@rentman.io' }).returning({ id: schema.contacts.id })
+      const scanAt = new Date(Date.now() - (staleDays + 6) * DAY)
+      await db.insert(schema.scans).values({ orgId, companyId, ranAt: scanAt, ok: true })
+      for (const status of ['approved', 'queued'] as const) {
+        await db.insert(schema.touches).values({
+          orgId, companyId, contactId: contact!.id, channel: 'email', direction: 'out', status,
+          createdAt: new Date(scanAt.getTime() + DAY),
+          ...(status === 'approved' ? { approvedBy: userId, approvedAt: new Date(scanAt.getTime() + DAY) } : {}),
+        })
+      }
+      const out = await run(getComplianceSummary, {})
+      if (!out.ok) throw new Error(out.message)
+      expect(out.summary).not.toContain('go with no further look')
+      expect(out.summary).toContain('2 were written from a scan that is stale now and are refused at sending (stale_evidence)')
+      expect(out.summary).toContain('0 of those with nobody looking again')
+      expect((out.data as { draftsOnStaleEvidence: Record<string, unknown> }).draftsOnStaleEvidence).toMatchObject({
+        count: 2, refusedAtSending: 2, notJudgedAtSending: 0, notJudgedNoFurtherLook: 0,
+        byWhy: { stale: 2, no_evidence: 0, rescanned_since: 0 },
+      })
     })
 
     it('counts one org only', async () => {

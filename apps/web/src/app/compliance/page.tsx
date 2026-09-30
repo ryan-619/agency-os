@@ -403,29 +403,31 @@ function ColdOptIn({ s, absent }: { s: ComplianceSummary; absent: Absent }) {
 
 function DraftsOnStale({ s }: { s: ComplianceSummary }) {
   const d = s.draftsOnStaleEvidence
-  const answers = d.rows.filter((r) => r.answersReply).length
-  const noLook = d.count - d.byStatus.awaiting_approval
   return (
     <section>
       <h2>Messages waiting to go on stale or missing evidence</h2>
       <Rule>
         §2.2: findings older than {s.freshness.staleDays} days must be re-verified before they appear in any
         outbound draft. Every outbound message not yet sent — awaiting approval, approved and waiting for its
-        moment, queued to send automatically, or being sent — whose company has no successful scan, or whose
-        last one is stale, measured from the scan&apos;s <code>ran_at</code> the way the draft generator
-        measures it. Only the first waits on a person: the other three go with nobody looking at the evidence
-        again. Should be zero for messages written from the scan; an answer to a reply is listed too, tagged,
-        because nothing marks which of its words came from the scan.
+        moment, queued to send automatically, or being sent — whose company has no successful scan, whose
+        last one is stale, or whose words were written from a scan that has gone stale since, measured from
+        the scan&apos;s <code>ran_at</code>. The send path refuses a message at sending when the scan its words
+        were written from is stale (<code>stale_evidence</code>), whoever approved it: those are waiting to be
+        refused, or to be denied and drafted again after a re-scan. It does not judge by evidence a message
+        with no successful scan behind it, or an answer to a reply — those go as written unless another rule
+        stops them, and only the ones awaiting approval wait on a person. Should be zero; an answer is listed
+        too, tagged, because nothing marks which of its words came from the scan.
       </Rule>
       <div className="cards">
         <Count n={d.count} label="on stale or missing evidence" href="#draft-rows" mustBeZero />
-        <Count n={noLook} label="…of which go with no further look (approved, queued, sending)" href="#draft-rows" />
-        <Count n={answers} label="…of which answers to a reply" href="#draft-rows" />
+        <Count n={d.refusedAtSending} label="…of which refused at sending (stale evidence) — re-scan, then draft again" href="#draft-rows" />
+        <Count n={d.notJudgedAtSending} label="…of which not judged by evidence (no successful scan, or an answer to a reply)" href="#draft-rows" />
+        <Count n={d.notJudgedNoFurtherLook} label="…of those, go with nobody looking again (approved, queued, sending)" href="#draft-rows" />
         <Count n={d.unsent} label="outbound messages not yet sent" href="/approvals" />
       </div>
       {d.count > 0 ? (
         <table id="draft-rows" style={{ marginTop: 12 }}>
-          <thead><tr><th>Drafted</th><th>Company</th><th>Status</th><th>Evidence</th><th></th></tr></thead>
+          <thead><tr><th>Drafted</th><th>Company</th><th>Status</th><th>Evidence</th><th>At sending</th><th></th></tr></thead>
           <tbody>
             {d.rows.slice(0, ROWS).map((r) => (
               <tr key={r.touchId}>
@@ -433,9 +435,16 @@ function DraftsOnStale({ s }: { s: ComplianceSummary }) {
                 <td><CompanyLink domain={r.domain} /></td>
                 <td>{UNSENT_STATUS_WORDS[r.status]}</td>
                 <td>
-                  {r.why === 'no_evidence' ? 'no successful scan' : <>last good scan <At at={r.lastOkScanAt} /></>}
+                  {r.why === 'no_evidence' ? (
+                    'no successful scan'
+                  ) : r.why === 'rescanned_since' ? (
+                    <>written from the scan of <At at={r.writtenFromScanAt} />; re-scanned <At at={r.lastOkScanAt} /> since</>
+                  ) : (
+                    <>last good scan <At at={r.lastOkScanAt} /></>
+                  )}
                   {r.answersReply ? <span className="pill" style={{ marginLeft: 6 }}>answer to a reply</span> : null}
                 </td>
+                <td>{r.refusedAtSending ? 'refused — stale evidence' : 'not judged by evidence'}</td>
                 <td>{r.status === 'awaiting_approval' ? <a href="/approvals">approvals</a> : '—'}</td>
               </tr>
             ))}
