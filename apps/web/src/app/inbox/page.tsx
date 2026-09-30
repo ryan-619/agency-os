@@ -28,6 +28,7 @@ import { icpForOrg } from '@/lib/queries'
  * that cannot receive any says so, rather than looking like an empty inbox.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 export const revalidate = 0
 
 export default async function InboxPage({

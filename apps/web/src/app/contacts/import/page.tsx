@@ -1,17 +1,19 @@
 import { redirect } from 'next/navigation'
 import { revalidatePath } from 'next/cache'
-import { can, parseIcpDefinition } from '@agency/core'
+import { can } from '@agency/core'
 import {
   CONTACT_IMPORT_COLUMNS, appendAudit, importContacts, parseContactSeeds, type AgencyDb, type ContactSeedRow,
 } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
+import { readIcp } from '@/lib/company-list'
 import { getDb } from '@/lib/db'
 import { log } from '@/lib/logger'
 import { icpForOrg } from '@/lib/queries'
 import { ContactImportForm, type ContactImportState } from './import-form'
 
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 /** Cap one import so a mis-paste cannot try to import a novel. */
 const MAX_ROWS = 5000
@@ -89,8 +91,9 @@ export default async function ImportContacts() {
   const session = await auth()
   if (!session?.user) redirect('/signin')
   const user = session.user
-  const icpRow = await icpForOrg(user.orgId)
-  const icp = icpRow ? parseIcpDefinition(icpRow.definition) : null
+  // Guarded: the ICP is only the sidebar's label here, and a malformed
+  // profile made this page a 500 when the parse was bare.
+  const { icp } = readIcp((await icpForOrg(user.orgId))?.definition)
   const header = CONTACT_IMPORT_COLUMNS.join(',')
 
   const signOutAction = async () => {

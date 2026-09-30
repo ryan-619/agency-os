@@ -28,6 +28,7 @@ import { icpForOrg } from '@/lib/queries'
  * the agent, and the panel says so where the composer would be.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export default async function ChatThreadPage({ params }: { params: Promise<{ sessionId: string }> }) {
   const session = await auth()

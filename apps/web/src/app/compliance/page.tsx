@@ -1,9 +1,10 @@
 import { redirect } from 'next/navigation'
-import { can, DEFAULT_STALE_AFTER_DAYS, parseIcpDefinition } from '@agency/core'
+import { can } from '@agency/core'
 import { complianceSummary, type AgencyDb, type ComplianceSummary } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { When } from '@/components/when'
+import { readIcp } from '@/lib/company-list'
 import { getDb } from '@/lib/db'
 import { deployment, type Deployment } from '@/lib/deployment'
 import { icpForOrg } from '@/lib/queries'
@@ -27,6 +28,7 @@ import { refusalWords } from '@/lib/refusal-words'
  * absent — "none recorded", never "none happened".
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 /** The most rows any one table renders; the count above it is always whole. */
 const ROWS = 50
@@ -58,18 +60,12 @@ export default async function CompliancePage() {
   const user = session.user
   const principal = { id: user.id, orgId: user.orgId, role: user.role }
 
-  const icpRow = await icpForOrg(user.orgId)
-  let orgLabel = 'Agency'
-  let staleDays = DEFAULT_STALE_AFTER_DAYS
-  if (icpRow) {
-    try {
-      const icp = parseIcpDefinition(icpRow.definition)
-      orgLabel = icp.label
-      staleDays = icp.freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
-    } catch {
-      orgLabel = 'Agency'
-    }
-  }
+  // The dashboard's guarded read: `isStale` throws on a threshold that is not
+  // a positive number, and `parseIcpDefinition` does not check it, so an ICP
+  // with `stale_after_days: 0` made this page a 500 while the dashboard beside
+  // it fell back to the default. Both now fall back, and this page says so.
+  const { icp, unreadable, staleAfterDays: staleDays } = readIcp((await icpForOrg(user.orgId))?.definition)
+  const orgLabel = icp?.label ?? 'Agency'
   const signOutAction = async () => {
     'use server'
     await signOut({ redirectTo: '/signin' })
@@ -96,6 +92,13 @@ export default async function CompliancePage() {
         Every number here is a count of rows, and every count links to its rows. A zero is &apos;none
         recorded&apos;, and the page says which recorder is absent on this deployment.
       </p>
+
+      {unreadable ? (
+        <div className="note note-warn" style={{ marginBottom: 8 }}>
+          <strong>The active ICP could not be read.</strong> &quot;Stale&quot; below uses the default of{' '}
+          {staleDays} days until the profile is fixed.
+        </div>
+      ) : null}
 
       {live.worker ? null : (
         <div className="note note-warn" style={{ marginBottom: 8 }}>

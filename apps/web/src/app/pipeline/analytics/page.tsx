@@ -20,6 +20,7 @@ import { icpForOrg } from '@/lib/queries'
  * those counts are lower bounds rather than finding out.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export default async function PipelineAnalyticsPage() {
   const session = await auth()

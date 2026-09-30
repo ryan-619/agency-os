@@ -28,13 +28,23 @@ import {
  * slowest thing in the product.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+type Params = Record<string, string | string[] | undefined>
+
+/**
+ * The first value of a query-string key. Next hands a REPEATED key over as
+ * an array, whatever the page's type says, so `?q=a&q=b` reached `.trim()`
+ * as `['a', 'b']` and the page was a 500.
+ */
+const one = (v: string | string[] | undefined): string => (Array.isArray(v) ? v[0] ?? '' : v ?? '').trim()
 
 export default async function ContactsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ q?: string; paused?: string; company?: string; page?: string }>
+  searchParams: Promise<Params>
 }) {
   const session = await auth()
   if (!session?.user) redirect('/signin')
@@ -43,10 +53,12 @@ export default async function ContactsPage({
   if (!can(principal, 'contacts:read')) redirect('/')
 
   const params = await searchParams
-  const q = (params.q ?? '').trim().slice(0, 200)
-  const paused = params.paused === 'yes' ? true : params.paused === 'no' ? false : undefined
-  const companyId = params.company && UUID.test(params.company) ? params.company : undefined
-  const page = Math.max(1, Math.min(1000, Number.parseInt(params.page ?? '1', 10) || 1))
+  const q = one(params['q']).slice(0, 200)
+  const pausedParam = one(params['paused'])
+  const paused = pausedParam === 'yes' ? true : pausedParam === 'no' ? false : undefined
+  const companyParam = one(params['company'])
+  const companyId = UUID.test(companyParam) ? companyParam : undefined
+  const page = Math.max(1, Math.min(1000, Number.parseInt(one(params['page']) || '1', 10) || 1))
   const limit = LEDGER_DEFAULT_LIMIT
 
   const db = getDb() as unknown as AgencyDb
@@ -113,7 +125,7 @@ export default async function ContactsPage({
   const linkFor = (p: number) => {
     const sp = new URLSearchParams()
     if (q) sp.set('q', q)
-    if (params.paused === 'yes' || params.paused === 'no') sp.set('paused', params.paused)
+    if (paused !== undefined) sp.set('paused', paused ? 'yes' : 'no')
     if (companyId) sp.set('company', companyId)
     if (p > 1) sp.set('page', String(p))
     const s = sp.toString()
@@ -151,7 +163,7 @@ export default async function ContactsPage({
           maxLength={200}
           style={{ maxWidth: 320 }}
         />
-        <select name="paused" defaultValue={params.paused === 'yes' || params.paused === 'no' ? params.paused : ''} style={{ padding: '6px 8px' }}>
+        <select name="paused" defaultValue={paused === undefined ? '' : paused ? 'yes' : 'no'} style={{ padding: '6px 8px' }}>
           <option value="">Paused or not</option>
           <option value="yes">Only paused</option>
           <option value="no">Only not paused</option>

@@ -28,7 +28,7 @@ import { refusalWords } from '@/lib/refusal-words'
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
 
-const UUID = /^[0-9a-f-]{36}$/i
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const ACTIONS = ['start', 'sent', 'not_sent', 'dismiss'] as const
 type Action = (typeof ACTIONS)[number]
 
