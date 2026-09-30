@@ -168,16 +168,17 @@ Never set `VERCEL_ENV` — the platform does, and the cron routes read it.
 
 **Optional — leave each unset until the feature that reads it is configured.**
 Every one fails closed: unset, its feature is off, the screens that depend on
-it say so, and nothing else changes. The web app reads a BLANK value as unset,
-so a copied `.env.example` cannot stop it booting; a present value of the wrong
-shape is refused at boot, with a message that names the variable and never
-the value.
+it say so, and nothing else changes. All three processes — the web app here,
+the worker and the voice service on their own hosts — read a BLANK value as
+unset, so a copied `.env.example` cannot stop any of them booting; a present
+value of the wrong shape is refused at boot, with a message that names the
+variable and never the value.
 
 | variable | turns on | unset |
 |---|---|---|
 | `CRON_SECRET` | the two daily crons (see "Scheduled jobs on Vercel"). `openssl rand -hex 32`, at least 32 characters, **Production only** | `/api/cron/*` answers 503; nothing is rescanned and no digest is built |
 | `RESCAN_BATCH_SIZE` | companies per org per nightly rescan, 1–20 | `6` |
-| `SLACK_WEBHOOK_URL` | posts to one Slack channel: a recorded reply (not a provider's retry of one), an accepted booking, a deal moved to won or lost on the board, a proposal accepted, an opt-out that could not be recorded, the daily digest, a silent worker. Ids, the company's domain and a link — never a name, an address or a body. Must be `https://hooks.slack.com/…`; the URL is the credential and is never logged | nothing is posted; the digest is still recorded in the audit log |
+| `SLACK_WEBHOOK_URL` | posts to one Slack channel: a recorded reply (not a provider's retry of one), an accepted booking, a deal moved to won or lost on the board, a proposal accepted, an opt-out that could not be recorded, the daily digest, a campaign that paused itself because its addresses bounced (posted by the digest run), a silent worker. Ids, the company's domain and a link — never a name, an address or a body. Must be `https://hooks.slack.com/…`; the URL is the credential and is never logged | nothing is posted; the digest is still recorded in the audit log |
 | `UNSUBSCRIBE_SECRET` | verifying a one-click unsubscribe at `/api/unsubscribe/<token>`. **The same value on the worker**, which mints the links | `/api/unsubscribe` answers 503 — and logs `OPT-OUT NOT RECORDED` for a well-formed token, because a worker holding the secret minted it |
 | `RESEND_WEBHOOK_SECRET` | replies through Resend (see "Replies through Resend"): the endpoint's `whsec_…` signing secret | `/api/inbound/resend` answers 503 |
 | `RESEND_API_KEY` | the same route's fetch of each received message — a key that can READ received email | `/api/inbound/resend` answers 503 |
@@ -217,7 +218,7 @@ route in the web app, and neither needs the worker.
 | path | schedule (UTC) | what it does | ceiling |
 |---|---|---|---|
 | `/api/cron/rescan` | `17 3 * * *` | re-scans up to `RESCAN_BATCH_SIZE` companies per org — never-scanned first, then the oldest stale scan — through the same `recordScan` the CLI uses | `maxDuration = 300` |
-| `/api/cron/digest` | `43 6 * * *` | builds the daily digest, posts it to Slack when `SLACK_WEBHOOK_URL` is set, then posts a separate alert if the worker has gone silent | `maxDuration = 60` |
+| `/api/cron/digest` | `43 6 * * *` | builds the daily digest, posts it to Slack when `SLACK_WEBHOOK_URL` is set, then one notice per campaign that paused itself since the previous digest (at most three), then a separate alert if the worker has gone silent | `maxDuration = 60` |
 
 Both at minutes off the hour, because most schedules run at `:00`.
 
@@ -265,14 +266,25 @@ under "Scheduled rescans" and "Scheduled jobs":
   `batch` or `budget`; `batch` night after night means raise
   `RESCAN_BATCH_SIZE`). An org with no usable ICP is `notRun`. An org whose run
   threw is `failed: <ErrorClass>` and makes the whole answer a 500, so the
-  platform's cron log shows it. The audit row is `scan.cron_run`.
+  platform's cron log shows it. The audit row is `scan.cron_run`. Each org is
+  CLAIMED before anything is selected (`claimRescan`: a transaction-scoped
+  advisory lock on the org and a `scan.cron_started` audit row that holds
+  until the claimant's own ceiling), because two overlapping deliveries both
+  read the queue before either recorded a scan, and every company was
+  scanned twice. A duplicate delivery reports the org as
+  `{ skipped: 'claimed', heldUntil }` and scans nothing.
 - The digest answers `{ posted, why?, orgs: [...] }` and writes `cron.digest`
   whether or not it posted. It is idempotent on a 20-hour window: an org with
   a `cron.digest` row in the last 20 hours is skipped, and duplicate
   deliveries serialise on a transaction-scoped advisory lock, so one message
-  is sent. A failed Slack post is recorded and not retried until the next
-  day's run. With no `SLACK_WEBHOOK_URL` nothing is fetched and the answer is
-  200 with `posted: false, why: 'no_slack'`.
+  is sent. After the digest it posts one `campaign_paused` notice for each
+  `campaign.auto_paused` row written since the previous digest, at most three
+  — the worker pauses a campaign whose addresses bounce and has no Slack path
+  of its own — and `cron.digest` records `campaignPauses { found, posted }`,
+  so a cut list is counted rather than dropped. A failed Slack post is
+  recorded and not retried until the next day's run. With no
+  `SLACK_WEBHOOK_URL` nothing is fetched and the answer is 200 with
+  `posted: false, why: 'no_slack'`.
 
 **The rescan is not a scan button.** Nobody clicks it, and a person still scans
 one company with `npm run scan -- <domain>`. It never picks a `*.inbound`
@@ -281,10 +293,14 @@ scanning it would send somebody's email address out as a DNS lookup every
 night.
 
 **The alert that the worker is silent comes from here, not from the worker**,
-because a silent worker cannot report itself. When a worker is configured
-(`AGENT_URL`) and the newest heartbeat is older than max(600 s, three of that
-worker's own ticks) — or there is none — the digest run posts a separate
-message after the digest, so it is the newest in the channel. It is checked
+because a silent worker cannot report itself. When the newest heartbeat is
+older than max(600 s, three of that worker's own ticks) — whether or not
+`AGENT_URL` is set, because a heartbeat row is an observation and beats
+configuration, and the production shape here is Vercel without `AGENT_URL`
+and the worker on Fly — or when there is no heartbeat at all and a worker is
+configured (`AGENT_URL`), the digest run posts a separate message after the
+digest and any campaign-paused notices, so it is the newest in the channel.
+It is checked
 once a day, because that is how often the cron runs. With no Slack, the
 `cron.digest` row is highlighted in `/audit` instead.
 
@@ -507,7 +523,7 @@ Everything else turns a feature on, and the worker says which at boot.
 | `SMTP_HOST`, `MAIL_FROM`, `SMTP_*` | sending | `outreach: disabled` |
 | `IMAP_HOST`, `IMAP_USER`, `IMAP_PASSWORD` | reply detection | `outreach: send-only` — replies never pause a sequence |
 | `UNSUBSCRIBE_SECRET` | the RFC 8058 one-click `List-Unsubscribe` header on every email. **The same value as Vercel's** | no header, and one warn line at boot — `unsubscribe: headers off`, naming the missing variable (logged only when SMTP is configured) |
-| `WEB_PUBLIC_URL` | where that header's link points: the web app's public https origin, e.g. `https://myagencyos.in` | as above — the header needs both |
+| `WEB_PUBLIC_URL` | where that header's link points: the web app's public https origin, e.g. `https://myagencyos.in`. In production the worker **refuses to boot** on a value that is not `https:` on a public multi-label host — RFC 8058 one-click needs an HTTPS URI, and mailbox providers ignore any other | as above — the header needs both |
 | `OUTREACH_BOUNCE_PAUSE_PCT` | the hard-bounce rate past which an email campaign pauses itself — over 30 days, once it has written to at least 20 people. `100` turns it off | `5`. The boot log says `bounce auto-pause: on` |
 
 After an automatic pause the bounce window restarts, so a person re-activating
@@ -732,8 +748,10 @@ laptop that was theoretical. On a public URL it is not:
   `{ ok: true }` and nothing enumerable. A token is 32 random bytes and only
   its sha256 is stored. A link expires after 30 days or when its evidence goes
   stale, whichever is first (with the default ICP that is always the evidence,
-  at most 14 days after the scan), and a person can revoke it. The buyer page
-  shows no score and no tier.
+  at most 14 days after the scan), and a person can revoke it. A newer
+  successful scan of the company supersedes it sooner: the buyer is told the
+  proposal is being re-verified, no view is counted, and the accept answers
+  410. The buyer page shows no score and no tier.
 - **`/api/inbound/resend`** sits under `/api/inbound`: it refuses everything
   until both Resend variables are set, and verifies the Svix signature before
   it acts on anything.

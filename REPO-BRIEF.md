@@ -52,7 +52,10 @@ checked in the send path. AI voice calls disclose they are AI first.
 
 **§2.2 Evidence integrity.** Findings carry the raw evidence that produced
 them. Findings older than 14 days are stale and must be re-verified before
-appearing in any outbound draft. The scanner reads **public pages only** —
+appearing in any outbound draft — and the send path checks it again at the
+moment of sending: a message whose words quote a scan that has aged out since
+is refused `stale_evidence`, and nobody may approve past it; the fix is a
+re-scan and a new draft. The scanner reads **public pages only** —
 homepage headers, `/.well-known/security.txt`, `/security`, `/trust`, the TLS
 cert, homepage script tags. No port scanning, no probing for `.git` or `.env`.
 Every piece of user-facing copy calls it posture review from the outside, never
@@ -298,13 +301,13 @@ compose.
 
 | where | what | when |
 |---|---|---|
-| Vercel, with `CRON_SECRET` | the rescan: never-scanned first, then the stalest, `RESCAN_BATCH_SIZE` per org | 03:17 UTC daily |
-| Vercel, with `CRON_SECRET` | the digest to Slack (recorded in `/audit` even with no Slack), and the worker-silent alert | 06:43 UTC daily |
-| the worker | the send tick, the bounce auto-pause, the heartbeat and its 30-day prune | every `OUTREACH_TICK_MS` (15 s) |
+| Vercel, with `CRON_SECRET` | the rescan: never-scanned first, then the stalest, `RESCAN_BATCH_SIZE` per org. Each org is claimed first, so an overlapping delivery skips it rather than scanning the same companies twice | 03:17 UTC daily |
+| Vercel, with `CRON_SECRET` | the digest to Slack (recorded in `/audit` even with no Slack), a notice for each campaign that paused itself since the previous digest (at most three), and the worker-silent alert | 06:43 UTC daily |
+| the worker | the bounce auto-pause, then the send tick; the heartbeat and its 30-day prune | every `OUTREACH_TICK_MS` (15 s) |
 | the worker | IMAP reply detection | IDLE, as mail arrives |
 | the worker | the restart reconciler (which also prunes expired sign-in links) and stuck-send recovery | at boot |
 | the worker | approval expiry | every `APPROVAL_SWEEP_MS` (60 s) |
-| `/tasks`, when read | one LinkedIn step per approved LinkedIn message; a claim left `sending` past 30 minutes is failed | whenever somebody opens it |
+| `/tasks`, when read | one LinkedIn step per approved LinkedIn message; a claim left `sending` past 30 minutes is failed; a handed step is re-checked, and its words withheld when the send path now refuses it past approval, the contact is paused, or the hand-over is over 24 hours old | whenever somebody opens it |
 
 ### Local — fully working, including chat
 
@@ -379,9 +382,14 @@ deploy prebuilt, restore. Prefer git-connected deploys, where it cannot arise.
   deployment whose mail is not configured yet. The failure is logged as
   `magic link could not be sent`, not shown.
 - **`cp .env.example .env` now boots all three processes.** A blank `NAME=`
-  is unset for the web app but NOT for the worker or the voice service, which
-  refuse a blank URL, uuid, enum or length-checked secret — so those lines are
-  commented out in the example, and the reason is at its top.
+  is unset in the web app, the worker and the voice service alike, so the
+  lines the example once commented out are live again, and
+  `apps/agent/test/env-example.test.ts` boots the worker and the voice service
+  on the file. Compose now names every optional variable the web app and the
+  worker read (`apps/agent/test/compose-env.test.ts`), bar a few listed with
+  a reason — before, an optional feature set in `.env` could stay off under
+  compose, because a variable the compose file does not name never reaches a
+  container.
 - **Postgres 18 reports an `ON DELETE RESTRICT` refusal as 23001, not 23503.**
   Neon runs 18.6. Code that turns a RESTRICT refusal into a sentence must
   accept both (`credentials.ts` does).
