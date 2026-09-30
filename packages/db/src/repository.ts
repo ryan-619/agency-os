@@ -125,9 +125,13 @@ export interface RecordScanOutput {
   readonly scoreId: string
   /** What was written, so the caller need not re-derive it. */
   readonly result: ScoreResult
+  /** Every row, informational ones included. */
   readonly findingsWritten: number
+  /** Of the SCORED signals — the ones the score was computed over. */
   readonly observedCount: number
   readonly unobservedCount: number
+  /** Rows written `scored = false`: observed context, never part of the score. */
+  readonly informationalCount: number
 }
 
 /**
@@ -217,8 +221,9 @@ export async function recordScan(db: AgencyDb, input: RecordScanInput): Promise<
       scoreId: score.id,
       result,
       findingsWritten: findingRows.length,
-      observedCount: findingRows.filter((f) => f.observed).length,
-      unobservedCount: findingRows.filter((f) => !f.observed).length,
+      observedCount: findingRows.filter((f) => f.scored && f.observed).length,
+      unobservedCount: findingRows.filter((f) => f.scored && !f.observed).length,
+      informationalCount: findingRows.filter((f) => !f.scored).length,
     }
   })
 }

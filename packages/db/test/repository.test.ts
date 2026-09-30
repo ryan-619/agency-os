@@ -524,6 +524,9 @@ describe('the qualification data core', () => {
         .insert(schema.companies).values({ orgId, domain: `fixture-${domain}` })
         .returning({ id: schema.companies.id })
       const out = await recordScan(db, { orgId, companyId: company!.id, icpProfile, raw: fixture, profile })
+      // The counts it reports are about the score's signals; the rest is said separately.
+      expect(out.observedCount + out.unobservedCount).toBe(Object.keys(icp.signals).length)
+      expect(out.informationalCount).toBe(ADDITIVE_SIGNAL_KEYS.length)
 
       const rows = await db.select().from(schema.findings).where(eq(schema.findings.scanId, out.scanId))
       expect(rows).toHaveLength(Object.keys(icp.signals).length + ADDITIVE_SIGNAL_KEYS.length)
