@@ -29,7 +29,14 @@
  *     transaction-scoped advisory lock BEFORE looking for it, so two
  *     deliveries arriving together serialise: the second waits, then finds
  *     the first one's row and does nothing. A check without the lock is a
- *     race both deliveries win.
+ *     race both deliveries win. (PGlite runs one transaction at a time, so
+ *     the suite shows the sequential half and pins the lock by its source;
+ *     only real Postgres can show the overlap.)
+ *   * **A campaign that paused itself is announced once.** The worker pauses
+ *     a campaign whose addresses bounce (`campaign.auto_paused`) and has no
+ *     Slack path of its own; the digest is the web-side reader of those rows,
+ *     inside the same once-per-day guard, and reads only the rows written
+ *     since the previous digest — so two runs never announce one pause.
  *
  * The audit row carries counts only — no domain list, no ids of people —
  * because /audit shows it to every member and Slack already had the rest.
@@ -64,6 +71,15 @@ export const DIGEST_OPT_OUT_FAILURES = Object.freeze([
 ] as const)
 
 const HOUR_MS = 3_600_000
+
+/**
+ * At most this many `campaign_paused` notices per run. Each is one Slack
+ * post at its three-second timeout inside the digest's transaction, and the
+ * route budgets an org's run for them before starting it — so the cap is
+ * what keeps that budget a number. The rows past it are counted in the
+ * `cron.digest` row (`campaignPauses`), not dropped silently.
+ */
+export const DIGEST_MAX_PAUSE_NOTICES = 3
 
 /**
  * The `digest` notification's fields, less `kind`, `orgId` and `worker`
@@ -262,6 +278,75 @@ async function evidenceCounts(
   return { stale, neverScanned }
 }
 
+/** One bounce auto-pause, as the `campaign_paused` notice carries it: an id and two numbers. */
+export interface DigestCampaignPause {
+  readonly campaignId: string
+  readonly bouncePct: number
+  readonly threshold: number
+}
+
+/**
+ * The campaigns that paused themselves since the previous digest, oldest
+ * first — at most `DIGEST_MAX_PAUSE_NOTICES` of them, and how many there
+ * were in all.
+ *
+ * The window is the digest's own 24-hour lookback, started no earlier than
+ * the previous `cron.digest` row: a manual run twenty-one hours after the
+ * scheduled one would otherwise read three hours of pauses the scheduled one
+ * already announced. Call it BEFORE `digestRecord`, inside `digestOnce`,
+ * where the newest `cron.digest` row is the previous run's. Ids and the two
+ * numbers the pause was made on — never who bounced (the writer stores
+ * nothing else).
+ */
+export async function digestCampaignPauses(
+  db: AgencyDb,
+  orgId: string,
+  opts: { readonly now: Date },
+): Promise<{ readonly pauses: readonly DigestCampaignPause[]; readonly found: number }> {
+  const lookback = new Date(opts.now.getTime() - DIGEST_LOOKBACK_HOURS * HOUR_MS)
+  const [previous] = await db
+    .select({ at: schema.auditLog.createdAt })
+    .from(schema.auditLog)
+    .where(
+      and(
+        eq(schema.auditLog.orgId, orgId),
+        eq(schema.auditLog.action, 'cron.digest'),
+        gte(schema.auditLog.createdAt, lookback),
+        lte(schema.auditLog.createdAt, opts.now),
+      ),
+    )
+    .orderBy(desc(schema.auditLog.createdAt))
+    .limit(1)
+  const rows = await db
+    .select({ campaignId: schema.auditLog.subjectId, detail: schema.auditLog.detail })
+    .from(schema.auditLog)
+    .where(
+      and(
+        eq(schema.auditLog.orgId, orgId),
+        eq(schema.auditLog.action, 'campaign.auto_paused'),
+        // After the previous digest, strictly: a pause it read was announced.
+        previous ? gt(schema.auditLog.createdAt, previous.at) : gte(schema.auditLog.createdAt, lookback),
+        lte(schema.auditLog.createdAt, opts.now),
+      ),
+    )
+    .orderBy(schema.auditLog.createdAt, schema.auditLog.id)
+  const pauses: DigestCampaignPause[] = []
+  for (const r of rows) {
+    const bouncePct = numberIn(r.detail, 'bouncePct')
+    const threshold = numberIn(r.detail, 'threshold')
+    // A row that does not say which campaign, or on what numbers, is not one a notice can be honest about.
+    if (r.campaignId === null || bouncePct === null || threshold === null) continue
+    pauses.push({ campaignId: r.campaignId, bouncePct, threshold })
+  }
+  return { pauses: pauses.slice(0, DIGEST_MAX_PAUSE_NOTICES), found: pauses.length }
+}
+
+function numberIn(detail: unknown, key: string): number | null {
+  if (typeof detail !== 'object' || detail === null || !(key in detail)) return null
+  const v = (detail as Record<string, unknown>)[key]
+  return typeof v === 'number' && Number.isFinite(v) ? v : null
+}
+
 /** Whether this org's digest has run since `since` — any `cron.digest` row, posted or not. */
 export async function digestAlreadySent(db: AgencyDb, orgId: string, since: Date): Promise<boolean> {
   const rows = await db
@@ -365,6 +450,13 @@ export type DigestRecord = {
    * the delivery; this says whether the run meant to send one.
    */
   readonly workerAlert?: 'not_needed' | 'posted' | 'failed' | 'no_slack'
+  /**
+   * The bounce auto-pauses this run read (`digestCampaignPauses`): how many
+   * there were, and how many Slack took a notice for. `found > posted` is a
+   * pause the channel was not told about — past the cap, a failed post, or
+   * no Slack.
+   */
+  readonly campaignPauses?: { readonly found: number; readonly posted: number }
 } & ({ readonly posted: true } | { readonly posted: false; readonly why: DigestNotPosted })
 
 /**
@@ -383,6 +475,7 @@ export async function digestRecord(db: AgencyDb, record: DigestRecord): Promise<
       counts: record.counts,
       ...(record.worker ? { worker: record.worker } : {}),
       ...(record.workerAlert ? { workerAlert: record.workerAlert } : {}),
+      ...(record.campaignPauses ? { campaignPauses: { found: record.campaignPauses.found, posted: record.campaignPauses.posted } } : {}),
     },
   })
 }

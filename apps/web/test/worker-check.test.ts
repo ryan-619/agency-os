@@ -21,7 +21,9 @@ import {
 } from '@agency/db/queries'
 import { WORKER_SILENT_AFTER_SECONDS, workerSilent } from '../src/lib/worker-check'
 import { slackMessage } from '../src/lib/slack-message'
-import { digestNotification, workerSilentNotification } from '../src/app/api/cron/digest/notification'
+import {
+  campaignPausedNotification, digestNotification, workerSilentNotification,
+} from '../src/app/api/cron/digest/notification'
 
 const NOW = new Date('2026-09-30T06:43:00.000Z')
 const secondsAgo = (s: number) => new Date(NOW.getTime() - s * 1000)
@@ -193,6 +195,27 @@ describe('workerSilentNotification', () => {
   })
 })
 
+describe('campaignPausedNotification', () => {
+  const CAMPAIGN = '00000000-0000-4000-8000-0000000000c1'
+
+  /** The worker pauses the campaign and cannot post; this is the notice it could not send. */
+  it('carries the campaign’s id and the two numbers the pause was made on, and nothing else', () => {
+    const pause = { campaignId: CAMPAIGN, bouncePct: 12, threshold: 5, name: 'DECOY Q4 list', sentTo: 25 }
+    const event = campaignPausedNotification({ orgId: ORG, pause })
+    expect(event).toEqual({ kind: 'campaign_paused', orgId: ORG, campaignId: CAMPAIGN, bouncePct: 12, threshold: 5 })
+    expect(JSON.stringify(event)).not.toContain('DECOY')
+  })
+
+  it('says what stopped and links to the campaigns page — never a name or an address', () => {
+    const { text } = slackMessage(campaignPausedNotification({ orgId: ORG, pause: { campaignId: CAMPAIGN, bouncePct: 12, threshold: 5 } }), ORIGIN)
+    expect(text).toContain('Campaign paused itself')
+    expect(text).toContain('12%')
+    expect(text).toContain(CAMPAIGN)
+    expect(text.trim().split('\n').at(-1)).toBe('https://agency.example/campaigns')
+    expect(text).not.toContain('@')
+  })
+})
+
 // ---------------------------------------------------------------------------
 
 describe('GET /api/cron/digest, from its source', () => {
@@ -222,6 +245,25 @@ describe('GET /api/cron/digest, from its source', () => {
       const keys = fields!.split(',').map((f) => f.split(':')[0]!.trim()).filter(Boolean)
       for (const k of keys) expect(['route', 'outcome', 'error'], fields).toContain(k)
     }
+  })
+
+  /**
+   * The pauses are read and posted INSIDE digestOnce, through its handle, so
+   * the once-per-day guard that keeps the digest from posting twice keeps
+   * them from being announced twice; and read BEFORE digestRecord, so the
+   * previous run's row still marks where the last announcement stopped.
+   */
+  it('announces each campaign that paused itself inside the once-a-window run, after the digest', () => {
+    const inside = route.slice(route.indexOf('digestOnce(db, orgId, since,'))
+    const read = inside.indexOf('digestCampaignPauses(tx, orgId,')
+    expect(read).toBeGreaterThan(-1)
+    expect(read).toBeLessThan(inside.indexOf('digestRecord(tx,'))
+    const digestPost = inside.indexOf('post(tx, slack, digestNotification(')
+    const pausePost = inside.indexOf('post(tx, slack, campaignPausedNotification(')
+    expect(pausePost).toBeGreaterThan(digestPost)
+    expect(inside.indexOf('workerSilentNotification(')).toBeGreaterThan(pausePost)
+    // The budget an org is started with covers every notice it may post.
+    expect(route).toMatch(/const ORG_BUDGET_MS = 15_000 \+ DIGEST_MAX_PAUSE_NOTICES \* 3_000/)
   })
 
   it('builds events by name, never by spreading the facts', () => {

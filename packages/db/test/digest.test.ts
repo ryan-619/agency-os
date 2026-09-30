@@ -15,14 +15,22 @@
  *   * the facts carry no address and no message body — the seeded rows are
  *     full of both;
  *   * a `cron.digest` row inside twenty hours stops the next run, one
- *     outside it does not, and two deliveries at once post once.
+ *     outside it does not, and a second delivery posts nothing — shown in
+ *     sequence, because PGlite runs one transaction at a time; the lock
+ *     that serialises two at once on real Postgres is pinned by its source;
+ *   * a campaign that paused itself is read once: since the previous
+ *     digest, inside the 24-hour lookback, capped, per org.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import {
-  DIGEST_OPT_OUT_FAILURES, DIGEST_TOP_ROTTING, DIGEST_WINDOW_HOURS,
-  digestAlreadySent, digestCounts, digestFacts, digestOnce, digestRecord,
+  DIGEST_MAX_PAUSE_NOTICES, DIGEST_OPT_OUT_FAILURES, DIGEST_TOP_ROTTING, DIGEST_WINDOW_HOURS,
+  digestAlreadySent, digestCampaignPauses, digestCounts, digestFacts, digestOnce, digestRecord,
   schema, type AgencyDb, type DigestFacts,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
@@ -372,7 +380,14 @@ describe('the daily digest', () => {
       expect(JSON.stringify(rows.map((r) => r.detail))).not.toContain('acme.example')
     })
 
-    it('runs once for two deliveries that arrive together: the second finds the first one’s row', async () => {
+    /**
+     * What this can show is SEQUENTIAL idempotency: PGlite runs one
+     * transaction at a time, so the second `digestOnce` below only starts
+     * once the first has committed, and it would pass with no lock at all.
+     * Two deliveries that truly overlap are serialised by the lock, which
+     * only real Postgres can show — so it is pinned by its source, next.
+     */
+    it('runs once for a second delivery: it finds the first one’s committed row', async () => {
       let runs = 0
       const run = (tx: AgencyDb) => async () => {
         runs += 1
@@ -391,6 +406,18 @@ describe('the daily digest', () => {
       expect((await digestOnce(db, otherOrgId, windowStart(), async () => 'ran')).ran).toBe(true)
     })
 
+    it('takes the transaction-scoped two-key lock before it looks for the row', () => {
+      const here = dirname(fileURLToPath(import.meta.url))
+      const source = readFileSync(join(here, '..', 'src', 'digest.ts'), 'utf8')
+      const body = source.slice(source.indexOf('export async function digestOnce'))
+      const end = body.indexOf('\n}\n')
+      const fn = body.slice(0, end)
+      const lock = fn.indexOf("pg_advisory_xact_lock(hashtext('cron.digest'), hashtext(")
+      expect(lock, 'digestOnce no longer takes its advisory lock').toBeGreaterThan(-1)
+      expect(fn.indexOf('db.transaction(')).toBeLessThan(lock)
+      expect(lock).toBeLessThan(fn.indexOf('digestAlreadySent('))
+    })
+
     it('writes nothing when the run throws, so the next delivery runs afresh', async () => {
       await expect(
         digestOnce(db, orgId, windowStart(), async (tx) => {
@@ -400,6 +427,86 @@ describe('the daily digest', () => {
       ).rejects.toThrow('went away')
       expect(await digestAlreadySent(db, orgId, windowStart())).toBe(false)
       expect((await digestOnce(db, orgId, windowStart(), async () => 'ran')).ran).toBe(true)
+    })
+  })
+
+  describe('campaigns that paused themselves', () => {
+    const paused = async (org: string, at: Date, detail: Record<string, unknown> = { bouncePct: 12, threshold: 5, sentTo: 25, bounced: 3 }) => {
+      const campaignId = randomUUID()
+      await db.insert(schema.auditLog).values({
+        orgId: org, actor: 'system', action: 'campaign.auto_paused', subjectType: 'campaign', subjectId: campaignId,
+        createdAt: at, detail,
+      })
+      return campaignId
+    }
+    const digestAt = (org: string, at: Date) =>
+      db.insert(schema.auditLog).values({ orgId: org, actor: 'system', action: 'cron.digest', createdAt: at, detail: { posted: true } })
+
+    it('reads every pause in the last 24 hours, oldest first, as an id and two numbers — and not another org’s', async () => {
+      const first = await paused(orgId, hoursAgo(20))
+      const second = await paused(orgId, hoursAgo(2), { bouncePct: 7.5, threshold: 5, sentTo: 40, bounced: 3 })
+      await paused(orgId, hoursAgo(30)) // yesterday's window
+      await paused(otherOrgId, hoursAgo(1))
+      const got = await digestCampaignPauses(db, orgId, { now: NOW })
+      expect(got).toEqual({
+        found: 2,
+        pauses: [
+          { campaignId: first, bouncePct: 12, threshold: 5 },
+          { campaignId: second, bouncePct: 7.5, threshold: 5 },
+        ],
+      })
+    })
+
+    /**
+     * The once-per-day guard is twenty hours, the lookback twenty-four. A
+     * manual run twenty-one hours after the scheduled one would re-read the
+     * three hours they share — so the window starts at the previous digest.
+     */
+    it('reads only what the previous digest did not, so no pause is announced twice', async () => {
+      await paused(orgId, hoursAgo(23))
+      await digestAt(orgId, hoursAgo(21))
+      const after = await paused(orgId, hoursAgo(1))
+      expect(await digestCampaignPauses(db, orgId, { now: NOW })).toEqual({
+        found: 1,
+        pauses: [{ campaignId: after, bouncePct: 12, threshold: 5 }],
+      })
+      // Another org's digest moves nothing here.
+      await digestAt(otherOrgId, hoursAgo(0.5))
+      expect((await digestCampaignPauses(db, orgId, { now: NOW })).found).toBe(1)
+    })
+
+    it('caps the notices and still counts every pause', async () => {
+      const ids: string[] = []
+      for (let i = DIGEST_MAX_PAUSE_NOTICES + 2; i > 0; i -= 1) ids.push(await paused(orgId, hoursAgo(i)))
+      const got = await digestCampaignPauses(db, orgId, { now: NOW })
+      expect(got.found).toBe(DIGEST_MAX_PAUSE_NOTICES + 2)
+      expect(got.pauses.map((p) => p.campaignId)).toEqual(ids.slice(0, DIGEST_MAX_PAUSE_NOTICES))
+    })
+
+    it('skips a row that does not say which campaign, or on what numbers', async () => {
+      await db.insert(schema.auditLog).values({
+        orgId, actor: 'system', action: 'campaign.auto_paused', createdAt: hoursAgo(1), detail: { bouncePct: 9, threshold: 5 },
+      })
+      await paused(orgId, hoursAgo(1), { bouncePct: 'lots', threshold: 5 })
+      await paused(orgId, hoursAgo(1), { threshold: 5 })
+      expect(await digestCampaignPauses(db, orgId, { now: NOW })).toEqual({ found: 0, pauses: [] })
+    })
+
+    /** The route reads the pauses and posts inside digestOnce; a second delivery reads nothing new. */
+    it('is announced once across two deliveries, through the once-per-day guard', async () => {
+      await paused(orgId, hoursAgo(1))
+      const announced: string[] = []
+      const deliver = () =>
+        digestOnce(db, orgId, new Date(NOW.getTime() - DIGEST_WINDOW_HOURS * HOUR), async (tx) => {
+          const { pauses, found } = await digestCampaignPauses(tx, orgId, { now: NOW })
+          announced.push(...pauses.map((p) => p.campaignId))
+          await digestRecord(tx, { orgId, posted: true, counts: digestCounts(await digestFacts(tx, orgId, { now: NOW })), campaignPauses: { found, posted: pauses.length } })
+        })
+      expect((await deliver()).ran).toBe(true)
+      expect((await deliver()).ran).toBe(false)
+      expect(announced).toHaveLength(1)
+      const [row] = await db.select().from(schema.auditLog).where(eq(schema.auditLog.action, 'cron.digest'))
+      expect((row!.detail as Record<string, unknown>)['campaignPauses']).toEqual({ found: 1, posted: 1 })
     })
   })
 })

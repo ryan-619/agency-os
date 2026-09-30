@@ -236,6 +236,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
     },
     worker: 'live',
     workerAlert: 'not_needed',
+    campaignPauses: { found: 1, posted: 0 },
   },
 }
 
