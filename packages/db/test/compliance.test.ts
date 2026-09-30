@@ -23,7 +23,8 @@ import {
   complianceDisclosure, complianceDraftsOnStaleEvidence, complianceEvidenceFreshness,
   complianceHumanCanResolve, complianceLateApprovals, complianceOptOutsNotRecorded,
   complianceOptOutsWithoutSuppression, complianceRefusalsByCode, complianceSummary,
-  complianceSuppressionsBySource, recordInboundReply, schema, type AgencyDb,
+  complianceSuppressionsBySource, DIGEST_OPT_OUT_FAILURES, recordInboundReply, recordUnsubscribe, schema,
+  type AgencyDb,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
 
@@ -309,7 +310,9 @@ describe('the compliance counts', () => {
 
       const r = await complianceDraftsOnStaleEvidence(db, orgId, STALE_DAYS, NOW)
       expect(r.awaiting).toBe(5)
+      expect(r.unsent).toBe(5)
       expect(r.count).toBe(4)
+      expect(r.byStatus).toEqual({ awaiting_approval: 4, approved: 0, queued: 0, sending: 0 })
       const why = new Map(r.rows.map((d) => [d.touchId, d.why]))
       expect(why.has(onFresh)).toBe(false)
       expect(why.get(onStale)).toBe('stale')
@@ -317,6 +320,44 @@ describe('the compliance counts', () => {
       expect(why.get(onDown)).toBe('stale')
       expect(why.get(throughContact)).toBe('stale')
       expect(r.rows.find((d) => d.touchId === throughContact)?.domain).toBe('stale.test')
+    })
+
+    // A queued auto-send row and an approved-but-deferred one leave with no
+    // further human look; counting only `awaiting_approval` missed exactly
+    // the rows nobody would see again.
+    it('measures every outbound row not yet sent — queued, approved and sending too — tagged by status', async () => {
+      await scan(orgId, fresh, ago(2), true)
+      await scan(orgId, stale, ago(20), true)
+      const queued = await touch({ orgId, companyId: stale, channel: 'email', direction: 'out', status: 'queued' })
+      const approved = await touch({
+        orgId, companyId: never, channel: 'email', direction: 'out', status: 'approved',
+        approvedBy: userId, approvedAt: ago(1), scheduledFor: ago(-1),
+      })
+      const sending = await touch({ orgId, companyId: stale, channel: 'linkedin', direction: 'out', status: 'sending' })
+      const awaitingDraft = await touch({ orgId, companyId: stale, channel: 'email', direction: 'out', status: 'awaiting_approval' })
+      // On fresh evidence: measured, not listed.
+      await touch({ orgId, companyId: fresh, channel: 'email', direction: 'out', status: 'queued' })
+      // Already gone, refused, or failed: not waiting to go anywhere.
+      await touch({ orgId, companyId: stale, channel: 'email', direction: 'out', status: 'sent', sentAt: ago(1) })
+      await touch({ orgId, companyId: stale, channel: 'email', direction: 'out', status: 'refused', refusalCode: 'needs_approval' })
+      await touch({ orgId, companyId: stale, channel: 'email', direction: 'out', status: 'failed' })
+      await touch({ orgId: otherOrgId, companyId: theirs, channel: 'email', direction: 'out', status: 'queued' })
+
+      const r = await complianceDraftsOnStaleEvidence(db, orgId, STALE_DAYS, NOW)
+      expect(r.unsent).toBe(5)
+      expect(r.awaiting).toBe(1)
+      expect(r.count).toBe(4)
+      expect(r.byStatus).toEqual({ awaiting_approval: 1, approved: 1, queued: 1, sending: 1 })
+      const status = new Map(r.rows.map((d) => [d.touchId, [d.status, d.why]]))
+      expect(status.get(queued)).toEqual(['queued', 'stale'])
+      expect(status.get(approved)).toEqual(['approved', 'no_evidence'])
+      expect(status.get(sending)).toEqual(['sending', 'stale'])
+      expect(status.get(awaitingDraft)).toEqual(['awaiting_approval', 'stale'])
+
+      // And the summary the page, the dashboard and the tool read carries it.
+      const summary = await complianceSummary(db, orgId, { staleDays: STALE_DAYS, now: NOW })
+      expect(summary.draftsOnStaleEvidence.count).toBe(4)
+      expect(summary.draftsOnStaleEvidence.byStatus.queued).toBe(1)
     })
 
     it('tags an answer to a reply rather than leaving it out', async () => {
@@ -432,6 +473,70 @@ describe('the compliance counts', () => {
       const outstanding = await complianceOptOutsWithoutSuppression(db, orgId)
       expect(outstanding.rows.map((x) => [x.id, x.why])).toEqual([[reply.touchId, 'unreadable']])
       expect((await complianceOptOutsNotRecorded(db, otherOrgId, null)).count).toBe(0)
+    })
+
+    // /compliance, the dashboard and get_compliance_summary counted only
+    // `contact.opt_out_not_recorded`, while the digest counted all three: a
+    // failed unsubscribe or erasure read 0 on the page over a real unrecorded
+    // opt-out. Neither leaves an opted-out reply or call for the next block.
+    it('counts every failure the digest counts — the unsubscribe link and an erasure too', async () => {
+      // The unsubscribe link, through the real writer: an outbound email whose
+      // delivered address is gone, to a contact with none on file either.
+      const nobody = (
+        await db.insert(schema.contacts).values({ orgId, companyId: stale, email: null }).returning({ id: schema.contacts.id })
+      )[0]!.id
+      const sentTo = await touch({ orgId, contactId: nobody, channel: 'email', direction: 'out', status: 'sent', sentAt: ago(2), recipient: null })
+      const errors: string[] = []
+      const unsub = await recordUnsubscribe(db, { touchId: sentTo, now: ago(1), log: { error: (message) => errors.push(message) } })
+      expect(unsub.ok).toBe(false)
+      expect(errors).toEqual(['OPT-OUT NOT RECORDED — record it by hand'])
+      // An erasure that could not keep its suppression, in the writer's shape.
+      const erased = await contact(orgId, down, 'e@down.test')
+      await appendAudit(db, {
+        orgId, actor: userId, action: 'contact.erasure_failed', subjectType: 'contact', subjectId: erased,
+        detail: { why: 'unreadable_phone', paused: true },
+      })
+      // A reply or call reader's own row.
+      const priya = await contact(orgId, fresh, 'priya@fresh.test')
+      await appendAudit(db, {
+        orgId, actor: 'system', action: 'contact.opt_out_not_recorded', subjectType: 'contact', subjectId: priya,
+        detail: { channel: 'email', why: 'unparseable_address' },
+      })
+      // Not a failure, and not this org's.
+      await appendAudit(db, { orgId, actor: 'system', action: 'unsubscribe.recorded', subjectType: 'touch', subjectId: sentTo, detail: {} })
+      await appendAudit(db, {
+        orgId: otherOrgId, actor: 'system', action: 'unsubscribe.not_recorded', subjectType: 'touch', subjectId: sentTo,
+        detail: { contactId: nobody, why: 'no_recipient' },
+      })
+
+      const r = await complianceOptOutsNotRecorded(db, orgId, null)
+      expect(r.count).toBe(3)
+      const by = new Map(r.rows.map((x) => [x.action, x]))
+      expect([...by.keys()].sort()).toEqual([...DIGEST_OPT_OUT_FAILURES].sort())
+      // The unsubscribe row names a touch; its company is the touch's contact's.
+      expect(by.get('unsubscribe.not_recorded')).toMatchObject({ channel: 'email', why: 'no_recipient', companyDomain: 'stale.test' })
+      expect(by.get('contact.erasure_failed')).toMatchObject({ channel: null, why: 'unreadable_phone', companyDomain: 'down.test' })
+      expect(by.get('contact.opt_out_not_recorded')).toMatchObject({ channel: 'email', companyDomain: 'fresh.test' })
+
+      const summary = await complianceSummary(db, orgId, { staleDays: STALE_DAYS, now: NOW })
+      expect(summary.optOuts.notRecorded.allTime).toBe(3)
+      expect((await complianceOptOutsNotRecorded(db, otherOrgId, null)).count).toBe(1)
+    })
+
+    it('resolves an unsubscribe row whose touch is gone through the contactId it carries, and counts one no company names', async () => {
+      const kept = await contact(orgId, never, 'k@never.test')
+      const goneTouch = '5d4c3b2a-1f0e-4d9c-8b7a-6f5e4d3c2b1a'
+      await appendAudit(db, {
+        orgId, actor: 'system', action: 'unsubscribe.not_recorded', subjectType: 'touch', subjectId: goneTouch,
+        detail: { touchId: goneTouch, contactId: kept, why: 'no_recipient' },
+      })
+      await appendAudit(db, {
+        orgId, actor: 'system', action: 'unsubscribe.not_recorded', subjectType: 'touch', subjectId: goneTouch,
+        detail: { touchId: goneTouch, contactId: 'not-a-uuid', why: 'no_recipient' },
+      })
+      const r = await complianceOptOutsNotRecorded(db, orgId, null)
+      expect(r.count).toBe(2)
+      expect(r.rows.map((x) => x.companyDomain).sort()).toEqual(['never.test', null].sort())
     })
 
     it('counts the audit rows inside the window and all time', async () => {
