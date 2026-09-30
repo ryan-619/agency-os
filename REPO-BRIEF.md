@@ -335,7 +335,7 @@ Worker ports: health on `AGENT_PORT` (3001), API on `AGENT_PORT + 1` (3002).
 ```bash
 npx tsc --build                 # build all workspace packages
 npm run typecheck               # + apps/web and the test project
-npx vitest run --maxWorkers=1   # 3506 tests in 140 files. One worker matters: see §8
+npx vitest run --maxWorkers=1   # 3875 tests in 148 files. One worker matters: see §8
 npm run db:migrate -- status    # what is applied
 npm run scan                    # the scanner CLI
 ./tools/remote-setup.sh         # migrate + seed a remote DB (hidden prompt)
