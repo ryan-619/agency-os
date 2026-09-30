@@ -10,17 +10,24 @@
  * from the daily cron, which runs on the web half, reading the heartbeat the
  * worker stops writing.
  *
- * Silent means a worker is CONFIGURED here (`deployment().worker`) and has
- * not been heard from within the threshold, or ever. A deployment that never
- * meant to run one is not silent — it is one where nothing sends, which
- * `nothingWillSendNote` already says on every page that would promise it,
- * and an alert about it every morning would teach the channel to ignore the
- * one that matters.
+ * Silent means a worker has written a heartbeat and not been heard from
+ * within the threshold — whatever this web half is configured with, because
+ * an observation beats configuration: the documented production shape is
+ * Vercel with no `AGENT_URL` (chat not exposed) and a worker on Fly, and
+ * when that worker stops its row goes quiet while `deployment().worker`
+ * still says false. With NO row, it is silent only where a worker is
+ * CONFIGURED (`never`). A deployment that never meant to run one is not
+ * silent — it is one where nothing sends, which `nothingWillSendNote`
+ * already says on every page that would promise it, and an alert about it
+ * every morning would teach the channel to ignore the one that matters.
  *
  * Pure: no `server-only`, no `@/`, no clock. The route reads the newest
  * heartbeat and passes the threshold that row earns (`heartbeatSilentAfter`,
- * which never goes below the default here), so the alert and the digest's
- * "Worker:" line — `heartbeatReport` over the same row — cannot disagree.
+ * which never goes below the default here), and the rule above is
+ * `heartbeatReport`'s own, so the alert and the digest's "Worker:" line —
+ * `heartbeatReport` over the same row — cannot disagree. They did: this
+ * returned "not silent" for any deployment without `AGENT_URL`, so the
+ * digest said "Worker: SILENT" and the alert was recorded `not_needed`.
  */
 
 /**
@@ -52,6 +59,9 @@ export function workerSilent(
       : // The worker stamps with its clock and this reads with another's: a
         // row a second in the future is skew, not a worker yet to tick.
         Math.max(0, Math.floor((now.getTime() - seen) / 1000))
-  if (!status.configured) return { silent: false, ageSeconds }
+  // No row: silent only where a worker was meant to be running.
+  if (status.lastSeenAt === null) return { silent: status.configured, ageSeconds }
+  // A row is an observation. One that cannot be read is not evidence that
+  // anything ticked, and one past the threshold is a worker that stopped.
   return { silent: ageSeconds === null || ageSeconds > threshold, ageSeconds }
 }

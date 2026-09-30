@@ -186,6 +186,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'credential.rotated': { connectorId: SUBJECT, secretId: SUBJECT, label: 'deepwiki token' },
   'credential.deleted': { label: 'old apollo key' },
   'scan.cron_run': { picked: 6, scanned: 5, unreachable: 1, skipped: 0, remaining: 4, schedule: '17 3 * * *' },
+  'scan.cron_started': { until: '2026-09-30T03:22:00.000Z', schedule: '17 3 * * *' },
   'meeting.outcome_recorded': { outcome: 'held', companyId: SUBJECT },
   'export.companies': { rows: 42, filters: {} },
   'export.findings': { rows: 310, filters: {} },
@@ -239,6 +240,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
     },
     worker: 'live',
     workerAlert: 'not_needed',
+    campaignPauses: { found: 1, posted: 0 },
   },
 }
 

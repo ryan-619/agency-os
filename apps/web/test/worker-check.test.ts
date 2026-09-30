@@ -21,7 +21,9 @@ import {
 } from '@agency/db/queries'
 import { WORKER_SILENT_AFTER_SECONDS, workerSilent } from '../src/lib/worker-check'
 import { slackMessage } from '../src/lib/slack-message'
-import { digestNotification, workerSilentNotification } from '../src/app/api/cron/digest/notification'
+import {
+  campaignPausedNotification, digestNotification, workerSilentNotification,
+} from '../src/app/api/cron/digest/notification'
 
 const NOW = new Date('2026-09-30T06:43:00.000Z')
 const secondsAgo = (s: number) => new Date(NOW.getTime() - s * 1000)
@@ -44,10 +46,22 @@ describe('workerSilent', () => {
     expect(workerSilent({ configured: true, lastSeenAt: secondsAgo(86_400) }, NOW)).toEqual({ silent: true, ageSeconds: 86_400 })
   })
 
-  it('is never silent where no worker is configured — that deployment says "nothing will send" instead', () => {
+  it('is not silent where no worker is configured and none ever wrote — that deployment says "nothing will send" instead', () => {
     expect(workerSilent({ configured: false, lastSeenAt: null }, NOW)).toEqual({ silent: false, ageSeconds: null })
-    // A stale row still has an age; it is just not an alarm here.
-    expect(workerSilent({ configured: false, lastSeenAt: secondsAgo(86_400) }, NOW)).toEqual({ silent: false, ageSeconds: 86_400 })
+  })
+
+  /**
+   * The documented production shape: Vercel with no AGENT_URL, a worker on
+   * Fly. The web half is not "configured" for a worker, and one has been
+   * writing heartbeats — then stopped. The row is the observation, and an
+   * observation beats configuration: it is silent, as the digest's Worker
+   * line already said.
+   */
+  it('is silent where a worker wrote a heartbeat and stopped, configured here or not', () => {
+    expect(workerSilent({ configured: false, lastSeenAt: secondsAgo(86_400) }, NOW)).toEqual({ silent: true, ageSeconds: 86_400 })
+    expect(workerSilent({ configured: false, lastSeenAt: secondsAgo(601) }, NOW)).toEqual({ silent: true, ageSeconds: 601 })
+    expect(workerSilent({ configured: false, lastSeenAt: secondsAgo(15) }, NOW)).toEqual({ silent: false, ageSeconds: 15 })
+    expect(workerSilent({ configured: false, lastSeenAt: new Date(Number.NaN) }, NOW)).toEqual({ silent: true, ageSeconds: null })
   })
 
   it('honours the threshold a slow-ticking worker earns', () => {
@@ -73,20 +87,28 @@ describe('workerSilent', () => {
     expect(workerSilent({ configured: true, lastSeenAt: new Date(Number.NaN) }, NOW)).toEqual({ silent: true, ageSeconds: null })
   })
 
-  it('agrees with the digest’s Worker line on every configured deployment', () => {
-    // The route passes the row's own threshold; heartbeatReport uses the same one.
-    for (const intervalMs of [undefined, 15_000, 20 * 60_000]) {
-      for (const age of [null, 0, 599, 600, 601, 3599, 3600, 3601, 86_400]) {
-        const row =
-          age === null
-            ? null
-            : { lastTickAt: secondsAgo(age), outreach: 'send-and-receive', chat: 'enabled', detail: intervalMs ? { intervalMs } : {} }
-        const report = heartbeatReport(row, true, NOW)
-        const check = workerSilent({ configured: true, lastSeenAt: row?.lastTickAt ?? null }, NOW, heartbeatSilentAfter(row))
-        expect(check.silent, `interval ${String(intervalMs)}, age ${String(age)}`).toBe(
-          report.status === 'silent' || report.status === 'never',
-        )
-        expect(check.ageSeconds).toBe(report.ageSeconds)
+  /**
+   * Configured or not, with a row or without: the route passes the row's own
+   * threshold, heartbeatReport uses the same one, and the alert fires exactly
+   * when the digest's Worker line reads SILENT or NEVER. `configured: false`
+   * with a row present is the case the grid used to leave out, and the one
+   * that disagreed.
+   */
+  it('agrees with the digest’s Worker line on every deployment', () => {
+    for (const configured of [true, false]) {
+      for (const intervalMs of [undefined, 15_000, 20 * 60_000]) {
+        for (const age of [null, 0, 599, 600, 601, 3599, 3600, 3601, 86_400]) {
+          const row =
+            age === null
+              ? null
+              : { lastTickAt: secondsAgo(age), outreach: 'send-and-receive', chat: 'enabled', detail: intervalMs ? { intervalMs } : {} }
+          const report = heartbeatReport(row, configured, NOW)
+          const check = workerSilent({ configured, lastSeenAt: row?.lastTickAt ?? null }, NOW, heartbeatSilentAfter(row))
+          expect(check.silent, `configured ${String(configured)}, interval ${String(intervalMs)}, age ${String(age)}`).toBe(
+            report.status === 'silent' || report.status === 'never',
+          )
+          expect(check.ageSeconds).toBe(report.ageSeconds)
+        }
       }
     }
   })
@@ -173,6 +195,27 @@ describe('workerSilentNotification', () => {
   })
 })
 
+describe('campaignPausedNotification', () => {
+  const CAMPAIGN = '00000000-0000-4000-8000-0000000000c1'
+
+  /** The worker pauses the campaign and cannot post; this is the notice it could not send. */
+  it('carries the campaign’s id and the two numbers the pause was made on, and nothing else', () => {
+    const pause = { campaignId: CAMPAIGN, bouncePct: 12, threshold: 5, name: 'DECOY Q4 list', sentTo: 25 }
+    const event = campaignPausedNotification({ orgId: ORG, pause })
+    expect(event).toEqual({ kind: 'campaign_paused', orgId: ORG, campaignId: CAMPAIGN, bouncePct: 12, threshold: 5 })
+    expect(JSON.stringify(event)).not.toContain('DECOY')
+  })
+
+  it('says what stopped and links to the campaigns page — never a name or an address', () => {
+    const { text } = slackMessage(campaignPausedNotification({ orgId: ORG, pause: { campaignId: CAMPAIGN, bouncePct: 12, threshold: 5 } }), ORIGIN)
+    expect(text).toContain('Campaign paused itself')
+    expect(text).toContain('12%')
+    expect(text).toContain(CAMPAIGN)
+    expect(text.trim().split('\n').at(-1)).toBe('https://agency.example/campaigns')
+    expect(text).not.toContain('@')
+  })
+})
+
 // ---------------------------------------------------------------------------
 
 describe('GET /api/cron/digest, from its source', () => {
@@ -202,6 +245,25 @@ describe('GET /api/cron/digest, from its source', () => {
       const keys = fields!.split(',').map((f) => f.split(':')[0]!.trim()).filter(Boolean)
       for (const k of keys) expect(['route', 'outcome', 'error'], fields).toContain(k)
     }
+  })
+
+  /**
+   * The pauses are read and posted INSIDE digestOnce, through its handle, so
+   * the once-per-day guard that keeps the digest from posting twice keeps
+   * them from being announced twice; and read BEFORE digestRecord, so the
+   * previous run's row still marks where the last announcement stopped.
+   */
+  it('announces each campaign that paused itself inside the once-a-window run, after the digest', () => {
+    const inside = route.slice(route.indexOf('digestOnce(db, orgId, since,'))
+    const read = inside.indexOf('digestCampaignPauses(tx, orgId,')
+    expect(read).toBeGreaterThan(-1)
+    expect(read).toBeLessThan(inside.indexOf('digestRecord(tx,'))
+    const digestPost = inside.indexOf('post(tx, slack, digestNotification(')
+    const pausePost = inside.indexOf('post(tx, slack, campaignPausedNotification(')
+    expect(pausePost).toBeGreaterThan(digestPost)
+    expect(inside.indexOf('workerSilentNotification(')).toBeGreaterThan(pausePost)
+    // The budget an org is started with covers every notice it may post.
+    expect(route).toMatch(/const ORG_BUDGET_MS = 15_000 \+ DIGEST_MAX_PAUSE_NOTICES \* 3_000/)
   })
 
   it('builds events by name, never by spreading the facts', () => {

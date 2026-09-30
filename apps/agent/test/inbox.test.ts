@@ -8,8 +8,12 @@
  * sets In-Reply-To but not References — each of which decides whether a reply
  * is matched to the message it answers or dropped.
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { drizzle } from 'drizzle-orm/pglite'
+import { eq } from 'drizzle-orm'
 import { readMailSignals } from '@agency/core'
+import { handleInboundEmail, schema, type AgencyDb } from '@agency/db'
+import { migratedDb, type TestDb } from '../../../packages/db/test/helpers.js'
 import { parseInbound } from '../src/outreach/inbox.js'
 
 const raw = (headers: string, body: string): string =>
@@ -230,5 +234,144 @@ Content-Type: multipart/mixed; boundary="M"`,
     )
     expect(mail!.dsn).toBeNull()
     expect(mail!.originalMessageIds).toEqual([])
+  })
+
+  /**
+   * A prospect answers "please unsubscribe me" and forwards, INLINE, the
+   * bounce our message caused somewhere else (mutt with `mime_forward=yes`
+   * writes a message/rfc822 part with `Content-Disposition: inline`).
+   * mailparser walks into an inline message, so the nested delivery status
+   * surfaced in `attachments` exactly as a real report's does — and the
+   * whole mail, opt-out included, was read as a bounce of our message.
+   */
+  it('reads no report nested inside an inline-forwarded message', async () => {
+    const mail = await parseInbound(INLINE_FORWARD)
+    expect(mail!.dsn).toBeNull()
+    expect(mail!.originalMessageIds).toEqual([])
+    expect(mail!.text?.split(/\r?\n/)[0]).toBe('Please unsubscribe me.')
+    expect(mail!.references).toEqual(['<sent-1@agency.test>'])
+    expect(readMailSignals(mail!)).toBeNull()
+  })
+
+  /** The same report forwarded as an ATTACHMENT was already opaque; it stays so. */
+  it('reads no report nested inside a message forwarded as an attachment', async () => {
+    const mail = await parseInbound(INLINE_FORWARD.replace('Content-Disposition: inline', 'Content-Disposition: attachment'))
+    expect(mail!.dsn).toBeNull()
+  })
+})
+
+/**
+ * The outer message of `INLINE_FORWARD`: a reply to a message this system
+ * sent, whose own words are an opt-out, carrying a delivery report as an
+ * inline message/rfc822 part.
+ */
+const NESTED_BOUNCE = [
+  'From: Mail Delivery System <MAILER-DAEMON@mx.example.org>',
+  'Subject: Undelivered Mail Returned to Sender',
+  'MIME-Version: 1.0',
+  'Content-Type: multipart/report; report-type=delivery-status; boundary="B"',
+  '',
+  '--B',
+  'Content-Type: text/plain',
+  '',
+  'Your message could not be delivered.',
+  '--B',
+  'Content-Type: message/delivery-status',
+  '',
+  'Reporting-MTA: dns; mx.example.org',
+  '',
+  'Final-Recipient: rfc822; priya@rentman.io',
+  'Action: failed',
+  'Status: 5.1.1',
+  '',
+  '--B',
+  'Content-Type: message/rfc822',
+  '',
+  'From: outreach@agency.test',
+  'To: priya@rentman.io',
+  'Message-ID: <sent-1@agency.test>',
+  '',
+  'Hello.',
+  '--B--',
+  '',
+].join('\r\n')
+
+const INLINE_FORWARD = raw(
+  `From: Priya <priya@rentman.io>
+To: outreach@agency.test
+Subject: Re: A gap on your security page
+Message-ID: <their-2@rentman.io>
+In-Reply-To: <sent-1@agency.test>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="M"`,
+  [
+    '--M',
+    'Content-Type: text/plain',
+    '',
+    'Please unsubscribe me.',
+    '',
+    'And this is what happened when you wrote to my old address:',
+    '--M',
+    'Content-Type: message/rfc822',
+    'Content-Disposition: inline',
+    '',
+    NESTED_BOUNCE,
+    '--M--',
+    '',
+  ].join('\r\n'),
+)
+
+/**
+ * The same mail through `handleInboundEmail`, the way the listener hands it
+ * over: it must reach `recordInboundReply` as the reply it is, and its
+ * opt-out must be recorded — not answered with "no contact was changed".
+ */
+describe('an inline-forwarded bounce reaching the recorder', () => {
+  let test: TestDb
+  let db: AgencyDb
+  let contactId: string
+  const NOON = new Date('2026-09-15T12:00:00.000Z')
+
+  beforeEach(async () => {
+    test = await migratedDb()
+    db = drizzle(test.pg, { schema }) as unknown as AgencyDb
+    const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
+    const orgId = org!.id
+    const [company] = await db
+      .insert(schema.companies)
+      .values({ orgId, domain: 'rentman.io', timeZone: 'Europe/London' })
+      .returning({ id: schema.companies.id })
+    const [contact] = await db
+      .insert(schema.contacts)
+      .values({ orgId, companyId: company!.id, email: 'priya@rentman.io', timeZone: 'Europe/London' })
+      .returning({ id: schema.contacts.id })
+    contactId = contact!.id
+    await db.insert(schema.touches).values({
+      orgId, contactId, companyId: company!.id, channel: 'email', direction: 'out', status: 'sent',
+      recipient: 'priya@rentman.io', sentAt: NOON, providerId: '<sent-1@agency.test>',
+      subject: 'A gap on your security page', body: 'Hello.',
+    })
+  }, 30_000)
+
+  afterEach(async () => {
+    await test?.close()
+  })
+
+  it('is recorded as a reply, and its opt-out suppresses the address', async () => {
+    const mail = await parseInbound(INLINE_FORWARD)
+    const outcome = await handleInboundEmail(db, { ...mail!, now: NOON })
+    expect(outcome.matched).toBe('message')
+    if (outcome.matched === 'none') return
+    expect(outcome.suppressed).toBe(true)
+    expect(outcome.paused).toBe(true)
+
+    const [reply] = await db.select().from(schema.touches).where(eq(schema.touches.id, outcome.touchId))
+    expect(reply!.direction).toBe('in')
+    const [person] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, contactId))
+    // A bounce would have marked the address; a reply does not.
+    expect(person!.emailBouncedAt).toBeNull()
+    expect(person!.pausedAt).not.toBeNull()
+    const suppressions = await db.select().from(schema.suppressions)
+    expect(suppressions.map((r) => r.value)).toContain('priya@rentman.io')
   })
 })

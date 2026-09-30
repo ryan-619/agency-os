@@ -1,8 +1,8 @@
-import type { DigestFacts, DigestWorker } from '@agency/db/queries'
+import type { DigestCampaignPause, DigestFacts, DigestWorker } from '@agency/db/queries'
 import type { NotificationEvent } from '../../../../lib/slack-message'
 
 /**
- * The two Slack events the daily cron sends, built field by field.
+ * The Slack events the daily cron sends, built field by field.
  *
  * Never a spread: the facts object is typed to hold counts and domains, and
  * copying the fields by name is what keeps it that way if somebody adds a
@@ -49,5 +49,24 @@ export function workerSilentNotification(args: {
     orgId: args.orgId,
     lastTickAt: args.lastSeenAt ? args.lastSeenAt.toISOString() : null,
     ageSeconds: args.ageSeconds,
+  }
+}
+
+/**
+ * A campaign that paused itself because its addresses bounced — the notice
+ * the worker cannot send (it has no Slack path). The campaign's id and the
+ * two numbers the pause was made on; never its name, never who bounced. The
+ * renderer links to /campaigns.
+ */
+export function campaignPausedNotification(args: {
+  readonly orgId: string
+  readonly pause: DigestCampaignPause
+}): Extract<NotificationEvent, { kind: 'campaign_paused' }> {
+  return {
+    kind: 'campaign_paused',
+    orgId: args.orgId,
+    campaignId: args.pause.campaignId,
+    bouncePct: args.pause.bouncePct,
+    threshold: args.pause.threshold,
   }
 }

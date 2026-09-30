@@ -27,6 +27,7 @@ import { and, asc, eq } from 'drizzle-orm'
 import { z } from 'zod'
 import { SENSITIVE_KEY, SENSITIVE_VALUE } from '@agency/core'
 import * as schema from './schema.js'
+import { isCheckViolation } from './pg-errors.js'
 import type { AgencyDb } from './repository.js'
 
 export type ConnectorRow = typeof schema.connectors.$inferSelect
@@ -346,6 +347,32 @@ export async function createConnector(db: AgencyDb, input: ConnectorInput): Prom
   const row = rows[0]
   if (!row) throw new Error('connector insert returned no row')
   return row
+}
+
+/**
+ * What a person is told about a connector named `agency` that predates 0018.
+ *
+ * 0018 added `connectors_name_is_not_agency` NOT VALID, which spares the rows
+ * already there only at the moment the constraint is added. A CHECK is
+ * evaluated on every later UPDATE of a row, whatever column it changes — so
+ * such a row can no longer be enabled, disabled, probed, re-credentialed or
+ * have its tools narrowed, and each of those answered a 500. The row does
+ * nothing meanwhile: the in-process server is spread last when a turn is
+ * assembled and takes its place. Deleting it still works (a CHECK is not
+ * evaluated on DELETE), which is why the sentence names that. 0018 is
+ * shipped and is not edited; a rename in a later migration would decide a
+ * name for somebody's server, so the person does it.
+ */
+export const LEGACY_AGENCY_CONNECTOR_MESSAGE =
+  "A connector named 'agency' predates this release and can no longer be changed; delete it and add it again under another name."
+
+/**
+ * True for exactly the refusal above: SQLSTATE 23514 on
+ * `connectors_name_is_not_agency`. Every connector write that can reach such
+ * a row answers it with `LEGACY_AGENCY_CONNECTOR_MESSAGE` and a 409.
+ */
+export function isLegacyAgencyConnectorRefusal(err: unknown): boolean {
+  return isCheckViolation(err, 'connectors_name_is_not_agency')
 }
 
 export async function updateConnector(

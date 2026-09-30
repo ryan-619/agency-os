@@ -817,6 +817,8 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     const status = num(c.d, 'status')
     return `could not post ${event ? `a ${spaced(event)}` : 'a'} notification to Slack${status ? ` (HTTP ${status})` : ''}`
   },
+  // The claim a delivery takes before it selects anything (rescan.ts); the run's own row follows.
+  'scan.cron_started': () => 'started the scheduled rescan; a duplicate delivery before it ends is skipped',
   'scan.cron_run': (c) => {
     const n = (k: string): number | null => num(c.d, k)
     return `ran the scheduled rescan${tail([
