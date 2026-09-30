@@ -1,4 +1,6 @@
-import { SENSITIVE_KEY, SENSITIVE_VALUE, redact, type SuppressionSource } from '@agency/core'
+import {
+  AGENCY_TOOL_NAMES, AGENCY_TOOL_RISK, SENSITIVE_KEY, SENSITIVE_VALUE, redact, type SuppressionSource,
+} from '@agency/core'
 import { inZone } from './format'
 import { REFUSAL_WORDS, refusalWords } from './refusal-words'
 
@@ -239,6 +241,8 @@ interface Ctx {
   readonly d: unknown
   /** The company, or "an unknown company". */
   readonly co: string
+  /** Whether `co` is a real company — for rows where having none is normal (a task, an export). */
+  readonly hasCo: boolean
   readonly person: (id: unknown) => string | null
 }
 type Template = (c: Ctx) => string
@@ -268,6 +272,11 @@ const theNamed = (d: unknown, noun: string, key = 'name'): string => {
   return n ? `the ${noun} ${quoted(n)}` : `a ${noun}`
 }
 const who = (c: Ctx): string => (c.row.subjectId ? c.person(c.row.subjectId) : null) ?? 'a teammate'
+
+function exported(c: Ctx, what: string): string {
+  const rows = num(c.d, 'rows')
+  return `downloaded ${what} as CSV${rows !== null ? ` (${plural(rows, 'row')})` : ''}`
+}
 
 function sendHeld(what: string): Template {
   return (c) => `held ${aMessage(word(c.d, 'channel'))} to a contact at ${c.co}: ${what}; it is retried later`
@@ -311,7 +320,28 @@ const PROPOSAL_STATUS: Record<string, Template> = {
   'proposal.withdrawn': (c) => `withdrew the proposal for ${c.co}`,
 }
 
+/**
+ * Every agency tool leaves `agent.<tool>` when it runs. The ones above with
+ * their own sentence say more; the rest are said from core's registry, so a
+ * tool the registry gains has a sentence the day it ships rather than
+ * appearing as a raw name. Only the registry's own words are used: a tool
+ * that only reads says so, and one that writes says it wrote inside.
+ */
+const TOOL_SENTENCES: Readonly<Record<string, Template>> = Object.fromEntries(
+  AGENCY_TOOL_NAMES.map((name): [string, Template] => {
+    const rule = AGENCY_TOOL_RISK[name][1]
+    const how =
+      rule === 'read_only'
+        ? ', which only reads'
+        : rule === 'writes_internal_state'
+          ? ', which writes inside this system; nothing was sent'
+          : ''
+    return [`agent.${name}`, () => `ran ${name}${how}`]
+  }),
+)
+
 const SENTENCES: Readonly<Record<string, Template>> = {
+  ...TOOL_SENTENCES,
   // --- the pipeline -------------------------------------------------------
   'deal.created': (c) => {
     const stage = word(c.d, 'stage')
@@ -341,7 +371,12 @@ const SENTENCES: Readonly<Record<string, Template>> = {
       has(c.d, 'valueCents') && (num(c.d, 'valueCents') === null ? 'cleared its value' : 'set its value'),
     ])}`
   },
-  'deal.next_action_set': (c) => `set when the next action on the deal for ${c.co} is due`,
+  'deal.next_action_set': (c) => {
+    const at = text(c.d, 'to', 40)
+    return at && !Number.isNaN(Date.parse(at))
+      ? `set the next action on the deal for ${c.co} due ${at.slice(0, 10)}`
+      : `cleared when the next action on the deal for ${c.co} is due`
+  },
   'meeting.booked': (c) => {
     const at = when(c.d)
     return `recorded a meeting with ${c.co}${at ? ` for ${at}` : ''}${tail(
@@ -352,7 +387,9 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   'meeting.cancelled': (c) => `cancelled the meeting with ${c.co}`,
   'meeting.outcome_recorded': (c) => {
     const outcome = word(c.d, 'outcome')
-    return `recorded the meeting with ${c.co} as ${outcome ? spaced(outcome) : 'done'}`
+    if (!outcome) return `recorded an outcome for the meeting with ${c.co}`
+    const at = outcome === 'rescheduled' ? when(c.d) : null
+    return `recorded the meeting with ${c.co} as ${spaced(outcome)}${at ? `, to ${at}` : ''}`
   },
   'proposal.generated': (c) => {
     const items = num(c.d, 'scopeItems')
@@ -468,7 +505,10 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   'campaign.auto_send_on': (c) =>
     `turned auto-send ON for ${theNamed(c.d, 'campaign')} — its messages now go without a person approving each one`,
   'campaign.auto_send_off': (c) => `turned auto-send off for ${theNamed(c.d, 'campaign')}`,
-  'campaign.enrolled': () => 'enrolled contacts into a campaign; enrolling queues messages, it sends nothing itself',
+  'campaign.enrolled': (c) => {
+    const queued = num(c.d, 'queued')
+    return `enrolled ${queued !== null ? plural(queued, 'contact') : 'contacts'} into a campaign; enrolling queues messages, it sends nothing itself`
+  },
   'campaign.auto_paused': (c) => {
     const pct = num(c.d, 'bouncePct')
     const limit = num(c.d, 'threshold')
@@ -526,8 +566,15 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   },
   'agent.queue_touch': (c) =>
     `queued ${aMessage(word(c.d, 'channel'))} about ${domainLabel(c.d) ?? 'a company'}; nothing was sent by queueing it`,
-  'agent.check_send': (c) => `checked whether a message about ${domainLabel(c.d) ?? 'a company'} may be sent; nothing was sent`,
-  'agent.get_consent': (c) => `read the consent recorded for a contact at ${domainLabel(c.d) ?? 'a company'}`,
+  'agent.check_send': (c) => {
+    const code = word(c.d, 'code')
+    const answer = !code ? '' : code === 'send_now' ? ': it may' : `: ${refusalWords(code)}`
+    return `checked whether a message about ${domainLabel(c.d) ?? 'a company'} may be sent${answer}; nothing was queued`
+  },
+  'agent.get_consent': (c) => {
+    const at = domainLabel(c.d)
+    return `read the consent recorded for a contact${at ? ` at ${at}` : ''}`
+  },
   'agent.tool_pre': (c) => `was about to call ${tool(c.d)}${riskNote(c.d)}`,
   'agent.tool_post': (c) => `finished ${tool(c.d)}`,
   'agent.tool_allow': (c) => `ran ${tool(c.d)} without asking — it is low risk`,
@@ -575,12 +622,16 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     const tools = words(c.d, 'tools')
     return `changed which tools of ${theNamed(c.d, 'connector')} the agent may use${tools ? ` (${plural(tools.length, 'tool')} off)` : ''}`
   },
-  'credential.rotated': () => 'replaced a stored credential',
+  'credential.rotated': (c) => `replaced ${theNamed(c.d, 'stored credential', 'label')}; the value is never in this log`,
+  'credential.deleted': (c) => `deleted ${theNamed(c.d, 'stored credential', 'label')}`,
   'user.granted': (c) => {
     const role = word(c.d, 'role')
     return `gave ${who(c)} access${role ? ` as ${role}` : ''}`
   },
-  'user.revoked': (c) => `revoked the access of ${who(c)}`,
+  'user.revoked': (c) => {
+    const ended = num(c.d, 'sessionsEnded')
+    return `revoked the access of ${who(c)}${ended !== null && ended > 0 ? ` and ended ${plural(ended, 'session')}` : ''}`
+  },
   'user.restored': (c) => `restored the access of ${who(c)}`,
   'user.role_changed': (c) => {
     const to = word(c.d, 'to') ?? word(c.d, 'role')
@@ -592,11 +643,27 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   },
   'note.added': (c) => `added a note on ${c.co}`,
   'note.deleted': (c) => `deleted a note on ${c.co}`,
-  'task.created': (c) => `created a task for ${c.co}`,
-  'task.completed': () => 'completed a task',
-  'task.reopened': () => 'reopened a task',
-  'task.assigned': () => 'assigned a task',
-  'task.template_applied': (c) => `added a checklist of tasks for ${c.co}`,
+  'task.created': (c) => `created a task${c.hasCo ? ` for ${c.co}` : ''}`,
+  'task.completed': (c) => `completed a task${c.hasCo ? ` for ${c.co}` : ''}`,
+  'task.reopened': (c) => `reopened a task${c.hasCo ? ` for ${c.co}` : ''}`,
+  'task.assigned': (c) => {
+    const to = detailValue(c.d, 'assigneeUserId')
+    return typeof to === 'string' ? `assigned a task to ${c.person(to) ?? 'a teammate'}` : 'unassigned a task'
+  },
+  'task.due_set': (c) => {
+    const at = text(c.d, 'dueAt', 40)
+    return at && !Number.isNaN(Date.parse(at)) ? `set a task due ${at.slice(0, 10)}` : 'cleared the due date of a task'
+  },
+  'task.template_applied': (c) => {
+    const count = num(c.d, 'count')
+    const template = word(c.d, 'template')
+    return `added ${count !== null ? plural(count, 'task') : 'tasks'}${template ? ` from the ${spaced(template)} checklist` : ''}${c.hasCo ? ` for ${c.co}` : ''}`
+  },
+
+  // --- exports: a download is data leaving through a person ---------------
+  'export.companies': (c) => exported(c, 'the companies'),
+  'export.findings': (c) => exported(c, 'the findings'),
+  'export.consents': (c) => exported(c, 'the consent records'),
 
   // --- voice --------------------------------------------------------------
   'call.opted_out': (c) => {
@@ -677,6 +744,7 @@ export function sentenceFor(row: AuditLine, lookups: AuditLookups = {}): string 
       row,
       d: row.detail,
       co: lookups.company ? companyLabel(lookups.company) : 'an unknown company',
+      hasCo: Boolean(lookups.company),
       person,
     })
   } catch {
@@ -757,6 +825,12 @@ export function subjectHref(row: AuditLine, company: AuditCompanyRef | null): st
       return '/settings/agents'
     case 'suppression':
       return '/suppressions'
+    case 'task':
+      return '/tasks'
+    case 'user':
+      return '/settings/team'
+    case 'secret':
+      return '/settings/credentials'
     default:
       return companyPage
   }
@@ -769,7 +843,7 @@ const FAMILY_LABEL: Readonly<Record<string, string>> = {
   suppression: 'Suppressions', unsubscribe: 'Unsubscribes', reply: 'Replies', agent: 'Agent and subagents',
   approval: 'Approvals', turn: 'Chat turns', connector: 'Connectors', credential: 'Credentials', user: 'Team',
   company: 'Companies', note: 'Notes', task: 'Tasks', call: 'Calls', notification: 'Notifications',
-  scan: 'Scheduled rescans', cron: 'Scheduled jobs',
+  scan: 'Scheduled rescans', cron: 'Scheduled jobs', export: 'Exports',
 }
 export const AUDIT_FAMILIES: readonly { readonly value: string; readonly label: string }[] = Object.freeze(
   [...new Set(AUDIT_ACTIONS.map((a) => a.split('.')[0] ?? a))].map((value) => ({
@@ -791,6 +865,11 @@ export const AUDIT_SUBJECT_TYPES: readonly { readonly value: string; readonly la
   { value: 'call', label: 'A call' },
   { value: 'connector', label: 'A connector' },
   { value: 'agent_def', label: 'A subagent' },
+  { value: 'company', label: 'A company' },
+  { value: 'note', label: 'A note' },
+  { value: 'task', label: 'A task' },
+  { value: 'user', label: 'A teammate' },
+  { value: 'secret', label: 'A stored credential' },
 ])
 
 /**

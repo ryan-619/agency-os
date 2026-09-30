@@ -17,7 +17,7 @@
  * that catches a template written next year that reads `detail.token`,
  * which no list of today's keys could.
  */
-import { REDACTED, SENSITIVE_KEY, SUPPRESSION_SOURCES } from '@agency/core'
+import { AGENCY_TOOL_NAMES, REDACTED, SENSITIVE_KEY, SUPPRESSION_SOURCES } from '@agency/core'
 import { describe, expect, it } from 'vitest'
 import {
   AUDIT_ACTIONS,
@@ -146,12 +146,66 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'call.ended': { status: 'completed', outcome: 'qualified', sentiment: 'positive', durationS: 125, disclosed: true },
   'notification.sent': { channel: 'slack', event: 'reply', ids: {}, status: 200 },
   'notification.failed': { channel: 'slack', event: 'reply', ids: {}, status: 500, error: 'http_500' },
+  // --- written by the wave-2 features merged beside this one --------------
+  'agent.check_send': { domain: 'rentman.io', contactId: SUBJECT, campaignId: SUBJECT, code: 'send_now' },
+  'agent.get_consent': { contactId: SUBJECT },
+  'contact.updated': { fields: ['name', 'time_zone'] },
+  'company.updated': { fields: ['name'] },
+  'contacts.imported': { inserted: 12, alreadyPresent: 3, unknownCompany: 1, refused: 0, phoneDropped: 2 },
+  'campaign.enrolled': { campaignId: SUBJECT, queued: 14, skipped: {}, status: 'active', limit: 50, truncated: false },
+  'deal.next_action_set': { companyId: SUBJECT, from: null, to: '2026-10-02T09:00:00.000Z' },
+  'reply.handled': { contactId: SUBJECT, replyKind: 'interested' },
+  'reply.reclassified': { from: 'other', to: 'interested' },
+  'reply.answer_drafted': { inboundTouchId: SUBJECT, touchId: SUBJECT, campaignId: SUBJECT, channel: 'email', resumed: true },
+  'note.added': { companyId: SUBJECT, noteId: SUBJECT },
+  'note.deleted': { companyId: SUBJECT, noteId: SUBJECT, authorUserId: ORG_USER },
+  'task.created': { taskId: SUBJECT, kind: 'follow_up', companyId: SUBJECT },
+  'task.completed': { taskId: SUBJECT, companyId: SUBJECT },
+  'task.reopened': { taskId: SUBJECT, companyId: SUBJECT },
+  'task.assigned': { taskId: SUBJECT, assigneeUserId: OTHER_USER },
+  'task.due_set': { taskId: SUBJECT, dueAt: '2026-10-02T09:00:00.000Z' },
+  'task.template_applied': { template: 'kickoff', companyId: SUBJECT, dealId: SUBJECT, count: 5 },
+  'user.granted': { role: 'member' },
+  'user.role_changed': { from: 'member', to: 'owner' },
+  'user.revoked': { role: 'member', sessionsEnded: 2 },
+  'user.restored': { role: 'member' },
+  'credential.rotated': { connectorId: SUBJECT, secretId: SUBJECT, label: 'deepwiki token' },
+  'credential.deleted': { label: 'old apollo key' },
+  'scan.cron_run': { picked: 6, scanned: 5, unreachable: 1, skipped: 0, remaining: 4, schedule: '17 3 * * *' },
+  'meeting.outcome_recorded': { outcome: 'held', companyId: SUBJECT },
+  'export.companies': { rows: 42, filters: {} },
+  'export.findings': { rows: 310, filters: {} },
+  'export.consents': { rows: 18, filters: {} },
 }
 
 describe('sentenceFor', () => {
   it('has a sentence for every action a writer in this tree produces', () => {
     const missing = Object.keys(WRITTEN).filter((a) => !AUDIT_ACTIONS.includes(a))
     expect(missing).toEqual([])
+  })
+
+  it('has a sentence for every tool in core’s registry, including the ones added later', () => {
+    const missing = AGENCY_TOOL_NAMES.map((n) => `agent.${n}`).filter((a) => !AUDIT_ACTIONS.includes(a))
+    expect(missing).toEqual([])
+    expect(sentenceFor(line('agent.get_replies', {}, { actor: 'agent' }), lookups)).toBe('ran get_replies, which only reads')
+    expect(sentenceFor(line('agent.add_note', {}, { actor: 'agent' }), lookups)).toBe(
+      'ran add_note, which writes inside this system; nothing was sent',
+    )
+    // A tool with its own sentence keeps it.
+    expect(sentenceFor(line('agent.check_send', WRITTEN['agent.check_send'], { actor: 'agent' }), lookups)).toBe(
+      'checked whether a message about rentman.io may be sent: it may; nothing was queued',
+    )
+  })
+
+  it('does not invent a company for a row that has none', () => {
+    expect(sentenceFor(line('task.created', { kind: 'follow_up', companyId: null }), {})).toBe('created a task')
+    expect(sentenceFor(line('task.created', WRITTEN['task.created']), lookups)).toBe('created a task for rentman.io')
+    expect(sentenceFor(line('export.companies', WRITTEN['export.companies']), {})).toBe(
+      'downloaded the companies as CSV (42 rows)',
+    )
+    expect(sentenceFor(line('meeting.outcome_recorded', {}), lookups)).toBe(
+      'recorded an outcome for the meeting with rentman.io',
+    )
   })
 
   it('builds each catalogued sentence from the row, with nothing unfilled in it', () => {
