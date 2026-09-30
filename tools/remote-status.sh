@@ -100,9 +100,10 @@ const { Client } = require("pg");
   console.log("  its index:", idx.rows.length ? idx.rows[0].indexname : "MISSING");
 
   // 0018 must land BEFORE the code that needs it: findings.scored is the
-  // first column a page reads (every company page), and /inbox, /tasks and
-  // /contacts read tables and columns that only 0018 creates. Code one
-  // migration ahead boots, serves the dashboard, and 500s on those pages.
+  // first column a page reads (every company page), and the dashboard,
+  // /inbox, /tasks and /contacts read tables and columns that only 0018
+  // creates. Code one migration ahead boots, serves /signin, and 500s on
+  // every one of those pages.
   const scored = await c.query(`
     select data_type, is_nullable
       from information_schema.columns
