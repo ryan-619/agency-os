@@ -57,6 +57,7 @@ function generated(): Proposal {
     findings: findings(),
     scan: { ranAt: RAN, stale: false, ok: true },
     score: { score: 71, tier: 'A' },
+    profiles: { activeProfileId: 'icp', scoreProfileId: 'icp' },
     dayRate: 1200,
     currency: 'USD',
     generatedAt: GENERATED,

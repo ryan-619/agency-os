@@ -9,9 +9,10 @@ import { getDb } from '@/lib/db'
  *
  * The scope is derived from the latest scan — nothing is typed in here but
  * the day rate. The generator refuses when there is nothing honest to write
- * from (no scan, an unreachable site, a stale scan, no gaps), and the refusal
- * comes back as the sentence to show, with the reason code so the UI can
- * offer the fix (re-scan) rather than a dead end.
+ * from (no scan, an unreachable site, a stale scan, a scan scored under a
+ * different ICP profile — `rescore` — or no gaps), and the refusal comes back
+ * as the sentence to show, with the reason code so the UI can offer the fix
+ * (re-scan) rather than a dead end.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'

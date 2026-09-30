@@ -1,5 +1,7 @@
 import { notFound, redirect } from 'next/navigation'
-import { DEFAULT_STALE_AFTER_DAYS, isStale, parseIcpDefinition } from '@agency/core'
+import {
+  DEFAULT_STALE_AFTER_DAYS, PROPOSAL_RESCORE_SENTENCE, isStale, parseIcpDefinition, proposalNeedsRescore,
+} from '@agency/core'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { can } from '@agency/core'
@@ -85,9 +87,19 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
       ? { ok: false, why: 'The last scan never reached the site; nothing was observed to propose from.' }
       : stale
         ? { ok: false, why: `The findings are stale (older than ${staleAfter} days). Re-scan before generating (§2.2).` }
-        : gaps.length === 0
-          ? { ok: false, why: 'No gaps were observed. There is nothing to propose.' }
-          : { ok: true }
+        : icp && icpRow &&
+            proposalNeedsRescore({
+              icp,
+              findings: found.findings,
+              profiles: { activeProfileId: icpRow.id, scoreProfileId: found.score?.icpProfileId ?? null },
+            })
+          ? {
+              ok: false,
+              why: `The last scan was ${PROPOSAL_RESCORE_SENTENCE} before generating: the active ICP scores signals it did not.`,
+            }
+          : gaps.length === 0
+            ? { ok: false, why: 'No gaps were observed. There is nothing to propose.' }
+            : { ok: true }
   const principal = { id: user.id, orgId: user.orgId, role: user.role }
   const slot: CompanySlotProps = {
     orgId: user.orgId,
