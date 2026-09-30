@@ -168,10 +168,12 @@ Never set `VERCEL_ENV` — the platform does, and the cron routes read it.
 
 **Optional — leave each unset until the feature that reads it is configured.**
 Every one fails closed: unset, its feature is off, the screens that depend on
-it say so, and nothing else changes. The web app reads a BLANK value as unset,
-so a copied `.env.example` cannot stop it booting; a present value of the wrong
-shape is refused at boot, with a message that names the variable and never
-the value.
+it say so, and nothing else changes. A BLANK value is unset — in the web app
+for every variable in this table but `RESCAN_BATCH_SIZE`, which refuses a
+blank (leave it out or give it a number), and in the worker and the voice
+service for all of theirs — so a copied `.env.example` cannot stop any of them
+booting. A present value of the wrong shape is refused at boot, with a message
+that names the variable and never the value.
 
 | variable | turns on | unset |
 |---|---|---|
@@ -496,7 +498,9 @@ fly deploy
 ```
 
 **Only two secrets are required**: `DATABASE_URL` and `AGENT_INTERNAL_TOKEN`.
-Everything else turns a feature on, and the worker says which at boot.
+Everything else turns a feature on, and the worker says which at boot. Any
+other variable set to the empty string is the same as one never set: it takes
+its default (the bounce threshold's `5`, not `0`) and never refuses the boot.
 
 | secret | what it turns on | without it |
 |---|---|---|

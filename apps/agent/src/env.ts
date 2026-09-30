@@ -1,10 +1,32 @@
 import { z } from 'zod'
 
+/**
+ * A blank value is UNSET, not a present value that happens to be empty — the
+ * web app's rule, and a copy of its helper (`apps/web/src/lib/env.ts`).
+ *
+ * `.env.example` documents every optional variable as `NAME=`, and compose
+ * hands a container `${NAME:-}` as an empty string. Without this, a blank URL,
+ * uuid, enum or length-checked secret stopped the worker booting over a
+ * feature nobody had turned on; a blank `LLM_MODEL=` reached the provider as
+ * a model called `''`; a blank `OUTREACH_BOUNCE_PAUSE_PCT=` was coerced to 0,
+ * so the first bounce paused the campaign; and a blank `IMAP_SECURE=` read as
+ * `false` where an absent one reads as `true`. Blank now takes the default,
+ * every time. A PRESENT value is still held to whatever the schema after it
+ * demands, and a refusal names the variable, never the value.
+ *
+ * Every entry keeps `.optional()` or `.default(` on the line that names it:
+ * `packages/db/test/deployment.test.ts` reads this file line by line to find
+ * the variables the worker REQUIRES, and an entry whose `.optional()` sits
+ * three lines down reads as one of them. The two required variables are not
+ * wrapped — a blank one is refused, and the message says which.
+ */
+const blankIsUnset = (v: unknown): unknown => (typeof v === 'string' && v.trim() === '' ? undefined : v)
+
 /** Validated at startup, like the web app's (PROMPT.md §10). Never logged. */
 const schema = z.object({
-  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  NODE_ENV: z.preprocess(blankIsUnset, z.enum(['development', 'test', 'production']).default('development')),
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
-  AGENT_PORT: z.coerce.number().int().positive().default(3001),
+  AGENT_PORT: z.preprocess(blankIsUnset, z.coerce.number().int().positive().default(3001)),
   /**
    * What the internal API binds to. Loopback by default, which is right when
    * the worker and the web app share a host.
@@ -17,8 +39,8 @@ const schema = z.object({
    * publish the port, so the docker network is the boundary instead of the
    * bind address.
    */
-  AGENT_BIND: z.string().min(1).default('127.0.0.1'),
-  LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+  AGENT_BIND: z.preprocess(blankIsUnset, z.string().min(1).default('127.0.0.1')),
+  LOG_LEVEL: z.preprocess(blankIsUnset, z.enum(['debug', 'info', 'warn', 'error']).default('info')),
 
   /**
    * The Agent SDK authenticates with an API key from the environment (§5).
@@ -29,7 +51,7 @@ const schema = z.object({
    * deployment has no approval queue and no recovery either. Chat reports
    * `chat_disabled` instead, which is a sentence someone can act on.
    */
-  ANTHROPIC_API_KEY: z.string().optional(),
+  ANTHROPIC_API_KEY: z.preprocess(blankIsUnset, z.string().optional()),
 
   /**
    * Needed only when ANTHROPIC_API_KEY is ORGANISATION-scoped.
@@ -43,7 +65,7 @@ const schema = z.object({
    * configuration and the workspace can carry its own spend limit, which is
    * worth having when the balance is small.
    */
-  ANTHROPIC_WORKSPACE_ID: z.string().optional(),
+  ANTHROPIC_WORKSPACE_ID: z.preprocess(blankIsUnset, z.string().optional()),
 
   /**
    * Authenticate as the DEVELOPER, using their own Claude Code login (§13).
@@ -64,10 +86,9 @@ const schema = z.object({
    * standing behind one human's account is what §2.3 exists to prevent.
    * Production authenticates with a key the deployment owns.
    */
-  AGENT_USE_LOCAL_LOGIN: z
-    .string()
-    .optional()
-    .transform((v) => v !== undefined && ['true', '1', 'yes'].includes(v.toLowerCase())),
+  AGENT_USE_LOCAL_LOGIN: z.preprocess(blankIsUnset, z.string().optional()).transform(
+    (v) => v !== undefined && ['true', '1', 'yes'].includes(v.toLowerCase()),
+  ),
 
   /**
    * Where the Claude Code binary is, when it is not on PATH.
@@ -77,7 +98,7 @@ const schema = z.object({
    * Application Support and nothing on PATH, and the resulting failure reads
    * like an auth problem rather than a missing file.
    */
-  CLAUDE_CODE_PATH: z.string().optional(),
+  CLAUDE_CODE_PATH: z.preprocess(blankIsUnset, z.string().optional()),
 
   /**
    * Encrypts third-party connector credentials at rest (§2.3).
@@ -87,7 +108,7 @@ const schema = z.object({
    * credential is skipped with a reason when this is unset, rather than
    * connecting unauthenticated and reporting an opaque 401.
    */
-  SECRETS_KEY: z.string().optional(),
+  SECRETS_KEY: z.preprocess(blankIsUnset, z.string().optional()),
 
   /**
    * Where the skills volume is mounted (§6). Unset means no skills.
@@ -98,10 +119,10 @@ const schema = z.object({
    * to load skills from a directory that contains one, and a deployment that
    * does not use skills does not carry the setting source at all.
    */
-  AGENT_SKILLS_DIR: z.string().optional(),
+  AGENT_SKILLS_DIR: z.preprocess(blankIsUnset, z.string().optional()),
 
   /** Overrides the SDK's default model per §5.5's "pick a model per task". */
-  AGENT_MODEL: z.string().optional(),
+  AGENT_MODEL: z.preprocess(blankIsUnset, z.string().optional()),
 
   /**
    * §5.5's single-shot seam, used here for reply triage (`classify_reply`).
@@ -112,19 +133,17 @@ const schema = z.object({
    * need LLM_ALLOW_REMOTE_LEAD_DATA, because a reply is a named person's
    * words.
    */
-  LLM_PROVIDER: z.enum(['ollama', 'openai', 'anthropic']).optional(),
-  LLM_MODEL: z.string().optional(),
-  OLLAMA_BASE_URL: z.string().url().default('http://127.0.0.1:11434'),
+  LLM_PROVIDER: z.preprocess(blankIsUnset, z.enum(['ollama', 'openai', 'anthropic']).optional()),
+  LLM_MODEL: z.preprocess(blankIsUnset, z.string().optional()),
+  OLLAMA_BASE_URL: z.preprocess(blankIsUnset, z.string().url().default('http://127.0.0.1:11434')),
   /** Declared, never inferred from the URL — see packages/llm. */
-  OLLAMA_IS_LOCAL: z
-    .string()
-    .optional()
-    .transform((v) => v === undefined || !['false', '0', 'no'].includes(v.toLowerCase())),
-  OPENAI_API_KEY: z.string().optional(),
-  LLM_ALLOW_REMOTE_LEAD_DATA: z
-    .string()
-    .optional()
-    .transform((v) => v !== undefined && ['true', '1', 'yes'].includes(v.toLowerCase())),
+  OLLAMA_IS_LOCAL: z.preprocess(blankIsUnset, z.string().optional()).transform(
+    (v) => v === undefined || !['false', '0', 'no'].includes(v.toLowerCase()),
+  ),
+  OPENAI_API_KEY: z.preprocess(blankIsUnset, z.string().optional()),
+  LLM_ALLOW_REMOTE_LEAD_DATA: z.preprocess(blankIsUnset, z.string().optional()).transform(
+    (v) => v !== undefined && ['true', '1', 'yes'].includes(v.toLowerCase()),
+  ),
 
   /**
    * Proves the caller is the web app. Defence in depth, not the trust anchor:
@@ -135,29 +154,29 @@ const schema = z.object({
   AGENT_INTERNAL_TOKEN: z.string().min(32, 'AGENT_INTERNAL_TOKEN must be at least 32 characters'),
 
   /** §5.1's bounds on one turn. */
-  AGENT_MAX_TURNS: z.coerce.number().int().positive().default(30),
-  AGENT_MAX_BUDGET_USD: z.coerce.number().positive().default(2),
+  AGENT_MAX_TURNS: z.preprocess(blankIsUnset, z.coerce.number().int().positive().default(30)),
+  AGENT_MAX_BUDGET_USD: z.preprocess(blankIsUnset, z.coerce.number().positive().default(2)),
 
   /**
    * A bound the SDK does not provide. maxTurns and maxBudgetUsd bound ONE
    * turn, so twenty $2 turns in an hour sits inside every SDK limit.
    */
-  AGENT_SESSION_BUDGET_USD: z.coerce.number().positive().default(20),
+  AGENT_SESSION_BUDGET_USD: z.preprocess(blankIsUnset, z.coerce.number().positive().default(20)),
 
   /** §5.4's approval window. */
-  APPROVAL_TTL_MINUTES: z.coerce.number().int().positive().default(30),
-  APPROVAL_POLL_MS: z.coerce.number().int().positive().default(2000),
-  APPROVAL_SWEEP_MS: z.coerce.number().int().positive().default(60_000),
+  APPROVAL_TTL_MINUTES: z.preprocess(blankIsUnset, z.coerce.number().int().positive().default(30)),
+  APPROVAL_POLL_MS: z.preprocess(blankIsUnset, z.coerce.number().int().positive().default(2000)),
+  APPROVAL_SWEEP_MS: z.preprocess(blankIsUnset, z.coerce.number().int().positive().default(60_000)),
 
   /**
    * The wall clock for one turn. Must EXCEED the approval window, or a turn
    * gets killed while its approval is still live and a human's decision lands
    * on a turn that no longer exists to consume it. Checked below.
    */
-  AGENT_TURN_TIMEOUT_MINUTES: z.coerce.number().int().positive().default(35),
+  AGENT_TURN_TIMEOUT_MINUTES: z.preprocess(blankIsUnset, z.coerce.number().int().positive().default(35)),
 
   /** Parked approvals must not starve the tool handlers sharing this pool. */
-  DATABASE_POOL_MAX: z.coerce.number().int().positive().default(8),
+  DATABASE_POOL_MAX: z.preprocess(blankIsUnset, z.coerce.number().int().positive().default(8)),
 
   // --- outreach (Phase 4, §8.4) -------------------------------------------
   //
@@ -168,36 +187,34 @@ const schema = z.object({
 
   /** The mailbox that sends. The same SMTP_* the web app uses for magic links
    *  is the usual answer; a warmed outreach mailbox is the better one. */
-  SMTP_HOST: z.string().optional(),
-  SMTP_PORT: z.coerce.number().int().positive().default(587),
-  SMTP_USER: z.string().optional(),
-  SMTP_PASSWORD: z.string().optional(),
-  SMTP_SECURE: z
-    .string()
-    .optional()
-    .transform((v) => v === 'true' || v === '1'),
+  SMTP_HOST: z.preprocess(blankIsUnset, z.string().optional()),
+  SMTP_PORT: z.preprocess(blankIsUnset, z.coerce.number().int().positive().default(587)),
+  SMTP_USER: z.preprocess(blankIsUnset, z.string().optional()),
+  SMTP_PASSWORD: z.preprocess(blankIsUnset, z.string().optional()),
+  SMTP_SECURE: z.preprocess(blankIsUnset, z.string().optional()).transform(
+    (v) => v === 'true' || v === '1',
+  ),
   /** The From header on outreach. A display name and an address. */
-  MAIL_FROM: z.string().optional(),
+  MAIL_FROM: z.preprocess(blankIsUnset, z.string().optional()),
 
   /**
    * The mailbox that RECEIVES replies (§8.4: "reply detection via IMAP IDLE").
    * Normally the same mailbox as SMTP_*, read back over IMAP. Unset means
    * replies are detected only through the inbound webhook, if one is wired.
    */
-  IMAP_HOST: z.string().optional(),
-  IMAP_PORT: z.coerce.number().int().positive().default(993),
-  IMAP_USER: z.string().optional(),
-  IMAP_PASSWORD: z.string().optional(),
-  IMAP_SECURE: z
-    .string()
-    .optional()
-    .transform((v) => v === undefined || v === 'true' || v === '1'),
-  IMAP_MAILBOX: z.string().default('INBOX'),
+  IMAP_HOST: z.preprocess(blankIsUnset, z.string().optional()),
+  IMAP_PORT: z.preprocess(blankIsUnset, z.coerce.number().int().positive().default(993)),
+  IMAP_USER: z.preprocess(blankIsUnset, z.string().optional()),
+  IMAP_PASSWORD: z.preprocess(blankIsUnset, z.string().optional()),
+  IMAP_SECURE: z.preprocess(blankIsUnset, z.string().optional()).transform(
+    (v) => v === undefined || v === 'true' || v === '1',
+  ),
+  IMAP_MAILBOX: z.preprocess(blankIsUnset, z.string().default('INBOX')),
 
   /** How often the sender looks for approved and queued messages. */
-  OUTREACH_TICK_MS: z.coerce.number().int().positive().default(15_000),
+  OUTREACH_TICK_MS: z.preprocess(blankIsUnset, z.coerce.number().int().positive().default(15_000)),
   /** How many it will dispatch per tick, across every campaign. */
-  OUTREACH_BATCH: z.coerce.number().int().positive().default(20),
+  OUTREACH_BATCH: z.preprocess(blankIsUnset, z.coerce.number().int().positive().default(20)),
 
   // The three below are read through `outreach/options.ts`, the one place the
   // sender's optional settings are derived from the environment. Every one of
@@ -212,7 +229,7 @@ const schema = z.object({
    * WEB_PUBLIC_URL unset means no header, said once in the boot log — an
    * opt-out link nobody can verify is worse than none.
    */
-  UNSUBSCRIBE_SECRET: z.string().min(32, 'UNSUBSCRIBE_SECRET must be at least 32 characters').optional(),
+  UNSUBSCRIBE_SECRET: z.preprocess(blankIsUnset, z.string().min(32, 'UNSUBSCRIBE_SECRET must be at least 32 characters').optional()),
 
   /**
    * The web app's public origin as the WORKER sees it — where
@@ -220,7 +237,7 @@ const schema = z.object({
    * is built from this and nothing else: not the address the worker binds,
    * which is a loopback nobody's mail client can reach.
    */
-  WEB_PUBLIC_URL: z.string().url().optional(),
+  WEB_PUBLIC_URL: z.preprocess(blankIsUnset, z.string().url().optional()),
 
   /**
    * A campaign whose addresses bounce past this percentage pauses itself,
@@ -228,7 +245,7 @@ const schema = z.object({
    * noise. The existing `campaign_inactive` deferral is the stop; a person
    * re-activates it after fixing the list.
    */
-  OUTREACH_BOUNCE_PAUSE_PCT: z.coerce.number().min(0).max(100).default(5),
+  OUTREACH_BOUNCE_PAUSE_PCT: z.preprocess(blankIsUnset, z.coerce.number().min(0).max(100).default(5)),
 })
 
 export type Env = z.infer<typeof schema>

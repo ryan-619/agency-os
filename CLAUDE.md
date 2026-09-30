@@ -1484,15 +1484,20 @@ docker compose run --rm seed
 # magic links http://localhost:8025   (Mailpit — dev only, relays nothing)
 ```
 
-**`cp .env.example .env` boots all three processes**, and that is now checked
-rather than assumed: parsing the file the way `node --env-file` does and
-running each process's `loadEnv` over it found that the worker refused a blank
-`UNSUBSCRIBE_SECRET=`, `WEB_PUBLIC_URL=` or `LLM_PROVIDER=`, and the voice
-service a blank `VOICE_PUBLIC_URL=` or `VOICE_ORG_ID=`. The web app reads a
-blank as unset; those two do not, so those lines are commented out in the
-example with the reason stated at its top. And compose reads `.env` only to
-fill `docker-compose.yml`'s `${…}` — a variable that file does not name never
-reaches a container.
+**`cp .env.example .env` boots all three processes**, and a test says so:
+`packages/db/test/deployment.test.ts` parses the file the way `node --env-file`
+does, fills the two secrets, and runs the worker's and the voice service's
+`loadEnv` over it (the web app's half is in `apps/web/test/env.test.ts`). The
+first time that was done by hand it found the worker refusing a blank
+`UNSUBSCRIBE_SECRET=`, `WEB_PUBLIC_URL=` or `LLM_PROVIDER=` and the voice
+service a blank `VOICE_PUBLIC_URL=` or `VOICE_ORG_ID=`; those lines were
+commented out of the example as a workaround. Both processes now read a blank
+as unset (§4), the lines are back, and the same test renders each service's
+`environment:` block the way compose does — `${NAME:-}` is an empty string —
+so the voice container, which refused to boot unless both were set, is covered
+too. Compose reads `.env` only to fill `docker-compose.yml`'s `${…}`; a
+variable that file does not name never reaches a container, which is why the
+`web` and `agent` blocks now name their optional variables as `${NAME:-}`.
 
 **`next build` does not run in a git worktree whose `node_modules` is
 symlinked into the main checkout** (how parallel work in this repo is set up):
@@ -1951,10 +1956,23 @@ documents each optional variable as a blank `NAME=` — so with the plain shapes
 `cp .env.example .env` stopped the whole app booting over features nobody had
 turned on. The six optional string variables and `INBOUND_WEBHOOK_SECRET` are
 wrapped in `z.preprocess(blankIsUnset, …)`; a present short value is still
-refused. The worker and the voice service do not do this yet (§3), and the
-Slack host refinement is hoisted into a const so its schema entry sits on one
-line, because `packages/db/test/deployment.test.ts` reads `env.ts` line by line
-and took a multi-line entry for a REQUIRED variable.
+refused. The Slack host refinement is hoisted into a const so its schema entry
+sits on one line, because `packages/db/test/deployment.test.ts` reads `env.ts`
+line by line and took a multi-line entry for a REQUIRED variable.
+
+**The worker and the voice service read a blank as unset too — every variable
+but the required ones.** The same helper, copied, wraps every optional or
+defaulted entry, so a blank takes the default rather than being coerced: a
+blank `OUTREACH_BOUNCE_PAUSE_PCT=` had been read as 0, pausing a campaign on
+its first bounce; a blank `LLM_MODEL=` reached the provider as a model called
+`''`, because `?? 'llama3'` does not fire on an empty string; and a blank
+`IMAP_SECURE=` meant plaintext where an absent one meant TLS. Each test file
+reads its schema's variable names from the source and asserts that blank and
+absent parse identically for every one, so a variable added later is covered
+without being listed. The web app's schema is narrower: it wraps the optional
+strings and secrets, but a blank `AGENT_URL=`, `AGENT_INTERNAL_TOKEN=` or
+numeric variable is still refused at boot — loud rather than silent, and
+`.env.example` gives each a value, or says to generate one.
 
 **CI's table count is derived from the migrations**, every `CREATE TABLE` plus
 `schema_migrations` — 31 at 0018 — rather than written down, so a migration

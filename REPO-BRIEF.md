@@ -378,10 +378,11 @@ deploy prebuilt, restore. Prefer git-connected deploys, where it cannot arise.
   path returns normally — an exact membership oracle, widest open on a
   deployment whose mail is not configured yet. The failure is logged as
   `magic link could not be sent`, not shown.
-- **`cp .env.example .env` now boots all three processes.** A blank `NAME=`
-  is unset for the web app but NOT for the worker or the voice service, which
-  refuse a blank URL, uuid, enum or length-checked secret — so those lines are
-  commented out in the example, and the reason is at its top.
+- **`cp .env.example .env` boots all three processes, and a test checks it.**
+  A blank `NAME=` is unset in the web app, the worker and the voice service,
+  so every optional variable is documented as a blank line; compose's
+  `${NAME:-}` is the same empty string, which is why the voice container now
+  boots unconfigured.
 - **Postgres 18 reports an `ON DELETE RESTRICT` refusal as 23001, not 23503.**
   Neon runs 18.6. Code that turns a RESTRICT refusal into a sentence must
   accept both (`credentials.ts` does).

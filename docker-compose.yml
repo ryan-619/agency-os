@@ -80,16 +80,29 @@ services:
       # The port is the worker's API (AGENT_PORT + 1), not its health port.
       AGENT_URL: ${AGENT_URL:-http://agent:3002}
       AGENT_INTERNAL_TOKEN: "${AGENT_INTERNAL_TOKEN:?required - generate one with openssl rand -base64 32}"
-      # Optional, all of them, and every feature behind one fails closed
-      # without it. Not wired here because none is needed for the stack to
-      # boot: set them in .env when the feature is configured.
-      #   CRON_SECRET, RESCAN_BATCH_SIZE   the daily rescan (a Vercel cron;
-      #                                    under compose the worker scans)
-      #   SLACK_WEBHOOK_URL                notifications — the URL is the credential
-      #   UNSUBSCRIBE_SECRET               one-click unsubscribe; same value as the agent's
-      #   RESEND_WEBHOOK_SECRET, RESEND_API_KEY   replies through Resend's webhook
-      #   INBOUND_WEBHOOK_SECRET           replies through a plain JSON webhook
-      #   SECRETS_KEY                      to store connector credentials from the UI
+      # Optional, all of them: the feature behind each fails closed without
+      # it, and the app reads a blank as unset, so an empty default is the
+      # same as not setting it. They are named here because this file has no
+      # `env_file:` — a variable this block does not name never reaches the
+      # container, whatever .env says.
+      #
+      # The daily rescan and digest are VERCEL crons. Nothing under compose
+      # calls /api/cron/* — there is no scheduler here, and nothing in the
+      # worker rescans on a schedule — so these answer only a caller holding
+      # the bearer, e.g. a host crontab. Without one, re-scan by hand:
+      # `npm run scan -- --stale`.
+      CRON_SECRET: ${CRON_SECRET:-}
+      RESCAN_BATCH_SIZE: ${RESCAN_BATCH_SIZE:-6}
+      # Notifications. The URL is the credential.
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      # One-click unsubscribe. The SAME value as the agent's below.
+      UNSUBSCRIBE_SECRET: ${UNSUBSCRIBE_SECRET:-}
+      # Replies through Resend's webhook, and through a plain JSON webhook.
+      RESEND_WEBHOOK_SECRET: ${RESEND_WEBHOOK_SECRET:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      INBOUND_WEBHOOK_SECRET: ${INBOUND_WEBHOOK_SECRET:-}
+      # Storing connector credentials from the UI. The SAME value as the agent's.
+      SECRETS_KEY: ${SECRETS_KEY:-}
     ports:
       - '3000:3000'
 
@@ -162,12 +175,14 @@ services:
       # Bound the blast radius of a subagent fan-out (§7).
       CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: ${CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS:-3}
       CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: ${CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH:-2}
-      # Optional. Without BOTH of the first two the worker adds no
-      # List-Unsubscribe header and says so once at boot; the third pauses a
-      # campaign whose bounce rate passes it.
-      #   UNSUBSCRIBE_SECRET          same value as the web app's
-      #   WEB_PUBLIC_URL              where /api/unsubscribe lives, as the worker sees it
-      #   OUTREACH_BOUNCE_PAUSE_PCT   default 5
+      # Optional, and a blank is unset. Without BOTH of the first two the
+      # worker adds no List-Unsubscribe header and says so once at boot.
+      # UNSUBSCRIBE_SECRET is the same value as the web app's; WEB_PUBLIC_URL
+      # is where /api/unsubscribe lives, as a mail client reaches it.
+      UNSUBSCRIBE_SECRET: ${UNSUBSCRIBE_SECRET:-}
+      WEB_PUBLIC_URL: ${WEB_PUBLIC_URL:-}
+      # A campaign whose bounce rate passes this pauses itself.
+      OUTREACH_BOUNCE_PAUSE_PCT: ${OUTREACH_BOUNCE_PAUSE_PCT:-5}
     volumes:
       # Put a skill at ./skills/.claude/skills/<name>/SKILL.md. The directory
       # may hold NOTHING else under .claude/ — see AGENT_SKILLS_DIR above.
@@ -188,8 +203,11 @@ services:
   # It needs a PUBLIC https origin (Twilio has to reach it, and the request
   # signature is computed over the URL Twilio used, not the one the socket
   # saw), so behind a reverse proxy set VOICE_PUBLIC_URL to the outside
-  # address. With it unset every webhook is refused, which is the correct
-  # failure: these endpoints can write a suppression.
+  # address. With it unset — or blank, which is what `${VOICE_PUBLIC_URL:-}`
+  # passes, and which the service reads as unset — it boots, refuses every
+  # webhook, and answers /readyz 503 `unconfigured`, so `docker compose ps`
+  # shows it unhealthy. That is the correct failure: these endpoints can
+  # write a suppression.
   voice:
     build:
       context: .
