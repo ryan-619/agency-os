@@ -4,7 +4,17 @@ Internal operating system for a small application-security agency. Read
 [PROMPT.md](PROMPT.md) for the full build spec; this file is the working
 summary a session should read first.
 
-**Current state: Phases 0–6 are built, and every Definition of Done except Phase 2's and Phase 3's is proved** — see the table below for exactly what "proved" means for each. Phase 6 is built but deliberately NOT switched on: §12 says not to before A2P 10DLC registration clears, so the compose service sits behind a `voice` profile and `docker compose up` does not start it.
+**Current state: Phases 0–6 are built, and every Definition of Done is proved** — see the table below for exactly what "proved" means for each, and what it does not. Phase 6 is built but deliberately NOT switched on: §12 says not to before A2P 10DLC registration clears, so the compose service sits behind a `voice` profile and `docker compose up` does not start it.
+
+**After the phases, one release on migration 0018** added the operating layer
+around the pipeline: an inbox for replies, notes and tasks, a consent ledger,
+compliance and audit pages, search and CSV exports, the settings pages,
+proposal print and buyer share links, LinkedIn steps a person sends, bounce
+handling, one-click unsubscribe, a worker heartbeat, and two Vercel crons (a
+nightly rescan and a Slack digest). The agent's own tools went from nine to
+twenty-three. Everything web-side works with no worker; §2 describes each
+piece and §4 the decisions behind them, and DEPLOYING.md carries the release
+checklist, which starts with applying 0018 BEFORE the code that reads it.
 
 **The worker deploys to Fly.io** (`fly.toml` at the repo root), and its
 defaults are the dangerous part: Fly scales a machine to zero between
@@ -15,17 +25,26 @@ off and a floor of one machine are load-bearing. Only `DATABASE_URL` (direct,
 unpooled) and `AGENT_INTERNAL_TOKEN` are required; **`ANTHROPIC_API_KEY` is
 optional and the worker is worth deploying without one** — sending, reply
 detection, stuck-send recovery, the restart reconciler and the sign-in-token
-sweep all run with no model, and only chat reports `chat_disabled`.
+sweep all run with no model, and only chat reports `chat_disabled`. Each
+worker upserts a `worker_heartbeats` row (keyed `hostname:pid`) every
+`OUTREACH_TICK_MS`, so a machine scaled to zero is a growing
+`worker.ageSeconds` in `/api/health` rather than an inference.
 
-**The web half is LIVE on Vercel** at `agency-os-tau-murex.vercel.app`, against
-a Neon Postgres (18.6) with Resend for magic links, migrated through **0016**
-and seeded. Proved live: `/api/health` reports `database: ok`, `/signin`
-renders, `/book/agency` serves the public booking page (it 404'd until the
-seed claimed the slug), and a sign-in request logged `magic link sent`. See [DEPLOYING.md](DEPLOYING.md) — including the two things
+**The web half is LIVE on Vercel** at **https://myagencyos.in** (first
+deployed as `agency-os-tau-murex.vercel.app`), against a Neon Postgres (18.6)
+with Resend for magic links, seeded. The code expects migration **0018**
+(`EXPECTED_MIGRATION`); production was at 0017 when this release was written,
+and 0018 is applied BEFORE this code deploys, never after — DEPLOYING.md,
+"migrate FIRST", and GO-LIVE.md Part 2b. Proved live: `/api/health` reports
+`database: ok`, `/signin` renders, `/book/agency` serves the public booking
+page (it 404'd until the seed claimed the slug), and a sign-in request logged
+`magic link sent`. See [DEPLOYING.md](DEPLOYING.md) — including the two things
 a LOCAL `vercel build` gets wrong (it traces `.env` into the upload; deploying
 from `apps/web` cannot resolve the hoisted `node_modules`). The agent worker is
-NOT deployed and cannot be on serverless, so chat, sending and reply detection
-are absent there and every screen that would promise them says so instead.
+NOT deployed and cannot be on serverless, so chat, email sending and IMAP
+reply detection are absent there and every screen that would promise them says
+so instead. What does NOT need it: replies through Resend's signed webhook,
+LinkedIn steps a person sends from `/tasks`, and the rescan and digest crons.
 
 **Phases 2 and 3's Definitions of Done now PASS.** They were blocked for the
 whole build on "the Anthropic account has no credit", and the diagnosis was
@@ -40,7 +59,7 @@ below. **Phase 4's is proved against a local SMTP sink, not a real mailbox.**
 | | proved | not proved |
 |---|---|---|
 | Phase 2 | **the whole thing, live.** `npm run smoke:agent` PASSED on 2026-09-25: one turn, 22 tool calls, 284 events, a cost reported, and an evidence-backed ranking of the pipeline's top three built from `scan_company`/`score_company`/`get_company` against the real database | nothing outstanding |
-| Phase 3 | **PASSED.** The agent named `mcp__deepwiki__ask_wiki_question`, `read_wiki_contents` and `read_wiki_structure` alongside its own nine, on a worker that had been running since BEFORE the connector row was written — §6's "no restart" promise, in the sequence that actually tests it | the agent *calling* a connector's tool in anger (it enumerates them; the gate asks it to enumerate) |
+| Phase 3 | **PASSED.** The agent named `mcp__deepwiki__ask_wiki_question`, `read_wiki_contents` and `read_wiki_structure` alongside its own nine (the `agency` server has twenty-three tools now), on a worker that had been running since BEFORE the connector row was written — §6's "no restart" promise, in the sequence that actually tests it | the agent *calling* a connector's tool in anger (it enumerates them; the gate asks it to enumerate) |
 | Phase 4 | draft → approved in the UI → deferred for quiet hours (live, 21:50 London) → sent in a real SMTP transaction → deal `contacted` → a reply by Message-ID pauses, ties, moves the deal to `replied` → "unsubscribe" suppresses. One test per §2.1 rule. | deliverability through a real mailbox; IMAP IDLE against a live server; a provider webhook with a real secret |
 | Phase 5 | live, in the browser: a `replied` deal dragged to `meeting` (HTML5 drop → `deal.moved` audit row) → meeting recorded from the company page at 15:00 London, stored as 14:00Z → brief generated from the rows → proposal generated from the scan (8 scope items with evidence, 2 workstreams, USD 9,600–15,600 at a 1,200 day rate) → `sent` → `accepted` closes the deal `won`. A stranger on `/book/agency` became a company, a contact with E.164 phone, three consent rows carrying the form's wording, a meeting, and a deal at `meeting`. | the agent's `book_meeting`/`update_deal` in a live turn (same blocker as Phase 2); a calendar invitation (deliberately not sent from here) |
 | Phase 6 | the whole Definition of Done, end to end against the real service: a SIGNED webhook is answered with `<ConversationRelay>` carrying the disclosure, the relay socket opens against the URL that TwiML handed out, four scripted questions qualify the caller, asking for a person produces the `end` frame whose `HandoffData` makes `/twiml/action` return a `<Dial>`, and the row ends with `answered_at`, `disclosed_ai_at`, an outcome, Twilio's duration and recording URL, a transcript containing the caller's own words, and a summary. `apps/voice/test/service.test.ts`. | Twilio itself — the carrier, the STT and the TTS. A2P 10DLC has not cleared and there are no Twilio credentials, so no real telephone call has been placed to this service |
@@ -84,19 +103,53 @@ one.
   normalised shape a constraint rather than a convention: email and domain must
   be lower-cased and trimmed, phone must be E.164. An unnormalised value cannot
   be stored, so `Stop@Example.com` can never coexist with `stop@example.com` as
-  a second, unsuppressed row. `packages/core` gains the matching `normalise()`
-  helper in Phase 4; until then the database is what enforces it.
+  a second, unsuppressed row. `packages/core`'s `normalise()` helpers produce
+  that shape, and the database refuses anything else.
   **Phase 4 obligation:** a suppression insert that fails is an opt-out that was
   never recorded — worse than the bug this constraint replaced. When
   `normalise()` cannot parse an inbound number or address, the send path must
   fail loudly and route it to a human, and must never fall through to sending.
   Every geo the seeded ICP targets is covered by a test in
   `packages/db/test/invariants.test.ts`.
-- Quiet hours are stored as wall-clock times and must be evaluated in the
-  **recipient's** timezone. *The evaluation lands in Phase 4.*
+- Quiet hours are stored as wall-clock times and evaluated in the
+  **recipient's** timezone, by `decideSend` (§2, "The send path").
+- **Which path recorded an opt-out is a fact (0018).**
+  `suppressions_source_is_known` admits `manual`, `reply`, `voice`,
+  `unsubscribe` and `erasure` — one per writer, and a value nothing writes is
+  not listed. The column is NULLABLE: a row written before it existed was not
+  tracked, and calling it `manual` would be a claim.
+- **A refusal is final until an owner lifts it.** `contactsRecordConsent`
+  refuses a grant over a recorded refusal (`refused_is_final`), and
+  `contactsLiftRefusal` is the one audited way (`consent.refusal_lifted`) a
+  refusal goes — back to NEVER ASKED, never to granted. The route gates the
+  lift to owners.
+- **A bounce is not an opt-out.** `contacts_bounce_has_code` keeps
+  `email_bounced_at` and `email_bounce_code` NULL together; the code must be an
+  RFC 3463 status; the mark is lifted only by `contactsUpdate` changing the
+  address, in the same UPDATE. It is a column and a `bounced` refusal, never a
+  suppression row (§2, "A bounce is evidence about an address").
+- **A reply is handled by a person, and only a reply.**
+  `touches_handled_is_inbound_only` and `touches_handled_has_who` (a handled
+  row names who, RESTRICT). An answer to a reply is OUTBOUND
+  (`touches_answer_is_outbound`), and the trigger
+  `touches_answer_names_an_inbound_row_in_the_same_org` — INSERT and UPDATE,
+  because a CHECK cannot see another row — refuses an answer whose parent is
+  outbound or in another org, which `dispatchTouch` would otherwise thread
+  into a conversation that is not its own.
+- **A LinkedIn step is one task per message.** `tasks_linkedin_send_names_touch`
+  and the partial unique index `tasks_one_open_per_touch`: two callers
+  materialising the same draft produce one open task, and the loser re-reads.
+- **A person in one org can never be named by a row in another.** 0018 gives
+  `users` and `contacts` a `UNIQUE (id, org_id)` and every column it adds that
+  names one — `touches.handled_by`, `notes.contact_id`/`author_user_id`,
+  `tasks.assignee_user_id`/`created_by`/`done_by`, `proposal_shares.created_by`
+  — references the PAIR, the shape 0006 gave `findings` and `scores`. The two
+  nullable user columns use `ON DELETE SET NULL (column)`, which names the
+  column so the NOT NULL `org_id` is never nulled with it; that is Postgres 15+
+  syntax, and CI's `postgres:16` job is what proves the deploy target takes it.
 
 ### Evidence integrity (§2.2)
-**The app must never state a finding it did not observe.** Four separate
+**The app must never state a finding it did not observe.** Five separate
 guards, because one of them alone was not enough:
 
 1. `findings_unobserved_has_no_gap` —
@@ -117,10 +170,20 @@ guards, because one of them alone was not enough:
    off-by-one can file one company's evidence under another's name and every
    constraint still passes.
 
+5. `findings_informational_carries_no_weight` (0018) — `scored OR weight = 0`.
+   The scanner now records thirteen observations the ICP does not score
+   (§2, "Informational signals"). `recordScan` writes `scored` as "is this key
+   an own property of the ICP's signals", so a non-ICP key is stored at weight
+   0 by construction, and `quotableFindings`, the proposal (its scope AND the
+   buyer-facing "Of N signals observed" count) and the meeting brief all leave
+   `scored = false` rows out. "Also observed" can never be read as a gap that
+   counts.
+
 **`findings.stale` is a cache, not the answer.** `markStaleFindings` writes it
 and `npm run scan` calls that on every run, so the column is current as of the
 last scan and no more. A finding that aged past the threshold an hour ago still
-has `stale = false` on it, and there is still no scheduled rescan.
+has `stale = false` on it. The nightly rescan cron keeps the column current
+for the companies it reaches, and it is still a cache.
 
 So **freshness is DERIVED from the scan's `ran_at`**, by `isStale()` in
 `packages/core/src/freshness.ts`, everywhere it decides whether something may
@@ -162,6 +225,19 @@ Two more §2.2 links, both added in 0006 and after:
   pins that limitation as an explicit test.
 - `sendVerificationRequest` deliberately does **not** log the magic-link URL.
   That URL is a bearer credential.
+- **Three more URLs are credentials, and are treated as such.** The Slack
+  webhook URL (never logged, never in an audit row — `redact()` cannot see it,
+  because it is a value in a URL rather than under a key); a proposal share
+  token, of which only the sha256 is stored — `proposal_shares_token_hash_shape`
+  (`^[0-9a-f]{64}$`) makes a raw token unstorable; and an unsubscribe token,
+  which names one message and nothing else.
+- **A session cookie's value is a bearer credential too.** The scanner records
+  each homepage `Set-Cookie` for `cookie_flags` with its VALUE replaced by
+  `<redacted>` — the rule reads names and attributes only.
+- **Where a connector's credential goes is a NAME in its config**
+  (`secretEnv`, `secretHeader`, `secretPrefix`), never the value. A `headers`
+  or `env` entry whose key or value looks like a credential is refused, and
+  `secretEnv` may not be anything in `FORBIDDEN_SECRET_ENV` or start `CLAUDE_`.
 
 ### Irreversible actions need a human (§2.4)
 - Anything leaving the building goes through the `approvals` queue unless a
@@ -177,6 +253,16 @@ Two more §2.2 links, both added in 0006 and after:
   decided instead of showing an error.
 - **Never set `permissionMode: "bypassPermissions"`.** See §8 below — there are
   three ways the gate is skipped, and the spec recommends two of them.
+- **A review of a connector's tools can only DISABLE.** A name in
+  `config.disabledTools` is a deny placed before `classifyRisk` in both gate
+  rings; nothing in the product allows a tool by name, and `allowedTools`
+  stays `[]` (§2, "Connector catalog, credentials and tool disable").
+- **The irreversible acts added since are each a person's.** Sending a
+  LinkedIn message is a person pressing Start and then "I sent it" (§2, "The
+  LinkedIn provider is a person"). A share link is not a send: a person pastes
+  the URL into a message they write, and a link can only be minted from a
+  proposal a person already marked `sent`. Erasing a contact is owner-only and
+  needs the contact's id typed back.
 
 ---
 
@@ -184,8 +270,9 @@ Two more §2.2 links, both added in 0006 and after:
 
 ```
 apps/
-  web/          Next.js 16 App Router — UI + BFF routes + Auth.js
-  agent/        the long-running worker (Phase 2 gives it the query() loop)
+  web/          Next.js 16 App Router — UI + BFF routes + Auth.js + two Vercel crons
+  agent/        the long-running worker: agent turns, the send tick, IMAP, recovery
+  voice/        inbound voice over Twilio ConversationRelay (Phase 6, not switched on)
 packages/
   core/         domain logic. NO I/O, no framework, no database.
   db/           schema, reversible SQL migrations, typed queries, seed
@@ -226,14 +313,100 @@ test bans spreading the row outright (the same instrument that keeps
 - **the worker's own environment.** A `stdio` connector is a process an owner
   chose through a web form; inheriting `process.env` would hand it
   `ANTHROPIC_API_KEY`, `DATABASE_URL` and `SECRETS_KEY`. Its env is built from
-  scratch, and its credential goes in `MCP_SECRET` rather than on a command
-  line, which is visible in `ps` to anyone on the host.
+  scratch, and its credential goes in an environment variable (`MCP_SECRET`
+  unless the config names another) rather than on a command line, which is
+  visible in `ps` to anyone on the host.
+
+  **"Built from scratch" was true of the object `buildConnector` emits and
+  not of the process, and a research pass found it.** The installed CLI
+  spawns a stdio server with `{ ...its own env, CLAUDE_PROJECT_DIR, …,
+  ...server.env }`, and its own env is `childEnv()` — which on the API-key
+  path carries `ANTHROPIC_API_KEY` and `ANTHROPIC_CUSTOM_HEADERS`. Every stdio
+  connector received the agency's key. `buildConnector` now launches each one
+  as `/usr/bin/env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN
+  -u ANTHROPIC_CUSTOM_HEADERS -u CLAUDE_CODE_OAUTH_TOKEN -- <command> <args>`
+  (`SCRUBBED_FROM_STDIO`, `STDIO_LAUNCHER`); `env` execs the real command, so
+  its argv is unchanged. The test spawns a real child the way the CLI does,
+  with a control proving the bare command WOULD get the key, and fails if
+  `childEnv()` ever emits a name nobody has classified. A command containing
+  `=` (which `env` would read as an assignment) and a `config.env` that sets a
+  scrubbed name are two new skip reasons.
 - **the network the worker runs in.** `isReachableConnectorUrl` refuses the
   same hosts the scanner does, for a worse reason: the worker would send the
   connector's CREDENTIAL to whatever answered `169.254.169.254`. Re-checked at
   BUILD time, not only when the row was written.
 - **the log.** Names and transports only. A URL carries a token in a query
   string sooner or later, whatever the form says.
+
+**One leak is NOT fixed, and is stated rather than hidden (§13).** `sdk.mjs`
+passes the whole `mcpServers` object to the CLI as `--mcp-config <json>` on the
+`claude` process's argv — the decrypted `authorization`/`x-api-key` header and
+the stdio credential included, for every transport, for as long as a turn
+runs. Anyone who can list processes on the worker host can read it. The
+catalog's intro says so. A possible fix — the SDK's `setMcpServers` control
+request, which its settings text lists as a separate MCP entry point — is
+outside this repo's code and unverified.
+
+### Connector catalog, credentials and tool disable
+
+**Settings → Connectors → "Add from the catalog"** shows the presets in
+`packages/core/src/connector-catalog.ts` (34, from the verified catalog only)
+in four groups: *works today* (a Bearer token, or no credential at all, like
+DeepWiki and Cloudflare's docs), *named header* (Hunter and Apollo
+`x-api-key`, Close `close-api-key` plus a non-secret `close-scope`, Pipedrive
+`x-api-token`, Sentry's `Sentry-Bearer` scheme), *runs on the worker host*
+(four stdio servers) and *needs a connect flow — not built* (seven OAuth-only
+servers, listed with a docs link and no Install button; OAuth is its own
+piece of work, flagged here under §13). Install posts the preset to the
+existing `POST /api/connectors` — no new route — and the connector is created
+DISABLED; Test and Enable happen in place.
+
+**A stdio preset is one click only when its package is pinned to an exact
+version** (`npx pkg@1.2.3`, `uvx pkg==1.2.3`). None of the four is pinned
+today, so each fills in the manual form for an owner to name the version they
+reviewed. Pinning one in the catalog turns its Install button on with no web
+change. The catalog's own versions were not looked up and written in, because
+a version nobody verified is a claim in a file whose rule is "only claims that
+were checked".
+
+**Why a NAME is not a credential.** `secretHeader`, `secretPrefix` and
+`secretEnv` say WHERE the worker puts the decrypted secret, never what it is;
+`refuseCredentialShapedKeys` refuses a `headers`/`env` entry under the slot's
+own name, a credential-shaped key, or a credential-shaped value (documented
+prefixes like `sk-`, `ghp_`, `xox*`, `whsec_`, and hand-typed `Bearer`/`Basic`
+schemes — `SENSITIVE_VALUE` alone would not have caught `sk-ant-…`). A tool
+name may not contain `__`. `POST /api/connectors` now answers the
+`connectors_name_is_not_agency` CHECK with a 409 sentence, keeps the
+duplicate-name 409, answers 500 for anything else (before, every failure read
+as a duplicate name), and deletes the credential it stored a moment earlier
+when the insert fails.
+
+**Settings → Credentials exists** (the connector DELETE route already pointed
+at it). It lists stored credentials — label, date, key version, the connectors
+using each, or *orphaned* — deletes orphans only, and re-enters a connector's
+credential. Re-entering disables the connector until it is tested again, and
+deletes the old row unless another connector still holds it. It is the only
+place a credential can be added to an existing connector. Without
+`SECRETS_KEY` it refuses, 503, like the connector form.
+
+**A per-tool review that can only DISABLE.** A name in `config.disabledTools`
+is refused in both gate rings (`canUseTool` and `PreToolUse`) before
+`classifyRisk` — no card, no approval row — and nothing here allows anything;
+`allowedTools` stays `[]`. A catalog server nobody has reviewed carries the
+catalog's `sendTools` as its default, DERIVED from the row's endpoint every
+turn (so a hand-typed Zapier URL is still Zapier), and `'*'` crosses to the
+gate as `mcp__<name>__*`, which no real tool name can collide with. An EMPTY
+saved list is an owner's decision and overrides the default. The deny sentence
+says the tool "is disabled in Settings → Connectors", not that an owner did
+it: a catalog default was chosen by nobody, and the model repeats the sentence
+to people.
+
+**The panel stores the CLI's spelling of a tool name.** The CLI names an MCP
+tool `mcp__<server>__<tool>` with each part passed through
+`replace(/[^a-zA-Z0-9_-]/g, '_')` (read from the shipped binary), so a probe's
+`github.create_issue` is stored as `github_create_issue`. A name that still
+cannot be stored — one with a double underscore — is listed without a checkbox
+and keeps asking a person.
 
 ### Skills, and the one bypass that is genuinely unavoidable (§6)
 
@@ -286,10 +459,6 @@ is capped at a 5s connect timeout and changes how the server's tools load into
 a real turn; a probe should not need a different config from the thing it
 tests.)
 
-Not yet created, because their phase has not arrived (§12 — do not scaffold all
-seven phases at once): `apps/voice` (Phase 6, and only after A2P 10DLC
-registration clears).
-
 ### packages/tools
 The tools as PLAIN DATA, with **no import of the Agent SDK anywhere in the
 package**. `apps/agent/src/mcp/agency.ts` is the only file that adapts them to
@@ -300,14 +469,62 @@ recorded-session mode, so anything needing the SDK to be *defined* is also
 untestable — and a package that CANNOT import the SDK cannot drag it into the
 Next module graph, which CI builds with no secrets on purpose.
 
-Nine tools ship: `get_icp`, `search_companies`, `get_company`, `scan_company`,
-`score_company`, `get_pipeline` (low risk), `update_deal`, `book_meeting`
-(medium — they write internal state, never anything outbound) and
-`queue_touch` (high). `get_pipeline` and `update_deal` arrived with Phase 5,
-once `deals` was a table something writes — before that a tool that reliably
-returned `[]` would have taught the model a false shape of the business.
-`draft_outreach` is the one §6 tool that does not exist by that name: a draft
-is `queue_touch` parked on a human, which is Phase 4's single send path.
+Twenty-three tools ship (`AGENCY_TOOL_NAMES`). Seventeen are low risk:
+`get_icp`, `search_companies`, `get_company`, `scan_company`, `score_company`,
+`get_pipeline`, `check_send`, `get_consent`, `get_replies`, `get_scan_history`,
+`get_evidence_changes`, `get_stale_companies`, `get_pipeline_metrics`,
+`get_company_timeline`, `get_compliance_summary`, `search_crm`, `list_tasks`.
+Five are medium — they write internal state, never anything outbound, and
+their summaries say nothing was sent: `update_deal`, `book_meeting`,
+`classify_reply`, `add_note`, `create_task`. One is high: `queue_touch`.
+`get_pipeline` and `update_deal` arrived with Phase 5, once `deals` was a
+table something writes — before that a tool that reliably returned `[]` would
+have taught the model a false shape of the business. `draft_outreach` is the
+one §6 tool that does not exist by that name: a draft is `queue_touch` parked
+on a human, which is Phase 4's single send path.
+
+The fourteen added with 0018, one line each:
+
+- **`check_send` and `get_consent`** make the gate's rule visible to the
+  model; both queue nothing. `get_consent` reports a suppression match by kind
+  and recording path, never the value.
+- **`get_scan_history`** lists every scan newest first with the score whose
+  `scan_id` names it; an unreachable scan is "unreachable", never a 0.
+- **`get_evidence_changes`** compares the two newest scans that reached the
+  site through `diffFindings`; not-assessed is never "fixed", and
+  informational signals are reported apart, as context.
+- **`get_stale_companies`** lists stale, unreachable and never-scanned
+  companies, judged by `isStale` on `ran_at` and never by `findings.stale`.
+- **`get_replies`** reads `inboxTouches` newest first and shows a reply's
+  first line only — at most 200 characters, labelled as the sender's own
+  words, never the address.
+- **`classify_reply`** records a kind through `replyReclassify` (actor
+  `agent`) or marks a reply handled by the principal through
+  `replyMarkHandled`. It can never name `opted_out`: the enum has no such
+  value, a row that is `opted_out` is refused whatever kind is asked, and
+  `replyReclassify`'s own predicate refuses both again.
+- **`get_pipeline_metrics`** is `pipelineMetrics` over `listDeals` and
+  `analyticsTransitions`, windowed: moves recorded in `sinceDays`, and deals
+  open now or closed inside it. Below five it prints "insufficient data".
+- **`get_company_timeline`** merges touches, scans with THAT scan's score,
+  deal audit rows, meetings, proposals, calls, notes and tasks, newest first.
+  A message is its subject and first line; a note is `note by <name>: "…"`,
+  and the summary says a note is a teammate's words, not evidence. A meeting
+  is printed in its own zone with the UTC instant beside it.
+- **`get_compliance_summary`** is `complianceSummary` at the ICP's stale
+  window — counts only, gated on `audit:read` like the page.
+- **`search_crm`** is `searchOrg` with `searchSectionsFor(principal)`
+  intersected with the sections asked for, never wider; the query is not
+  audited.
+- **`add_note`** (`companies:write`), **`create_task`** (`deals:write`, kind
+  `todo`, the assignee resolved in THIS org and not revoked) and
+  **`list_tasks`** (`deals:read`; `open: false` includes done ones).
+
+Each asks `can()` the question its page or route asks, which only matters for
+a role `can()` does not know — that role gets `not_permitted`. **Only the tool
+summary reaches the model (§5.5)**: a reply's words appear there only as a
+bounded first line, never the body or the reply's own subject, and no audit
+detail carries any of its text.
 
 ### packages/scanner
 `fetch.ts` does the I/O; `extract.ts` is pure. That split is not cosmetic — it
@@ -328,6 +545,55 @@ tools that write to that table. It does not resolve DNS, so a public name
 pointing at a private address is still out of scope; that needs a connect-time
 check and should be added if the scanner is ever aimed at untrusted input.
 
+### Informational signals
+
+**Thirteen additive keys, read from bytes already captured** — no new request
+class (`ADDITIVE_SIGNAL_KEYS`): `csp_report_only`, `csp_quality`,
+`cookie_flags`, `referrer_policy_quality`, `permissions_policy_quality`,
+`content_type_options_quality`, `cross_origin_policies`, `sri_third_party`,
+`mixed_content`, `stack_disclosure`, `deprecated_headers`, `hsts_quality`,
+`reporting_endpoints`. They are posture CONTEXT from the homepage response,
+stored as findings with `scored = false` and weight 0 (§1), shown in their own
+section of the company page, and returned by `get_company` — observed ones
+only, each labelled. **Promotion is a data change:** add the key to the ICP
+with a weight. `weight: 0` in an ICP is refused.
+
+Parity's guarantee moved from "no extra keys" to "no unexpected keys", and the
+parity ICP is frozen in `packages/scanner/test/icp-parity.json` so an ICP edit
+cannot move the goldens. `cookie_flags` reads `home.setCookies`, which the
+sixteen recorded fixtures do not hold, so there it reads "not captured" — no
+fixture was re-recorded and no golden changed; a re-record ships alone, with
+its diff read (§5).
+
+The words are honest in both directions. "No cookies" reads *not applicable*,
+never as a pass. An `http://` `<link rel=canonical>` is a pointer, not a load,
+so only stylesheet/preload/modulepreload links count as blockable mixed
+content, and a `<noscript>` reference is left out. A short documented list of
+tag-manager hosts is counted in the SRI ratio and never flagged, because an
+SRI-less tag manager is a ratio, not a gap. `recordScan`'s observed and
+unobserved counts are over scored signals only; `informationalCount` counts
+the rest.
+
+### Evidence: history, the diff and the timeline
+
+**A diff never turns a blocked fetch into a fix.** `diffFindings` calls a
+signal `unchanged` only when BOTH scans observed it; a signal neither saw is
+`not_assessed_this_time`, and one scan's failure to observe is never a change
+in either direction. `scanHistory` joins the score on `scan_id` (the newest
+score for that scan, by a lateral join — `scores` has no unique `scan_id`) and
+reports `score: null` for every `ok: false` scan, although `recordScan` stores
+a 0 with `unreachable (…)` for one: a timeout is never charted as a 0.
+
+**The company page shows history, the diff and a timeline.** The timeline
+reads deal moves from deal rows AND from the labels inside `contact.replied`,
+`meeting.booked` and `proposal.accepted(_via_share)` — `setDealStage` writes
+no row for a won — and folds a companion into the first-class row it repeats
+within 60 seconds; two first-class rows are never folded. It is cut at
+`completeSince()`, the latest oldest-row among the sources that hit their
+read limit, and says so, rather than showing a truncated source's gap as a
+quiet stretch. Every panel dates evidence from `scans.ran_at` through
+`isStale`, never from `findings.stale`.
+
 ### What lands in `packages/core`, and when
 | Phase | Domain rules |
 |---|---|
@@ -338,6 +604,7 @@ check and should be added if the scanner is ever aimed at untrusted input.
 | 4 ✅ | consent, suppression, quiet hours, daily caps — the one send path |
 | 5 ✅ | `proposalFromFindings` and `meetingBrief` — the two documents the pipeline writes, pure, refusing stale evidence |
 | 6 ✅ | the AI disclosure, the opt-out/handoff/sentiment readers, the scripted turn, and §5.5's `decideLlmCall` |
+| 0018 release ✅ | the informational signals' words, `diffFindings`, rotting and `pipelineMetrics`, enrolment's gate and draft, the kickoff and renewal templates, the bounce and auto-reply readers, the connector catalog as data, suppression sources |
 
 ---
 
@@ -443,10 +710,196 @@ the suppression step and being stopped later by the provider. That is the
 right direction — it is a refusal a human can act on — but it is a behaviour
 change, not just a new column.
 
+**The sender's facts have one gatherer, and every screen reads it.**
+`sendFactsFor` gathers exactly what `dispatchTouch` checks, and `previewSend`
+runs `decideSend` over them and writes nothing. The contacts ledger, the
+send-check route, `check_send`, the approvals page and the inbox's answer
+path all show the decision the sender WILL make, from the same function —
+never a restatement of the rules that could drift from them.
+
+**The ledger says never-asked, refused and granted are three facts.**
+`/contacts` shows each person's consent and suppression answer from
+`consentLedgerFor`, which `get_consent` also reads, and a send-check per
+campaign through `previewSend`, with the recipient masked to its domain.
+Consent recorded there carries the form's wording as evidence; a grant over a
+refusal is a 409 (`refused_is_final`), and lifting a refusal is an owner's
+explicit act that returns the person to never-asked (§1).
+
+**An edit cannot move a person out from under their own opt-out.** A
+suppression is keyed by value, so `contactsUpdate` refuses any edit — a change
+or a clear — that would make a suppression row stop matching the contact, and
+repeats that condition inside the UPDATE, so a "stop" arriving mid-edit fails
+the edit (`changed_meanwhile`). An email moving within a suppressed domain is
+allowed. Carrying the suppression over to the new value was rejected: that
+would suppress an address that may belong to somebody who never asked. Phones
+are stored as E.164 on edit, a LinkedIn URL must be one `normaliseLinkedIn`
+can read, and changing the email clears a bounce mark in the same UPDATE.
+
+**An import writes no consent row; a company carries a declared zone,
+editable, never derived from `country`.** `/contacts/import` drops a phone
+`normalisePhone` cannot read and reports it by line, stores a readable one as
+E.164, and is idempotent on a re-run: a person matches on email; without one,
+on LinkedIn profile; without that, on phone AND name at the same company,
+because a shared switchboard number is not one person. It refuses a file that
+is not UTF-8, because Excel's plain CSV is Windows-1252 and accented names
+would be stored garbled. Company edit (`PATCH /api/companies/[id]`) changes
+the name, the country and the IANA zone, through `isKnownTimeZone`.
+
+**Enrolment is the first production caller of `draftOpener`.** It checks
+consent for the channel, the recipient's zone, pause and a usable address,
+and does NOT read the suppression table: a suppressed contact is enrolled and
+then refused `suppressed` by `dispatchTouch`, the one place that rule lives
+(a dry run reports a hint count through `previewSend`). The duplicate guard is
+a NOT EXISTS in the INSERT's own SELECT over every earlier outbound row for
+the (contact, campaign) pair except `refused` — and except `failed` where a
+person approves each draft. Under auto-send a `failed` row blocks, because
+`recoverStuckSends` leaves `failed` on a send that may have gone, and queuing
+it again with no person in the loop would be exactly the guess that rule
+refuses. A contact already sent the opener is skipped `already_contacted`; a
+never-scanned company is skipped `stale`, because a scan fixes both; and a
+campaign on a cold-forbidden channel is refused whole
+(`campaign_channel_unsupported`).
+
+**The approvals page shows the same facts the sender reads**, from
+`previewSend`, and the evidence the draft quotes with its date — exactly
+`quotableFindings`, so a stale scan lists no lines and says why. Approve is
+disabled only for a `humanCanResolve: false` decision, and the page says so;
+everything else stays approvable, because the worker re-checks at sending.
+From the keyboard approving is two steps: `a` arms the focused card and Enter
+on that same card approves; any other key or a change of focus disarms it
+(§2.4). A page load is bounded to 80 previews, four at a time, because
+Vercel's pool is one connection; past that a person reads "could not be
+checked here — the worker checks again at sending" and is never blocked.
+
+**Replies have a screen.** `/inbox` lists every reply with its kind. A person
+may set any kind except `opted_out` and may never clear it — the zod enum and
+the query predicate both enforce that. An answer is an `awaiting_approval`
+draft naming `answers_touch_id`, which `dispatchTouch` threads through
+In-Reply-To/References from the parent's Message-ID (an inbound parent in the
+same org only — the §1 trigger). Answering resumes the person the reply paused,
+with an audit row. **The inbox never drafts to somebody who asked to stop**: a
+reply of kind `opted_out`, a suppression on the address on file OR on the
+From the reply came from, or a recorded refusal of the channel is a 409, and
+nobody is resumed. The check is the sender's own dry run, inside the draft's
+transaction after the resume, so a refusal nobody may approve past rolls back
+both; one a person can resolve (quiet hours, the cap, a zone, a paused
+campaign) comes back beside the draft as `wouldHold`. Two people answering
+one reply are serialised by locking the reply row — an `INSERT … WHERE NOT
+EXISTS` does not serialise under READ COMMITTED.
+
+**The opt-out reader runs first, and a genuine auto-reply pauses nobody.**
+`recordInboundReply` reads the words before the headers: an auto-reply flag
+applies only to a body that did not ask to be left alone. **An auto-reply read
+from `Auto-Submitted` — or `Precedence: bulk|junk|list|auto_reply`,
+`X-Autoreply`, `X-Autorespond` — no longer pauses a contact. That is a
+behaviour change, flagged.** It is stored `auto_reply` and skips the pause,
+the cancel and the advance. An explicit `Auto-Submitted: no` wins over any
+Precedence, because reading a mail as human-written is the direction that
+pauses; with no headers at all the behaviour is byte-for-byte what it was. An
+opt-out whose suppression cannot be written is audited
+`contact.opt_out_not_recorded`, logged `OPT-OUT NOT RECORDED — follow up by
+hand`, and returned as `optOutNotRecorded`.
+
+**A bounce is evidence about an address, not a person asking to be left
+alone.** It is a column and a refusal — `bounced`, ordered right after
+`suppressed` with the order asserted, and `humanCanResolve: true`: correct
+the address — never a suppression row. A delivery report of any kind is never
+filed as a reply; before, a DSN from a server that sets References was
+recorded as the contact replying, which paused them and moved the deal to
+`replied`. A report is acted on only when it is tied to a message this system
+SENT (the returned copy's Message-ID, the MTA's `Original-Message-ID`, or the
+report's own References), the address it names is the one that message went
+to, and that address is still the contact's; otherwise it is audited
+`contact.bounce_unmatched` and nothing changes. `5.2.2` (mailbox full) is
+transient although its class is 5, per RFC 3463, and a transient failure is
+recorded and changes nothing. `dispatchTouch`'s last look before the provider
+re-reads the mark. A campaign that bounces past `OUTREACH_BOUNCE_PAUSE_PCT`
+(30 days, at least 20 people written to) pauses itself — the existing
+`campaign_inactive` deferral is the stop — and its window restarts after the
+pause. **Residual risk, stated:** anyone who can mail the agency inbox can
+write a DSN, so a report is believed only when it names one of our
+Message-IDs AND the address that message went to — in practice the
+recipient, or somebody they forwarded our mail to. The effect is bounded:
+email to that one address stops until corrected; it suppresses nobody,
+pauses nobody, and touches no other contact.
+
+**A click IS the opt-out** — the fourth way a suppression row is written,
+after the suppressions page, a reply and a spoken opt-out. The token is
+`${touchId}.${hex HMAC-SHA256(UNSUBSCRIBE_SECRET, touchId)}`: it names the
+touch row and nothing else — no address, no expiry, no org. The minter is
+exported from the `@agency/db` root only; the web verifies through `queries`
+and computes its own MAC rather than importing the minter. `recordUnsubscribe`
+suppresses the address the message was DELIVERED to (`touches.recipient`)
+first, and the contact's current email too when it differs, all under the
+touch's org; a deleted contact still records. The loud path — a NULL
+recipient, an `addSuppression` that returns `ok: false` or throws, any
+intended row missing — audits `unsubscribe.not_recorded`, logs `OPT-OUT NOT
+RECORDED — record it by hand` at error, AWAITS the Slack notice (never
+`after()`: this is the one event that must not be lost to a host without
+`waitUntil`) and answers 500; the pause and the cancel run on that path too. A
+repeat click is idempotent. A GET only redirects to the page, because link
+scanners prefetch. The worker adds `List-Unsubscribe`/`List-Unsubscribe-Post`
+only with both `UNSUBSCRIBE_SECRET` and `WEB_PUBLIC_URL`.
+
+**The LinkedIn provider is a person.** `linkedinHumanProvider(userId)` is a
+`MessageProvider` whose `send()` sends nothing: it hands the words to whoever
+pressed Start and answers `human:<userId>`. Two presses, in that order. Start
+claims the row `sending` (the tick's own predicate, so two clicks give one
+hand-over and one `claimed`) and runs `dispatchTouch`, so every §2.1 rule —
+suppression by the 0016 `in/slug` key included — is checked at that moment.
+The words reach the screen ONLY on the success path, and the row settles
+`sent` in the same request; a refusal hands over nothing, and a clock refusal
+restores `approved` plus `scheduled_for` exactly as the worker's tick does,
+pinned by twin-row tests. "I sent it" closes the step's task; "I did not send
+it" marks the row `failed` with `sent_at` cleared, so the daily cap stops
+counting it (the deal is left where the forward-only move put it). `/tasks`
+materialises one `linkedin_send` task per approved or queued LinkedIn touch on
+read, so it works with no worker, and fails its own claims left `sending`
+past 30 minutes; `recoverStuckSends` is untouched and still covers them.
+`send.sent` reads "via human" for this path.
+
+**Erasure keeps the suppression.** Suppression rows first, everything in one
+transaction, and a suppression that cannot be stored aborts the erasure and
+fails loudly (§2.1's Phase 4 obligation) — rolled back, the contact paused
+with the reason, `contact.erasure_failed` audited, `OPT-OUT NOT RECORDED`
+logged, the Slack notice awaited, 500. Owners only, with the contact's id
+typed back as confirmation; downloading the record first is any member's, and
+audited as `contact.exported` BEFORE the file is produced (no audit row, no
+file). The keys kept: the contact's email, E.164 phone and LinkedIn `in/`
+slug, the recipient of every outbound message, the number on every linked
+call, and the key each of their opt-outs was recorded against — never the
+email's domain or a `company/` page, either of which would silence the whole
+company, and never the From of an ordinary reply, which may be a colleague in
+the thread. A contact-row value that cannot be read aborts (a person can fix
+it); a historical one is skipped and reported, or the person could never be
+erased. An opted-out reply keeps its From and an opted-out call its numbers,
+with their words scrubbed, because the compliance page re-derives every
+opt-out's key from them. **Not scrubbed, and the page says so:** chat
+transcripts, audit detail, free text about the company that names them, and a
+recording held at Twilio — the result returns the call SIDs for a person to
+delete by hand.
+
+**The Resend inbound route is a READER.** It verifies the Svix signature
+(in-repo, pinned to Svix's published vector), fetches the message, maps it to
+`handleInboundEmail` and can send nothing — no second matcher, and the same
+opt-out reader the IMAP listener and `/api/inbound/email` use. Its status codes
+are decisions about retrying: an unfetchable message is 502 and a recording
+failure 500, so Resend retries both; everything it read is 200. The generic
+route's "200 either way" is deliberately not copied, because a 2xx for an
+unread message could swallow a "stop". An HTML-only reply is converted to text
+with its lines kept, so a one-word "Stop" above a `<blockquote>` reads as an
+opt-out. **Open finding:** the worker's IMAP path flattens HTML to one line,
+so the same HTML-only reply arriving there pauses the contact and is never
+suppressed; `apps/web/test/resend-inbound.test.ts` demonstrates it. `dsn` is
+always null on this path — the receiving API lists attachments without their
+contents — so a bounce arriving through Resend is never recognised as one.
+
 **Not built:** SendGrid behind the provider interface (the interface is the
-point; the second implementation is a few lines when it is needed) and a
-LinkedIn *provider* — nothing can send on that channel, so the suppression
-above is a rule waiting for its sender rather than one in use.
+point; the second implementation is a few lines when it is needed); any
+automation of LinkedIn — the provider is a person, by design; multi-step
+sequences (enrolment writes one opener per person); and the campaign's
+`icp_profile_id` (enrolment qualifies against the active ICP; nothing sets or
+reads that column).
 
 ### The pipeline (Phase 5, §8.6)
 
@@ -503,14 +956,108 @@ writes carry the form's exact wording as `evidence`, imported from the same
 module the form renders (`lib/booking-copy.ts`) — a consent whose recorded
 wording is not what the person saw is a claim. A free-mail address does not
 name a company, so the row is `<address>.inbound` named after the person, for
-a human to fix. Rate limiting belongs at the reverse proxy, like `/api/health`.
+a human to fix. Rate limiting belongs at the edge — on Vercel, the WAF rule
+DEPLOYING.md's public-surface section asks for — like `/api/health`.
+
+**Deals have owners.** `setDealOwner` writes `deals.owner_user_id`, the board's
+card sets it, and the change is a `deal.updated` audit row naming who. (An
+earlier version of this file listed ownership as not built; it was built
+before 0018.)
+
+**Rotting means "untouched", not "in stage".** It is measured from
+`updated_at`, which every change writes — a move, a next action, an owner, a
+due date — so the honest label is "untouched for N days", and
+`deals.stage_entered_at` was rejected: it would have been a second clock that
+disagreed with the first. **`next_action_at` has a writer**: `PATCH
+/api/deals/[id]/next-action` (`deals:write`), one UPDATE whose self-join reads
+the value it replaces, plus the audit row `deal.next_action_set { companyId,
+from, to }`, in one transaction. A date on a closed deal is a 409; clearing is
+always allowed. A due date set from the board is the END of the chosen day in
+the setter's zone, and "due today, or overdue" is `next_action_at <= now +
+24h`, which is today in any zone for a board-set date — the server does not
+know the viewer's.
+
+**`advanceDeal` audits its own moves.** Every automatic creation and advance
+writes `deal.created`/`deal.advanced` `{ companyId, from, to }`, actor
+`system` unless the caller names one, with the caller's `db` — so inside a
+transaction it commits or rolls back with the move. Before, a send, a reply,
+a booking or a generated proposal recorded the move only inside its own
+action, none of which says the stage the deal LEFT, so analytics could not
+count it. `POST /api/deals` still writes its own `{ companyId, stage }` row
+beside advanceDeal's; `analyticsTransitions` leaves those out in SQL (they
+have no `to`), so one move is neither counted twice nor reported unreadable.
+Still NOT recorded as deal rows: a stage set by the agent's `update_deal`
+(audited as `agent.update_deal` with no `from`), a proposal accepted as won,
+and every automatic move made before this change.
+
+**Analytics are lower bounds and say so.** `/pipeline/analytics` computes win
+rate and velocity (median days from creation to won) from `deals`, so those
+are exact; conversion and time in stage come from the recorded moves, and time
+in stage counts only stays whose arrival AND departure were both recorded.
+Every figure is shown beside its denominator, and below five it reads
+"insufficient data (< 5)".
+
+**A meeting has an outcome, once it has started.** `meetings.outcome` is
+`held`, `no_show` or `rescheduled`, and `starts_at <= now` sits in the one
+UPDATE beside `cancelled_at IS NULL`. A no-show does not move the deal. A
+recorded outcome can be corrected, and each correction writes its own
+`meeting.outcome_recorded`. `rescheduleMeeting` marks the old meeting
+`rescheduled` and records the new one through `createMeeting` in ONE
+transaction — a "rescheduled" that names no new meeting would be a claim with
+no evidence — and the replacement keeps the original's source, contact,
+title, length, notes and review flag; the two are linked only through audit
+rows (`rescheduledTo`, `rescheduledFrom`), read by `meetingRescheduleLinks`.
+`cancelMeeting` refuses a meeting whose outcome is recorded, because held and
+cancelled are opposite facts.
+
+**An `.ics` file is a download for the team member's own calendar**, not an
+invitation: `METHOD:PUBLISH`, no ATTENDEE, no ORGANIZER, and it says "Nobody
+is invited by it." It carries nothing from notes or `external_ref` and names
+no contact; a booking-page title is rebuilt from the company, because the
+system writes it from the visitor's name, and an `.inbound` company appears as
+"an inbound lead".
+
+**A proposal can be printed and downloaded; it still cannot be sent from
+here.** `/proposals/[id]/print` renders the STORED document through
+`<ProposalDocument audience="team">` with no Shell, and prints the stale
+banner, taken from `scans.ran_at`. `GET /api/proposals/[id]/markdown`
+(`deals:read`) returns the buyer's content — no score, tier or per-item weight
+— plus the stale banner, because Markdown is the form most likely to be pasted
+into a mail and removing the banner should take a deliberate edit; it refuses
+a DRAFT whose evidence is stale (409). Both write `proposal.exported`.
+`ProposalDocument` carries an `audience`: the buyer copy omits score, tier,
+weights and the word "stale"; both keep the "not the case here (…)" and "not
+assessed" sentences verbatim.
+
+**A share link is the proposal's own document behind an unguessable,
+revocable token; accepting it is the same `setProposalStatus` a person
+clicks.** A link is minted only from `sent` — never an implicit draft → sent,
+because marking a proposal sent is the human act §2.4 means — and only while
+the evidence is fresh. `expires_at` is capped at `scan.ran_at +
+stale_after_days`, and the read and the accept re-derive `isStale(ran_at)`,
+because the threshold can be lowered after a link is minted; the buyer is
+then told "being re-verified", never "stale". A view is a count and two
+timestamps. The public page returns 404 for an unknown, revoked or expired
+token alike (a page cannot answer 410; the accept route does).
+
+**Notes and tasks are internal state with no outbound side.** Kickoff and
+renewal templates are created by a click, never by a stage change — the board
+should not fill with work nobody asked for — and are refused without a won
+deal or while a set of the same kind is still open, in one transaction under
+`pg_advisory_xact_lock`, so a double click makes one set on real Postgres.
+`packages/core/test/documents-never-read-notes.test.ts` keeps notes out of the
+proposal and the brief; its predicate is the notes MODULE and TABLE, not the
+word "notes" (a meeting has its own notes column), and it runs over
+fabricated leaks so it is shown to be able to fail. Lengths count code points,
+as Postgres `length()` does. "Due today" in `tasksCounts` is the next 24 hours,
+because the org has no zone. A `linkedin_send` task cannot be ticked from
+`/tasks` (409): ticking it would claim a message went that no rule checked.
 
 **Not built:** calendar invitations (a meeting recorded here moves the deal;
 the invite goes from a person's calendar or the calendar connector, and
-`book_meeting`'s summary says so), a proposal PDF or e-mail send (the document
-is the JSON; sending anything is Phase 4's single path), and deal ownership
-(`deals.owner_user_id` exists and nothing sets it yet — a two-person agency
-did not need it to close).
+`book_meeting`'s summary says so — an `.ics` download is not an invitation),
+and a proposal PDF or e-mail send (the document is the JSON; sending anything
+is Phase 4's single path — a share link is not a send).
 
 ### Voice (Phase 6, §8.5)
 
@@ -683,10 +1230,190 @@ larger than any real job before it is sent.
 once at boot and logs `summaries: ollama (local)` or `deterministic`; the
 session asks for a summary when the call closes and writes `endCall`'s
 deterministic one on every failure path. Only the caller's and the agent's
-turns are sent — not the system events. `classify_reply`, `draft_outreach` and
-`summarise_findings` have their task keys and no caller yet; wiring them is
+turns are sent — not the system events. The worker calls `classify_reply`
+(`apps/agent/src/outreach/classify.ts`) and `draft_outreach`
+(`apps/agent/src/outreach/draft.ts`) the same way, beside the deterministic
+answer. `summarise_findings` has its task key and no caller yet; wiring it is
 adding an `attemptText` call beside the deterministic answer that already
-exists, never in place of it.
+exists, never in place of it. (The agent TOOL named `classify_reply` is a
+different thing: it records a kind a model or a person chose, and calls no
+model itself.)
+
+### The compliance page and the audit log
+
+**The compliance page COUNTS ROWS and re-derives no rule.** `/compliance`
+reads `complianceSummary()` in `packages/db/src/compliance.ts` — the same read
+`get_compliance_summary` makes, so the page and the tool cannot disagree.
+Quiet-hours breaches are deliberately NOT recomputed: today's window and zone
+applied to yesterday's send is not an observation, so what is counted is the
+send path's own `refusal_code = 'quiet_hours'`. Approvals decided after expiry
+are labelled a clean expiry, informational, against today's rows — never a
+breach, because `decideApproval` allows it on purpose (§1). Freshness comes
+from the latest scan's `ran_at` through `isStale`, and the page shows how many
+stale companies `findings.stale` still calls fresh.
+
+The must-be-zero checks: `callsThatDidNotDisclose()`, which leads the page;
+opted-out replies and calls with no matching suppression row today (keys from
+the send path's own `suppressionKeysFor`; an unreadable key is listed, never
+read as clear), beside the count of `contact.opt_out_not_recorded` rows;
+voice/SMS/WhatsApp touches that WENT OUT with no granted consent row today,
+with the send path's own refusals counted apart as "stopped by the send path";
+and drafts awaiting approval whose company's latest successful scan is stale
+or missing. The auto-send check prints its predicate and its zero, and its
+test runs the same predicate over rows that would match. Every zero says
+"none recorded" and names the recorder `deployment()` reports absent — no
+worker, no reply path, no `UNSUBSCRIBE_SECRET`, a voice service the page
+cannot see. `COMPLIANCE_REFUSAL_HUMAN_CAN_RESOLVE` restates `decideSend`'s
+`humanCanResolve` per code (a row stores the code, not the decision), typed
+`Record<SendRefusalCode, boolean>` so a new code fails the build, and
+`compliance.test.ts` drives `decideSend` into every code and asserts they
+agree.
+
+**The audit log has a reader.** `/audit` is keyset-paged on `(created_at,
+id)`, newest first, 100 a page. The cursor comparison reads the cursor row's
+STORED `created_at` by id, because a JS `Date` holds milliseconds and
+`timestamptz` microseconds: a cursor built from the `Date` skipped rows
+written in the same millisecond. Filters: an action family (an escaped LIKE —
+`_` is a wildcard and nearly every action has one), an actor, a subject type,
+a subject id. Sentences come from `apps/web/src/lib/audit-copy.ts`, which is
+pure and reads `detail` only through `detailValue()`, refusing `SENSITIVE_KEY`
+keys and `SENSITIVE_VALUE` strings; the raw row sits behind `<details>`,
+through `redact()`, and an unknown action is shown as its raw name.
+
+**Every action a writer produces has a sentence, and a test reads the tree to
+keep it so.** `apps/web/test/audit-copy.test.ts` scans every `src/` under
+`apps/` and `packages/` for `action:` and `audit('…')` literals — a ternary
+on the lines after `action:` included — and fails for an action with no
+sentence or no detail shape in its `WRITTEN` map, for a templated action whose
+expansions nobody listed, and for a `WRITTEN` entry nothing writes. A
+convention did this job before and failed: features built in parallel wrote
+seven actions from files that were not `audit-copy.ts`, and `/audit` showed
+each as a raw name. `isAlarm` highlights an opt-out that was not recorded, a
+call with no AI disclosure, and a digest whose worker-silent alert reached
+nobody. The page's own notes say what the log cannot: an approval decision is
+written twice (the web route and the worker), scans are audited only when the
+cron or the agent ran them, and suppression changes before 0018 were never
+written at all (§4).
+
+### Notifications and the heartbeat
+
+**Slack is one seam, and it carries ids.** The `NotificationEvent` union in
+`lib/slack-message.ts` names every kind — `reply`, `booking`, `deal_closed`,
+`proposal_accepted`, `opt_out_not_recorded`, `digest`, `worker_silent`,
+`campaign_paused` — and the content rule is ids, a public domain, a kind and a
+deep link: never a body, a name, an address, a phone number, a note or a
+chosen time. A free-mail lead's `<address>.inbound` row reaches the channel in
+NO field, the link included, because Slack unfurls and logs URLs; such a
+message links to `/inbox`, `/pipeline` or an id-based page, and
+`slack-message.test.ts` asserts no payload contains `.inbound`. The webhook
+URL is a bearer credential `redact()` cannot see, so it is never logged and a
+failure is reported by error NAME or Slack's short token. One attempt, 3 s,
+no retry, and an audit row `notification.sent|failed` with actor `system`.
+
+Routes call `notify()` inside `after()`, after the write, wrapped in
+try/catch — Next `console.error`s an escaping Error whole, past `redact()` —
+and the deal and proposal routes read the company domain inside that
+callback, so a failed read cannot 500 a move that is already committed. A
+duplicate inbound delivery announces nothing; accepting a proposal closes the
+deal won inside `setProposalStatus`, and that close is not announced again.
+`opt_out_not_recorded` is the exception: it is AWAITED, on a path that is
+already answering 500. **Not built:** retries, a per-org webhook, and a
+worker-side notifier — `campaign_paused` is in the union and unwired, because
+the pause happens in the worker, which has no Slack path; it logs a warn line
+per pause and the campaigns card explains it.
+
+**The alert that the worker is silent cannot come from the worker.** The daily
+digest cron reads `worker_heartbeats` and posts a separate `worker_silent`
+message, after the digest, when a worker is configured and the newest
+heartbeat is older than the threshold that row earns (`heartbeatSilentAfter`:
+max(600 s, three of the worker's own ticks)) or there is none. Once a day,
+because that is how often the cron runs; with several orgs it posts once per
+org, which one agency with one org does not need engineered around.
+
+**A silent worker is a number in `/api/health`, not an inference.**
+`worker_heartbeats` is a SYSTEM table with no `org_id` — the worker serves
+every org — keyed `hostname:pid`, upserted every tick with `{ halted,
+lockHeld, intervalMs, version }` (`version` is null under `node
+apps/agent/dist/index.js`, which is how the image runs). `booted_at` moves on
+a re-boot with the same id. Rows older than 30 days are pruned on every write,
+BEFORE the upsert, so a write throws exactly when its row was not written —
+which `lastHeartbeatAt()`, and so `/readyz`'s `heartbeatWrittenAt`, rely on.
+A failed write is logged once per failure streak (and on a change of error
+class) and once on recovery — not 5,760 identical lines a day while 0018 is
+missing — and never stops the worker (§4: only liveness may stop a process).
+What the row says comes from `healthInputs()`, the same object `/readyz`
+answers from, so the two cannot disagree about the halt or the lock. On the
+web side a row decides `live` or `silent` whatever the configuration says — an
+observation beats configuration — `never` is a configured worker with no row,
+and `not_configured` is neither. `worker` never changes `/api/health`'s status
+or code, even under `?strict=1`.
+
+### Search, exports and records
+
+**Search excludes connectors, secrets, prompts, chat, approval payloads, audit
+detail, raw scans, users and provider ids (§2.3); `q` is content and stays out
+of logs.** `GET /api/search` has no `search` capability: each section is gated
+by the read capability that already gates its table (`searchSectionsFor`),
+outbound bodies only for `approvals:decide` and reply bodies under
+`campaigns:read`. `apps/web/test/search-source.test.ts` pins the exact
+searched-column set, so adding a column is a visible §2.3 decision rather than
+a quiet one. A driver error is logged by name only, because drizzle's message
+quotes the bound parameters. A query is 2 to 100 characters after whitespace
+is collapsed.
+
+**Exports are audited because lead data left the database; a blank is not
+false.** `GET /api/export/{companies,findings,consents}` each write one
+`export.<view>` row `{ rows, filters }` BEFORE the file is produced, and answer
+503 with nothing exported if that row cannot be written — stricter than the
+house `.catch(() => {})`, because an unrecorded movement of lead data is the
+very thing §2.3 and §5.5 care about. Over 20,000 rows is a 413, never a
+truncated file. Every file is UTF-8 with a BOM, then `# internal — never
+prospect-facing`, then RFC 4180 CRLF rows, with any cell starting `=`, `+`,
+`-`, `@`, a tab or a CR prefixed by an apostrophe. `stale` is derived from
+`ran_at` — the findings export's projection does not even carry
+`findings.stale`. In the findings file `gap` AND `weight` are blank for an
+unobserved signal, because a 0 is a number a spreadsheet sums; in the consents
+file a missing row is `never_asked`. `/companies` is a GET form run through
+`lib/company-list.ts`, and the companies export honours the same query string,
+so "export this view" is exactly the rows on screen. One known limitation: that
+file is domain-first and re-imports through `/companies/import`, whose importer
+reads everything after the first comma as the name — a NEW domain would be
+named `Acme,72,A — call first`. Existing domains are untouched.
+
+**A person's whole record is one download, and erasure keeps the
+suppression** — see the send path above.
+
+### The settings pages and the dashboard
+
+**`/settings` is five read-mostly pages.** `/settings/icp` shows the stored
+definition with no editor (§4). `/settings/spend` reads only Postgres sums of
+`chat_messages.cost_usd` — per UTC day and per person, revoked people
+included — gated on `audit:read` like `/compliance`. `/settings/deployment`
+names every variable and never shows a value or a URL, beside the heartbeat
+and the schema state computed exactly as `/api/health` computes it; it is the
+page that answers "why would nothing send?". `/settings/mail` checks the WEB
+app's `MAIL_FROM` domain — SPF, DMARC, and DKIM at the common selectors or
+`?dkim=<one label>` — with TXT lookups made from the browser through
+`/api/settings/mail-dns`, so a slow nameserver delays one panel rather than the
+page. The worker's `MAIL_FROM` lives on its own host, and the page says it
+cannot see it. A 1024-bit RSA DKIM key (Resend's and Google's default) passes
+with a note, and only a shorter one is "weak"; an answer that could not be
+read is "could not be checked", never "missing".
+
+**The dashboard states the phases once and every bullet from a fact.** Its
+headline says "Phases 0–6 are built", and that Phase 6 is deliberately not
+switched on only while no call is on record in this database. The worker
+line comes from the newest heartbeat. "Needs a look" is a row of counters —
+failing compliance checks, unhandled replies, drafts and agent actions
+awaiting approval, deals untouched past their stage's limit or past due,
+overdue tasks, and stale, never-scanned and unreachable companies at the
+ICP's own threshold — each linking to the filter that lists exactly its rows;
+a zero whose recorder is absent reads "None recorded" and names what is
+missing. The last ten audit lines are `sentenceFor`'s. "What this instance can
+and cannot do" is chosen in `lib/dashboard-view.ts` from `deployment()` or
+from an observation — the heartbeat, the newest `scan.cron_run`, calls on
+record — so "stale companies are rescanned daily" is only said once a rescan
+has actually run in the last 36 hours.
 
 ## 3. Commands
 
@@ -694,7 +1421,7 @@ exists, never in place of it.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 1500 tests: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice
+npm test                 # 3506 tests in 140 files: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice + the 0018 release
 npx vitest run --maxWorkers=1 --minWorkers=1   # the same suite on a machine short of memory
 npm run build            # packages, then the Next app
 
@@ -710,6 +1437,10 @@ npm run scan                  # every company that has never been scanned
 npm run scan -- --all         # re-scan everything
 npm run scan -- rentman.io    # one domain
 npm run scan -- --import f.csv  # import a domain,name CSV, then scan
+# ...and on Vercel, once CRON_SECRET is set, the two daily crons. Run either by
+# hand with the bearer — the dashboard's Run control may not carry it:
+curl -H "Authorization: Bearer $CRON_SECRET" https://<host>/api/cron/rescan   # never-scanned, then stale
+curl -H "Authorization: Bearer $CRON_SECRET" https://<host>/api/cron/digest   # Slack digest + worker-silent alert
 
 # a local Postgres on a machine with neither Postgres nor Docker
 npm run db:local              # PGlite behind a TCP socket; data in .pgdata/
@@ -721,13 +1452,18 @@ AGENT_USE_LOCAL_LOGIN=true npx tsx --env-file=.env apps/agent/src/index.ts
 npm run smoke:agent              # the Phase 2 gate. SPENDS whatever the worker authenticates with.
 npm run smoke:agent -- --draft   # ...and make it park a draft on a human
 npm run smoke:agent -- --connector deepwiki   # the Phase 3 gate (§6's "no restart")
+# When /readyz reports chat disabled, the smoke test names AGENT_USE_LOCAL_LOGIN=true
+# first (development only, spends no credit) and ANTHROPIC_API_KEY second.
 
 # production operations, all prompt-based so no connection string touches a
 # file, an argument list or shell history (§2.3)
 ./tools/remote-setup.sh       # migrate + seed a remote database
+./tools/remote-status.sh      # read-only schema facts, safe to paste — incl. "0018 is applied"
 ./tools/run-worker.sh         # run the worker here, against production, nothing exposed
-./tools/add-teammate.sh       # grant somebody access — there is no signup flow
+./tools/add-teammate.sh       # grant somebody access — or Settings → Team, in the browser
 ./tools/spend.sh              # what the API has actually cost: per day, per person, run rate
+./tools/mail-dns.sh           # SPF/DKIM/DMARC records for a sending domain
+./tools/dev-login.sh          # a local sign-in link without a mailbox
 
 # the parity harness — regenerate only when re-recording on purpose
 npm run fixtures:capture      # re-record the seed domains' public surface
@@ -748,10 +1484,26 @@ docker compose run --rm seed
 # magic links http://localhost:8025   (Mailpit — dev only, relays nothing)
 ```
 
+**`cp .env.example .env` boots all three processes**, and that is now checked
+rather than assumed: parsing the file the way `node --env-file` does and
+running each process's `loadEnv` over it found that the worker refused a blank
+`UNSUBSCRIBE_SECRET=`, `WEB_PUBLIC_URL=` or `LLM_PROVIDER=`, and the voice
+service a blank `VOICE_PUBLIC_URL=` or `VOICE_ORG_ID=`. The web app reads a
+blank as unset; those two do not, so those lines are commented out in the
+example with the reason stated at its top. And compose reads `.env` only to
+fill `docker-compose.yml`'s `${…}` — a variable that file does not name never
+reaches a container.
+
+**`next build` does not run in a git worktree whose `node_modules` is
+symlinked into the main checkout** (how parallel work in this repo is set up):
+Turbopack refuses "files outside of the workspace root". `cd apps/web && npx
+next build --webpack` is the equivalent check there, with the same
+server/client boundary rules. The main checkout and Vercel are unaffected.
+
 **The suite's memory cost is per WORKER, and that is what falls over first.**
 vitest forks a worker per CPU and `freshDb()` builds an embedded Postgres in
 each one — and it does that in `beforeEach`, so every individual test gets a
-new PGlite instance and replays all sixteen migrations. On a machine under
+new PGlite instance and replays all eighteen migrations. On a machine under
 memory pressure the workers fight rather than share, and the first thing to
 give is `freshDb()` blowing the 30-second `hookTimeout`, which reads like a
 broken test and is not one. Measured here: `apps/voice` took **945 seconds and
@@ -764,7 +1516,10 @@ process, keeps the finished data directory, and hands each test a COPY via
 `loadDataDir`. The work is shared; the state is not — `loadDataDir` hydrates
 a new instance rather than attaching to one. Measured: the whole suite went
 from **290s to 97s** single-worker, with the same tests passing, and
-`apps/voice` alone from 9.8s to 4.4s.
+`apps/voice` alone from 9.8s to 4.4s. The suite has more than doubled since:
+at 0018 it is 3,506 tests in 140 files, and a single-worker run took 1,060 s
+on a four-core container already loaded past its core count — the typecheck
+first, then every test green, with no `.env` in the tree.
 
 `freshDb()` remains and `migrations.test.ts` and `schema-parity.test.ts`
 still use it — a test about applying migrations cannot start from a database
@@ -776,8 +1531,9 @@ behaving strangely, intermittently, depending on file order. That is exactly
 how a suite starts passing vacuously, so it has its own test rather than an
 argument in a comment. `packages/db/test/harness.test.ts` writes a row named
 `LEAKED FROM THE PREVIOUS TEST` in one test and asserts the next cannot see
-it, checks the migrations really are applied (down to 0017's `reply_kind`),
-and re-checks the UTC pin the snapshot could have lost.
+it, checks the migrations really are applied (down to 0018's
+`findings.scored`, with 0017's `reply_kind` as a second line), and re-checks
+the UTC pin the snapshot could have lost.
 
 `packages/core` and `packages/db` compile to `dist/` and are consumed as
 JavaScript, so **run `npx tsc --build` after changing them** or the web app
@@ -904,8 +1660,9 @@ token rows for addresses that are not team members. They are single-use, expire
 in 15 minutes, and grant nothing — but nothing prunes them and nothing rate
 limits the endpoint. Phase 2's worker should sweep
 `verification_tokens WHERE expires < now()`; rate limiting belongs at the
-reverse proxy. This was a deliberate trade against roster disclosure, which is
-the worse failure.
+edge — the reverse proxy on a VPS, the WAF rule on Vercel (DEPLOYING.md, "The
+public surface"). This was a deliberate trade against roster disclosure, which
+is the worse failure.
 
 **`AUTH_URL` is required and `AUTH_TRUST_HOST` is tri-state.** Auth.js reads
 `process.env.AUTH_URL` itself, so a zod `.default()` made the variable look
@@ -959,6 +1716,20 @@ holds a definition with no `order` and will use that fallback; re-seed it.**
 numbers as literals. The threshold, channels and daily cap shown are whatever
 the active `icp_profiles` row says. A dashboard displaying a threshold the
 engine is not using is the same class of mistake as a finding nobody observed.
+So does `/settings/icp`, and there is no ICP editor, on purpose: a stored score
+names the definition it was computed from, and editing that definition in
+place would change what every old score claims to mean.
+
+**The ICP is partly descriptive, and `/settings/icp` says which part.**
+`scoreCompany` evaluates four disqualifiers (`unreachable`,
+`is_security_vendor`, `has_security_team`, `no_public_product`); the seed's
+`enterprise_scale` is checked by nothing, and the page marks it so
+(`SCORER_DISQUALIFIERS` in `apps/web/src/lib/icp-view.ts`, pinned against
+`scoring.ts`). The profile's outreach block — channels, `max_per_day`,
+`auto_send` — is enforced by nothing either: the send path applies each
+campaign's own channel, cap and quiet hours. The dashboard's Active ICP table
+still shows the profile's channels and daily cap as if they were the operative
+values; that is the one place left that overstates them.
 
 **Migration 0010's down file was edited before any deployment.** Its original
 down reverted `refused` rows to `failed` without clearing `refusal_code`,
@@ -1036,7 +1807,9 @@ orchestrator has to reach it — and it reports only `err.name`, never the drive
 message that would carry the DSN. It is not rate limited, so sustained
 anonymous traffic can occupy connections from the same pool the app uses;
 `DATABASE_POOL_MAX` exists partly so that ceiling is tunable. Rate limiting
-belongs with the reverse proxy in front of the VPS, not in the app.
+belongs at the edge, not in the app: the reverse proxy in front of a VPS, and
+on Vercel — where there is no proxy you control, which this sentence predates
+— the WAF rule DEPLOYING.md asks for.
 
 **`/api/health` reports the schema state, and deliberately does not enforce
 it.** It reads `max(version)` from `schema_migrations` and compares it against
@@ -1067,6 +1840,135 @@ as long as it takes to run the suite.
 `createUser` cannot succeed. That is deliberate: there is no signup flow (§1).
 The `signIn` callback refuses any address without a `users` row *before* mail is
 sent, and the NOT NULL is the backstop if that callback is ever bypassed.
+
+**Settings → Team revokes access and never deletes anyone.** Revoking stamps
+`users.revoked_at` and deletes that person's sessions in the same transaction;
+restoring clears the stamp and keeps the role. Three statements enforce the
+rules themselves, with no check beforehand to race: a revoked owner does not
+count as an owner, the last live owner cannot be demoted or revoked, and
+nobody can revoke themselves. Revocation is checked in three places in
+`auth.ts` — the request leg, the callback leg and the per-request `session`
+callback, all through `memberMayAccess` — and in the worker's
+`resolvePrincipal` on every turn. The session-callback check closes a race: a
+magic link completed just before a revocation could otherwise create a 30-day
+session just after it. That callback deletes the sessions and THROWS; returning
+nothing is not a safe alternative, because next-auth then falls back to the raw
+adapter session, `sessionToken` included.
+
+**"Last signed in" is `users.email_verified`.** @auth/core 0.41.3 re-stamps it
+on every completed magic link and at no other time. `users.updated_at` also
+moves on every sign-in (the adapter's `updateUser` fires the trigger), so it
+means nothing and the page never shows it. `verification_tokens` are never
+listed, because they hold rows for strangers.
+
+**The team page is not a roster oracle either.** `users_email_key` is global,
+so granting an address another org holds gets one generic sentence — "That
+address cannot be added here." — with the same 409 as a same-org repeat, and
+the address is never logged. A revoked member asking for a sign-in link gets
+the same response as a stranger; only the operator log's `reason`
+(`access_revoked` / `not_a_member`) tells them apart. Granting sends no mail.
+
+**Suppression audit rows were never written.** The suppression routes put the
+normalised value in `audit_log.subject_id`, a uuid column, and the insert
+failed silently behind `.catch(() => {})`. Now `subjectId` is null and the
+value is in `detail`, built by `auditSuppressionAdded`/`auditSuppressionRemoved`
+in `packages/db/src/audit.ts`, which `suppression-audit.test.ts` runs through
+`appendAudit` against a real engine. Every suppression change before 0018 is
+missing from the log, and `/audit` says so rather than implying the log is
+complete.
+
+**A cron rescans; it is not a scan button.** §1 used to end its
+`findings.stale` paragraph with "there is still no scheduled rescan"; now there
+is one, and REPO-BRIEF's "no scan button" still stands: nobody clicks
+`/api/cron/rescan`, and a person still scans one company with `npm run scan --
+<domain>`. **Its deadline is derived, not guessed.** `worstCaseScanMs =
+homeTimeoutMs × 11 + pathTimeoutMs × 11 + 8 000` (TLS) — 162 s at the cron's
+8 s / 6 s — because a redirect chain may spend a per-hop timeout eleven times.
+A company is dispatched only when `elapsed + worstCaseScanMs <= budget`, with
+the budget 300 s less a 60 s margin, shared across orgs. The first rule,
+"stop dispatching after 240 s", could start a scan at 239 s that ran to about
+400 s, and the platform would kill the function with the audit row unwritten.
+`rescan.test.ts` reads `fetch.ts`, so the restated 11 and 8 000 cannot drift.
+**And the per-hop timeouts do not bound a body that drips a byte inside each
+inactivity window** — `get()` checks its deadline before each hop, not during
+the read — so each scan is raced against its worst case; one that loses is
+abandoned, records nothing, and stops the run, because its sockets cannot be
+closed and a second scan beside it would be the overlap the design forbids.
+**It never picks a `*.inbound` company**: that is the booking page's
+placeholder named after a person, and scanning it would resolve somebody's
+email address as a DNS name every night, for an "unreachable" row about a
+company that does not exist. A refused host takes no batch slot, or it would
+sit at the head of the queue taking one every night forever.
+
+**A second stranger-facing write surface**, added with the booking page's
+rules verbatim — a hashed token, bodies read as text and bounded, nothing
+enumerable returned, the accept through the same `setProposalStatus` and
+`setDealStage` a person uses, audited — and §2.2 governs the buyer page harder:
+no score, no tier, no "stale". The only other stranger-facing write added is
+the one-click unsubscribe, and all it writes is an opt-out — the one write a
+stranger must always be able to make. (The cron and Resend routes are public
+paths too, but each is authenticated by a secret, not by a session.)
+
+**§8.4's single path has a human-shaped provider.** The alternative was a
+second sender in a route, which is exactly what the rule forbids. The words are
+revealed only after the rules pass, because a message a person could copy
+before the rules ran is a message that can go after a refusal.
+
+**A per-tool review that can only DISABLE, where §6 recommends wildcards that
+ALLOW.** §2's gate section explains why the wildcard is refused; this is what
+stands in its place. `connectorToolsSetDisabled` writes ONE key with
+`jsonb_set` and does not re-disable the connector or clear `last_ok_at` the way
+`updateConnector` does, because narrowing what a server may do is not a change
+to where it points — re-disabling would punish an owner for making a live
+connector safer. `disabledTools` is `.optional()` rather than `.default([])`:
+`ConnectorConfig` is the zod OUTPUT type, so a default made the key required
+in every config literal a caller builds; `disabledToolNames` applies the
+default instead.
+
+**On Postgres 18 an `ON DELETE RESTRICT` refusal is SQLSTATE 23001, not
+23503.** Measured on PGlite 18.3, and Neon runs 18.6: RESTRICT raises
+`restrict_violation` (23001), NO ACTION still raises 23503, and Postgres 16/17
+report RESTRICT as 23503. So `pg-errors.ts`'s `isForeignKeyViolation` comment
+("or a RESTRICT refused the delete") is wrong on the deployed server, and
+`credentials.ts` recognises both codes, scoped to the one constraint it means.
+Any new code that maps a RESTRICT refusal to a sentence must do the same.
+
+**`deployment()` flags are configuration, never observation — and a flag
+means the feature can actually run.** `inbound: 'webhook'` for Resend needs
+BOTH `RESEND_WEBHOOK_SECRET` and `RESEND_API_KEY`, because the route answers
+503 without either and saying "webhook" about a route that refuses everything
+is the claim the module exists to stop. The pure facts live in
+`lib/deployment-facts.ts` and the `server-only` reader in `lib/deployment.ts`,
+for a measured rule: **a module a test in `apps/web/test` imports carries no
+`server-only` and no `@/` import, transitively.** That is why
+`secret-compare.ts`, `slack-post.ts`, `deployment-facts.ts`, `resend-inbound.ts`
+and the `notification.ts` beside each hooked route exist as separate files, and
+why a route that cannot be imported is pinned by reading its source.
+
+**The web app reads a BLANK environment value as unset.** zod refuses `''` for
+`z.string().min(32).optional()` and for `.url().optional()`, and `.env.example`
+documents each optional variable as a blank `NAME=` — so with the plain shapes,
+`cp .env.example .env` stopped the whole app booting over features nobody had
+turned on. The six optional string variables and `INBOUND_WEBHOOK_SECRET` are
+wrapped in `z.preprocess(blankIsUnset, …)`; a present short value is still
+refused. The worker and the voice service do not do this yet (§3), and the
+Slack host refinement is hoisted into a const so its schema entry sits on one
+line, because `packages/db/test/deployment.test.ts` reads `env.ts` line by line
+and took a multi-line entry for a REQUIRED variable.
+
+**CI's table count is derived from the migrations**, every `CREATE TABLE` plus
+`schema_migrations` — 31 at 0018 — rather than written down, so a migration
+that adds a table cannot fail the Postgres 16 job for a reason nobody reads.
+The compose-config job carries `AGENT_INTERNAL_TOKEN`, without which compose
+refuses to render the file it is checking. `worker_heartbeats` is the one
+table with no `org_id`, listed under the migrations test's `SYSTEM_TABLES`
+with the auth tables and its own conventions.
+
+**Migration 0018 is not the master plan's SQL verbatim.** Review added block
+(0) — `users` and `contacts` `UNIQUE (id, org_id)` and the same-org composite
+keys (§1) — in place of per-column references that let a row in one org name a
+person in another, and the answer trigger. `schema.ts` declares those columns
+without `.references`, as it already did `scanId`.
 
 ---
 
@@ -1479,6 +2381,56 @@ PREDATES the boot can have been orphaned. The single-worker advisory lock is a
 second layer rather than the first, because it cannot be verified everywhere —
 see the PGlite socket bridge note in §4.
 
+**And the heartbeat.** `boot/heartbeat.ts` is started after the lock, like the
+sender, and what its row says is read through `healthInputs()`, so the row and
+`/readyz` cannot disagree about the halt or the lock. `/readyz` always carries
+`heartbeatWrittenAt` — null until a write has landed, an ISO instant after —
+and the boot log prints `workerId` (`hostname:pid`), the key the row is keyed
+by. A silent worker is now a number in `/api/health`, not an inference (§2,
+"Notifications and the heartbeat").
+
+### Threads are per person, and the page checks
+
+`/chat` picks the person's newest unarchived thread, or creates one, and
+redirects to `/chat/<id>`, so the URL always names the thread on screen. A
+thread list sits beside the panel with New thread, Rename and Archive, and a
+way to put an archived thread back. `chatReadOwnSession` puts org AND user in
+the WHERE, so a teammate's thread, another org's thread and a made-up id all
+get the same 404; the org-scoped `readChatSession` stays the worker's read,
+because the worker re-checks the owner itself. **Archive is refused while
+`running_turn_id IS NOT NULL`**, in the UPDATE's own WHERE: a running turn may
+be holding an approval card open in that thread, and archiving would hide the
+card. Archived threads are hidden, not deleted — opened by URL they are
+read-only, with no composer. A blank title is refused rather than stored as
+NULL, because `ensureChatSessionTitle` would overwrite a NULL with the next
+message. `chatSessionCosts` sums `cost_usd` in Postgres and returns
+Postgres's own text; no total is ever formed in JavaScript. All of this works
+with no worker; only sending a turn needs one, and the panel says so by naming
+`AGENT_URL` and `AGENT_INTERNAL_TOKEN` rather than blaming an API key.
+
+### The prompt names the gate-side tools, and the seed shapes new databases only
+
+**The system prompt stops guessing where the rules are.** It points the model
+to `get_pipeline`/`update_deal`/`book_meeting` for deals; to `check_send` and
+`get_consent` before drafting — "the rule, not your guess"; to
+`get_evidence_changes` before it repeats an old finding and
+`get_stale_companies` before it quotes anything. It says `classify_reply` may
+set a reply's kind but may never mark an opt-out, and that a note from
+`add_note` is never evidence. A test fails if the prompt names a tool that is
+not in `AGENCY_TOOL_NAMES`.
+
+**Fourteen tools joined the nine**, and the seeded subagents were given the ones
+their job needs: the qualifier `get_scan_history` and `get_evidence_changes`;
+the researcher those two plus `get_consent`, `check_send`,
+`get_company_timeline` and `search_crm`; the closer `check_send`,
+`get_consent`, `get_replies`, `classify_reply`, `add_note` and `create_task`.
+Each seeded prompt says when to run the tools it was given, and `seed.test.ts`
+pins grants and prompts together. **The seed inserts `agent_defs` with `ON
+CONFLICT (org_id, slug) DO NOTHING`, so a live database's subagents do NOT
+pick these up** — "re-seeding updates grants" was proposed and dropped for
+exactly that reason. Change them in Settings → Agents; the seed only shapes a
+new database.
+
 ### Costs are strings, and the SDK's total is cumulative
 
 `chat_messages.cost_usd` is drizzle `numeric` with no mode, so it is a STRING
@@ -1497,7 +2449,11 @@ on a human, which is Phase 4's single send path. `get_pipeline` and
 `update_deal` were held back until Phase 5 gave `deals` a writer — §12
 forbids a tool that teaches the model a false shape of the business — and
 ship now, with `book_meeting` beside them; all three write internal state
-only and say in their summary that nothing was sent.
+only and say in their summary that nothing was sent. The same rule held the
+0018 tools back until their tables had writers: the release's first commit
+shipped them as stubs answering `invalid_state`, and `packages/tools/test/no-stubs.test.ts` now fails
+if a stub marker, or the stubs' "not available in this revision", survives in
+any shipped source.
 
 And §6's **skill-upload UI** — see the skills section above for why. Everything
 else in §6 and §7 ships.
