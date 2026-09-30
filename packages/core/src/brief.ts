@@ -87,7 +87,9 @@ export function meetingBrief(input: BriefInput): Brief {
   // marked unscored is out, and so — when there IS an ICP to ask — is any key
   // the ICP does not name, which catches a caller that never mapped `scored`.
   const scoredOnly = input.findings.filter(
-    (f) => f.scored !== false && (Object.keys(signals).length === 0 || f.signalKey in signals),
+    (f) =>
+      f.scored !== false &&
+      (Object.keys(signals).length === 0 || Object.prototype.hasOwnProperty.call(signals, f.signalKey)),
   )
   const gaps = fresh
     ? scoredOnly
