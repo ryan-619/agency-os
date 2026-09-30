@@ -9,10 +9,10 @@
  * underscores taken out, which is honest and ugly rather than wrong.
  *
  * Every `SendRefusalCode` is here, and `refusal-words.test.ts` pins that by
- * naming them. `bounced` is a code the send path does not produce yet — a
- * bounce is evidence about an address that arrives from the mail headers —
- * and it is here so that the day it lands, the screens already have words
- * for it rather than showing `bounced` in a monospace font.
+ * naming them. `bounced` is the address a delivery report said does not
+ * exist — evidence about an address, read from a report that named a message
+ * this system sent, and never a suppression: the fix is a corrected address,
+ * not an owner lifting an opt-out.
  */
 export const REFUSAL_WORDS: Readonly<Record<string, string>> = {
   unparseable_recipient: 'no usable address',

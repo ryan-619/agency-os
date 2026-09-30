@@ -14,6 +14,7 @@ import { REFUSAL_WORDS, refusalWords } from '../src/lib/refusal-words'
 const SEND_CODES = {
   unparseable_recipient: true,
   suppressed: true,
+  bounced: true,
   cold_channel_forbidden: true,
   no_consent: true,
   consent_revoked: true,
@@ -24,8 +25,8 @@ const SEND_CODES = {
   needs_approval: true,
 } satisfies Record<SendRefusalCode, true>
 
-/** The send path's ten, plus the one that arrives with bounce handling. */
-const CODES: readonly string[] = [...Object.keys(SEND_CODES), 'bounced']
+/** Every code the send path produces — `bounced` among them since bounce handling landed. */
+const CODES: readonly string[] = Object.keys(SEND_CODES)
 
 describe('REFUSAL_WORDS', () => {
   it.each(CODES)('has words for %s', (code) => {
@@ -51,6 +52,7 @@ describe('refusalWords', () => {
   it('returns the words for a known code', () => {
     expect(refusalWords('daily_cap')).toBe('daily cap')
     expect(refusalWords('campaign_inactive')).toBe('campaign paused or not active')
+    expect(refusalWords('bounced')).toBe('address bounced')
   })
 
   it('makes an unknown code readable rather than hiding it', () => {

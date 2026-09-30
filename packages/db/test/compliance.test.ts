@@ -213,6 +213,7 @@ describe('the compliance counts', () => {
         cold_channel_forbidden: { channel: 'sms', recipient: '+14155550100' },
         unparseable_recipient: { recipient: 'not an address' },
         suppressed: { suppressed: true },
+        bounced: { recipientBounced: true },
         consent_revoked: { consent: { granted: false, source: 'reply' } },
         unknown_timezone: { recipientTimeZone: null },
         quiet_hours: { now: new Date('2026-09-15T23:00:00.000Z') },
