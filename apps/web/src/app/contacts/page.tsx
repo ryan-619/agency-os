@@ -151,7 +151,9 @@ export default async function ContactsPage({
       <div className="note">
         <strong>Paused</strong> means a reply stopped every campaign for that person until somebody resumes
         them; a pause is also set by hand with a reason. {pausedCount > 0 ? `${pausedCount} on this page are paused.` : null}
-        {repliesNote ? <> {repliesNote} Until that changes, nobody here is paused by a reply — only by hand.</> : null}
+        {repliesNote ? <> {repliesNote} As configured, this deployment pauses nobody on an email reply — a worker
+          running elsewhere can, and a text reply through DoveSoft’s webhook does where that is set up;
+          /settings/deployment shows both.</> : null}
       </div>
 
       <form method="get" action="/contacts" style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginTop: 14 }}>
