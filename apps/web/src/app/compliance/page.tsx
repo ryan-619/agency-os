@@ -398,7 +398,7 @@ function DraftsOnStale({ s }: { s: ComplianceSummary }) {
       </Rule>
       <div className="cards">
         <Count n={d.count} label="on stale or missing evidence" href="#draft-rows" mustBeZero />
-        <Count n={d.refusedAtSending} label="…of which refused at sending (stale evidence) — re-scan, then draft again" href="#draft-rows" />
+        <Count n={d.refusedAtSending} label="…of which refused at sending (stale or superseded evidence) — draft again from a current scan" href="#draft-rows" />
         <Count n={d.notJudgedAtSending} label="…of which not judged by evidence (no successful scan behind the words, or an answer to a reply)" href="#draft-rows" />
         <Count n={d.notJudgedNoFurtherLook} label="…of those, go with nobody looking again (approved, queued, sending)" href="#draft-rows" />
         <Count n={d.unsent} label="outbound messages not yet sent" href="/approvals" />

@@ -50,4 +50,16 @@ describe('/compliance on messages waiting to go on stale or missing evidence', (
     expect(prose).toContain('or that a newer successful scan has superseded')
     expect(prose).toContain('and when a newer successful scan has superseded it')
   })
+
+  /**
+   * The refused-at-sending count holds superseded rows too, whose company
+   * has just been re-scanned — "re-scan, then draft again" sent a person to
+   * do what already happened. The fix true of both is a new draft from a
+   * current scan. Round 4 (integrator).
+   */
+  it('labels the refused-at-sending count with a fix true of a superseded row as well as an aged one', () => {
+    const label = /<Count n=\{d\.refusedAtSending\} label="([^"]+)"/.exec(block)?.[1]
+    expect(label).toBe('…of which refused at sending (stale or superseded evidence) — draft again from a current scan')
+    expect(label).not.toMatch(/re-scan/)
+  })
 })
