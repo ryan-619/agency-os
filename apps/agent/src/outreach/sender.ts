@@ -67,13 +67,14 @@
  *
  * ## What is deferred, and what is not
  *
- * The deferrals are listed by name below — `quiet_hours`, `daily_cap`,
- * `campaign_inactive`: the clock and a person's switch. Every other refusal
- * code is terminal (`refused`), including any added later, so a new rule
- * that time will not fix — stale evidence among them — needs no change here.
+ * The deferrals are `deferUntil`'s, in packages/core — `quiet_hours`,
+ * `daily_cap`, `campaign_inactive`: the clock and a person's switch. Every
+ * other refusal code is terminal (`refused`), including any added later, so
+ * a new rule that time will not fix — stale evidence among them, and a
+ * promotional band that never opens — needs no change here.
  */
 import { and, asc, eq, inArray, isNull, lte, or } from 'drizzle-orm'
-import type { Channel } from '@agency/core'
+import { deferUntil, type Channel } from '@agency/core'
 import {
   campaignAutoPause, campaignBounceRates, dispatchTouch, dueTouches, schema,
   type AgencyDb, type MessageProvider, type TouchRow,
@@ -339,12 +340,16 @@ export async function runSenderTick(deps: SenderDeps, memo?: SenderMemo): Promis
        * after the window finds it. Everything else — suppression, consent, a
        * missing recipient — stays refused, because time will not change it.
        *
-       * An hour for quiet hours, six for the cap. Neither is precise and
-       * neither needs to be: the tick re-checks the real rule when it arrives,
-       * and a message that is still too early is deferred again.
+       * Quiet hours wait for the minute the decision names: the end of the
+       * window, or a promotional SMS's band opening (`deferUntil`). They
+       * waited a flat hour until review round 5, and a band half an hour wide
+       * was stepped over by every retry whose minute past the hour fell
+       * outside it, for up to ten days. The cap and a paused campaign wait six
+       * hours. None of it is a promise: the tick re-checks the real rule when
+       * it arrives, and a message that is still too early is deferred again.
        */
-      if (code === 'quiet_hours' || code === 'daily_cap' || code === 'campaign_inactive') {
-        const retryAt = new Date(now.getTime() + (code === 'quiet_hours' ? 1 : 6) * 60 * 60 * 1000)
+      const retryAt = deferUntil(result.decision, now)
+      if (retryAt !== null) {
         await deps.db
           .update(schema.touches)
           .set({ status: touch.status, refusalCode: null, scheduledFor: retryAt })

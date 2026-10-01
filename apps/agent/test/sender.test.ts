@@ -165,6 +165,23 @@ describe('the sender tick', () => {
     expect(row.scheduledFor!.getTime()).toBeGreaterThan(NIGHT.getTime())
   })
 
+  /**
+   * Review round 5, findings [1] and [3]: a quiet-hours deferral waits for the minute the window
+   * ends where the recipient is — 08:00 in London, 07:00 UTC — and goes at it. It used to come back
+   * an hour later each time, which stepped over a promotional band half an hour wide for days.
+   */
+  it('puts a quiet-hours deferral at the end of the window, and sends it then', async () => {
+    const t = await approved()
+    await tick(NIGHT)
+    const windowEnds = new Date('2026-09-16T07:00:00.000Z')
+    expect((await reread(t.id)).scheduledFor).toEqual(windowEnds)
+    // A minute before, it is not due; at the minute, it goes.
+    expect((await tick(new Date(windowEnds.getTime() - 60_000))).picked).toBe(0)
+    const s = await tick(new Date(windowEnds.getTime() + 5_000))
+    expect(s).toMatchObject({ picked: 1, sent: 1 })
+    expect((await reread(t.id)).status).toBe('sent')
+  })
+
   it('does not pick up a deferred message before its time', async () => {
     const t = await approved()
     await tick(NIGHT)

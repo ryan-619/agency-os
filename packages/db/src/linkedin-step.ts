@@ -64,7 +64,7 @@
  * Audit rows carry ids only (§2.3). Never the words, never the profile.
  */
 import { and, asc, eq, inArray, isNull, like, lt, sql } from 'drizzle-orm'
-import { normaliseLinkedIn, type Channel, type SendRefusalCode } from '@agency/core'
+import { deferUntil, normaliseLinkedIn, type Channel, type SendRefusalCode } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
@@ -166,9 +166,6 @@ export const LINKEDIN_HANDOVER_HOURS = 24
  * - `expired`   handed over more than `LINKEDIN_HANDOVER_HOURS` ago.
  */
 export type LinkedinWithheld = 'refused' | 'paused' | 'unchecked' | 'expired'
-
-/** The refusals that are about the clock, not the person. */
-const CLOCK_CODES: readonly SendRefusalCode[] = ['quiet_hours', 'daily_cap', 'campaign_inactive']
 
 // ---------------------------------------------------------------------------
 // The list
@@ -615,12 +612,13 @@ export async function linkedinPerformStep(
    * The clock is not a refusal. The other copy of this step is the worker's
    * tick in apps/agent/src/outreach/sender.ts, and `linkedin-step.test.ts`
    * runs both on twin rows and asserts they land identically: back to the
-   * status it came from, no refusal code, and a `scheduled_for` an hour out
-   * for quiet hours or six for the cap and a paused campaign. Neither is
-   * precise and neither needs to be — Start re-checks the real rule.
+   * status it came from, no refusal code, and the `scheduled_for` both take
+   * from `deferUntil` — the end of the quiet window (it was a flat hour until
+   * review round 5), or six hours for the cap and a paused campaign. Start
+   * re-checks the real rule whenever it is pressed.
    */
-  if (CLOCK_CODES.includes(code)) {
-    const retryAt = new Date(now.getTime() + (code === 'quiet_hours' ? 1 : 6) * 60 * 60 * 1000)
+  const retryAt = deferUntil(result.decision, now)
+  if (retryAt !== null) {
     await db
       .update(schema.touches)
       .set({ status: touch.status, refusalCode: null, scheduledFor: retryAt })
