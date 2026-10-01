@@ -116,6 +116,12 @@ describe('length and segments', () => {
     expect(smsLength(text).encoding).toBe(needsUnicode(text) ? 'ucs2' : 'gsm7')
   })
 
+  it('agrees with the provider on every character from U+0000 to U+03FF, and on € and ₹', () => {
+    const chars = [...Array.from({ length: 0x400 }, (_, i) => String.fromCodePoint(i)), '€', '₹']
+    const disagree = chars.filter((c) => (smsLength(`a${c}`).encoding === 'ucs2') !== needsUnicode(`a${c}`))
+    expect(disagree).toEqual([])
+  })
+
   it('sends the whole message as UCS-2 for one character outside GSM-7: 70, then 67', () => {
     expect(smsLength(`${'a'.repeat(69)}न`)).toMatchObject({ encoding: 'ucs2', units: 70, segments: 1, perSegment: 70 })
     expect(smsLength(`${'a'.repeat(70)}न`)).toMatchObject({ encoding: 'ucs2', units: 71, segments: 2, perSegment: 67 })
