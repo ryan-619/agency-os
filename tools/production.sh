@@ -112,8 +112,13 @@ deploy() {
 # migration fails the build, so nothing is deployed ahead of its schema.
 deploy_remote_migrating() {
   vercel_ids
+  # NEXT_ENABLE_ADAPTER=0: Vercel's remote builders switch @vercel/next's
+  # new adapter on, and with this app's standalone output its
+  # onBuildComplete looks for an apps/web/.next/next-server.js.nft.json the
+  # build never wrote, failing every remote build after the migration step.
+  # A `vercel build` run anywhere else takes the classic path, which works.
   "${VERCEL[@]}" deploy --prod --yes --logs --archive=tgz \
-    --build-env AGENCY_MIGRATE_ON_BUILD=1 --token "$VERCEL_TOKEN"
+    --build-env AGENCY_MIGRATE_ON_BUILD=1 --build-env NEXT_ENABLE_ADAPTER=0 --token "$VERCEL_TOKEN"
 }
 
 verify() {
@@ -150,7 +155,10 @@ case "$ACTION" in
     if [ -n "${PRODUCTION_DATABASE_URL:-}" ]; then db status; else health_status; fi
     ;;
   migrate) migrate ;;
-  deploy) deploy ;;
+  deploy)
+    deploy
+    verify
+    ;;
   release)
     if [ -n "${PRODUCTION_DATABASE_URL:-}" ]; then
       # Migrate from here, then deploy what was built here.
