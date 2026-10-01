@@ -989,6 +989,96 @@ describe('the registered template (0019)', () => {
       if (!d.allowed) expect(d.code).toBe('quiet_hours')
     })
 
+    /**
+     * Review round 4: the IST band and 10:00–21:00 in Los Angeles never overlap in September, so
+     * every promotional SMS to an American number was deferred as quiet hours, every hour, for
+     * ever — while the draft said "it goes when the band opens". TRAI's band is the Indian
+     * operators'; it governs Indian numbers. Every number keeps 10:00–21:00 where it is.
+     */
+    it('sends one to an American number inside 10:00–21:00 where they are, whatever the time in India', () => {
+      const us = (now: string) =>
+        decideSend(sms({ template: promo, recipient: '+14155550100', recipientTimeZone: 'America/Los_Angeles', now: new Date(now) }))
+      // 11:00 in Los Angeles, 23:30 in India.
+      expect(us('2026-09-15T18:00:00.000Z')).toEqual({ allowed: true, code: 'send_now' })
+      // 09:30 there: outside the campaign's quiet hours, outside the promotional band.
+      const early = us('2026-09-15T16:30:00.000Z')
+      expect(early.allowed).toBe(false)
+      if (early.allowed) return
+      expect(early.code).toBe('quiet_hours')
+      expect(early.humanCanResolve).toBe(true)
+      expect(early.reason).toContain('10:00–21:00 in America/Los_Angeles')
+      expect(early.reason).toContain('governs Indian numbers')
+      expect(early.reason).not.toContain('+14155550100')
+    })
+
+    it('sends one to an American number on most quarter-hours of its own day, as the probe counted', () => {
+      for (const [zone, expected] of [['America/Los_Angeles', 44], ['America/Denver', 44], ['America/New_York', 44], ['Asia/Kolkata', 44]] as const) {
+        let sendable = 0
+        for (let q = 0; q < 96; q += 1) {
+          const now = new Date(Date.UTC(2026, 8, 15, 0, q * 15))
+          if (decideSend(sms({ template: promo, recipient: '+14155550100', recipientTimeZone: zone, now })).allowed) sendable += 1
+        }
+        expect(sendable, zone).toBe(expected)
+      }
+    })
+
+    it('holds an Indian number to both bands, and says so', () => {
+      // 11:00 in Los Angeles in January is 00:30 in India.
+      const d = decideSend(sms({ template: promo, recipientTimeZone: 'America/Los_Angeles', now: new Date('2026-01-15T19:00:00.000Z') }))
+      expect(d.allowed).toBe(false)
+      if (d.allowed) return
+      expect(d.code).toBe('quiet_hours')
+      expect(d.reason).toMatch(/TRAI/)
+      expect(d.reason).toContain('America/Los_Angeles')
+      // 20:45 there is 10:15 in India: both open.
+      expect(
+        decideSend(sms({ template: promo, recipientTimeZone: 'America/Los_Angeles', now: new Date('2026-01-16T04:45:00.000Z') })),
+      ).toEqual({ allowed: true, code: 'send_now' })
+    })
+
+    /**
+     * An Indian number read in a zone whose 10:00–21:00 never meets IST's band at today's clocks
+     * has no moment it may go. Deferring it as quiet hours promised the clock would resolve it, and
+     * the clock never will — so it is refused, as the zone the send path could not use, with a
+     * sentence naming the fix. A person can resolve it (the contact's zone, or a service template),
+     * so it is not a refusal nobody may approve past.
+     */
+    it('refuses an Indian number whose zone never meets IST’s band, rather than deferring it for ever', () => {
+      for (const [zone, at] of [
+        ['America/Los_Angeles', '2026-09-15T18:00:00.000Z'],
+        ['America/Denver', '2026-09-15T18:00:00.000Z'],
+        ['America/Denver', '2026-01-15T18:00:00.000Z'],
+        ['America/Phoenix', '2026-09-15T18:00:00.000Z'],
+      ] as const) {
+        const d = decideSend(sms({ template: promo, recipientTimeZone: zone, now: new Date(at) }))
+        expect(d.allowed, zone).toBe(false)
+        if (d.allowed) continue
+        expect(d.code, zone).toBe('unknown_timezone')
+        expect(d.humanCanResolve).toBe(true)
+        expect(d.reason).toContain(zone)
+        expect(d.reason).toMatch(/never overlap/)
+        expect(d.reason).toContain('Asia/Kolkata')
+        expect(d.reason).not.toMatch(/goes when/)
+        expect(d.reason).not.toContain('+919876543210')
+      }
+    })
+
+    it('reports a band that never opens before the campaign’s own quiet hours, which would only defer it', () => {
+      // 23:00 in Denver: inside the campaign's 21:00–08:00 as well.
+      const d = decideSend(
+        sms({ template: promo, recipientTimeZone: 'America/Denver', now: new Date('2026-09-16T05:00:00.000Z'), sentToday: 99, autoSend: false }),
+      )
+      expect(d.allowed).toBe(false)
+      if (!d.allowed) expect(d.code).toBe('unknown_timezone')
+    })
+
+    it('never refuses a service SMS to an Indian number in Los Angeles for the band', () => {
+      const d = decideSend(
+        sms({ recipientTimeZone: 'America/Los_Angeles', now: new Date('2026-09-15T18:00:00.000Z') }),
+      )
+      expect(d).toEqual({ allowed: true, code: 'send_now' })
+    })
+
     it('does not hold a service or transactional SMS to the band', () => {
       for (const category of ['service_implicit', 'service_explicit', 'transactional'] as const) {
         const d = decideSend(

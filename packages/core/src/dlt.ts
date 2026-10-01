@@ -26,6 +26,7 @@
 // neither module reads the other at module scope, only inside functions, and
 // `localMinutes` is a hoisted function declaration.
 import { localMinutes } from './send.js'
+import { normalisePhone } from './normalise.js'
 
 // ---------------------------------------------------------------------------
 // Categories
@@ -36,7 +37,9 @@ import { localMinutes } from './send.js'
  * them), for SMS and voice.
  *
  *  - `promotional`       to non-DND numbers only, and only inside TRAI's
- *                        daily band (`PROMOTIONAL_WINDOW`);
+ *                        daily band (`PROMOTIONAL_WINDOW`) for an Indian
+ *                        number, and 10:00–21:00 where the recipient is for
+ *                        any number (`promotionalBand`);
  *  - `transactional`     reserved by the operators for banks' OTPs and
  *                        alerts — an agency template in it is the operator's
  *                        problem to refuse, not ours to guess at;
@@ -124,28 +127,75 @@ export const PROMOTIONAL_WINDOW = Object.freeze({
   end: 21 * 60,
   zone: 'Asia/Kolkata',
   words: '10:00–21:00 India time',
+  /** The same hours with no zone, for the recipient's own clock. */
+  hours: '10:00–21:00',
 })
 
 /**
- * Whether a PROMOTIONAL message may go now: inside TRAI's band in India,
- * AND inside the same hours where the recipient is.
+ * Whether this is a number TRAI's band governs: an Indian one, `+91`.
  *
- * Both, because they answer different questions. The band is the
- * operator's, in IST — outside it the message is held or dropped whatever
- * zone the contact record names. The recipient's zone is §2.1's rule that
- * the clock is always read where the person lives; for an Indian number the
- * two are the same zone, and for anyone else the stricter of the two holds.
+ * Read through `normalisePhone`, so `0091 98765 43210` is Indian and a
+ * number with no country code is NOT — unknown is not Indian, and the band
+ * it would add can only defer a message, never send one sooner.
+ */
+export function isIndianNumber(recipient: string): boolean {
+  return normalisePhone(recipient)?.startsWith('+91') ?? false
+}
+
+/** What `promotionalBand` answers. */
+export interface PromotionalBand {
+  /** The message may go now. */
+  readonly open: boolean
+  /** TRAI's IST band applied: the recipient is an Indian number. */
+  readonly india: boolean
+  /**
+   * Some minute of the day, at the UTC offsets in force at `now`, is inside
+   * every band that applies. False only for an Indian number read in a zone
+   * whose 10:00–21:00 never meets IST's — Denver and Phoenix all year, Los
+   * Angeles on daylight time — which is a message that has no moment it may
+   * go, not one that is early.
+   */
+  readonly opensToday: boolean
+}
+
+/**
+ * Whether a PROMOTIONAL message may go now: 10:00–21:00 where the recipient
+ * is, always, AND inside TRAI's band in India when the number is Indian.
+ *
+ * The band is the Indian operators', in IST — they hold promotional traffic
+ * to an Indian number outside it whatever zone the contact record names, and
+ * it says nothing about anybody else's number. The recipient's hours are
+ * §2.1's rule that the clock is always read where the person lives. For an
+ * Indian number in India the two are the same; for one recorded elsewhere
+ * both hold, and they can fail to overlap at all — `opensToday` says so,
+ * because "it goes when the band opens" is false for a band that never does.
  * Checking both can only DEFER a message, never send one sooner.
+ *
+ * "Today" is the offsets in force at `now`: a daylight-saving change can
+ * open or close the overlap (Los Angeles has half an hour of it in winter,
+ * none in summer), and the answer is about the clocks as they are.
  *
  * Null when the recipient's zone is not one the runtime knows — the caller
  * has already refused that as `unknown_timezone`.
  */
-export function promotionalWindowOpen(now: Date, recipientTimeZone: string): boolean | null {
+export function promotionalBand(now: Date, recipientTimeZone: string, recipient: string): PromotionalBand | null {
   const local = localMinutes(now, recipientTimeZone)
   const india = localMinutes(now, PROMOTIONAL_WINDOW.zone)
   if (local === null || india === null) return null
+  const indian = isIndianNumber(recipient)
   const inside = (m: number): boolean => m >= PROMOTIONAL_WINDOW.start && m < PROMOTIONAL_WINDOW.end
-  return inside(local) && inside(india)
+  const openAt = (l: number, i: number): boolean => inside(l) && (!indian || inside(i))
+  // Each zone's offset from UTC at `now`, in minutes, then every minute of
+  // a UTC day read through both. 1,440 comparisons, and no calendar maths.
+  const utc = now.getUTCHours() * 60 + now.getUTCMinutes()
+  const localOffset = local - utc
+  const indiaOffset = india - utc
+  const day = 24 * 60
+  let opensToday = false
+  for (let m = 0; m < day && !opensToday; m += 1) {
+    opensToday = openAt((((m + localOffset) % day) + day) % day, (((m + indiaOffset) % day) + day) % day)
+  }
+  return { open: openAt(local, india), india: indian, opensToday }
 }
 
 // ---------------------------------------------------------------------------

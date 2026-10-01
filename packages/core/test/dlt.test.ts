@@ -11,8 +11,8 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
-  DLT_VAR_MAX_CHARS, PROMOTIONAL_WINDOW, matchesTemplate, normaliseDltHeader, parseTemplate,
-  parseTemplateCategory, promotionalWindowOpen, renderTemplate, smsOptOut, templateCategoriesFor,
+  DLT_VAR_MAX_CHARS, PROMOTIONAL_WINDOW, isIndianNumber, matchesTemplate, normaliseDltHeader, parseTemplate,
+  parseTemplateCategory, promotionalBand, renderTemplate, smsOptOut, templateCategoriesFor,
 } from '../src/index.js'
 
 describe('parsing a registered body', () => {
@@ -227,8 +227,11 @@ describe('categories and headers', () => {
 })
 
 describe('TRAI’s promotional band', () => {
+  const INDIAN = '+919876543210'
+  const AMERICAN = '+14155550100'
+
   it('is 10:00 to 21:00 in India', () => {
-    expect(PROMOTIONAL_WINDOW).toMatchObject({ start: 600, end: 1260, zone: 'Asia/Kolkata' })
+    expect(PROMOTIONAL_WINDOW).toMatchObject({ start: 600, end: 1260, zone: 'Asia/Kolkata', hours: '10:00–21:00' })
   })
 
   it.each([
@@ -236,17 +239,70 @@ describe('TRAI’s promotional band', () => {
     ['2026-09-15T04:30:00.000Z', true], //  10:00 IST
     ['2026-09-15T15:29:00.000Z', true], //  20:59 IST
     ['2026-09-15T15:30:00.000Z', false], // 21:00 IST — the end is exclusive
-  ])('at %s is open: %s', (at, open) => {
-    expect(promotionalWindowOpen(new Date(at), 'Asia/Kolkata')).toBe(open)
+  ])('at %s is open for an Indian number in India: %s', (at, open) => {
+    expect(promotionalBand(new Date(at), 'Asia/Kolkata', INDIAN)).toEqual({ open, india: true, opensToday: true })
   })
 
-  it('is closed when it is open in India but not where the recipient is', () => {
+  it('is closed for an Indian number when it is open in India but not where the recipient is', () => {
     // 11:00 IST is 06:30 in London in September.
-    expect(promotionalWindowOpen(new Date('2026-09-15T05:30:00.000Z'), 'Europe/London')).toBe(false)
+    expect(promotionalBand(new Date('2026-09-15T05:30:00.000Z'), 'Europe/London', INDIAN)).toMatchObject({ open: false, india: true })
+  })
+
+  it('reads TRAI’s band as governing Indian numbers only, however the number is written', () => {
+    expect(isIndianNumber('+919876543210')).toBe(true)
+    expect(isIndianNumber('+91 98765 43210')).toBe(true)
+    expect(isIndianNumber('0091-98765-43210')).toBe(true)
+    expect(isIndianNumber('+14155550100')).toBe(false)
+    expect(isIndianNumber('+9198')).toBe(false) // not a number at all
+    expect(isIndianNumber('9876543210')).toBe(false) // no country code: unknown, not Indian
+  })
+
+  /**
+   * Review round 4: the IST band and 10:00–21:00 in Los Angeles never overlap in September, so a
+   * promotional SMS to an American number could never go — and was deferred as quiet hours for ever.
+   * TRAI's band is the Indian operators'; an American number keeps only its own hours.
+   */
+  it('opens for an American number inside its own 10:00–21:00, whatever the time in India', () => {
+    // 11:00 in Los Angeles is 23:30 in India.
+    expect(promotionalBand(new Date('2026-09-15T18:00:00.000Z'), 'America/Los_Angeles', AMERICAN)).toEqual({
+      open: true, india: false, opensToday: true,
+    })
+    // 09:59 and 21:00 there are outside it.
+    expect(promotionalBand(new Date('2026-09-15T16:59:00.000Z'), 'America/Los_Angeles', AMERICAN)?.open).toBe(false)
+    expect(promotionalBand(new Date('2026-09-16T04:00:00.000Z'), 'America/Los_Angeles', AMERICAN)?.open).toBe(false)
+  })
+
+  it('counts every quarter-hour of a day in Los Angeles: 44 open for an American number, 0 for an Indian one', () => {
+    const count = (recipient: string): number => {
+      let open = 0
+      for (let q = 0; q < 96; q += 1) {
+        if (promotionalBand(new Date(Date.UTC(2026, 8, 15, 0, q * 15)), 'America/Los_Angeles', recipient)?.open) open += 1
+      }
+      return open
+    }
+    expect(count(AMERICAN)).toBe(44)
+    expect(count(INDIAN)).toBe(0)
+  })
+
+  it('says when the two bands never meet at today’s clocks, and when they do', () => {
+    // Los Angeles on Pacific Daylight Time, and Denver all year: 10:00–21:00 there misses IST’s band.
+    expect(promotionalBand(new Date('2026-09-15T18:00:00.000Z'), 'America/Los_Angeles', INDIAN)).toEqual({
+      open: false, india: true, opensToday: false,
+    })
+    expect(promotionalBand(new Date('2026-01-15T18:00:00.000Z'), 'America/Denver', INDIAN)?.opensToday).toBe(false)
+    // On Pacific Standard Time there is half an hour: 20:30–21:00 in Los Angeles is 10:00–10:30 in India.
+    expect(promotionalBand(new Date('2026-01-15T18:00:00.000Z'), 'America/Los_Angeles', INDIAN)?.opensToday).toBe(true)
+    expect(promotionalBand(new Date('2026-01-16T04:45:00.000Z'), 'America/Los_Angeles', INDIAN)).toEqual({
+      open: true, india: true, opensToday: true,
+    })
+    // New York overlaps, and an American number in Denver always has its own hours.
+    expect(promotionalBand(new Date('2026-09-15T18:00:00.000Z'), 'America/New_York', INDIAN)?.opensToday).toBe(true)
+    expect(promotionalBand(new Date('2026-09-15T18:00:00.000Z'), 'America/Denver', AMERICAN)?.opensToday).toBe(true)
   })
 
   it('answers null for a zone the runtime does not know', () => {
-    expect(promotionalWindowOpen(new Date(), 'Not/AZone')).toBeNull()
+    expect(promotionalBand(new Date(), 'Not/AZone', INDIAN)).toBeNull()
+    expect(promotionalBand(new Date(), 'Not/AZone', AMERICAN)).toBeNull()
   })
 })
 
