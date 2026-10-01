@@ -3,13 +3,13 @@ import type { Metadata } from 'next'
 import { notFound, redirect } from 'next/navigation'
 import { and, eq } from 'drizzle-orm'
 import { can, isStale, type Proposal } from '@agency/core'
-import { appendAudit, readProposal, schema, type AgencyDb } from '@agency/db/queries'
+import { appendAudit, readProposal, schema, shareEvidenceSuperseded, type AgencyDb } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { ProposalDocument } from '@/components/pipeline/proposal-document'
 import { readIcp } from '@/lib/company-list'
 import { getDb } from '@/lib/db'
 import { log } from '@/lib/logger'
-import { isoDate, provenanceSentence, staleBannerText } from '@/lib/proposal-markdown'
+import { isoDate, provenanceSentence, staleBannerText, supersededBannerText } from '@/lib/proposal-markdown'
 import { icpForOrg } from '@/lib/queries'
 
 /**
@@ -25,9 +25,10 @@ import { icpForOrg } from '@/lib/queries'
  * exactly as the page derives it, and it PRINTS. A printed proposal is the
  * easiest thing in the product to hand to somebody, so it carries the
  * warning onto the paper rather than leaving it on a screen nobody will see
- * again. Printing is not sending (§8.4); nothing here sends. Each render is
- * audited as `proposal.exported { format: 'print' }`, beside the Markdown
- * download's `format: 'markdown'`.
+ * again. So does the superseded banner, when a newer successful scan exists
+ * (round 3, finding [6]). Printing is not sending (§8.4); nothing here
+ * sends. Each render is audited as `proposal.exported { format: 'print' }`,
+ * beside the Markdown download's `format: 'markdown'`.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -92,6 +93,7 @@ const load = cache(async (orgId: string, id: string) => {
     preparedBy: preparer ? (preparer.name ?? preparer.email) : null,
     evidenceAsOf: scan ? scan.ranAt.toISOString() : null,
     evidenceStale: isStale(scan?.ranAt, staleAfter),
+    evidenceSuperseded: await shareEvidenceSuperseded(db, orgId, row.id),
   }
 })
 
@@ -114,9 +116,10 @@ export default async function ProposalPrintPage({ params }: { params: Promise<{ 
 
   const found = await load(user.orgId, id)
   if (!found) notFound()
-  const { row, doc, company, agency, preparedBy, evidenceAsOf, evidenceStale } = found
+  const { row, doc, company, agency, preparedBy, evidenceAsOf, evidenceStale, evidenceSuperseded } = found
   const scannedOn = isoDate(evidenceAsOf ?? doc.basedOn.scanRanAt)
   const banner = staleBannerText(company.domain, scannedOn)
+  const superseded = supersededBannerText(company.domain)
 
   await appendAudit(getDb() as unknown as AgencyDb, {
     orgId: user.orgId,
@@ -152,6 +155,11 @@ export default async function ProposalPrintPage({ params }: { params: Promise<{ 
       {evidenceStale ? (
         <div className="note note-warn" style={{ margin: '14px 0' }}>
           <strong>{banner.lead}</strong> {banner.rest}
+        </div>
+      ) : null}
+      {evidenceSuperseded ? (
+        <div className="note note-warn" style={{ margin: '14px 0' }}>
+          <strong>{superseded.lead}</strong> {superseded.rest}
         </div>
       ) : null}
 
