@@ -6,7 +6,8 @@ import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { can } from '@agency/core'
 import {
-  companyThread, listContactsForCompany, meetingsForCompany, openDealFor, proposalsForCompany, type AgencyDb,
+  companyThread, linkedinThreadWithheld, listContactsForCompany, meetingsForCompany, openDealFor, proposalsForCompany,
+  type AgencyDb, type LinkedinThreadWithheld,
 } from '@agency/db/queries'
 import { CompanyEditSlot } from '@/components/company/edit'
 import { EvidencePanelsSlot } from '@/components/company/evidence'
@@ -31,6 +32,29 @@ function evidenceLines(evidence: unknown): Array<[string, string]> {
   ])
 }
 
+/**
+ * What the Conversation panel prints in place of LinkedIn words /tasks would
+ * not show (review round 3). The rule is /tasks' own
+ * (`linkedinThreadWithheld`); this only words it.
+ */
+const LINKEDIN_HELD: Record<Exclude<LinkedinThreadWithheld, 'not_handed'>, string> = {
+  refused: 'the send rules now refuse this person',
+  paused: 'the contact is paused',
+  unchecked: 'the rules cannot be checked — the contact or the campaign is gone',
+  expired: 'it was handed over more than a day ago',
+}
+
+function linkedinHeldLine(why: LinkedinThreadWithheld, status: string): string {
+  if (why !== 'not_handed') return `Words withheld: ${LINKEDIN_HELD[why]}. They are shown in /tasks when the rules allow.`
+  if (status === 'awaiting_approval') {
+    return 'The words are on /approvals for a person to approve; after that they are shown in /tasks when the rules allow.'
+  }
+  if (status === 'approved' || status === 'queued' || status === 'sending') {
+    return 'Words shown in /tasks when the rules allow — Start checks every send rule at that moment.'
+  }
+  return 'Not sent, so the words are not shown here. A LinkedIn message’s words are shown in /tasks when the rules allow.'
+}
+
 export default async function CompanyDetail({ params }: { params: Promise<{ domain: string }> }) {
   const session = await auth()
   if (!session?.user) redirect('/signin')
@@ -50,6 +74,8 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
     meetingsForCompany(db, user.orgId, company.id),
     proposalsForCompany(db, user.orgId, company.id),
   ])
+  // LinkedIn words this panel may not print — /tasks' rule, read once.
+  const withheld = await linkedinThreadWithheld(db, user.orgId, thread)
   // A profile that does not parse is read as no profile, as every other page
   // reads it: one bad ICP edit must not make the company page a 500.
   let icp: ReturnType<typeof parseIcpDefinition> | null
@@ -348,25 +374,38 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
           <p className="muted" style={{ fontSize: 13 }}>Nothing has been sent or received yet.</p>
         ) : (
           <div className="thread">
-            {thread.map((t) => (
-              <div key={t.id} className={`touch touch-${t.direction}`}>
-                <div className="touch-head">
-                  <span className="pill">{t.direction === 'in' ? 'reply' : t.channel}</span>
-                  <span className={`tag${t.status === 'sent' || t.status === 'replied' ? ' on' : t.status === 'refused' || t.status === 'failed' ? ' warn' : ''}`}>
-                    {t.status}
-                    {t.refusalCode ? ` — ${t.refusalCode.replace(/_/g, ' ')}` : ''}
-                  </span>
-                  <span className="muted" style={{ fontSize: 12 }}>
-                    <When iso={(t.sentAt ?? t.createdAt).toISOString()} />
-                    {t.recipient ? ` · ${t.recipient}` : ''}
-                  </span>
+            {thread.map((t) => {
+              // A LinkedIn message's words are printed only where /tasks would
+              // print them: never before Start hands them over, and not while
+              // the step is open and its re-check withholds them. Not printed
+              // means not sent to the browser at all.
+              const held = withheld.get(t.id)
+              return (
+                <div key={t.id} className={`touch touch-${t.direction}`}>
+                  <div className="touch-head">
+                    <span className="pill">{t.direction === 'in' ? 'reply' : t.channel}</span>
+                    <span className={`tag${t.status === 'sent' || t.status === 'replied' ? ' on' : t.status === 'refused' || t.status === 'failed' ? ' warn' : ''}`}>
+                      {t.status}
+                      {t.refusalCode ? ` — ${t.refusalCode.replace(/_/g, ' ')}` : ''}
+                    </span>
+                    <span className="muted" style={{ fontSize: 12 }}>
+                      <When iso={(t.sentAt ?? t.createdAt).toISOString()} />
+                      {t.recipient ? ` · ${t.recipient}` : ''}
+                    </span>
+                  </div>
+                  {held ? (
+                    <div className="muted" style={{ fontSize: 12.5 }}>{linkedinHeldLine(held, t.status)}</div>
+                  ) : (
+                    <>
+                      {t.subject ? <div style={{ fontSize: 13.5, fontWeight: 600 }}>{t.subject}</div> : null}
+                      {t.body ? <pre className="mono touch-body">{t.body}</pre> : null}
+                    </>
+                  )}
+                  {t.error ? <div className="err-line">{t.error}</div> : null}
+                  {t.decisionNote ? <div className="muted" style={{ fontSize: 12.5 }}>Note: {t.decisionNote}</div> : null}
                 </div>
-                {t.subject ? <div style={{ fontSize: 13.5, fontWeight: 600 }}>{t.subject}</div> : null}
-                {t.body ? <pre className="mono touch-body">{t.body}</pre> : null}
-                {t.error ? <div className="err-line">{t.error}</div> : null}
-                {t.decisionNote ? <div className="muted" style={{ fontSize: 12.5 }}>Note: {t.decisionNote}</div> : null}
-              </div>
-            ))}
+              )
+            })}
           </div>
         )}
       </section>

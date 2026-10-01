@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server'
 import { assertCan } from '@agency/core'
 import {
-  appendAudit, contactPatchInput, contactsUpdate, pauseContact, pauseReasonClass, readContact, resumeContact,
-  updateContactTimeZone, type AgencyDb,
+  appendAudit, contactPatchInput, contactPauseByHand, contactResumeByHand, contactsUpdate, pauseReasonClass,
+  readContact, updateContactTimeZone, type AgencyDb,
 } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
@@ -13,9 +13,16 @@ import { getDb } from '@/lib/db'
  * Four edits, each with a reason to exist on its own:
  *
  *  - `pause` with a reason. What a reply does automatically, done by hand —
- *    "they emailed me directly", "out of office until March".
+ *    "they emailed me directly", "out of office until March". Over a
+ *    reply's pause it REPLACES the reply's reason, so answering that reply
+ *    cannot lift the teammate's hold; over any other pause it is refused
+ *    with a sentence (409) and that pause stands (`contactPauseByHand`).
  *  - `resume`. A person deciding a paused contact may be written to again.
- *    Deliberate, audited, and the ONLY way a pause ends.
+ *    Deliberate, audited, and the ONLY way a pause ends — except the two a
+ *    person may not lift: an opt-out nobody could record, and an erasure
+ *    that did not finish, which are recorded or finished instead
+ *    (`contactResumeByHand`, 409 with its sentence). It lifts the pause the
+ *    page read and no other.
  *  - `timeZone`. The thing that unblocks a contact the send path has been
  *    refusing as `unknown_timezone`.
  *  - `update`: name, title and addresses (`contactPatchInput`). The email is
@@ -57,16 +64,25 @@ export async function PATCH(
   if (action === 'pause') {
     const why = typeof reason === 'string' ? reason.trim() : ''
     if (!why) return NextResponse.json({ error: 'Say why — a pause with no reason gets cleared.' }, { status: 400 })
-    const paused = await pauseContact(db, user.orgId, id, `${why} (by ${user.email ?? user.id})`)
+    const r = await contactPauseByHand(db, {
+      orgId: user.orgId, contactId: id, reason: `${why} (by ${user.email ?? user.id})`,
+    })
+    if (!r.ok) {
+      return NextResponse.json({ error: r.message, reason: r.reason }, { status: r.reason === 'not_found' ? 404 : 409 })
+    }
     await appendAudit(db, {
       orgId: user.orgId, actor: user.id, action: 'contact.paused', subjectType: 'contact', subjectId: id,
-      detail: { reason: why.slice(0, 200), alreadyPaused: !paused },
+      // `alreadyPaused` stays false: a pause that changed nothing is now a
+      // 409, never a row. `replacedPauseFor` names the reply's pause this one
+      // replaced — its class, never its text.
+      detail: { reason: why.slice(0, 200), alreadyPaused: false, ...(r.replaced ? { replacedPauseFor: r.replaced } : {}) },
     }).catch(() => {})
-    return NextResponse.json({ paused: true })
+    return NextResponse.json({ paused: true, replaced: r.replaced })
   }
 
   if (action === 'resume') {
-    await resumeContact(db, user.orgId, id)
+    const r = await contactResumeByHand(db, { orgId: user.orgId, contact })
+    if (!r.ok) return NextResponse.json({ error: r.message, reason: r.reason }, { status: 409 })
     await appendAudit(db, {
       orgId: user.orgId, actor: user.id, action: 'contact.resumed', subjectType: 'contact', subjectId: id,
       // The CLASS of the pause, never its text: a manual reason carries a

@@ -387,6 +387,69 @@ function withheldFor(recheck: SendPreview | null, handedAt: Date, now: Date): Li
   return null
 }
 
+/**
+ * Why a screen other than /tasks must not print a LinkedIn message's words.
+ *
+ * - `not_handed`  Start has not handed them over: a draft, an approved or
+ *                 queued step, one being started, or one the rules stopped
+ *                 or that did not go (`refused`, `failed`). /tasks never
+ *                 shows these words, and no screen should — a person can
+ *                 copy them into LinkedIn without any rule having said yes.
+ * - the four `LinkedinWithheld` reasons: handed, the step still open, and
+ *                 the re-check /tasks runs on every read withholds them now.
+ */
+export type LinkedinThreadWithheld = 'not_handed' | LinkedinWithheld
+
+/**
+ * Which LinkedIn messages in a thread have words a screen may not print, and
+ * why (review round 3: the company page's Conversation panel printed every
+ * touch's body, the words /tasks withholds one click away).
+ *
+ * This is /tasks' own rule, not a second one: words are shown once Start
+ * has handed them over (`isHanded`), and while the step's task is still
+ * open, only if `withheldFor` — over the same `previewSend` re-check
+ * `linkedinStepsDue` runs, from the same written-at moment — lets them be.
+ * A handed message whose step is closed is history: "I sent it" closed it,
+ * and the words went. Email, and anybody's reply, are not this rule's
+ * business and are never in the map. Reads only.
+ */
+export async function linkedinThreadWithheld(
+  db: AgencyDb,
+  orgId: string,
+  thread: readonly TouchRow[],
+  now: Date = new Date(),
+): Promise<Map<string, LinkedinThreadWithheld>> {
+  const held = new Map<string, LinkedinThreadWithheld>()
+  const handed: TouchRow[] = []
+  for (const t of thread) {
+    if (t.orgId !== orgId || t.channel !== 'linkedin' || t.direction !== 'out') continue
+    if (isHanded(t)) handed.push(t)
+    else held.set(t.id, 'not_handed')
+  }
+  if (handed.length === 0) return held
+
+  const open = await db
+    .select({ touchId: schema.tasks.touchId })
+    .from(schema.tasks)
+    .where(
+      and(
+        eq(schema.tasks.orgId, orgId),
+        inArray(schema.tasks.touchId, handed.map((t) => t.id)),
+        isNull(schema.tasks.doneAt),
+      ),
+    )
+  const stillOpen = new Set(open.map((r) => r.touchId))
+  for (const t of handed) {
+    if (!stillOpen.has(t.id)) continue
+    const recheck = t.contactId && t.campaignId
+      ? await previewSend(db, { orgId, contactId: t.contactId, campaignId: t.campaignId, now, writtenAt: evidenceAsOfFor(t) })
+      : null
+    const withheld = withheldFor(recheck, t.sentAt ?? t.updatedAt ?? t.createdAt, now)
+    if (withheld) held.set(t.id, withheld)
+  }
+  return held
+}
+
 function isHanded(t: Pick<TouchRow, 'status' | 'providerId'>): boolean {
   return t.status === 'sent' && typeof t.providerId === 'string' && t.providerId.startsWith(HUMAN_PREFIX)
 }
@@ -588,6 +651,17 @@ export type LinkedinFinishResult =
  * The task is the arbiter: `tasksComplete` is one UPDATE with `done_at IS
  * NULL`, so "I sent it" and "I did not send it" pressed at once produce one
  * answer, and the loser is told `alreadyDone` without changing the row.
+ *
+ * One transaction (review round 3): the task's completion, the row marked
+ * `failed` for "I did not send it", and both audit rows land together or
+ * not at all. The completion used to commit on its own first, so a fault
+ * before the row's UPDATE left a message the person said never went
+ * recorded as `sent` — counted by the daily cap, read by enrolment as
+ * already contacted — and the retry found no open task and answered
+ * `alreadyDone` without touching it. Now a fault leaves the step open, and
+ * the retry does all of it. The step's own audit row is therefore no longer
+ * caught: a caught failure inside a transaction leaves it aborted, and the
+ * COMMIT would undo the rest without a word.
  */
 export async function linkedinFinishStep(
   db: AgencyDb,
@@ -636,46 +710,49 @@ export async function linkedinFinishStep(
     }
   }
 
-  const task = await tasksOpenForTouch(db, args.orgId, touch.id)
-  if (!task) return { ok: true, alreadyDone: true }
-  const done = await tasksComplete(db, {
-    orgId: args.orgId,
-    id: task.id,
-    byUserId: args.userId,
-    actor: args.userId,
-    ...(args.now ? { now: args.now } : {}),
+  return db.transaction(async (transaction): Promise<LinkedinFinishResult> => {
+    const tx = transaction as unknown as AgencyDb
+    const task = await tasksOpenForTouch(tx, args.orgId, touch.id)
+    if (!task) return { ok: true, alreadyDone: true }
+    const done = await tasksComplete(tx, {
+      orgId: args.orgId,
+      id: task.id,
+      byUserId: args.userId,
+      actor: args.userId,
+      ...(args.now ? { now: args.now } : {}),
+    })
+    if (!done.ok) return { ok: false, reason: 'not_found', message: done.message }
+    if (done.alreadyDone) return { ok: true, alreadyDone: true }
+
+    if (args.outcome === 'not_sent') {
+      // `sent_at` is cleared because nothing went: the daily cap counts it,
+      // and so does anyone reading the row. `provider_id` stays — it names who
+      // was handed the message, which is still true.
+      //
+      // The deal is NOT moved back. Start moved it to `contacted` through
+      // `advanceDeal`, which only goes forward, and it may have been there
+      // already for a message that did go; guessing which is how a booked
+      // meeting gets knocked back. Moving it is the board's job, by a person.
+      await tx
+        .update(schema.touches)
+        .set({ status: 'failed', sentAt: null, error: LINKEDIN_STEP_NOT_SENT_ERROR })
+        .where(
+          and(
+            eq(schema.touches.id, touch.id),
+            eq(schema.touches.status, 'sent'),
+            like(schema.touches.providerId, `${HUMAN_PREFIX}%`),
+          ),
+        )
+    }
+
+    await appendAudit(tx, {
+      orgId: args.orgId,
+      actor: args.userId,
+      action: `linkedin.${args.outcome}`,
+      subjectType: 'touch',
+      subjectId: touch.id,
+      detail: { touchId: touch.id, taskId: task.id, campaignId: touch.campaignId },
+    })
+    return { ok: true, alreadyDone: false }
   })
-  if (!done.ok) return { ok: false, reason: 'not_found', message: done.message }
-  if (done.alreadyDone) return { ok: true, alreadyDone: true }
-
-  if (args.outcome === 'not_sent') {
-    // `sent_at` is cleared because nothing went: the daily cap counts it,
-    // and so does anyone reading the row. `provider_id` stays — it names who
-    // was handed the message, which is still true.
-    //
-    // The deal is NOT moved back. Start moved it to `contacted` through
-    // `advanceDeal`, which only goes forward, and it may have been there
-    // already for a message that did go; guessing which is how a booked
-    // meeting gets knocked back. Moving it is the board's job, by a person.
-    await db
-      .update(schema.touches)
-      .set({ status: 'failed', sentAt: null, error: LINKEDIN_STEP_NOT_SENT_ERROR })
-      .where(
-        and(
-          eq(schema.touches.id, touch.id),
-          eq(schema.touches.status, 'sent'),
-          like(schema.touches.providerId, `${HUMAN_PREFIX}%`),
-        ),
-      )
-  }
-
-  await appendAudit(db, {
-    orgId: args.orgId,
-    actor: args.userId,
-    action: `linkedin.${args.outcome}`,
-    subjectType: 'touch',
-    subjectId: touch.id,
-    detail: { touchId: touch.id, taskId: task.id, campaignId: touch.campaignId },
-  }).catch(() => {})
-  return { ok: true, alreadyDone: false }
 }
