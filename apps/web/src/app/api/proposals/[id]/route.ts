@@ -75,18 +75,7 @@ export async function PATCH(
   // acceptance through their link that commits in between is not
   // overwritten. Review round 3, finding [12].
   const row = await setProposalStatus(db, { orgId: user.orgId, id, status: to, actor: user.id, from })
-  if (!row) {
-    const now = await readProposal(db, user.orgId, id)
-    if (!now) return NextResponse.json({ error: 'No such proposal.' }, { status: 404 })
-    return NextResponse.json(
-      {
-        error:
-          `This proposal became ${now.status} a moment ago — by a teammate, or by the buyer from their link — ` +
-          `so it was not marked ${to}. Nothing was changed; reload to see it.`,
-      },
-      { status: 409 },
-    )
-  }
+  if (!row) return notWritten(db, user.orgId, id, to)
 
   if (row.status === 'accepted') {
     const orgId = user.orgId
@@ -113,4 +102,22 @@ export async function PATCH(
   }
 
   return NextResponse.json({ id, status: row.status, decidedAt: row.decidedAt ? row.decidedAt.toISOString() : null })
+}
+
+/**
+ * Why `setProposalStatus` wrote nothing: the proposal is gone (404), or its
+ * status is no longer the one this request read (409), and the person is
+ * told what it became rather than that it does not exist.
+ */
+async function notWritten(db: AgencyDb, orgId: string, id: string, to: ProposalStatus): Promise<NextResponse> {
+  const now = await readProposal(db, orgId, id)
+  if (!now) return NextResponse.json({ error: 'No such proposal.' }, { status: 404 })
+  return NextResponse.json(
+    {
+      error:
+        `This proposal became ${now.status} a moment ago — by a teammate, or by the buyer from their link — ` +
+        `so it was not marked ${to}. Nothing was changed; reload to see it.`,
+    },
+    { status: 409 },
+  )
 }

@@ -23,7 +23,8 @@ describe('PATCH /api/proposals/[id]', () => {
 
   it('answers 409 with what the proposal became when the status changed meanwhile, and 404 only when it is gone', () => {
     const tail = src.slice(src.indexOf('const row = await setProposalStatus('))
-    expect(tail).toContain('readProposal(db, user.orgId, id)')
+    expect(tail).toContain('if (!row) return notWritten(db, user.orgId, id, to)')
+    expect(tail).toContain('readProposal(db, orgId, id)')
     expect(tail).toContain('status: 409')
     expect(tail).toContain('a moment ago')
     expect(tail).toContain('by the buyer from their link')
