@@ -1779,7 +1779,7 @@ describe('0019 — message templates, and what the operator said', () => {
       )
     })
 
-    it.each(['awaiting_approval', 'approved', 'queued', 'sending', 'sent'])(
+    it.each(['awaiting_approval', 'approved', 'queued', 'sending'])(
       'REFUSES an outbound SMS in %s that names no template',
       async (status) => {
         expect(await expectRejection(() => smsTouch(status, null))).toContain('touches_sms_and_whatsapp_name_a_template')
@@ -1788,6 +1788,16 @@ describe('0019 — message templates, and what the operator said', () => {
 
     it('REFUSES an outbound WhatsApp message with no template too', async () => {
       expect(await expectRejection(() => smsTouch('awaiting_approval', null, 'whatsapp'))).toContain('touches_sms_and_whatsapp_name_a_template')
+    })
+
+    /**
+     * `sent` is reached only from `sending`, which the CHECK binds, so a sent
+     * row without a template is one a revert of 0019 left. Binding `sent`
+     * made every such row un-updatable after a re-apply (review round 4,
+     * [11]; migration-0019-revert.test.ts drives the sequence).
+     */
+    it('accepts a sent SMS with no template — only a revert of 0019 leaves one', async () => {
+      expect(await smsTouch('sent', null)).toHaveLength(1)
     })
 
     it('accepts a refused or failed SMS with no template — neither can go out', async () => {

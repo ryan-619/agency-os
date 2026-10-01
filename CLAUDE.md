@@ -3285,9 +3285,24 @@ Everything new is text + CHECK and nothing is newer than Postgres 15.
 on every new and updated row, never re-checked against stored ones —
 because nothing before 0019 could put an outbound SMS or WhatsApp row in a
 sendable state, and a row that somehow exists is refused `no_template` by
-`decideSend` the first time anything tries to send it. It exempts `refused`
-and `failed` rows, so the sender can settle such a row rather than throw on
-it every tick; every move back to a sendable status re-evaluates the CHECK.
+`decideSend` the first time anything tries to send it. It binds only the
+statuses the sender can still carry to a provider (`awaiting_approval`,
+`approved`, `queued`, `sending`), and every move into one re-evaluates it;
+`sent` is reached only through `sending`, so every message that went out
+named its template on the way. **It does not bind `sent`, and the first
+version did** — review round 4 found that a CHECK is evaluated on EVERY
+later UPDATE of a row, `NOT VALID` or not, so reverting 0019 (which drops
+`template_id`) and applying it again left every earlier SMS un-updatable:
+its delivery report answered 500, its recipient could not be erased, and
+its contact could not be deleted (ON DELETE SET NULL is an UPDATE) — 0018's
+`connectors_name_is_not_agency` trap again. The down also SETTLES every SMS
+or WhatsApp message that could still go out — `refused`/`no_template`, or
+`failed` for one caught `sending` — with an `error` saying 0019 was
+reverted, because no code before 0019 can send one and a re-apply would
+otherwise leave it bound with no template.
+`packages/db/test/migration-0019-revert.test.ts` drives the sequence. Both
+halves were changed after 0019 was pushed to this branch and before it
+reached any deployed database (the 0010 precedent).
 `contacts_bounce_code_is_rfc3463` is in 0019 too, and added valid, because
 its one writer has refused anything else since 0018. Reverting 0019 deletes every template and
 every delivery report and unlinks every SMS from its template; inbound SMS

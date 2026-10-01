@@ -90,12 +90,26 @@ ALTER TABLE touches ADD CONSTRAINT touches_template_is_in_the_same_org_and_chann
   ON DELETE RESTRICT;
 CREATE INDEX touches_template_idx ON touches (template_id) WHERE template_id IS NOT NULL;
 
--- An outbound SMS or WhatsApp message that can still go out, or went out,
--- names its template. A REFUSED or FAILED one need not: neither status is one
--- `dispatchTouch` will send, and every transition back to one it will
--- (approved, queued, sending, sent) is an UPDATE this CHECK re-evaluates. That
--- escape is what lets the sender settle a pre-0019 row as `no_template`
--- rather than throw on it every tick.
+-- An outbound SMS or WhatsApp message that can still go out names its
+-- template. The CHECK binds only the statuses `dispatchTouch` can still carry
+-- to a provider — awaiting_approval, approved, queued, sending — and every
+-- move INTO one of them is an UPDATE this CHECK re-evaluates. `sent` is
+-- reached only from `sending` (or from a `failed` row a stuck-send recovery
+-- settled while the provider had it, which was `sending` first), so every
+-- message that went out named its template on the way, and RESTRICT above
+-- keeps that registration for as long as the message exists.
+--
+-- It does NOT bind `sent` (or refused, failed, delivered…) itself, and that
+-- is deliberate. A first version did, and review found the trap: reverting
+-- 0019 drops template_id, re-applying adds it back NULL, and a CHECK is
+-- evaluated on EVERY later UPDATE of a row — so every SMS sent before the
+-- revert became un-updatable: its delivery report answered 500, the
+-- recipient could not be erased (the erasure's UPDATE of the row failed)
+-- and their contact could not be deleted (ON DELETE SET NULL is an UPDATE).
+-- 0018's `connectors_name_is_not_agency` is the same shape (CLAUDE.md §2).
+-- Refused and failed rows are exempt for the reason they always were: the
+-- sender settles a template-less row as `no_template` rather than throw on
+-- it every tick.
 --
 -- NOT VALID: enforced for every new and updated row, never re-checked against
 -- the rows already stored. Safe because nothing before 0019 could put an
@@ -109,7 +123,7 @@ ALTER TABLE touches ADD CONSTRAINT touches_sms_and_whatsapp_name_a_template CHEC
   channel NOT IN ('sms', 'whatsapp')
   OR direction <> 'out'
   OR template_id IS NOT NULL
-  OR status IN ('refused', 'failed')
+  OR status NOT IN ('awaiting_approval', 'approved', 'queued', 'sending')
 ) NOT VALID;
 
 -- (3) Delivery — what the operator said about an SMS after the provider
