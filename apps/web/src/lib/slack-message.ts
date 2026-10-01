@@ -1,4 +1,10 @@
-import type { ReplyKind } from '@agency/core'
+import {
+  slackOptOutNotRecordedPayload,
+  slackPayloadOf,
+  type ReplyKind,
+  type SlackOptOutNotRecordedEvent,
+  type SlackPayload,
+} from '@agency/core'
 import { refusalWords } from './refusal-words'
 
 /**
@@ -27,6 +33,12 @@ import { refusalWords } from './refusal-words'
  * testable as data. The origin is an argument — `env().AUTH_URL`, never the
  * Host header — because the link is what somebody clicks, and a forged host
  * would send them somewhere else.
+ *
+ * One message has a second sender. An opt-out that could not be recorded is
+ * also raised by the worker, for a reply it read over IMAP, so that message
+ * — and the cut at Slack's length limit every message gets — is built by
+ * `packages/core/src/slack-payload.ts`, which both processes call: the
+ * channel reads the same bytes whichever one noticed.
  */
 export type NotificationEvent =
   | {
@@ -48,15 +60,8 @@ export type NotificationEvent =
       companyDomain: string
       via: 'team' | 'share_link'
     }
-  | {
-      kind: 'opt_out_not_recorded'
-      orgId: string
-      /** The touch the request arrived on: the clicked message, or the inbound reply. */
-      touchId: string
-      contactId: string | null
-      /** Which way the person asked: the unsubscribe link, an erasure, or a reply that said stop. */
-      path: 'unsubscribe' | 'erasure' | 'reply'
-    }
+  /** Built in packages/core: the worker raises it too. */
+  | SlackOptOutNotRecordedEvent
   | { kind: 'worker_silent'; orgId: string; lastTickAt: string | null; ageSeconds: number | null }
   | {
       kind: 'digest'
@@ -85,13 +90,7 @@ export type NotificationEvent =
     }
   | { kind: 'campaign_paused'; orgId: string; campaignId: string; bouncePct: number; threshold: number }
 
-export interface SlackPayload {
-  readonly text: string
-  readonly blocks?: readonly unknown[]
-}
-
-/** Slack refuses a `text` past this; a digest with a long tail is cut, not dropped. */
-const MAX_TEXT = 4000
+export type { SlackPayload }
 
 const REPLY_WORDS: Readonly<Record<ReplyKind, string>> = {
   opted_out: 'asked to stop',
@@ -187,16 +186,9 @@ export function slackMessage(event: NotificationEvent, origin: string): SlackPay
       lines.push(link(`/proposals/${encodeURIComponent(event.proposalId)}`))
       break
     }
-    case 'opt_out_not_recorded': {
-      lines.push(
-        `OPT-OUT NOT RECORDED. Somebody asked to be left alone through ${
-          event.path === 'unsubscribe' ? 'the unsubscribe link' : event.path === 'reply' ? 'a reply' : 'an erasure request'
-        } and no suppression row could be written. A person has to record it now.`,
-      )
-      lines.push(`touch ${event.touchId} · contact ${event.contactId ?? 'unknown'}`)
-      lines.push(link('/suppressions'))
-      break
-    }
+    case 'opt_out_not_recorded':
+      // The worker posts this one too; one builder, so the bytes are the same.
+      return slackOptOutNotRecordedPayload(event, origin)
     case 'worker_silent': {
       lines.push('Worker silent.')
       lines.push(
@@ -253,6 +245,6 @@ export function slackMessage(event: NotificationEvent, origin: string): SlackPay
     }
   }
 
-  const text = lines.join('\n')
-  return { text: text.length > MAX_TEXT ? `${text.slice(0, MAX_TEXT - 1)}…` : text }
+  // A digest with a long tail is cut at Slack's limit, not dropped.
+  return slackPayloadOf(lines)
 }
