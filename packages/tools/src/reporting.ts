@@ -17,10 +17,11 @@
  *    note as "note by <name>:" in quotation marks and says so in the summary,
  *    so "they have no CSP" typed after a call cannot be repeated as a finding.
  *  - **Message bodies stay out.** A timeline line carries a message's subject
- *    and its FIRST LINE only, bounded; the compliance summary is counts with
- *    no rows at all; search returns the label and one line of context the
- *    search module already chose, and that module cannot name a connector or
- *    a chat (§2.3).
+ *    and its FIRST LINE only, bounded — and for a LinkedIn message /tasks
+ *    would not show, neither (`linkedinThreadWithheld`, /tasks' own rule);
+ *    the compliance summary is counts with no rows at all; search returns
+ *    the label and one line of context the search module already chose, and
+ *    that module cannot name a connector or a chat (§2.3).
  *
  * Each tool asks `can()` the same question the page behind it asks, so a role
  * that could not open the page cannot read it through the agent either.
@@ -29,9 +30,9 @@ import { z } from 'zod'
 import { can, pipelineMetrics, staleAfterDaysOf, type PipelineMetrics } from '@agency/core'
 import {
   activeIcpProfile, analyticsTransitions, auditForSubject, callsForCompany, companyThread,
-  complianceSummary, findCompanyByDomain, listDeals, meetingsForCompany, notesAuthorLabel, notesFor,
-  proposalsForCompany, scanHistory, searchOrg, searchQueryFrom, searchSectionsFor, tasksList,
-  type AgencyDb, type AuditRow, type SearchSections,
+  complianceSummary, findCompanyByDomain, linkedinThreadWithheld, listDeals, meetingsForCompany, notesAuthorLabel,
+  notesFor, proposalsForCompany, scanHistory, searchOrg, searchQueryFrom, searchSectionsFor, tasksList,
+  type AgencyDb, type AuditRow, type LinkedinThreadWithheld, type SearchSections,
 } from '@agency/db'
 import * as schema from '@agency/db/schema'
 import { normaliseDomain } from '@agency/scanner'
@@ -251,6 +252,19 @@ function dealLine(row: AuditRow, names: ReadonlyMap<string, string>): string {
   return `deal ${row.action.replace(/^deal\./, '').replace(/_/g, ' ')}${who}`
 }
 
+/**
+ * Why a LinkedIn message's words are not in the timeline, in the company
+ * page's words for the same reasons. The rule is /tasks' own
+ * (`linkedinThreadWithheld`); this only words it.
+ */
+const LINKEDIN_HELD: Record<LinkedinThreadWithheld, string> = {
+  not_handed: 'Start has not handed them over',
+  refused: 'the send rules now refuse this person',
+  paused: 'the contact is paused',
+  unchecked: 'the rules cannot be checked — the contact or the campaign is gone',
+  expired: 'they were handed over more than a day ago',
+}
+
 export const getCompanyTimeline: AgencyToolSpec<typeof companyTimelineShape> = {
   name: 'get_company_timeline',
   description:
@@ -289,9 +303,26 @@ export const getCompanyTimeline: AgencyToolSpec<typeof companyTimelineShape> = {
     ])
     const dealRows = (await Promise.all(deals.map((d) => auditForSubject(ctx.db, ctx.orgId, 'deal', d.id, limit)))).flat()
     const names = await actorNames(ctx, dealRows)
+    // A LinkedIn message's words reach the model only where /tasks would
+    // print them (review round 5, [10]): never before Start hands them over,
+    // and not while the step is open and its re-check withholds them. A
+    // person could otherwise copy them into LinkedIn from a chat, past every
+    // rule Start runs — to somebody suppressed on LinkedIn since, say.
+    const withheld = await linkedinThreadWithheld(ctx.db, ctx.orgId, touches, ctx.now())
 
     const events: TimelineEvent[] = []
     for (const t of touches) {
+      const held = withheld.get(t.id)
+      if (held) {
+        const status = t.status === 'refused' && t.refusalCode ? `refused by the send path (${t.refusalCode})` : t.status
+        events.push({
+          at: t.sentAt ?? t.createdAt,
+          kind: 'message',
+          id: t.id,
+          text: `${t.channel} message out, ${status} — words withheld (${LINKEDIN_HELD[held]})`,
+        })
+        continue
+      }
       const subject = t.subject ? ` “${oneLine(t.subject, 120)}”` : ''
       const first = firstLineOf(t.body)
       const opening = first ? ` — first line: “${first}”` : ''
@@ -361,7 +392,10 @@ export const getCompanyTimeline: AgencyToolSpec<typeof companyTimelineShape> = {
     const header = `${domain}: ${shown.length} of ${events.length} event${events.length === 1 ? '' : 's'}, newest first.`
     const footer =
       'Notes are a teammate’s words, not evidence — never repeat one as something the scanner found. ' +
-      'Messages show the subject and the first line only.'
+      'Messages show the subject and the first line only.' +
+      (shown.some((e) => withheld.has(e.id))
+        ? ' A LinkedIn message’s words are shown only where /tasks would show them — Start checks every send rule first.'
+        : '')
     return ok(
       {
         domain,
