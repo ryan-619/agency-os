@@ -388,10 +388,11 @@ function DraftsOnStale({ s }: { s: ComplianceSummary }) {
         §2.2: findings older than {s.freshness.staleDays} days must be re-verified before they appear in any
         outbound draft. Every outbound message not yet sent — awaiting approval, approved and waiting for its
         moment, queued to send automatically, or being sent — whose company has no successful scan, whose
-        last one is stale, or whose words were written from a scan that has gone stale since, measured from
-        the scan&apos;s <code>ran_at</code>. The send path refuses a message at sending when the scan its words
-        were written from is stale (<code>stale_evidence</code>), whoever approved it: those are waiting to be
-        refused, or to be denied and drafted again after a re-scan. It does not judge by evidence a message
+        last one is stale, or whose words were written from a scan that has gone stale since or that a newer
+        successful scan has superseded, measured from the scan&apos;s <code>ran_at</code>. The send path refuses
+        a message at sending when the scan its words were written from is stale (<code>stale_evidence</code>),
+        whoever approved it, and when a newer successful scan has superseded it: those are waiting to be
+        refused, or to be denied and drafted again from the latest scan. It does not judge by evidence a message
         with no successful scan behind it, or an answer to a reply — those go as written unless another rule
         stops them, and only the ones awaiting approval wait on a person. Should be zero; an answer is listed
         too, tagged, because nothing marks which of its words came from the scan.
@@ -417,6 +418,8 @@ function DraftsOnStale({ s }: { s: ComplianceSummary }) {
                     'no successful scan'
                   ) : r.why === 'rescanned_since' ? (
                     <>written from the scan of <At at={r.writtenFromScanAt} />; re-scanned <At at={r.lastOkScanAt} /> since</>
+                  ) : r.why === 'superseded' ? (
+                    <>written from the scan of <At at={r.writtenFromScanAt} />, still fresh; superseded by the newer scan of <At at={r.lastOkScanAt} /></>
                   ) : (
                     <>last good scan <At at={r.lastOkScanAt} /></>
                   )}

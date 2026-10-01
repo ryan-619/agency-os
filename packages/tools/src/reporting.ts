@@ -472,11 +472,16 @@ export const getComplianceSummary: AgencyToolSpec<Record<string, never>> = {
       // The send path refuses a message whose words were written from a stale
       // scan (`stale_evidence`), whoever approved it; saying these "go with no
       // further look" told the model the opposite of what the sender does.
+      // It refuses one written from a fresh scan a newer one has superseded
+      // too (r4), and those are said apart: "a scan that is stale now" would
+      // be false about them. Every superseded row is refused at sending.
       `Outbound messages not yet sent on stale or missing evidence: ${d.count} of ${d.unsent} not yet sent ` +
         `(must be 0) — ${d.byStatus.awaiting_approval} awaiting approval, ${d.byStatus.approved} approved, ` +
-        `${d.byStatus.queued} queued, ${d.byStatus.sending} sending. ${d.refusedAtSending} were written from a scan ` +
+        `${d.byStatus.queued} queued, ${d.byStatus.sending} sending. ${d.refusedAtSending - d.byWhy.superseded} were written from a scan ` +
         'that is stale now and are refused at sending (stale_evidence) — waiting to be refused, or to be re-drafted ' +
-        `after a re-scan; ${d.notJudgedAtSending} have no successful scan behind them or answer a reply, so the send ` +
+        `after a re-scan; ${d.byWhy.superseded} were written from a scan a newer successful scan has superseded, ` +
+        'and are refused at sending too (stale_evidence) — waiting to be refused, or to be re-drafted from the latest ' +
+        `scan; ${d.notJudgedAtSending} have no successful scan behind them or answer a reply, so the send ` +
         `path does not judge them by evidence and they go as written unless another rule stops them — ` +
         `${d.notJudgedNoFurtherLook} of those with nobody looking again (approved, queued or sending).`,
       `Consent rows: ${tally(s.consents.byChannel, (i) => s.consents.byChannel[i]!.channel)}; ` +
