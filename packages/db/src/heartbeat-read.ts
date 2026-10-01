@@ -29,6 +29,13 @@ import type { WorkerHeartbeat } from './schema.js'
 export type HeartbeatOutreach = 'disabled' | 'send-only' | 'send-and-receive' | 'receive-only'
 /** Whether the worker can take a chat turn. Never which credential it uses (§2.3). */
 export type HeartbeatChat = 'enabled' | 'disabled'
+/**
+ * Whether the worker sends SMS through DoveSoft (0019): `on` with both
+ * DOVESOFT_API_KEY and DOVESOFT_ENTITY_ID on its host, `off` otherwise.
+ * Separate from `outreach`, which describes the MAILBOX only — a worker with
+ * no SMTP and DoveSoft on reports `outreach: 'disabled'` and sends texts.
+ */
+export type HeartbeatSms = 'on' | 'off'
 
 /**
  * How long a worker may go unheard before it is called silent, when nothing
@@ -122,13 +129,29 @@ export function heartbeatSilentAfter(row: { readonly detail: unknown } | null): 
   return Math.max(HEARTBEAT_SILENT_AFTER_SECONDS, Math.ceil((intervalMs * MISSED_TICKS) / 1000))
 }
 
+/**
+ * What the row says about SMS, from `detail.sms` — written by
+ * `apps/agent/src/worker.ts` beside `halted` and `lockHeld`, because the
+ * table's `outreach` column and its CHECK predate DoveSoft. Null for no row,
+ * and for a row that does not carry `on` or `off`: a worker from before 0019
+ * wrote nothing, and a value nobody defined is not guessed at.
+ */
+export function heartbeatSms(row: { readonly detail: unknown } | null): HeartbeatSms | null {
+  const detail = row?.detail
+  const sms = typeof detail === 'object' && detail !== null && 'sms' in detail ? (detail as { sms: unknown }).sms : null
+  return sms === 'on' || sms === 'off' ? sms : null
+}
+
 export interface HeartbeatReport {
   /** This web deployment is configured to reach a worker (`deployment().worker`). */
   readonly configured: boolean
   readonly lastSeenAt: Date | null
   readonly ageSeconds: number | null
+  /** The MAILBOX: `HeartbeatOutreach`'s vocabulary. Says nothing about SMS. */
   readonly outreach: string | null
   readonly chat: string | null
+  /** SMS through DoveSoft (`heartbeatSms`); null when the row does not say. */
+  readonly sms: HeartbeatSms | null
   /**
    * `not_configured` only when there is no row AND no worker is configured —
    * a deployment that never meant to run one. A configured deployment with
@@ -162,6 +185,7 @@ export function heartbeatReport(
     ageSeconds,
     outreach: row?.outreach ?? null,
     chat: row?.chat ?? null,
+    sms: heartbeatSms(row),
     status: observed === 'never' && !configured ? 'not_configured' : observed,
     // Configured, a stopped worker is silent however long ago it stopped:
     // somebody meant one to be running. An age that cannot be read is not a week.
