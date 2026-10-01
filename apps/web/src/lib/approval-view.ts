@@ -129,9 +129,16 @@ export function candidateLine(decision: CandidateDecision | null): string {
  * what paused them), after which the draft can simply be approved — and a
  * denial is a person's no, which stops them being drafted on that campaign
  * again.
+ *
+ * On a template channel (`channel` sms or whatsapp) there is nobody else to
+ * choose: the slots were filled for one person, `smsCandidates` offers only
+ * them, and `approveDraft` refuses anyone else (`rendered_for_another`). So
+ * neither the paused block nor the default one says "choose someone else"
+ * there. Round 4, finding [22]. Without a channel the email words stand.
  */
-export function approveBlock(decision: CandidateDecision | null): string | null {
+export function approveBlock(decision: CandidateDecision | null, channel?: string): string | null {
   if (decision === null || decision.humanCanResolve) return null
+  const onlyThem = channel !== undefined && TEMPLATE_CHANNEL_NAMES.has(channel)
   if (decision.code === 'stale_evidence' && decision.evidenceSuperseded) {
     return (
       `Approving is pointless: ${decision.words} — a newer scan of the company has run since the one it was ` +
@@ -148,7 +155,9 @@ export function approveBlock(decision: CandidateDecision | null): string | null 
   if (decision.code === 'paused') {
     return (
       `Approving is pointless: ${decision.words}, and nobody may approve past a pause — the worker would refuse it. ` +
-      'The rule below says what lifts it; the draft can wait here until then, or choose someone else.'
+      (onlyThem
+        ? `The rule below says what lifts it; the draft can wait here until then. ${FILLED_FOR_ONE}`
+        : 'The rule below says what lifts it; the draft can wait here until then, or choose someone else.')
     )
   }
   // 0019: the WORDS are what the operator would scrub, so another person
@@ -161,9 +170,25 @@ export function approveBlock(decision: CandidateDecision | null): string | null 
   }
   return (
     `Approving is pointless: ${decision.words}, and nobody may approve past that — the worker would refuse it. ` +
-    'Deny the draft, or choose someone else.'
+    (!onlyThem
+      ? 'Deny the draft, or choose someone else.'
+      : channel === 'sms'
+        ? `Deny the draft. ${FILLED_FOR_ONE} A text to somebody else is drafted from their own row on /contacts (Draft SMS).`
+        // Nothing in the product drafts a WhatsApp message, so nothing is pointed at.
+        : `Deny the draft. ${FILLED_FOR_ONE}`)
   )
 }
+
+/**
+ * The channels whose words are a registered template filled in for one
+ * person — core's `TEMPLATE_CHANNELS` (`packages/core/src/send.ts`),
+ * restated so a client component importing this file does not pull the
+ * domain package into the browser bundle. `approval-view.test.ts` holds the
+ * two to one set.
+ */
+export const TEMPLATE_CHANNEL_NAMES: ReadonlySet<string> = new Set(['sms', 'whatsapp'])
+
+const FILLED_FOR_ONE = 'Its template was filled in for this one person, so it cannot go to anyone else.'
 
 // ---------------------------------------------------------------------------
 // Which campaign the decisions were computed under
@@ -262,13 +287,15 @@ export function templateLine(t: DraftTemplate): string {
  * Its `{#var#}` slots were filled for that person — their name, their
  * company — so the same words to somebody else would be the right template
  * with the wrong values. An email draft keeps everyone at its company.
+ * WhatsApp is a template channel too, and `approveDraft` refuses anyone else
+ * on it (`rendered_for_another`), so it is narrowed the same way.
  */
 export function smsCandidates<T extends { readonly id: string }>(
   channel: string,
   contactId: string | null,
   people: readonly T[],
 ): readonly T[] {
-  if (channel !== 'sms' || !contactId) return people
+  if (!TEMPLATE_CHANNEL_NAMES.has(channel) || !contactId) return people
   return people.filter((p) => p.id === contactId)
 }
 

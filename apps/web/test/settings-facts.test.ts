@@ -140,6 +140,47 @@ describe('a worker that sends SMS (0019)', () => {
     expect(a.tone).toBe('ok')
     expect(a.text).toContain('does not send email')
   })
+
+  /**
+   * The sender leaves a due row on a channel it has no provider for exactly
+   * as it was — no refusal code, no `scheduled_for` — and only its log says
+   * why. So "carries its reason on the message" is true of email and not of
+   * an approved SMS on a worker with SMS off. Round 4, finding [17].
+   */
+  it('does not promise a reason on an SMS the worker cannot send', () => {
+    for (const outreach of ['send-and-receive', 'send-only']) {
+      const a = sendingAnswer(heartbeatReport(smsRow(outreach, 'off'), true, NOW))
+      expect(a.text).toBe(
+        'A worker is alive and reports that it sends. An email that has still not gone out carries its reason on the ' +
+          'message: a refusal, quiet hours, the daily cap, or an approval nobody has decided. A text does not: SMS is ' +
+          'off in that worker, so an approved SMS waits with no reason on it — only the worker’s log says why — until ' +
+          'SMS is switched on where the worker runs (DOVESOFT_API_KEY and DOVESOFT_ENTITY_ID on its host).',
+      )
+      expect(a.tone).toBe('ok')
+    }
+  })
+
+  it('does not promise one either when the worker has not said whether it sends SMS', () => {
+    // `row()` carries no `detail.sms`: a worker from before DoveSoft.
+    const report = heartbeatReport(row(30), true, NOW)
+    expect(report.sms).toBeNull()
+    const a = sendingAnswer(report)
+    expect(a.text).not.toMatch(/A message that has still not gone out carries its reason/)
+    expect(a.text).toContain('An email that has still not gone out carries its reason on the message')
+    expect(a.text).toContain(
+      'an approved SMS may wait with no reason on it until SMS is switched on where the worker runs ' +
+        '(DOVESOFT_API_KEY and DOVESOFT_ENTITY_ID on its host)',
+    )
+  })
+
+  it('keeps the promise for every channel when SMS is on', () => {
+    const a = sendingAnswer(heartbeatReport(smsRow('send-and-receive', 'on'), true, NOW))
+    expect(a.tone).toBe('ok')
+    expect(a.text).toBe(
+      'A worker is alive and reports that it sends. A message that has still not gone out carries its reason on the ' +
+        'message: a refusal, quiet hours, the daily cap, or an approval nobody has decided.',
+    )
+  })
 })
 
 describe('the clause is the digest’s', () => {
@@ -196,7 +237,46 @@ describe('the Replies fact', () => {
     )
   })
 
-  it('names the variables the line is read from, the worker’s included', () => {
-    expect(replies(input()).vars).toEqual(['AGENT_URL', 'AGENT_INTERNAL_TOKEN', 'INBOUND_WEBHOOK_SECRET', 'RESEND_WEBHOOK_SECRET', 'RESEND_API_KEY'])
+  it('names the variables the line is read from, the worker’s and DoveSoft’s included', () => {
+    expect(replies(input()).vars).toEqual([
+      'AGENT_URL', 'AGENT_INTERNAL_TOKEN', 'INBOUND_WEBHOOK_SECRET', 'RESEND_WEBHOOK_SECRET', 'RESEND_API_KEY', 'DOVESOFT_WEBHOOK_SECRET',
+    ])
+  })
+
+  /**
+   * DoveSoft's webhook lets texts in, a STOP included, with no worker and no
+   * email webhook — and the line said "no reply is read", off, while the SMS
+   * section on the same page listed the URLs texts arrive at. Round 4,
+   * finding [16].
+   */
+  describe('with DoveSoft’s webhook (0019)', () => {
+    const TEXTS = 'Texts a contact sends back, a STOP included, arrive through DoveSoft’s webhook.'
+
+    it('is on, says texts arrive, and says it is EMAIL replies that are not read', () => {
+      const r = replies(input({ smsInbound: true }))
+      expect(r.on).toBe(true)
+      expect(r.sentence).toBe(
+        'No inbound email webhook is configured, and this deployment is not configured to reach a worker. Unless the ' +
+          `heartbeat shows one reading a mailbox against this database, no email reply is read. ${TEXTS}`,
+      )
+      expect(r.sentence).not.toMatch(/no reply is read/)
+    })
+
+    it('adds the texts to every other shape, and words the webhook as email’s', () => {
+      expect(replies(input({ smsInbound: true, worker: true })).sentence).toBe(
+        'No inbound email webhook is configured. This deployment is configured to reach a worker; whether it reads a ' +
+          `mailbox is the heartbeat’s question. ${TEXTS}`,
+      )
+      expect(replies(input({ smsInbound: true, inbound: 'webhook' }, { inboundJson: true })).sentence).toBe(
+        `Accepted by the inbound webhook (/api/inbound/email). ${TEXTS}`,
+      )
+    })
+
+    it('says nothing about texts without the secret', () => {
+      for (const i of [input(), input({ smsInbound: false }), input({ worker: true })]) {
+        expect(replies(i).sentence).not.toMatch(/text|DoveSoft/i)
+      }
+      expect(replies(input({ smsInbound: false })).on).toBe(false)
+    })
   })
 })

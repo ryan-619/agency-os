@@ -170,9 +170,21 @@ export function agentReachable(d: Deployment, w: WorkerStatusLike): boolean {
   return d.worker && w.status === 'live' && w.chat === 'enabled'
 }
 
-/** Can a reply reach this deployment at all? A reading worker, or a webhook. */
-function repliesArrive(d: Deployment, w: WorkerStatusLike): boolean {
-  return workerReceives(w) || d.inbound === 'webhook' || d.smsInbound === true
+/**
+ * Can an EMAIL reply reach this deployment? A reading worker, or an email
+ * webhook. DoveSoft's webhook is not one of them: it lets texts in and
+ * nothing else, so it is asked about apart (`textsArrive`) — counting it
+ * here took the "None recorded" caveat off the replies counter, and had the
+ * feed say "replies still arrive", on a deployment no email reply can reach.
+ * Round 4, finding [15].
+ */
+function emailRepliesArrive(d: Deployment, w: WorkerStatusLike): boolean {
+  return workerReceives(w) || d.inbound === 'webhook'
+}
+
+/** Texts a contact sends back, a STOP included, arrive through DoveSoft's webhook (0019). */
+function textsArrive(d: Deployment): boolean {
+  return d.smsInbound === true
 }
 
 /**
@@ -218,6 +230,11 @@ function agentAbsentBecause(d: Deployment, w: WorkerStatusLike): string | null {
 }
 
 const capital = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1)
+
+/** The clause that follows "no email reply can arrive" when DoveSoft's webhook is set. */
+const TEXTS_STILL_DO = 'texts still do, through DoveSoft’s webhook'
+/** The same, where the sentence has not already said "arrive". */
+const TEXTS_STILL_ARRIVE = 'texts still arrive, through DoveSoft’s webhook'
 
 export interface WorkerLine {
   /** `ok`: heard from recently. `warn`: expected and not heard. `quiet`: none was expected. */
@@ -724,7 +741,9 @@ export function needsALook(c: LookCounts, d: Deployment, w: WorkerStatusLike): L
     })
   }
 
-  const noReplies = repliesArrive(d, w) ? null : notReadingBecause(w)
+  // With DoveSoft's webhook the counter still counts texts, so it is the
+  // EMAIL half that is missing, and the caveat says which half.
+  const noReplies = emailRepliesArrive(d, w) ? null : notReadingBecause(w)
   items.push({
     id: 'replies',
     n: c.repliesUnhandled,
@@ -732,11 +751,15 @@ export function needsALook(c: LookCounts, d: Deployment, w: WorkerStatusLike): L
     none: 'unhandled replies',
     href: '/inbox?show=unhandled',
     detail:
-      noReplies !== null
-        ? c.repliesUnhandled === 0
-          ? `None recorded: ${noReplies} and no inbound webhook is configured, so no reply can arrive here.`
-          : `No new ones can arrive: ${noReplies} and no inbound webhook is configured.`
-        : null,
+      noReplies === null
+        ? null
+        : textsArrive(d)
+          ? c.repliesUnhandled === 0
+            ? `None recorded: ${noReplies} and no inbound email webhook is configured, so no email reply can arrive here; ${TEXTS_STILL_DO}.`
+            : `No new email replies can arrive: ${noReplies} and no inbound email webhook is configured; ${TEXTS_STILL_DO}.`
+          : c.repliesUnhandled === 0
+            ? `None recorded: ${noReplies} and no inbound webhook is configured, so no reply can arrive here.`
+            : `No new ones can arrive: ${noReplies} and no inbound webhook is configured.`,
     alarm: false,
   })
 
@@ -934,17 +957,23 @@ export function feedLines(
  */
 export function quietFeedNote(d: Deployment, w: WorkerStatusLike): string | null {
   const noSends = notSendingBecause(w)
-  const noReplies = repliesArrive(d, w) ? null : notReadingBecause(w)
+  const noReplies = emailRepliesArrive(d, w) ? null : notReadingBecause(w)
   if (noSends === null && noReplies === null) return null
+  // With DoveSoft's webhook a text still lands in the feed (it is a reply
+  // like any other), so the quiet half is EMAIL replies, and the note says so.
+  const texts = textsArrive(d)
+  const replies = texts ? 'email replies' : 'replies'
+  const webhook = texts ? 'no inbound email webhook' : 'no inbound webhook'
+  const tail = texts ? `; ${TEXTS_STILL_ARRIVE}.` : '.'
   if (noSends !== null && noReplies !== null) {
     return noSends === noReplies
-      ? `${capital(noSends)}, so no sends or replies appear here.`
-      : `${capital(noSends)} and no inbound webhook is configured, so no sends or replies appear here.`
+      ? `${capital(noSends)}, so no sends or ${replies} appear here${tail}`
+      : `${capital(noSends)} and ${webhook} is configured, so no sends or ${replies} appear here${tail}`
   }
   if (noSends !== null) {
     return `${capital(noSends)}, so no sends appear here; replies still arrive${
       d.inbound === 'webhook' ? ' through the inbound webhook' : ''
     }.`
   }
-  return `${capital(noReplies as string)} and no inbound webhook is configured, so no replies appear here.`
+  return `${capital(noReplies as string)} and ${webhook} is configured, so no ${replies} appear here${tail}`
 }

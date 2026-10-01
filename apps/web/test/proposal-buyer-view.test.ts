@@ -164,7 +164,10 @@ describe('the team’s side', () => {
   })
 
   it('refuses Create in the order the route does', () => {
-    expect(shareCreateBlocked({ status: 'draft', evidenceStale: true })).toMatch(/sent first/)
+    // A stale draft is told about its evidence first: marking it sent cannot
+    // make it linkable (see proposal-share-copy.test.ts).
+    expect(shareCreateBlocked({ status: 'draft', evidenceStale: true })).toMatch(/^Not while the evidence/)
+    expect(shareCreateBlocked({ status: 'draft', evidenceStale: false })).toMatch(/sent first/)
     expect(shareCreateBlocked({ status: 'accepted', evidenceStale: false })).toMatch(/accepted/)
     expect(shareCreateBlocked({ status: 'sent', evidenceStale: true })).toMatch(/stale/)
     expect(shareCreateBlocked({ status: 'sent', evidenceStale: false })).toBeNull()

@@ -699,6 +699,25 @@ describe('needsALook', () => {
     expect(item(ZERO, { ...BARE, worker: true }, { ...LIVE, outreach: 'receive-only' }, 'replies').detail).toBeNull()
   })
 
+  it('a zero with only DoveSoft’s webhook names the email half as missing, not a clean zero (0019)', () => {
+    // Texts arrive; email replies cannot. A clean zero would claim both.
+    const sms = { ...BARE, smsInbound: true }
+    expect(item(ZERO, sms, NO_WORKER, 'replies').detail).toBe(
+      'None recorded: no worker is connected and no inbound email webhook is configured, so no email reply can arrive here; ' +
+        'texts still do, through DoveSoft’s webhook.',
+    )
+    expect(item(ZERO, { ...sms, worker: true }, { ...LIVE, outreach: 'send-only' }, 'replies').detail).toMatch(
+      /^None recorded: the worker is not reading a mailbox and no inbound email webhook is configured, so no email reply can arrive here; texts still do/,
+    )
+    expect(item({ ...ZERO, repliesUnhandled: 2 }, sms, NO_WORKER, 'replies').detail).toBe(
+      'No new email replies can arrive: no worker is connected and no inbound email webhook is configured; ' +
+        'texts still do, through DoveSoft’s webhook.',
+    )
+    // Either email recorder makes it a clean zero again, texts or not.
+    expect(item(ZERO, { ...sms, inbound: 'webhook' }, NO_WORKER, 'replies').detail).toBeNull()
+    expect(item(ZERO, { ...sms, worker: true }, LIVE, 'replies').detail).toBeNull()
+  })
+
   it('replies waiting with no recorder say no new ones can arrive', () => {
     const i = item({ ...ZERO, repliesUnhandled: 2 }, BARE, NO_WORKER, 'replies')
     expect(i.label).toBe('replies nobody has handled')
@@ -928,6 +947,29 @@ describe('quietFeedNote', () => {
     expect(quietFeedNote(BARE, RETIRED)).toBe(
       'The last worker to report in has retired, so no sends or replies appear here.',
     )
+  })
+
+  it('with only DoveSoft’s webhook, says the email half is quiet and texts still arrive (0019)', () => {
+    const sms = { ...BARE, smsInbound: true }
+    expect(quietFeedNote(sms, NO_WORKER)).toBe(
+      'No worker is connected, so no sends or email replies appear here; texts still arrive, through DoveSoft’s webhook.',
+    )
+    expect(quietFeedNote({ ...sms, worker: true }, SILENT)).toBe(
+      'The worker has gone quiet, so no sends or email replies appear here; texts still arrive, through DoveSoft’s webhook.',
+    )
+    expect(quietFeedNote({ ...sms, worker: true }, { ...LIVE, outreach: 'send-only' })).toBe(
+      'The worker is not reading a mailbox and no inbound email webhook is configured, so no email replies appear here; ' +
+        'texts still arrive, through DoveSoft’s webhook.',
+    )
+    expect(quietFeedNote({ ...sms, worker: true }, { ...LIVE, outreach: null })).toBe(
+      'The worker has not said that it sends and no inbound email webhook is configured, so no sends or email replies appear here; ' +
+        'texts still arrive, through DoveSoft’s webhook.',
+    )
+    // An email recorder is there: only the sending half is quiet.
+    expect(quietFeedNote({ ...sms, inbound: 'webhook' }, NO_WORKER)).toBe(
+      'No worker is connected, so no sends appear here; replies still arrive through the inbound webhook.',
+    )
+    expect(quietFeedNote({ ...sms, worker: true }, LIVE)).toBeNull()
   })
 
   it('is silent itself when the worker sends and a reply can arrive', () => {
