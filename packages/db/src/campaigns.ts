@@ -12,7 +12,7 @@
  * rule here. A campaign builder that validated compliance would be a second
  * place that could be right while the send path was wrong.
  */
-import { and, asc, desc, eq, sql } from 'drizzle-orm'
+import { and, asc, count, desc, eq, inArray, sql } from 'drizzle-orm'
 import { z } from 'zod'
 import { normaliseSuppressionValue, type SuppressionKind, type SuppressionSource } from '@agency/core'
 import * as schema from './schema.js'
@@ -68,6 +68,37 @@ export const campaignInput = z
 
 export type CampaignInput = z.infer<typeof campaignInput>
 export type CampaignRow = typeof schema.campaigns.$inferSelect
+export type CampaignStatus = CampaignInput['status']
+
+/**
+ * An EDIT: the campaign as the form will save it, and the status the form
+ * LOADED (`expectStatus`), which `updateCampaign` puts in its predicate.
+ * Optional, so a caller that never read a status writes as before. Review
+ * round 3, finding 13: the form sent back the status it loaded, so a save
+ * made after the worker paused a bouncing campaign re-activated it.
+ */
+export const campaignEditInput = campaignInput.extend({
+  expectStatus: z.enum(['draft', 'active', 'paused', 'done']).optional(),
+})
+
+/** The statuses of a message still waiting to go — the ones a channel switch would strand. */
+const LIVE_STATUSES = ['queued', 'awaiting_approval', 'approved', 'sending'] as const
+
+/**
+ * What a save did. Each refusal is something that changed, or waits, since
+ * the form was read — never an error — and the route words each one.
+ */
+export type CampaignUpdate =
+  | { readonly ok: true; readonly row: CampaignRow }
+  | { readonly ok: false; readonly reason: 'not_found' }
+  /** Auto-send is no longer what the caller read (`expect.autoSend`). */
+  | { readonly ok: false; readonly reason: 'auto_send_changed'; readonly autoSend: boolean }
+  /** The status is no longer what the form loaded (`expect.status`). */
+  | { readonly ok: false; readonly reason: 'status_changed'; readonly status: string }
+  /** A channel switch, refused while `live` messages written for `channel` wait. */
+  | { readonly ok: false; readonly reason: 'channel_has_live_messages'; readonly live: number; readonly channel: string }
+  /** Something moved between the save and the read that explains it; saving again settles it. */
+  | { readonly ok: false; readonly reason: 'changed' }
 
 export async function listCampaigns(db: AgencyDb, orgId: string): Promise<CampaignRow[]> {
   return db
@@ -120,14 +151,35 @@ export async function updateCampaign(
   id: string,
   input: CampaignInput,
   /**
-   * The auto-send value the caller READ before deciding it was allowed to
-   * write. Put in the predicate, so a member's save built on a stale read —
-   * auto-send was on when they opened the form and an owner turned it off
-   * since — matches nothing instead of turning it back on. Null skips the
-   * check, for a caller allowed to set it either way.
+   * What the caller READ before deciding what to write, each put in the
+   * UPDATE's own predicate so a save built on a stale read matches nothing
+   * instead of undoing what changed since. Null or absent skips that check.
    */
-  expectAutoSend: boolean | null = null,
-): Promise<CampaignRow | null> {
+  expect: {
+    /**
+     * The auto-send value the caller read before deciding it was allowed to
+     * write: a member's save built on a stale read — auto-send was on when
+     * they opened the form and an owner turned it off since — must not turn
+     * it back on. Null for a caller allowed to set it either way.
+     */
+    readonly autoSend?: boolean | null
+    /**
+     * The status the edit form LOADED (r4, review round 3, finding 13). The
+     * form sends every field back, status included, so a teammate who
+     * changed only the cap re-activated a campaign the worker had paused
+     * for bouncing in between.
+     */
+    readonly status?: CampaignStatus | null
+  } = {},
+): Promise<CampaignUpdate> {
+  // r4 (review round 3, finding 2): the channel may not move under messages
+  // still waiting to go. Each was written for the campaign's channel, and a
+  // campaign switched from LinkedIn to email while it held approved
+  // messages used to have them addressed by the email keys. The sender
+  // refuses such a message too (`channelMismatch`); this stops the edit that
+  // would strand it. Raw SQL names `campaigns` itself: the subquery must
+  // read the row being updated, never its own `touches` row.
+  const live = sql.join(LIVE_STATUSES.map((s) => sql`${s}`), sql`, `)
   const rows = await db
     .update(schema.campaigns)
     .set({
@@ -144,11 +196,46 @@ export async function updateCampaign(
       and(
         eq(schema.campaigns.orgId, orgId),
         eq(schema.campaigns.id, id),
-        ...(expectAutoSend === null ? [] : [eq(schema.campaigns.autoSend, expectAutoSend)]),
+        ...(expect.autoSend == null ? [] : [eq(schema.campaigns.autoSend, expect.autoSend)]),
+        ...(expect.status == null ? [] : [eq(schema.campaigns.status, expect.status)]),
+        sql`(campaigns.channel = ${input.channel} OR NOT EXISTS (
+          SELECT 1 FROM touches t
+           WHERE t.org_id = campaigns.org_id AND t.campaign_id = campaigns.id
+             AND t.direction = 'out' AND t.status IN (${live})
+        ))`,
       ),
     )
     .returning()
-  return rows[0] ?? null
+  const row = rows[0]
+  if (row) return { ok: true, row }
+
+  // Nothing matched: say which expectation failed, from a fresh read. The
+  // order is the predicate's, so the answer names the first thing that
+  // stopped the save.
+  const current = await readCampaign(db, orgId, id)
+  if (!current) return { ok: false, reason: 'not_found' }
+  if (expect.autoSend != null && current.autoSend !== expect.autoSend) {
+    return { ok: false, reason: 'auto_send_changed', autoSend: current.autoSend }
+  }
+  if (expect.status != null && current.status !== expect.status) {
+    return { ok: false, reason: 'status_changed', status: current.status }
+  }
+  if (current.channel !== input.channel) {
+    const [waiting] = await db
+      .select({ n: count() })
+      .from(schema.touches)
+      .where(
+        and(
+          eq(schema.touches.orgId, orgId),
+          eq(schema.touches.campaignId, id),
+          eq(schema.touches.direction, 'out'),
+          inArray(schema.touches.status, [...LIVE_STATUSES]),
+        ),
+      )
+    const n = waiting?.n ?? 0
+    if (n > 0) return { ok: false, reason: 'channel_has_live_messages', live: n, channel: current.channel }
+  }
+  return { ok: false, reason: 'changed' }
 }
 
 /**

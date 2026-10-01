@@ -199,8 +199,13 @@ function CampaignForm({
       const res = await fetch(campaign ? `/api/campaigns/${campaign.id}` : '/api/campaigns', {
         method: campaign ? 'PATCH' : 'POST',
         headers: { 'content-type': 'application/json' },
+        // An edit names the status it LOADED, and the save is refused (409)
+        // if that changed since: a campaign the worker paused for bouncing
+        // while this form was open must not be re-activated by a save that
+        // changed only the cap.
         body: JSON.stringify({
           name, channel, dailyCap, quietStart, quietEnd, autoSend: channel === 'sms' ? false : autoSend, status, icpProfileId: null,
+          ...(campaign ? { expectStatus: campaign.status } : {}),
         }),
       })
       if (!res.ok) {

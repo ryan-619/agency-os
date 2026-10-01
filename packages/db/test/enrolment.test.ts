@@ -167,6 +167,36 @@ describe('enrolling a campaign', () => {
 
   const outbound = () => db.select().from(schema.touches).where(eq(schema.touches.direction, 'out'))
 
+  /**
+   * `db`, with every draft INSERT handed to `before` first and the number of
+   * rows it returned recorded. `insertDraft` runs its INSERT on a
+   * transaction's handle, after the per-person lock (r4, review round 3,
+   * finding 10), so the handle is what is wrapped, and the lock's own SELECT
+   * is not counted. `before` gets that handle: on PGlite a write through the
+   * outer `db` would wait for the open transaction for ever.
+   */
+  const watchInserts = (before: (tx: AgencyDb, text: string) => Promise<void> = async () => {}) => {
+    const inserted: number[] = []
+    const wrap = (target: AgencyDb): AgencyDb =>
+      new Proxy(target, {
+        get(t, prop, receiver) {
+          if (prop === 'transaction') {
+            return (fn: (tx: AgencyDb) => Promise<unknown>) => t.transaction((tx) => fn(wrap(tx as unknown as AgencyDb)))
+          }
+          if (prop !== 'execute') return Reflect.get(t, prop, receiver)
+          return async (query: Parameters<AgencyDb['execute']>[0]) => {
+            const text = JSON.stringify(query)
+            const isInsert = text.includes('INSERT INTO touches')
+            if (isInsert) await before(t, text)
+            const res = await t.execute(query)
+            if (isInsert) inserted.push((res as unknown as { rows: unknown[] }).rows.length)
+            return res
+          }
+        },
+      })
+    return { db: wrap(db), inserted }
+  }
+
   it('writes one draft per contact, parked on a person, about the company', async () => {
     await scan()
     const a = await contact()
@@ -562,22 +592,12 @@ describe('enrolling a campaign', () => {
       [sentElsewhere]: { orgId, campaignId: other, contactId: sentElsewhere, companyId, channel: 'email', direction: 'out', status: 'sent', sentAt: FRESH_AT, providerId: 'p-9' },
       [clockOnly]: { orgId, campaignId: auto, contactId: clockOnly, companyId, channel: 'email', direction: 'out', status: 'refused', refusalCode: 'quiet_hours' },
     }
-    const inserted: number[] = []
-    const watched = new Proxy(db, {
-      get(target, prop, receiver) {
-        if (prop !== 'execute') return Reflect.get(target, prop, receiver)
-        return async (query: Parameters<AgencyDb['execute']>[0]) => {
-          const text = JSON.stringify(query)
-          const who = Object.keys(landing).find((id) => text.includes(id))
-          if (who) {
-            await target.insert(schema.touches).values(landing[who]!)
-            delete landing[who]
-          }
-          const res = await target.execute(query)
-          inserted.push((res as unknown as { rows: unknown[] }).rows.length)
-          return res
-        }
-      },
+    const { db: watched, inserted } = watchInserts(async (tx, text) => {
+      const who = Object.keys(landing).find((id) => text.includes(id))
+      if (who) {
+        await tx.insert(schema.touches).values(landing[who]!)
+        delete landing[who]
+      }
     })
     const r = ok(await enrolCampaign(watched, { orgId, campaignId: auto, actor: userId, now: NOW }))
     expect(Object.keys(landing)).toEqual([])
@@ -621,17 +641,7 @@ describe('enrolling a campaign', () => {
     await scan()
     await contact()
     await contact({ email: 'sam@rentman.io' })
-    const inserted: number[] = []
-    const watched = new Proxy(db, {
-      get(target, prop, receiver) {
-        if (prop !== 'execute') return Reflect.get(target, prop, receiver)
-        return async (query: Parameters<AgencyDb['execute']>[0]) => {
-          const res = await target.execute(query)
-          inserted.push((res as unknown as { rows: unknown[] }).rows.length)
-          return res
-        }
-      },
-    })
+    const { db: watched, inserted } = watchInserts()
     const race = () => enrolCampaign(watched, { orgId, campaignId, actor: userId, now: NOW })
     const [x, y] = await Promise.all([race(), race()])
     expect(ok(x!).queued.length + ok(y!).queued.length).toBe(2)

@@ -146,8 +146,8 @@ describe('against a real engine', () => {
         name: 'Renamed', channel: 'email' as const, icpProfileId: null, dailyCap: 10,
         quietStart: '22:00', quietEnd: '07:00', autoSend: true, status: 'active' as const,
       }
-      expect((await updateCampaign(db, orgId, row.id, input))!.name).toBe('Renamed')
-      expect(await updateCampaign(db, otherOrgId, row.id, input)).toBeNull()
+      expect(await updateCampaign(db, orgId, row.id, input)).toMatchObject({ ok: true, row: { name: 'Renamed' } })
+      expect(await updateCampaign(db, otherOrgId, row.id, input)).toEqual({ ok: false, reason: 'not_found' })
     })
 
     it('creates an SMS campaign through the input schema, with auto-send off', async () => {

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { assertCan, can } from '@agency/core'
-import { appendAudit, campaignInput, readCampaign, updateCampaign, type AgencyDb } from '@agency/db/queries'
+import { appendAudit, campaignEditInput, readCampaign, updateCampaign, type AgencyDb, type CampaignUpdate } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
 
@@ -16,6 +16,12 @@ import { getDb } from '@/lib/db'
  * cap, quiet hours and auto-send from the row on every dispatch, so nothing
  * here needs to restart anything — and nothing here can be used to slip a
  * message past a rule, because the rules are not here.
+ *
+ * Two saves are refused with a 409 sentence rather than written (review
+ * round 3, findings 2 and 13): one built on a status that changed since the
+ * form loaded it — the worker pauses a campaign whose addresses bounce, and
+ * a save that changed only the cap used to re-activate it — and a channel
+ * switch while messages written for the old channel are still waiting.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -45,7 +51,7 @@ export async function PATCH(
   } catch {
     return NextResponse.json({ error: 'invalid_json' }, { status: 400 })
   }
-  const parsed = campaignInput.safeParse(body)
+  const parsed = campaignEditInput.safeParse(body)
   if (!parsed.success) {
     const first = parsed.error.issues[0]
     return NextResponse.json(
@@ -69,17 +75,19 @@ export async function PATCH(
   // A caller who may not switch auto-send on writes with `current.autoSend`
   // in the predicate: if an owner turned it off between this caller's read
   // and their save, the UPDATE matches nothing rather than turning it back
-  // on. An owner is not gated, so nothing is checked for them.
+  // on. An owner is not gated, so nothing is checked for them. The status
+  // the FORM loaded goes in the predicate too, for everybody.
   const mayToggle = can(principal, 'campaigns:set_auto_send')
-  const updated = await updateCampaign(db, user.orgId, id, parsed.data, mayToggle ? null : current.autoSend)
-  if (!updated) {
-    const still = await readCampaign(db, user.orgId, id)
-    if (!still) return NextResponse.json({ error: 'No such campaign.' }, { status: 404 })
-    return NextResponse.json(
-      { error: 'Someone changed this campaign’s auto-send while you were editing. Reload and try again.' },
-      { status: 409 },
-    )
+  const { expectStatus, ...input } = parsed.data
+  const saved = await updateCampaign(db, user.orgId, id, input, {
+    autoSend: mayToggle ? null : current.autoSend,
+    status: expectStatus ?? null,
+  })
+  if (!saved.ok) {
+    if (saved.reason === 'not_found') return NextResponse.json({ error: 'No such campaign.' }, { status: 404 })
+    return NextResponse.json({ error: refusedSave(saved) }, { status: 409 })
   }
+  const updated = saved.row
 
   await appendAudit(db, {
     orgId: user.orgId,
@@ -101,4 +109,29 @@ export async function PATCH(
     },
   }).catch(() => {})
   return NextResponse.json({ id, autoSend: updated.autoSend, status: updated.status })
+}
+
+/** The 409's sentence: what changed or waits, and that nothing was saved. */
+function refusedSave(saved: Exclude<CampaignUpdate, { ok: true } | { reason: 'not_found' }>): string {
+  switch (saved.reason) {
+    case 'auto_send_changed':
+      return 'Someone changed this campaign’s auto-send while you were editing. Reload and try again; nothing was saved.'
+    case 'status_changed':
+      return (
+        `This campaign was set to ${saved.status} while you were editing` +
+        (saved.status === 'paused'
+          ? ' (the worker pauses a campaign whose addresses bounce, and this page says when it did)'
+          : '') +
+        '. Nothing was saved: reload to see it as it is now, then save again if it should change.'
+      )
+    case 'channel_has_live_messages':
+      return (
+        `${saved.live} ${saved.live === 1 ? 'message' : 'messages'} written for ${saved.channel === 'linkedin' ? 'LinkedIn' : saved.channel} ` +
+        `${saved.live === 1 ? 'is' : 'are'} still waiting in this campaign (awaiting approval, approved, queued or sending), so ` +
+        'its channel cannot change: each was written for that medium. It can change once none are waiting; to write on ' +
+        'the other channel now, create a new campaign for it. Nothing was saved.'
+      )
+    case 'changed':
+      return 'This campaign changed while you were editing. Reload and try again; nothing was saved.'
+  }
 }

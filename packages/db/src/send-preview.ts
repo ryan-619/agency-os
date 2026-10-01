@@ -5,7 +5,8 @@
  * contacts ledger, the check-send route, the `check_send` tool — reads the
  * answer from HERE, and here reads it from the sender's own fact-gatherer.
  * `previewSend` builds the SAME facts `dispatchTouch` builds, through
- * `sendFactsFor`, and hands them to the same `decideSend`. A preview that
+ * `sendFactsFor`, and hands them to the same `decideSend`, through the
+ * sender's own `decideGathered`. A preview that
  * gathered its own facts would be a second opinion about §2.1, and the one
  * thing a second opinion can do is disagree with the sender at the moment
  * somebody trusted it.
@@ -16,13 +17,13 @@
  */
 import { and, eq, or } from 'drizzle-orm'
 import {
-  decideSend, pauseReasonClass, suppressionKeysFor,
+  pauseReasonClass, suppressionKeysFor,
   type Channel, type PauseReasonClass, type SendDecision, type SuppressionKind,
 } from '@agency/core'
 import { TEMPLATE_CHANNELS, type TemplateCategory, type TemplateFacts } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
-import { sendFactsFor, type EvidenceAsOf, type MessageWords } from './outreach.js'
+import { channelMismatch, decideGathered, sendFactsFor, type EvidenceAsOf, type MessageWords } from './outreach.js'
 
 export interface SendPreviewInput {
   readonly orgId: string
@@ -39,6 +40,9 @@ export interface SendPreviewInput {
    * the microsecond, which a `Date` cannot carry. A `Date`: words written at
    * that instant and stored nowhere. Null: an answer to a reply, which
    * quotes no scan.
+   *
+   * A stored draft is also asked about on ITS OWN channel, as the sender
+   * sends it (r4); every other form takes the campaign's.
    */
   readonly writtenAt?: EvidenceAsOf
   /**
@@ -83,10 +87,18 @@ export interface SendPreviewFacts {
    */
   readonly pausedFor: PauseReasonClass | null
   /**
-   * Whether the scan the words could quote is past its re-verification
-   * deadline now (§2.2) — judged at `writtenAt`, from the scan's `ran_at`.
+   * Whether the words may not quote the scan behind them (§2.2): it is past
+   * its re-verification deadline now — judged at `writtenAt`, from the
+   * scan's `ran_at` — or a newer successful scan has superseded it.
    */
   readonly evidenceStale: boolean
+  /**
+   * Whether a newer SUCCESSFUL scan of the company has superseded the one
+   * behind the words (r4, review round 3, finding 4) — one of the two ways
+   * `evidenceStale` is true, for a screen to say "draft it again from the
+   * latest scan" rather than "re-scan".
+   */
+  readonly evidenceSuperseded: boolean
   readonly quietStart: string
   readonly quietEnd: string
   readonly sentToday: number
@@ -208,7 +220,14 @@ export async function previewSend(db: AgencyDb, input: SendPreviewInput): Promis
       }
     }
   }
-  const decision = decideSend(facts)
+  // r4: the sender's own wording of a stale-evidence refusal — aged, or
+  // superseded by a newer scan (`decideGathered`) — over the facts above,
+  // the assumed template included.
+  const decision = decideGathered({ ...gathered, facts })
+  // r4: a stored message whose campaign now sends on another channel — what
+  // the sender refuses it as, in its words (`channelMismatch`).
+  const mismatch = channelMismatch({ ...gathered, facts }, decision)
+  if (mismatch !== null) return { ok: false, reason: 'missing', message: mismatch }
   return {
     ok: true,
     decision,
@@ -226,6 +245,7 @@ export async function previewSend(db: AgencyDb, input: SendPreviewInput): Promis
       pausedReason,
       pausedFor: paused ? pauseReasonClass(pausedReason) : null,
       evidenceStale: facts.evidenceStale,
+      evidenceSuperseded: gathered.evidenceSuperseded,
       quietStart: facts.quietStart,
       quietEnd: facts.quietEnd,
       sentToday: facts.sentToday,
