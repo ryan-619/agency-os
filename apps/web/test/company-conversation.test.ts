@@ -34,6 +34,10 @@ describe('the Conversation panel', () => {
     expect(held).toBeGreaterThan(-1)
     expect(held).toBeLessThan(panel.indexOf('{t.body}'))
     expect(held).toBeLessThan(panel.indexOf('{t.subject}'))
-    expect(panel).toMatch(/shown in \/tasks when the rules allow/)
+    // In their place, a line saying where the words are and why.
+    expect(panel).toMatch(/linkedinHeldLine\(held, t\.status\)/)
+    const words = page.slice(page.indexOf('function linkedinHeldLine'), page.indexOf('export default'))
+    expect(words).toMatch(/shown in \/tasks when the rules allow/)
+    expect(words).not.toMatch(/t\.body|\.body\b/)
   })
 })

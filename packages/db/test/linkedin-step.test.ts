@@ -653,7 +653,7 @@ describe('the LinkedIn step', () => {
     it('never holds back an email, or anybody’s reply', async () => {
       const [mail] = await db
         .insert(schema.touches)
-        .values({ orgId, campaignId, contactId, companyId, channel: 'email', direction: 'out', status: 'approved', body: BODY })
+        .values({ orgId, campaignId, contactId, companyId, channel: 'email', direction: 'out', status: 'queued', body: BODY })
         .returning({ id: schema.touches.id })
       const [theirs] = await db
         .insert(schema.touches)
