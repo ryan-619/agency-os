@@ -10,7 +10,10 @@
  *     and whether a call is on record decides what it says about Phase 6;
  *   * each flag moves exactly the bullets tied to it, so a "cannot" is
  *     keyed on the fact it names;
- *   * the worker line has one shape per heartbeat status;
+ *   * the worker line has one shape per heartbeat status, and a RETIRED row
+ *     — a session somebody ran by hand and closed over a week ago, with no
+ *     worker configured — is called what the digest and /api/health call
+ *     it, never "silent";
  *   * a counter whose recorder is absent reads "none recorded" and names
  *     what is missing, never a clean zero;
  *   * the feed speaks the audit page's vocabulary, not a second one.
@@ -21,9 +24,12 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { HEARTBEAT_RETIRED_AFTER_DAYS, heartbeatReport, heartbeatReportedStatus } from '@agency/db/queries'
 import type { Deployment } from '../src/lib/deployment-facts'
+import { slackMessage, type NotificationEvent } from '../src/lib/slack-message'
 import {
   RESCAN_OVERDUE_HOURS,
+  RETIRED_WORKER_WORDS,
   complianceChecksFailing,
   dealsNeedingALook,
   elapsed,
@@ -35,6 +41,7 @@ import {
   quietFeedNote,
   splitLook,
   workerLine,
+  workerWord,
   type DashboardFacts,
   type FeedRow,
   type LookCounts,
@@ -54,11 +61,14 @@ const BARE: Deployment = {
   unsubscribe: false,
 }
 
-const NO_WORKER: WorkerStatusLike = { configured: false, status: 'not_configured', lastSeenAt: null, outreach: null, chat: null }
-const NEVER: WorkerStatusLike = { configured: true, status: 'never', lastSeenAt: null, outreach: null, chat: null }
+const NO_WORKER: WorkerStatusLike = {
+  configured: false, status: 'not_configured', retired: false, lastSeenAt: null, outreach: null, chat: null,
+}
+const NEVER: WorkerStatusLike = { configured: true, status: 'never', retired: false, lastSeenAt: null, outreach: null, chat: null }
 const LIVE: WorkerStatusLike = {
   configured: true,
   status: 'live',
+  retired: false,
   lastSeenAt: ago(120),
   outreach: 'send-and-receive',
   chat: 'enabled',
@@ -66,6 +76,12 @@ const LIVE: WorkerStatusLike = {
 const SILENT: WorkerStatusLike = { ...LIVE, status: 'silent', lastSeenAt: ago(3 * 3_600 + 5) }
 /** A worker on Fly writing to this database while this web app has no AGENT_URL. */
 const LIVE_ELSEWHERE: WorkerStatusLike = { ...LIVE, configured: false }
+/**
+ * `./tools/run-worker.sh` run once against this database nine days ago and
+ * closed, on a deployment with no worker configured: `heartbeatReport` keeps
+ * the status `silent` and sets `retired`.
+ */
+const RETIRED: WorkerStatusLike = { ...LIVE, configured: false, status: 'silent', retired: true, lastSeenAt: ago(9 * 86_400) }
 
 const FACTS: DashboardFacts = { now: NOW, lastRescanAt: null, callsOnRecord: 0 }
 
@@ -74,6 +90,7 @@ const SHAPES: readonly { name: string; d: Deployment; w: WorkerStatusLike }[] = 
   { name: 'worker configured, never reported', d: { ...BARE, worker: true }, w: NEVER },
   { name: 'worker live', d: { ...BARE, worker: true }, w: LIVE },
   { name: 'worker silent', d: { ...BARE, worker: true }, w: SILENT },
+  { name: 'worker retired', d: BARE, w: RETIRED },
   { name: 'worker live elsewhere', d: BARE, w: LIVE_ELSEWHERE },
   { name: 'worker live, outreach off', d: { ...BARE, worker: true }, w: { ...LIVE, outreach: 'disabled' } },
   { name: 'worker live, send-only', d: { ...BARE, worker: true }, w: { ...LIVE, outreach: 'send-only' } },
@@ -124,6 +141,10 @@ describe('honestyHeadline', () => {
     expect(honestyHeadline(BARE, NO_WORKER, FACTS).text).toContain('Nothing on this deployment is sending: no worker is connected.')
     expect(honestyHeadline({ ...BARE, worker: true }, NEVER, FACTS).text).toContain('no worker has ever reported in')
     expect(honestyHeadline({ ...BARE, worker: true }, SILENT, FACTS).text).toContain('the worker has gone quiet')
+    expect(honestyHeadline(BARE, RETIRED, FACTS).text).toContain(
+      'Nothing on this deployment is sending: the last worker to report in has retired.',
+    )
+    expect(honestyHeadline(BARE, RETIRED, FACTS).text).not.toMatch(/gone quiet|silent/i)
     expect(honestyHeadline({ ...BARE, worker: true }, { ...LIVE, outreach: 'disabled' }, FACTS).text).toContain(
       'the worker is running with outreach switched off',
     )
@@ -164,10 +185,11 @@ describe('honestyBullets', () => {
       expect(ids({ ...BARE, worker: true }, NEVER)[0]).toBe('worker-never')
       expect(ids({ ...BARE, worker: true }, SILENT)[0]).toBe('worker-silent')
       expect(ids({ ...BARE, worker: true }, LIVE)[0]).toBe('worker-live')
+      expect(ids(BARE, RETIRED)[0]).toBe('worker-retired')
     })
 
     it('never says a worker is running unless one reported in within the threshold', () => {
-      for (const w of [NO_WORKER, NEVER, SILENT]) {
+      for (const w of [NO_WORKER, NEVER, SILENT, RETIRED]) {
         for (const b of honestyBullets({ ...BARE, worker: true }, w, FACTS)) {
           expect(text(b)).not.toMatch(/A worker is running|Chat runs in it|reads the mailbox for replies/)
         }
@@ -176,6 +198,14 @@ describe('honestyBullets', () => {
 
     it('says how long a silent worker has been quiet', () => {
       expect(bullet({ ...BARE, worker: true }, SILENT, 'worker-silent').rest).toContain('Nothing has reported in for 3 hours.')
+    })
+
+    it('calls a retired worker retired, with the digest’s words, and never quiet or silent', () => {
+      const b = bullet(BARE, RETIRED, 'worker-retired')
+      expect(b.lead).toBe('The last worker to report in has retired.')
+      expect(b.rest).toContain(`It was last seen 9 days ago and ${RETIRED_WORKER_WORDS}.`)
+      expect(text(b)).not.toMatch(/gone quiet|silent/i)
+      expect(ids(BARE, RETIRED)).not.toContain('worker-silent')
     })
 
     it('says what a live worker said it is doing, and nothing it did not', () => {
@@ -347,6 +377,74 @@ describe('workerLine', () => {
     expect(l.at).toEqual(SILENT.lastSeenAt)
     expect(l.tail).toBe('3 hours without a heartbeat · approved messages wait and no mailbox is read until it is back')
   })
+
+  it('retired: last seen when (for the viewer’s zone), and why nothing sends — quiet, never "silent"', () => {
+    expect(workerLine(RETIRED, NOW)).toEqual({
+      tone: 'quiet',
+      lead: 'Worker retired — last seen',
+      at: RETIRED.lastSeenAt,
+      tail: RETIRED_WORKER_WORDS,
+    })
+  })
+})
+
+/**
+ * The grid: every status `heartbeatReport` can produce, retired included,
+ * built by the function the page's data comes from — so a row the digest
+ * calls retired cannot be one the dashboard calls silent.
+ */
+describe('the dashboard and the digest call the worker the same thing', () => {
+  const row = (secondsAgo: number) => ({
+    lastTickAt: ago(secondsAgo), outreach: 'send-and-receive', chat: 'enabled', detail: { intervalMs: 15_000 },
+  })
+  const DAY = 86_400
+  const ROWS = [
+    ['no row', null],
+    ['a fresh row', row(30)],
+    ['an hour-old row', row(3_600)],
+    ['a row just inside the retirement horizon', row(HEARTBEAT_RETIRED_AFTER_DAYS * DAY - 60)],
+    ['a row past the retirement horizon', row(HEARTBEAT_RETIRED_AFTER_DAYS * DAY + 60)],
+  ] as const
+  const GRID = ROWS.flatMap(([label, r]) =>
+    [true, false].map((configured) => [`${label}, worker ${configured ? '' : 'not '}configured`, r, configured] as const),
+  )
+
+  it.each(GRID)('%s', (_label, r, configured) => {
+    const report = heartbeatReport(r, configured, NOW)
+    const word = heartbeatReportedStatus(report)
+    expect(workerWord(report)).toBe(word)
+
+    const d = { ...BARE, worker: configured }
+    const line = workerLine(report, NOW)
+    const worker = honestyBullets(d, report, FACTS)[0]!
+    const said = `${line.lead} ${line.tail ?? ''} ${worker.lead} ${worker.rest} ${honestyHeadline(d, report, FACTS).text}`
+    expect(worker.id).toBe(
+      { not_configured: 'worker-none', never: 'worker-never', live: 'worker-live', silent: 'worker-silent', retired: 'worker-retired' }[word],
+    )
+    if (word === 'retired') {
+      expect(line.lead).toBe('Worker retired — last seen')
+      expect(said).not.toMatch(/silent|gone quiet/i)
+      expect(said).toContain(RETIRED_WORKER_WORDS)
+    }
+    if (word === 'silent') expect(line.lead).toBe('Worker silent since')
+  })
+
+  it('covers every word, retired included', () => {
+    const words = new Set(GRID.map(([, r, configured]) => heartbeatReportedStatus(heartbeatReport(r, configured, NOW))))
+    expect([...words].sort()).toEqual(['live', 'never', 'not_configured', 'retired', 'silent'])
+  })
+
+  it('says it in the digest’s own words', () => {
+    const digest: NotificationEvent = {
+      kind: 'digest', orgId: '00000000-0000-4000-8000-0000000000aa', pendingApprovals: 0, unhandledReplies: 0,
+      rottingDeals: 0, staleCompanies: 0, neverScanned: 0, dueTasks: 0, overdueTasks: 0, refusals24h: [],
+      optOutsNotRecorded24h: 0, spend24hUsd: '0.00', worker: 'retired', workerLastSeenAt: RETIRED.lastSeenAt!.toISOString(),
+      campaignPauses: { found: 0, notices: 0 }, topRotting: [],
+    }
+    expect(slackMessage(digest, 'https://agency.example').text).toContain(
+      `Worker: retired — last seen 2026-09-21; ${RETIRED_WORKER_WORDS}`,
+    )
+  })
 })
 
 describe('elapsed', () => {
@@ -412,6 +510,9 @@ describe('needsALook', () => {
       'None recorded: no worker is connected and no inbound webhook is configured, so no reply can arrive here.',
     )
     expect(item(ZERO, { ...BARE, worker: true }, SILENT, 'replies').detail).toMatch(/^None recorded: the worker has gone quiet/)
+    expect(item(ZERO, BARE, RETIRED, 'replies').detail).toBe(
+      'None recorded: the last worker to report in has retired and no inbound webhook is configured, so no reply can arrive here.',
+    )
     expect(item(ZERO, { ...BARE, worker: true }, { ...LIVE, outreach: 'send-only' }, 'replies').detail).toMatch(
       /^None recorded: the worker is not reading a mailbox/,
     )
@@ -648,6 +749,9 @@ describe('quietFeedNote', () => {
     )
     expect(quietFeedNote({ ...BARE, worker: true }, SILENT)).toBe(
       'The worker has gone quiet, so no sends or replies appear here.',
+    )
+    expect(quietFeedNote(BARE, RETIRED)).toBe(
+      'The last worker to report in has retired, so no sends or replies appear here.',
     )
   })
 
