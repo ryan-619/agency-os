@@ -1059,6 +1059,11 @@ export async function approveDraft(
  * happened and enrolment still skipped them as already contacted, for good.
  * Found by review. So it is recorded as `stale_evidence`, a refusal a re-scan
  * resolves, and the audit row names the code.
+ *
+ * Denying an ANSWER to a reply also puts back the pause the reply caused,
+ * when drafting that answer is what lifted it (`repauseForDeniedAnswer`,
+ * review round 3): the reply is unanswered again, and a person whose reply
+ * nobody answered is not somebody every campaign may write to.
  */
 export async function denyDraft(
   db: AgencyDb,
