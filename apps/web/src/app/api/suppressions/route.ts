@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { assertCan } from '@agency/core'
-import { addSuppression, appendAudit, type AgencyDb } from '@agency/db/queries'
+import { addSuppression, appendAudit, auditSuppressionAdded, type AgencyDb } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
 
@@ -15,6 +15,14 @@ import { getDb } from '@/lib/db'
  * A value that cannot be normalised is REFUSED with a message that says what
  * the consequence would be. The alternative, storing it as typed, is an
  * opt-out that never matches: worse than the error.
+ *
+ * The row says it was added here — `source: 'manual'` (0018) — because
+ * "how did this person come to be on the list?" is a question an auditor
+ * asks, and the answer is a column, not a guess from the reason.
+ *
+ * The audit entry comes from `auditSuppressionAdded`. It used to be built
+ * inline with the address as `subjectId`, a uuid column, so every insert was
+ * refused and swallowed: no suppression added here was ever on the record.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -44,16 +52,14 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
 
   const db = getDb() as unknown as AgencyDb
-  const result = await addSuppression(db, { orgId: user.orgId, kind, value, reason })
+  const result = await addSuppression(db, { orgId: user.orgId, kind, value, reason, source: 'manual' })
   if (!result.ok) return NextResponse.json({ error: result.message }, { status: 400 })
 
-  await appendAudit(db, {
-    orgId: user.orgId,
-    actor: user.id,
-    action: result.alreadyPresent ? 'suppression.already_present' : 'suppression.added',
-    subjectType: 'suppression',
-    subjectId: result.value,
-    detail: { kind, reason: reason.trim().slice(0, 200) },
-  }).catch(() => {})
+  await appendAudit(
+    db,
+    auditSuppressionAdded({
+      orgId: user.orgId, actor: user.id, alreadyPresent: result.alreadyPresent, kind, value: result.value, reason,
+    }),
+  ).catch(() => {})
   return NextResponse.json(result, { status: result.alreadyPresent ? 200 : 201 })
 }

@@ -1,12 +1,20 @@
 # Agency OS — the whole system on one host (PROMPT.md §3).
 #
-#   cp .env.example .env      # then set AUTH_SECRET
+#   cp .env.example .env      # then set AUTH_SECRET and AGENT_INTERNAL_TOKEN
 #   docker compose up --build
 #   docker compose run --rm migrate     # apply migrations
 #   docker compose run --rm seed        # create the org, owner and ICP
 #
 # Lead data stays on the agency's own hardware. Nothing here talks to a managed
 # service.
+#
+# Compose reads .env ONLY to fill the ${…} below. A container receives exactly
+# the variables its `environment:` block names, whatever .env holds — so every
+# optional variable a service reads is named here as `NAME: ${NAME:-}`, and
+# each app reads the resulting blank as unset (the feature behind it stays
+# off, as it would with the line absent). A number the app does not read
+# that way is given its schema's default here instead: zod's coerce reads a
+# blank as 0.
 
 name: agency-os
 
@@ -80,6 +88,33 @@ services:
       # The port is the worker's API (AGENT_PORT + 1), not its health port.
       AGENT_URL: ${AGENT_URL:-http://agent:3002}
       AGENT_INTERNAL_TOKEN: "${AGENT_INTERNAL_TOKEN:?required - generate one with openssl rand -base64 32}"
+      # Optional, all of them, and every feature behind one fails closed
+      # without it: set them in .env when the feature is configured.
+      #
+      # The daily rescan and the Slack digest (with its worker-silent alert)
+      # are the two /api/cron/* routes. On Vercel the platform calls them;
+      # under compose NOTHING does — the worker neither rescans nor posts a
+      # digest — so set CRON_SECRET and drive them from the host's own
+      # scheduler with the bearer, as CLAUDE.md §3 shows:
+      #   17 3 * * *  curl -fsS -H "Authorization: Bearer $CRON_SECRET" http://localhost:3000/api/cron/rescan
+      #   43 6 * * *  curl -fsS -H "Authorization: Bearer $CRON_SECRET" http://localhost:3000/api/cron/digest
+      # (VERCEL_ENV is unset here, which the routes allow; never set it by hand.)
+      CRON_SECRET: ${CRON_SECRET:-}
+      RESCAN_BATCH_SIZE: ${RESCAN_BATCH_SIZE:-6}
+      # Notifications. The URL is the credential.
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      # One-click unsubscribe: verifies the click. The SAME value as the agent's.
+      UNSUBSCRIBE_SECRET: ${UNSUBSCRIBE_SECRET:-}
+      # Replies through Resend's webhook (both), or a plain JSON webhook.
+      RESEND_WEBHOOK_SECRET: ${RESEND_WEBHOOK_SECRET:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      INBOUND_WEBHOOK_SECRET: ${INBOUND_WEBHOOK_SECRET:-}
+      # To store connector credentials from the UI. The SAME value as the agent's.
+      SECRETS_KEY: ${SECRETS_KEY:-}
+      # DoveSoft's delivery reports and inbound texts (/api/inbound/dovesoft/*),
+      # and the org its account belongs to. Sending SMS is the worker's.
+      DOVESOFT_WEBHOOK_SECRET: ${DOVESOFT_WEBHOOK_SECRET:-}
+      DOVESOFT_ORG_ID: ${DOVESOFT_ORG_ID:-}
     ports:
       - '3000:3000'
 
@@ -110,6 +145,11 @@ services:
       # worker still boots and still serves health; chat reports itself
       # disabled and the rest of the product is unaffected.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Only for an ORGANISATION-scoped key; a workspace-scoped one needs none.
+      ANTHROPIC_WORKSPACE_ID: ${ANTHROPIC_WORKSPACE_ID:-}
+      # Blank is the SDK's default model; .env.example names Haiku, at a
+      # fraction of the cost (CLAUDE.md §8).
+      AGENT_MODEL: ${AGENT_MODEL:-}
       # §2.3 — third-party credentials are encrypted at rest with this key.
       # Optional until a connector is configured (Phase 3).
       SECRETS_KEY: ${SECRETS_KEY:-}
@@ -152,6 +192,44 @@ services:
       # Bound the blast radius of a subagent fan-out (§7).
       CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: ${CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS:-3}
       CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: ${CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH:-2}
+      # One-click unsubscribe. Without BOTH the worker adds no List-Unsubscribe
+      # header and says so once at boot. The secret is the SAME value as the
+      # web app's. The URL is the web app's origin a recipient's mail client
+      # can reach, e.g. https://agency.example — NOT http://web:3000 or
+      # localhost: in production the worker refuses to boot on anything but
+      # https on a public host, because RFC 8058 one-click needs one.
+      UNSUBSCRIBE_SECRET: ${UNSUBSCRIBE_SECRET:-}
+      WEB_PUBLIC_URL: ${WEB_PUBLIC_URL:-}
+      # A campaign whose bounce rate passes this pauses itself. Blank is 5.
+      OUTREACH_BOUNCE_PAUSE_PCT: ${OUTREACH_BOUNCE_PAUSE_PCT:-}
+      # The alarm for a reply read over IMAP that said stop and whose
+      # suppression could not be written. The SAME value as the web app's.
+      # The URL is the credential.
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      # §5.5's reply triage. Blank is the deterministic kind, which is complete.
+      # A remote provider also needs LLM_ALLOW_REMOTE_LEAD_DATA: a reply is a
+      # named person's words.
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+      OLLAMA_IS_LOCAL: ${OLLAMA_IS_LOCAL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LLM_ALLOW_REMOTE_LEAD_DATA: ${LLM_ALLOW_REMOTE_LEAD_DATA:-}
+      # SMS through DoveSoft (0019). On only with BOTH the key and the DLT
+      # entity id; either blank means no SMS provider, said once at boot by
+      # name, and approved texts wait in the queue. Every text is still a
+      # registered DLT template a person approved, to somebody who opted in.
+      # The key is a credential: it is sent as a header and logged nowhere.
+      # Blank base URL is DoveSoft's own API; in production it must be https
+      # on a public host, because the key is sent to it.
+      DOVESOFT_API_KEY: ${DOVESOFT_API_KEY:-}
+      DOVESOFT_ENTITY_ID: ${DOVESOFT_ENTITY_ID:-}
+      DOVESOFT_BASE_URL: ${DOVESOFT_BASE_URL:-}
+      # Deliberately NOT passed: AGENT_USE_LOCAL_LOGIN (development only — the
+      # worker refuses it under NODE_ENV=production), CLAUDE_CODE_PATH (a path
+      # on a developer's machine, meaningless inside the image), and
+      # APPROVAL_POLL_MS / APPROVAL_SWEEP_MS (tuning knobs; the schema's
+      # defaults apply).
     volumes:
       # Put a skill at ./skills/.claude/skills/<name>/SKILL.md. The directory
       # may hold NOTHING else under .claude/ — see AGENT_SKILLS_DIR above.
@@ -197,11 +275,32 @@ services:
       VOICE_ORG_ID: ${VOICE_ORG_ID:-}
       TASKROUTER_WORKFLOW_SID: ${TASKROUTER_WORKFLOW_SID:-}
       VOICE_HANDOFF_NUMBER: ${VOICE_HANDOFF_NUMBER:-}
+      # The team member a handoff is recorded against (calls.handoff_to_user_id).
+      VOICE_HANDOFF_USER_EMAIL: ${VOICE_HANDOFF_USER_EMAIL:-}
       VOICE_LANGUAGE: ${VOICE_LANGUAGE:-en-US}
       VOICE_TTS_PROVIDER: ${VOICE_TTS_PROVIDER:-}
       VOICE_TTS_VOICE: ${VOICE_TTS_VOICE:-}
       VOICE_MAX_CALL_SECONDS: ${VOICE_MAX_CALL_SECONDS:-900}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # §5.5's call summary. Blank is the deterministic extractive summary,
+      # which every call gets anyway. The SAME names the agent's reply triage
+      # reads, so one .env line configures both. A remote provider also needs
+      # LLM_ALLOW_REMOTE_LEAD_DATA: a call transcript is a named person's
+      # words. Blank OLLAMA_IS_LOCAL is "local" and blank
+      # LLM_ALLOW_REMOTE_LEAD_DATA is "no" — the service reads a blank as
+      # unset. Note OLLAMA_BASE_URL's default is this container's own
+      # loopback; point it at the Ollama host.
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+      OLLAMA_IS_LOCAL: ${OLLAMA_IS_LOCAL:-}
+      LLM_ALLOW_REMOTE_LEAD_DATA: ${LLM_ALLOW_REMOTE_LEAD_DATA:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Read only for LLM_PROVIDER=anthropic, as the summary model's key.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Deliberately NOT passed: VOICE_MODEL. The schema declares it and
+      # nothing reads it — the scripted policy is the whole conversation —
+      # so a value set here would change nothing.
     ports:
       - '127.0.0.1:3003:3003'
 

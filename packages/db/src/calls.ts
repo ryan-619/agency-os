@@ -253,6 +253,7 @@ export async function recordOptOut(
       kind: 'phone',
       value: args.phone,
       reason: 'asked to be removed during a call',
+      source: 'voice',
     })
   } catch (err) {
     added = {

@@ -11,6 +11,7 @@ import { getDb } from '@/lib/db'
  * about the org this page reveals, and a slug that is not live is a 404.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export default async function BookingPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params

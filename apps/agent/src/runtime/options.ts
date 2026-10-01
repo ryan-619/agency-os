@@ -23,7 +23,7 @@
  * the `managedSettings` policy tier below, and the `PreToolUse` hook that
  * forces a prompt for anything above low risk.
  */
-import type { Options } from '@anthropic-ai/claude-agent-sdk'
+import type { McpSdkServerConfigWithInstance, Options } from '@anthropic-ai/claude-agent-sdk'
 
 /**
  * Every option key this application is allowed to set.
@@ -79,7 +79,16 @@ export const FORBIDDEN_TOOLS: readonly string[] = [
 
 export interface BuildOptionsInput {
   readonly canUseTool: Options['canUseTool']
-  readonly mcpServers: NonNullable<Options['mcpServers']>
+  /**
+   * IN-PROCESS servers only, and the type says so. The SDK writes every
+   * server in `mcpServers` that is not in-process onto the CLI's argv as
+   * `--mcp-config <json>` — a connector's decrypted header or stdio
+   * credential included, readable by anyone who can list processes on the
+   * host. Connectors go over the control channel instead
+   * (`runtime/open-query.ts`); an in-process server's name is all the CLI
+   * is told about it, in the `initialize` request on stdin.
+   */
+  readonly mcpServers: Readonly<Record<string, McpSdkServerConfigWithInstance>>
   /**
    * The subagents from `agent_defs` (§7).
    *
@@ -130,9 +139,12 @@ export function buildQueryOptions(input: BuildOptionsInput): Options {
     // answer — what IS in the default tool set — by making it irrelevant.
     tools: [],
     disallowedTools: [...FORBIDDEN_TOOLS],
-    mcpServers: input.mcpServers,
-    // Only servers declared here. Without it, an `.mcp.json` on disk would add
-    // servers nobody registered in the connectors table.
+    mcpServers: { ...input.mcpServers },
+    // Only servers this process names — here, or handed over the control
+    // channel. Without it, an `.mcp.json` on disk would add servers nobody
+    // registered in the connectors table. (It does not refuse the hand-over:
+    // measured against the shipped CLI, `setMcpServers` connects a stdio
+    // server under `--strict-mcp-config`.)
     strictMcpConfig: true,
     // §7's subagents. Note what is NOT done alongside this: §7 says to include
     // "Agent" in allowedTools "so delegation does not stall on approval". That
@@ -226,7 +238,7 @@ export function buildQueryOptions(input: BuildOptionsInput): Options {
  * out of the OS keychain — this process never reads it, never holds it, and
  * never puts it in an environment. It exists so Phase 2 and Phase 3's
  * Definitions of Done can be proved on a machine with no API key, and
- * `index.ts` REFUSES TO BOOT with it when NODE_ENV is production: a personal
+ * `loadEnv` REFUSES TO BOOT with it when NODE_ENV is production: a personal
  * credential standing behind a shared service is what §2.3 is about.
  */
 export type AgentCredential =
@@ -327,21 +339,36 @@ export function systemPrompt(orgName: string, icpLabel: string | null): string {
     icpLabel ? "team's own weighting rather than your own intuition." : '',
     '',
     'WHAT "THE PIPELINE" MEANS HERE',
-    'The pipeline is the companies already in the CRM. search_companies reads it. Deal stages and a kanban',
-    'board do not exist yet, so if someone asks about deals, say that and offer the company list instead.',
+    'Companies live in the CRM: search_companies lists them, and search_crm finds a company, person, deal or',
+    'meeting from a name or a phrase. A company gets a deal the first time something happens to it, and',
+    'the deal moves through stages from new to won or lost. A company with no deal is one nobody has worked.',
+    'get_pipeline reads every open deal with its stage and next action; update_deal moves one or sets its',
+    'next action; book_meeting records a meeting and moves the deal to the meeting stage. All three change',
+    'the CRM only — book_meeting sends no invitation, and nothing you do to a deal reaches the prospect.',
     '',
     'EVIDENCE — THE RULE THAT MATTERS MOST',
     'Never state a security finding you have not read from a tool result. If a scan could not observe',
     'something, it is absent from what you are given, and absence means UNKNOWN, not "they are fine" and not',
     '"they are missing it". Findings carry the date they were observed; anything marked stale must be',
-    're-verified with score_company before you repeat it to anyone. Everything the scanner sees is on the',
-    "company's own public pages — describe it as a review from the outside, never as a security test, and",
-    'never imply you probed anything.',
+    're-verified with score_company before you repeat it to anyone. Run get_evidence_changes before',
+    'repeating an old finding, because the company may have fixed it since; run get_stale_companies before',
+    "quoting anything. Everything the scanner sees is on the company's own public pages — describe it as a",
+    'review from the outside, never as a security test, and never imply you probed anything.',
     '',
     'ACTIONS THAT LEAVE THE BUILDING',
-    'Cold outreach is email and LinkedIn only. You cannot send anything: queue_touch writes a draft that a',
-    'person has to read and approve, and a human is asked before it is even written. If someone denies a',
-    'request, report that plainly and do not try a different route to the same thing.',
+    'Cold outreach is email and LinkedIn only. Before drafting for a person, run check_send and get_consent —',
+    'the rule, not your guess. check_send runs the real send rules and queues nothing, and a yes from it is',
+    'not an approval; if it says no, report why and do not draft around it. You cannot send anything:',
+    'queue_touch writes a draft that a person has to read and approve, and a human is asked before it is',
+    'even written. If someone denies a request, report that plainly and do not try a different route to the',
+    'same thing.',
+    '',
+    'REPLIES, NOTES AND TASKS',
+    "get_replies reads the inbox. With classify_reply you may set a reply's kind or mark it handled; you may",
+    "never mark an opt-out — that is decided from the person's own words before any model reads them.",
+    'add_note, create_task and list_tasks keep the team\'s own records, and none of them sends anything.',
+    'A note is your words, never evidence: do not quote one as a finding, yours or anyone else\'s.',
+    'A note you add is filed under the name of the person you are helping, and the audit log records that you wrote it, so write only what they would put their name to.',
     '',
     'HOW TO ANSWER',
     'Be concise and concrete. Prefer a short list of companies with their scores over a paragraph about them.',

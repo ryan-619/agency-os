@@ -26,7 +26,7 @@ import { eq } from 'drizzle-orm'
 import { request } from 'node:http'
 import { createServer } from 'node:net'
 import { WebSocket } from 'ws'
-import { schema, type AgencyDb } from '@agency/db'
+import { complianceSuppressionsBySource, schema, type AgencyDb } from '@agency/db'
 import { fakeProvider } from '@agency/llm'
 import type { LlmProvider } from '@agency/core'
 import { migratedDb,type TestDb } from '../../../packages/db/test/helpers.js'
@@ -432,6 +432,14 @@ describe('the voice service, end to end', () => {
       expect(res.status).toBe(200)
       const [sup] = await db.select().from(schema.suppressions)
       expect(sup).toMatchObject({ kind: 'phone', value: THEIR })
+      // 0018's column names the writer. Stored NULL, /compliance counted a
+      // text received today as "unrecorded: written before 0018". The voice
+      // service records the opt-outs its number receives, spoken or texted,
+      // under `voice` — the one value SUPPRESSION_SOURCES gives it.
+      expect(sup!.source).toBe('voice')
+      const counted = await complianceSuppressionsBySource(db, orgId, null)
+      expect(counted.bySource.find((b) => b.source === 'voice')?.n).toBe(1)
+      expect(counted.bySource.find((b) => b.source === 'unrecorded')?.n).toBe(0)
     })
 
     it('leaves any other text for a human and answers nothing', async () => {

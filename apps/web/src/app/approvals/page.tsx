@@ -1,14 +1,19 @@
 import { redirect } from 'next/navigation'
-import { can, parseIcpDefinition } from '@agency/core'
-import { and, eq, inArray } from 'drizzle-orm'
+import { can, isStale, parseIcpDefinition, staleAfterDaysOf, type IcpDefinition } from '@agency/core'
+import { and, desc, eq, sql } from 'drizzle-orm'
 import {
-  listCampaigns, listContactsForCompany, pendingApprovals, pendingDrafts, schema, type AgencyDb,
+  evidenceAsOfFor, listCampaigns, listContactsForCompany, pendingApprovals, pendingDrafts, previewSend, quotableFindings,
+  readContact, schema, templatesList, type AgencyDb, type StoredWords,
 } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { getDb } from '@/lib/db'
-import { deployment } from '@/lib/deployment'
+import { deployment, nothingWillSendNote } from '@/lib/deployment'
 import { icpForOrg } from '@/lib/queries'
+import {
+  addressedByOf, campaignToCheck, decisionView, draftEvidenceFrom, evidenceLine, smsCandidates, uncheckedDecision,
+  type CandidateDecision, type DraftEvidence, type DraftTemplate, type EvidenceScan,
+} from '@/lib/approval-view'
 import { ApprovalQueue } from '@/components/chat/queue'
 import { DraftQueue, type DraftView } from '@/components/outreach/drafts'
 
@@ -24,9 +29,58 @@ import { DraftQueue, type DraftView } from '@/components/outreach/drafts'
  * itself. It deliberately sends no mail: Phase 2 ships no send path, §8.4 says
  * there must be exactly one, and adding a second here — to notify about the
  * first — would be the joke writing itself.
+ *
+ * A draft card shows the same facts the sender reads, from the same function
+ * (`previewSend`), and the evidence the draft may quote with its date. It
+ * used to hand-roll "reachable" from the contact row — address, pause,
+ * declined, zone — which is a second opinion about §2.1 that could only ever
+ * disagree with the sender, and never knew about the suppression list at
+ * all. Nothing here decides: the display is read-only and the check stays in
+ * the send path, which runs again at the moment of sending.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 export const revalidate = 0
+
+/**
+ * How many (person, campaign) previews one page load runs. Each is a handful
+ * of indexed reads, and on Vercel the pool is ONE connection, so they queue.
+ * The people a row came addressed to are previewed first; past the limit a
+ * candidate says it was not checked here, which is true — the worker checks
+ * every rule at sending regardless.
+ */
+const PREVIEW_LIMIT = 80
+const PREVIEW_CONCURRENCY = 4
+
+/** Run `fn` over `items`, at most `limit` at a time, keeping their order. */
+async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length)
+  let next = 0
+  const lanes = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++
+      out[i] = await fn(items[i]!)
+    }
+  })
+  await Promise.all(lanes)
+  return out
+}
+
+/** The address a channel would use — `recipientFor` in the send path, restated for a label. */
+function addressFor(channel: string, c: { email: string | null; phone: string | null; linkedinUrl: string | null }) {
+  switch (channel) {
+    case 'email':
+      return c.email
+    case 'linkedin':
+      return c.linkedinUrl
+    case 'sms':
+    case 'voice':
+    case 'whatsapp':
+      return c.phone
+    default:
+      return null
+  }
+}
 
 export default async function ApprovalsPage() {
   const session = await auth()
@@ -34,17 +88,43 @@ export default async function ApprovalsPage() {
   const user = session.user
 
   const db = getDb() as unknown as AgencyDb
-  const [rows, drafts, campaigns] = await Promise.all([
+  const now = new Date()
+  const [rows, drafts, campaigns, icpRow, templates] = await Promise.all([
     pendingApprovals(db, user.orgId),
     pendingDrafts(db, user.orgId),
     listCampaigns(db, user.orgId),
+    icpForOrg(user.orgId),
+    templatesList(db, user.orgId),
   ])
+  // 0019: the registration an SMS draft names, by id — its ids for the card, never a second copy of its body.
+  const templateById = new Map<string, DraftTemplate>(
+    templates.map((t) => [t.id, { externalId: t.externalId, senderId: t.senderId, category: t.category, active: t.active }]),
+  )
+
+  let icp: IcpDefinition | null = null
+  try {
+    icp = icpRow ? parseIcpDefinition(icpRow.definition) : null
+  } catch {
+    icp = null
+  }
+  // `isStale` throws on a non-positive threshold, and one bad ICP value must
+  // not take the approval queue down with it. The default is §2.2's own 14.
+  const staleAfter = staleAfterDaysOf(icp)
+
+  const campaignChoices = campaigns.map((c) => ({
+    id: c.id,
+    name: c.name,
+    channel: c.channel,
+    autoSend: c.autoSend,
+    status: c.status,
+  }))
 
   /**
-   * Who each draft could go to: the contacts at its company, with the ones the
-   * send path would refuse anyway marked as such and why. The reason is shown
-   * rather than the person silently omitted — "not offered: Priya (no
-   * timezone)" is something a person can fix; an empty list is not.
+   * Who each draft could go to: everyone at its company, and the person the
+   * row came addressed to if they are not (an inbox answer to somebody with
+   * no company). Nobody is silently omitted — a person the sender would
+   * refuse is listed with the refusal, because "on the suppression list" is
+   * something to know and an empty list is not.
    */
   const companyIds = [...new Set(drafts.map((d) => d.company?.id).filter((id): id is string => Boolean(id)))]
   const contactsByCompany = new Map(
@@ -52,51 +132,221 @@ export default async function ApprovalsPage() {
       companyIds.map(async (id) => [id, await listContactsForCompany(db, user.orgId, id)] as const),
     ),
   )
-  // The send path falls back to the company's zone when the contact has none
-  // (0010), so the page must too — or it refuses to offer people the worker
-  // would happily send to. Found by review.
-  const companyZones = new Map(
-    (
-      await db
-        .select({ id: schema.companies.id, timeZone: schema.companies.timeZone })
-        .from(schema.companies)
-        .where(and(eq(schema.companies.orgId, user.orgId), inArray(schema.companies.id, companyIds.length ? companyIds : ['00000000-0000-4000-8000-000000000000'])))
-    ).map((c) => [c.id, c.timeZone] as const),
+  const strayIds = [
+    ...new Set(
+      drafts
+        .filter((d) => {
+          const own = d.touch.contactId
+          if (!own) return false
+          const people = d.company ? contactsByCompany.get(d.company.id) ?? [] : []
+          return !people.some((p) => p.id === own)
+        })
+        .map((d) => d.touch.contactId as string),
+    ),
+  ]
+  const strays = new Map(
+    (await Promise.all(strayIds.map((id) => readContact(db, user.orgId, id)))).flatMap((c) => (c ? [[c.id, c] as const] : [])),
   )
-  const draftViews: DraftView[] = drafts.map((d) => ({
-    id: d.touch.id,
-    channel: d.touch.channel,
-    subject: d.touch.subject,
-    body: d.touch.body,
-    createdAt: d.touch.createdAt.toISOString(),
-    company: d.company,
-    candidates: (d.company ? contactsByCompany.get(d.company.id) ?? [] : []).map((c) => {
-      const name = [c.firstName, c.lastName].filter(Boolean).join(' ') || c.email || 'unnamed'
-      const address = d.touch.channel === 'linkedin' ? c.linkedinUrl : c.email
-      const declined = c.consents.find((k) => k.channel === d.touch.channel && !k.granted)
-      const zone = c.timeZone ?? (d.company ? companyZones.get(d.company.id) ?? null : null)
-      const why = !address
-        ? `no ${d.touch.channel === 'linkedin' ? 'LinkedIn profile' : 'email address'}`
-        : c.pausedAt
-          ? `paused — ${c.pausedReason ?? 'by a person'}`
-          : declined
-            ? 'declined this channel'
-            : !zone
-              ? 'no timezone on them or their company, so quiet hours cannot be checked'
-              : null
-      return { id: c.id, label: address ? `${name} <${address}>` : name, reachable: why === null, why }
-    }),
-  }))
 
-  const icpRow = await icpForOrg(user.orgId)
-  let orgLabel = 'Agency'
-  if (icpRow) {
-    try {
-      orgLabel = parseIcpDefinition(icpRow.definition).label
-    } catch {
-      orgLabel = 'Agency'
+  const planned = drafts.map((d) => {
+    const people = d.company ? contactsByCompany.get(d.company.id) ?? [] : []
+    const own = d.touch.contactId ? strays.get(d.touch.contactId) : undefined
+    return {
+      d,
+      people: smsCandidates(d.touch.channel, d.touch.contactId, own ? [...people, own] : people),
+      checked: campaignToCheck({ channel: d.touch.channel, campaignId: d.touch.campaignId }, campaignChoices),
     }
+  })
+
+  /**
+   * The previews, one per distinct (person, campaign, stored words): the
+   * words are part of the question since stale evidence is a rule (§2.2) —
+   * the sender judges a draft's words by the scan current when they were
+   * WRITTEN, so a preview "as if written now" would call fresh a draft the
+   * worker will refuse. The words are named by their row (`evidenceAsOfFor`),
+   * whose stored `created_at` the sender compares to the microsecond; two
+   * drafts in one millisecond are not one moment. An answer to a reply
+   * quotes no scan, so every answer to a person shares one preview. The
+   * preselected people go first, so the limit never costs the card the one
+   * person it was addressed to.
+   */
+  const key = (contactId: string, campaignId: string, writtenAt: StoredWords | null) =>
+    `${contactId}:${campaignId}:${writtenAt ? writtenAt.touchId : 'answer'}`
+  const wanted: { contactId: string; campaignId: string; writtenAt: StoredWords | null }[] = []
+  const seen = new Set<string>()
+  const want = (contactId: string, campaignId: string, writtenAt: StoredWords | null) => {
+    const k = key(contactId, campaignId, writtenAt)
+    if (seen.has(k)) return
+    seen.add(k)
+    wanted.push({ contactId, campaignId, writtenAt })
   }
+  for (const p of planned) {
+    if (p.checked && p.d.touch.contactId) want(p.d.touch.contactId, p.checked.id, evidenceAsOfFor(p.d.touch))
+  }
+  for (const p of planned) if (p.checked) for (const c of p.people) want(c.id, p.checked.id, evidenceAsOfFor(p.d.touch))
+
+  const previewed = await mapLimit(wanted.slice(0, PREVIEW_LIMIT), PREVIEW_CONCURRENCY, async (w) => {
+    const k = key(w.contactId, w.campaignId, w.writtenAt)
+    try {
+      const preview = await previewSend(db, {
+        orgId: user.orgId, contactId: w.contactId, campaignId: w.campaignId, now, writtenAt: w.writtenAt,
+      })
+      return [k, preview.ok ? decisionView(preview.decision) : uncheckedDecision(preview.message)] as const
+    } catch (err) {
+      // Named, never the driver's message (it can carry the DSN — §2.3).
+      const name = err instanceof Error ? err.name : 'UnknownError'
+      return [k, uncheckedDecision(`The check did not run (${name}).`)] as const
+    }
+  })
+  const decisions = new Map<string, CandidateDecision>(previewed)
+  const notChecked = uncheckedDecision(
+    `Not checked on this page: more people are waiting than one page load previews (${PREVIEW_LIMIT}). ` +
+      'The worker checks every rule at sending regardless.',
+  )
+
+  /**
+   * The evidence behind each draft, judged as the sender judges its words
+   * (`evidenceAsOfFor`): the latest successful scan at or before the draft
+   * was WRITTEN, aged at now — or, for an answer to a reply, no scan at all.
+   * It used to be each company's LATEST scan for every card, so after a
+   * re-scan the panel listed the new scan's lines under words written from
+   * the old one, and an answer about a stale company was told "the send path
+   * refuses" what the sender never judges by scan age. Found by review.
+   *
+   * The lines are `quotableFindings` — the draft generator's own filter:
+   * observed, a gap, scored, from the latest SUCCESSFUL scan, fresh by
+   * `isStale` on its `ran_at` — so they are shown only when that latest scan
+   * is the one the words were written from (`draftEvidenceFrom`), and a line
+   * shown is a line a draft may say.
+   */
+  const latestByCompany = new Map<string, { readonly scan: EvidenceScan | null; readonly lines: readonly string[] }>(
+    await Promise.all(
+      companyIds.map(async (companyId) => {
+        const latest = await db
+          .select({ id: schema.scans.id, ranAt: schema.scans.ranAt })
+          .from(schema.scans)
+          .where(and(eq(schema.scans.orgId, user.orgId), eq(schema.scans.companyId, companyId), eq(schema.scans.ok, true)))
+          .orderBy(desc(schema.scans.ranAt))
+          .limit(1)
+        const scan = latest[0]
+        if (!scan) return [companyId, { scan: null, lines: [] }] as const
+        if (isStale(scan.ranAt, staleAfter, now)) {
+          return [companyId, { scan: { ...scan, stale: true }, lines: [] }] as const
+        }
+        const found = await quotableFindings(db, user.orgId, companyId, staleAfter, now)
+        // `quotableFindings` reads "latest" again; if a scan landed between the
+        // two reads, the lines are that scan's, so it is the latest one.
+        let current: EvidenceScan = { ...scan, stale: false }
+        const first = found[0]
+        if (first && first.scanId !== scan.id) {
+          const newer = await db
+            .select({ id: schema.scans.id, ranAt: schema.scans.ranAt })
+            .from(schema.scans)
+            .where(and(eq(schema.scans.orgId, user.orgId), eq(schema.scans.id, first.scanId)))
+            .limit(1)
+          if (newer[0]) current = { ...newer[0], stale: isStale(newer[0].ranAt, staleAfter, now) }
+        }
+        const lines = found.map((f) =>
+          evidenceLine({ signalKey: f.signalKey, why: icp?.signals[f.signalKey]?.why ?? null, detail: f.detail }),
+        )
+        return [companyId, { scan: current, lines }] as const
+      }),
+    ),
+  )
+
+  /**
+   * The scan each draft's words were written from. Most drafts were written
+   * after their company's latest scan, and that IS the one; only a draft not
+   * provably later than the latest scan needs a read of its own, one per
+   * draft, four at a time — the pool is one connection on Vercel.
+   *
+   * "Provably later" is a strictly later MILLISECOND, because a `Date` holds
+   * no more. A scan in the draft's own millisecond may be either side of the
+   * words, so that draft is read in SQL against its stored `created_at`, as
+   * the sender reads it (`evidenceAsOfFor`) — never by comparing two `Date`s
+   * that agree to the millisecond and disagree in the database.
+   */
+  const writtenKey = (companyId: string, at: StoredWords) => `${companyId}:${at.touchId}`
+  const notProvablyAfterLatest = drafts.flatMap((d) => {
+    const at = evidenceAsOfFor(d.touch)
+    if (!d.company || !at) return []
+    const latest = latestByCompany.get(d.company.id)?.scan
+    if (!latest || latest.ranAt.getTime() < at.writtenAt.getTime()) return []
+    return [{ companyId: d.company.id, at }]
+  })
+  const writtenFromOlder = new Map<string, EvidenceScan | null>(
+    await mapLimit(notProvablyAfterLatest, PREVIEW_CONCURRENCY, async ({ companyId, at }) => {
+      const rows = await db
+        .select({ id: schema.scans.id, ranAt: schema.scans.ranAt })
+        .from(schema.scans)
+        .where(
+          and(
+            eq(schema.scans.orgId, user.orgId),
+            eq(schema.scans.companyId, companyId),
+            eq(schema.scans.ok, true),
+            sql`${schema.scans.ranAt} <= coalesce(
+              (SELECT t.created_at FROM touches t WHERE t.id = ${at.touchId}::uuid AND t.org_id = ${user.orgId}::uuid),
+              ${at.writtenAt.toISOString()}::timestamptz
+            )`,
+          ),
+        )
+        .orderBy(desc(schema.scans.ranAt))
+        .limit(1)
+      const scan = rows[0]
+      return [writtenKey(companyId, at), scan ? { ...scan, stale: isStale(scan.ranAt, staleAfter, now) } : null] as const
+    }),
+  )
+
+  const evidenceFor = (d: (typeof drafts)[number]): DraftEvidence | null => {
+    if (!d.company) return null
+    const latest = latestByCompany.get(d.company.id) ?? { scan: null, lines: [] }
+    const at = evidenceAsOfFor(d.touch)
+    const writtenFrom =
+      at === null
+        ? null
+        : latest.scan && latest.scan.ranAt.getTime() < at.writtenAt.getTime()
+          ? latest.scan
+          : writtenFromOlder.get(writtenKey(d.company.id, at)) ?? null
+    return draftEvidenceFrom({ answersReply: at === null, writtenFrom, latest: latest.scan, latestLines: latest.lines })
+  }
+
+  const draftViews: DraftView[] = planned.map(({ d, people, checked }) => {
+    // Preselect only what the selects can show: a campaign on the draft's
+    // channel that still exists, and a person in the list. A value with no
+    // matching option would sit in state, invisible, behind an enabled Approve.
+    const campaignId =
+      d.touch.campaignId && campaignChoices.some((c) => c.id === d.touch.campaignId && c.channel === d.touch.channel)
+        ? d.touch.campaignId
+        : null
+    const contactId = d.touch.contactId && people.some((p) => p.id === d.touch.contactId) ? d.touch.contactId : null
+    return {
+      id: d.touch.id,
+      channel: d.touch.channel,
+      subject: d.touch.subject,
+      body: d.touch.body,
+      createdAt: d.touch.createdAt.toISOString(),
+      company: d.company,
+      contactId,
+      campaignId,
+      addressedBy: addressedByOf({
+        contactId: d.touch.contactId,
+        campaignId: d.touch.campaignId,
+        answersTouchId: d.touch.answersTouchId,
+      }),
+      checkedUnder: checked,
+      candidates: people.map((c) => {
+        const name = [c.firstName, c.lastName].filter(Boolean).join(' ') || c.email || 'unnamed'
+        const address = addressFor(d.touch.channel, c)
+        return {
+          id: c.id,
+          label: address ? `${name} <${address}>` : `${name} (no ${d.touch.channel === 'linkedin' ? 'LinkedIn profile' : 'address'})`,
+          decision: checked ? decisions.get(key(c.id, checked.id, evidenceAsOfFor(d.touch))) ?? notChecked : null,
+        }
+      }),
+      evidence: evidenceFor(d),
+      template: d.touch.templateId ? templateById.get(d.touch.templateId) ?? null : null,
+    }
+  })
 
   const signOutAction = async () => {
     'use server'
@@ -108,7 +358,6 @@ export default async function ApprovalsPage() {
   return (
     <Shell
       user={user}
-      orgName={orgLabel}
       current="approvals"
       signOut={signOutAction}
       pendingApprovals={rows.length}
@@ -125,12 +374,19 @@ export default async function ApprovalsPage() {
       {draftViews.length === 0 ? (
         <p className="muted" style={{ fontSize: 13 }}>No drafts are waiting.</p>
       ) : (
-        <DraftQueue
-          drafts={draftViews}
-          campaigns={campaigns.map((c) => ({ id: c.id, name: c.name, channel: c.channel, autoSend: c.autoSend }))}
-          canDecide={decidable}
-          senderConnected={deployment().worker}
-        />
+        <>
+          <p className="muted" style={{ fontSize: 13, margin: '0 0 8px' }}>
+            Beside each person is what the send path would decide about them right now — the same check the
+            worker runs, not a second opinion — and under each draft, the evidence it may quote and when it was
+            observed. It is shown, not enforced here: every rule is checked again at the moment of sending.
+          </p>
+          <DraftQueue
+            drafts={draftViews}
+            campaigns={campaignChoices}
+            canDecide={decidable}
+            noSenderNote={nothingWillSendNote(deployment())}
+          />
+        </>
       )}
 
       <h2 style={{ fontSize: 15, margin: '22px 0 8px' }}>Tools waiting on you</h2>

@@ -20,10 +20,19 @@
  */
 import type { PreToolUseHookInput, SyncHookJSONOutput } from '@anthropic-ai/claude-agent-sdk'
 import { classifyRisk } from '@agency/core'
+import { connectorToolsIsDisabled } from '@agency/db'
+import { disabledToolMessage } from './can-use-tool.js'
 
 export interface HookDeps {
   readonly audit: (action: string, detail: Record<string, unknown>) => Promise<void>
   readonly log: { error: (msg: string, fields?: Record<string, unknown>) => void }
+  /**
+   * The connector calls an owner turned off — the same set `canUseTool` is
+   * handed. Denied here too, because a deny from this hook holds even where
+   * a bare allowedTools entry or a settings rule would have settled the call
+   * before `canUseTool` was consulted.
+   */
+  readonly disabledTools: ReadonlySet<string>
 }
 
 /** Seconds. The hook does no I/O beyond one audit insert. */
@@ -34,6 +43,29 @@ export function makePreToolUse(deps: HookDeps) {
     try {
       const h = input as PreToolUseHookInput
       if (h?.hook_event_name !== 'PreToolUse') return {}
+
+      // Turned off in Settings → Connectors: denied before classification,
+      // and without waiting for anything — there is nobody to ask. The audit
+      // is recorded best-effort: the refusal must not depend on it, and if
+      // it throws past this, the catch below declines and canUseTool, which
+      // checks the same set, refuses instead.
+      if (connectorToolsIsDisabled(deps.disabledTools, h.tool_name)) {
+        await deps
+          .audit('agent.tool_disabled', {
+            toolName: h.tool_name,
+            toolUseId: h.tool_use_id,
+            agentId: h.agent_id ?? null,
+            agentType: h.agent_type ?? null,
+          })
+          .catch(() => {})
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'deny',
+            permissionDecisionReason: disabledToolMessage(h.tool_name),
+          },
+        }
+      }
 
       const verdict = classifyRisk({
         toolName: h.tool_name,

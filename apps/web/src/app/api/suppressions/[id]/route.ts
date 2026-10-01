@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { assertCan } from '@agency/core'
-import { appendAudit, removeSuppression, type AgencyDb } from '@agency/db/queries'
+import { appendAudit, auditSuppressionRemoved, removeSuppression, type AgencyDb } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
 
@@ -12,8 +12,12 @@ import { getDb } from '@/lib/db'
  * again. It has to be possible — a row added by mistake must come off, and a
  * list that can only grow is a list nobody trusts — and it has to be
  * accountable, which is what the audit row is for. The audit row records the
- * value, the reason it was there, and who removed it; nothing else in this
- * codebase deletes an opt-out.
+ * value, the reason it was there, which path recorded it, and who removed
+ * it; nothing else in this codebase deletes an opt-out.
+ *
+ * Built by `auditSuppressionRemoved`. It used to put the value in
+ * `subjectId`, a uuid column, so the insert was refused and swallowed —
+ * and a removal is exactly the write that most needed to be on the record.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -39,13 +43,6 @@ export async function DELETE(
   const removed = await removeSuppression(db, user.orgId, id)
   if (!removed) return NextResponse.json({ error: 'No such suppression.' }, { status: 404 })
 
-  await appendAudit(db, {
-    orgId: user.orgId,
-    actor: user.id,
-    action: 'suppression.removed',
-    subjectType: 'suppression',
-    subjectId: removed.value,
-    detail: { kind: removed.kind, hadReason: removed.reason, addedAt: removed.createdAt.toISOString() },
-  }).catch(() => {})
+  await appendAudit(db, auditSuppressionRemoved({ orgId: user.orgId, actor: user.id, removed })).catch(() => {})
   return NextResponse.json({ removed: true })
 }

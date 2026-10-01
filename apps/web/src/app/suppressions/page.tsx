@@ -1,11 +1,11 @@
 import { redirect } from 'next/navigation'
-import { can, parseIcpDefinition } from '@agency/core'
+import { can } from '@agency/core'
 import { listSuppressions, pausedContacts, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { SuppressionsPanel } from '@/components/outreach/suppressions'
+import { SUPPRESSION_SOURCE_WORDS, UNRECORDED_SOURCE, suppressionSource } from '@/lib/audit-copy'
 import { getDb } from '@/lib/db'
-import { icpForOrg } from '@/lib/queries'
 
 /**
  * The suppression list and the paused contacts (PROMPT.md §2.1, §8.4).
@@ -14,8 +14,16 @@ import { icpForOrg } from '@/lib/queries'
  * strengths. A suppression is permanent until an owner removes it, and it is
  * checked by the send path before anything else. A pause is what a reply
  * does — every campaign, immediately — and it ends when a person resumes.
+ *
+ * Each suppression says how it got there (0018's `source`): added here, a
+ * reply, a call, the unsubscribe link, or an erasure. A row from before the
+ * column existed says "unrecorded" — inventing `manual` for it would be a
+ * claim about who did what, which is the one thing the column is for. The
+ * words are mapped here, on the server, so the browser bundle carries a tag
+ * and a sentence rather than the vocabulary module.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export default async function SuppressionsPage() {
   const session = await auth()
@@ -29,29 +37,21 @@ export default async function SuppressionsPage() {
     pausedContacts(db, user.orgId),
   ])
 
-  const icpRow = await icpForOrg(user.orgId)
-  let orgLabel = 'Agency'
-  if (icpRow) {
-    try {
-      orgLabel = parseIcpDefinition(icpRow.definition).label
-    } catch {
-      orgLabel = 'Agency'
-    }
-  }
-
   const signOutAction = async () => {
     'use server'
     await signOut({ redirectTo: '/signin' })
   }
 
   return (
-    <Shell user={user} orgName={orgLabel} current="suppressions" signOut={signOutAction}>
+    <Shell user={user} current="suppressions" signOut={signOutAction}>
       <h1>Suppressions</h1>
       <p className="lede">
         One row here and no channel may ever contact that address, number or domain again. It is
         checked first, before consent and before anything a campaign says, on every message. Values
         are normalised on the way in so that a lookup is an exact match — a value that cannot be
-        normalised is refused rather than stored in a form that would never match.
+        normalised is refused rather than stored in a form that would never match. Every row says how it
+        got here, and an addition or removal made on this page is on the{' '}
+        <a href="/audit?action=suppression">audit log</a> — a removal with everything the row said.
       </p>
       <SuppressionsPanel
         suppressions={suppressions.map((s) => ({
@@ -59,8 +59,10 @@ export default async function SuppressionsPage() {
           kind: s.kind,
           value: s.value,
           reason: s.reason,
+          source: suppressionSource(s.source),
           createdAt: s.createdAt.toISOString(),
         }))}
+        sources={[...Object.values(SUPPRESSION_SOURCE_WORDS), UNRECORDED_SOURCE]}
         paused={paused.map((p) => ({
           id: p.id,
           email: p.email,

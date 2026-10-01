@@ -19,10 +19,19 @@
  *    marks this task as carrying lead data and `decideLlmCall` refuses a
  *    remote provider unless the operator allowed one. That refusal is the
  *    seam's, not restated here.
+ *
+ * And a better kind is WRITTEN the way a person's is: through the inbox's
+ * reclassify path (`replyReclassifyIfStill`, actor `agent`), so every guard
+ * a person meets applies, a move off `auto_reply` pauses the person and
+ * cancels what was queued for them as their reply would have, the move is
+ * audited, and a kind somebody else set while the model was answering
+ * stands. It used to be an UPDATE by id: a header-flagged auto-reply the
+ * model read as a person's became `wrong_person` and paused nobody. Found
+ * by review (round 3, finding 8).
  */
 import { REPLY_KINDS, type LlmProvider, type ReplyKind } from '@agency/core'
 import { attemptText } from '@agency/llm'
-import { schema, type AgencyDb } from '@agency/db'
+import { replyReclassifyIfStill, schema, type AgencyDb, type ReplyHumanKind } from '@agency/db'
 import { eq } from 'drizzle-orm'
 import type { Logger } from '../logger.js'
 
@@ -77,15 +86,29 @@ export async function refineReplyKind(args: {
     args.log.info('classifier answered outside its vocabulary — keeping the deterministic kind')
     return args.deterministic
   }
-  const kind = said as ReplyKind
+  // Not `opted_out`, and one of the kinds: one a person may choose.
+  const kind = said as ReplyHumanKind
+  if (kind === args.deterministic) return kind
 
-  if (kind !== args.deterministic) {
-    await db_update(args.db, args.touchId, kind)
-    args.log.info('reply re-classified', { from: args.deterministic, to: kind })
+  const at = await args.db
+    .select({ orgId: schema.touches.orgId })
+    .from(schema.touches)
+    .where(eq(schema.touches.id, args.touchId))
+    .limit(1)
+  const orgId = at[0]?.orgId
+  if (!orgId) return args.deterministic
+
+  // Only while the reply still has the kind the model was asked about; a
+  // guard that refuses (the person is suppressed, say) keeps what is stored.
+  const written = await replyReclassifyIfStill(args.db, {
+    orgId, touchId: args.touchId, kind, actor: 'agent', expected: args.deterministic,
+  })
+  if (!written.ok) {
+    args.log.info('the classifier’s kind was not written', { reason: written.reason })
+    return written.reason === 'changed_meanwhile' ? (written.current ?? args.deterministic) : args.deterministic
   }
+  args.log.info('reply re-classified', {
+    from: args.deterministic, to: kind, paused: written.paused, cancelled: written.cancelled,
+  })
   return kind
-}
-
-async function db_update(db: AgencyDb, touchId: string, kind: ReplyKind): Promise<void> {
-  await db.update(schema.touches).set({ replyKind: kind }).where(eq(schema.touches.id, touchId))
 }

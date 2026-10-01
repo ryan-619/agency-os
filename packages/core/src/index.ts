@@ -29,3 +29,18 @@ export * from './proposal.js'
 export * from './brief.js'
 export * from './voice.js'
 export * from './llm/provider.js'
+export * from './suppression-source.js'
+export * from './connector-catalog.js'
+// Wave-1 stubs, each replaced wholesale by the feature named on its first line.
+export * from './informational.js'
+export * from './diff.js'
+export * from './enrolment.js'
+export * from './rotting.js'
+export * from './analytics.js'
+export * from './kickoff.js'
+export * from './mail-signals.js'
+// Round 3: the inbound paths' one HTML-to-text converter, and the Slack message two processes post.
+export * from './html-text.js'
+export * from './slack-payload.js'
+// DoveSoft (0019): the DLT template rules an Indian SMS is scrubbed against, and the SMS opt-out reader.
+export * from './dlt.js'

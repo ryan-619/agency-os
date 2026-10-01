@@ -93,6 +93,11 @@ export async function POST(
           'is not sent through another; choose a campaign on the same channel.',
         400,
       ],
+      rendered_for_another: [
+        'This message was written for one person — its registered template was filled in with their details — so ' +
+          'it can be approved only to them. To reach somebody else, draft one for them (an SMS: Draft SMS on /contacts).',
+        400,
+      ],
     }
     const [message, status] = messages[r.reason]
     return NextResponse.json({ error: message, reason: r.reason }, { status })

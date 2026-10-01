@@ -1,11 +1,9 @@
 import { redirect } from 'next/navigation'
-import { parseIcpDefinition } from '@agency/core'
 import { callsThatDidNotDisclose, listCalls, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { When } from '@/components/when'
 import { getDb } from '@/lib/db'
-import { icpForOrg } from '@/lib/queries'
 
 /**
  * Calls (PROMPT.md §8.5).
@@ -17,6 +15,7 @@ import { icpForOrg } from '@/lib/queries'
  * failure that is invisible from everywhere else.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 const OUTCOME_TONE: Readonly<Record<string, string>> = {
   qualified: ' on',
@@ -34,27 +33,18 @@ export default async function CallsPage() {
   const user = session.user
 
   const db = getDb() as unknown as AgencyDb
-  const [calls, undisclosed, icpRow] = await Promise.all([
+  const [calls, undisclosed] = await Promise.all([
     listCalls(db, user.orgId, 100),
     callsThatDidNotDisclose(db, user.orgId),
-    icpForOrg(user.orgId),
   ])
 
-  let orgLabel = 'Agency'
-  if (icpRow) {
-    try {
-      orgLabel = parseIcpDefinition(icpRow.definition).label
-    } catch {
-      orgLabel = 'Agency'
-    }
-  }
   const signOutAction = async () => {
     'use server'
     await signOut({ redirectTo: '/signin' })
   }
 
   return (
-    <Shell user={user} orgName={orgLabel} current="calls" signOut={signOutAction}>
+    <Shell user={user} current="calls" signOut={signOutAction}>
       <h1>Calls</h1>
       <p className="lede">
         Inbound only. The AI says it is an AI before anything else, a caller who asks to be left alone is

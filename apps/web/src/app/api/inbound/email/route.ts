@@ -1,8 +1,12 @@
-import { timingSafeEqual } from 'node:crypto'
-import { NextResponse } from 'next/server'
+import { NextResponse, after } from 'next/server'
+import { mailSignalInput } from '@agency/core'
 import { handleInboundEmail, type AgencyDb } from '@agency/db/queries'
 import { getDb } from '@/lib/db'
 import { env } from '@/lib/env'
+import { log } from '@/lib/logger'
+import { secretMatches } from '@/lib/secret'
+import { notify } from '@/lib/slack'
+import { optOutNotRecordedNotification, replyNotification } from './notification'
 
 /**
  * Inbound email by webhook (PROMPT.md §8.4, "or the provider webhook").
@@ -29,17 +33,37 @@ import { env } from '@/lib/env'
  * is a few lines in that provider's configuration and this route stays the
  * same for all of them. Unknown fields are ignored; a missing `from` is a
  * 400.
+ *
+ * Two more when the provider has them: `headers` (an object of strings —
+ * the whole map is fine) and `dsn` (the text of a `message/delivery-status`
+ * part). They are what let an out-of-office be recorded without pausing
+ * anybody, and a bounce mark an address (packages/core/src/mail-signals.ts).
+ * For a bounce, the Message-ID of the message it returns goes in
+ * `references` or `inReplyTo`: a report is acted on only when it names a
+ * message this system sent. Both are BOUNDED, never refused
+ * (`mailSignalInput`): only the few headers the readers read are kept, each
+ * cut to 2,000 characters, and the report to 20,000 — a delivery rejected
+ * over its header count might be the reply that says stop. Without them,
+ * nothing about this route changes.
+ *
+ * ## The team hears about it — after the answer
+ *
+ * A recorded reply posts one Slack message when `SLACK_WEBHOOK_URL` is set:
+ * ids, the company's domain and a link, never the text (`lib/slack-message.ts`).
+ * It is scheduled with `after()`, so it runs once the provider has its 200,
+ * and the scheduling itself sits in a try/catch: a host with no `waitUntil`
+ * throws from `after()` synchronously, and that must not turn a reply that
+ * is already recorded into a 500 the provider would retry. A retried
+ * delivery is recognised by its Message-ID and announces nothing
+ * (`./notification.ts`).
+ *
+ * One reply is not announced that way: a "stop" whose suppression row could
+ * not be written. It raises the `opt_out_not_recorded` alarm instead, AWAITED
+ * like the unsubscribe and erasure routes' — the answer is still 200, since
+ * a retry would be recognised as a duplicate and record nothing more.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
-
-function secretMatches(expected: string, given: string | null): boolean {
-  if (!given) return false
-  const a = Buffer.from(expected)
-  const b = Buffer.from(given)
-  if (a.length !== b.length) return false
-  return timingSafeEqual(a, b)
-}
 
 export async function POST(request: Request): Promise<NextResponse> {
   const secret = env().INBOUND_WEBHOOK_SECRET
@@ -70,20 +94,48 @@ export async function POST(request: Request): Promise<NextResponse> {
       ? [o['inReplyTo']]
       : []
 
+  const signals = mailSignalInput({ headers: o['headers'], dsn: o['dsn'] })
+
   const outcome = await handleInboundEmail(getDb() as unknown as AgencyDb, {
     from,
     subject: typeof o['subject'] === 'string' ? o['subject'] : null,
     text: typeof o['text'] === 'string' ? o['text'].slice(0, 20_000) : null,
     messageId: typeof o['messageId'] === 'string' ? o['messageId'] : null,
     references,
+    ...(signals.headers ? { headers: signals.headers } : {}),
+    dsn: signals.dsn,
   })
+
+  // A reply that said stop and could not be suppressed raises the alarm,
+  // AWAITED — never `after()`, which a host without `waitUntil` drops — in
+  // place of the ordinary message, which would read as handled. `notify` is
+  // bounded (3 s) and never throws.
+  const alarm = optOutNotRecordedNotification(outcome)
+  if (alarm) await notify(alarm)
+
+  const event = replyNotification(outcome)
+  if (event) {
+    try {
+      after(() => notify(event))
+    } catch (err) {
+      log.warn('reply notification not scheduled', { error: err instanceof Error ? err.name : 'UnknownError' })
+    }
+  }
 
   // 200 either way. "This address is not a contact" is the ANSWER to a
   // webhook delivery, not a failure of it — a 4xx would make the provider
-  // retry a message that will never match.
+  // retry a message that will never match. A delivery report is `none` —
+  // it is not a reply — and says what it did: the status and whether an
+  // address was marked, never which one.
   return NextResponse.json(
     outcome.matched === 'none'
-      ? { matched: 'none', why: outcome.why }
+      ? {
+          matched: 'none',
+          why: outcome.why,
+          ...(outcome.bounce
+            ? { bounce: { permanent: outcome.bounce.permanent, code: outcome.bounce.code, marked: outcome.bounce.marked } }
+            : {}),
+        }
       : { matched: outcome.matched, paused: outcome.paused, suppressed: outcome.suppressed },
   )
 }

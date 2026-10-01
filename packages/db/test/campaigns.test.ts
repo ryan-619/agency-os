@@ -8,11 +8,11 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
-import { eq } from 'drizzle-orm'
+import { eq, inArray } from 'drizzle-orm'
 import {
-  addSuppression, campaignActivity, campaignInput, createCampaign, listCampaigns,
-  listSuppressions, pausedContacts, removeSuppression, schema, updateCampaign,
-  type AgencyDb,
+  addSuppression, appendAudit, campaignActivity, campaignAutoPause, campaignAutoPauses, campaignBounceRates,
+  campaignInput, createCampaign, listCampaigns, listSuppressions, pausedContacts, removeSuppression, schema,
+  updateCampaign, type AgencyDb,
 } from '../src/index.js'
 import { migratedDb,type TestDb } from './helpers.js'
 
@@ -35,12 +35,41 @@ describe('campaignInput', () => {
   })
 
   /**
-   * §2.1: cold outreach is email and LinkedIn. A CAMPAIGN is by definition a
-   * sequence of cold messages, so the other channels are not offered — and
-   * the send path refuses them independently, because a form is not a control.
+   * §2.1: cold outreach is email and LinkedIn. Voice and WhatsApp are not
+   * offered — and the send path refuses cold messages on them independently,
+   * because a form is not a control.
    */
-  it.each(['sms', 'voice', 'whatsapp'])('refuses a %s campaign outright', (channel) => {
+  it.each(['voice', 'whatsapp'])('refuses a %s campaign outright', (channel) => {
     expect(campaignInput.safeParse({ ...valid, channel }).success).toBe(false)
+  })
+
+  /**
+   * SMS (0019): a campaign is where an SMS's cap and quiet hours live, so
+   * one may be created — but every SMS is drafted per person from a
+   * registered template and approved by a person, so never with auto-send.
+   */
+  it('accepts an SMS campaign, with auto-send off by default', () => {
+    const parsed = campaignInput.safeParse({ ...valid, channel: 'sms' })
+    expect(parsed.success).toBe(true)
+    if (!parsed.success) return
+    expect(parsed.data.channel).toBe('sms')
+    expect(parsed.data.autoSend).toBe(false)
+    expect(campaignInput.safeParse({ ...valid, channel: 'sms', autoSend: false }).success).toBe(true)
+  })
+
+  it('refuses an SMS campaign that auto-sends, with a sentence on the autoSend field', () => {
+    const parsed = campaignInput.safeParse({ ...valid, channel: 'sms', autoSend: true })
+    expect(parsed.success).toBe(false)
+    if (parsed.success) return
+    const issue = parsed.error.issues[0]
+    expect(issue?.path).toEqual(['autoSend'])
+    expect(issue?.message).toBe(
+      'An SMS campaign cannot auto-send: every SMS is approved by a person. Save it with auto-send off.',
+    )
+  })
+
+  it('still lets an email campaign auto-send — the owner gate on that is the route’s', () => {
+    expect(campaignInput.safeParse({ ...valid, autoSend: true }).success).toBe(true)
   })
 
   it.each(['9pm', '25:00', '21:60', '', '21'])('refuses the quiet time %j', (quietStart) => {
@@ -117,8 +146,15 @@ describe('against a real engine', () => {
         name: 'Renamed', channel: 'email' as const, icpProfileId: null, dailyCap: 10,
         quietStart: '22:00', quietEnd: '07:00', autoSend: true, status: 'active' as const,
       }
-      expect((await updateCampaign(db, orgId, row.id, input))!.name).toBe('Renamed')
-      expect(await updateCampaign(db, otherOrgId, row.id, input)).toBeNull()
+      expect(await updateCampaign(db, orgId, row.id, input)).toMatchObject({ ok: true, row: { name: 'Renamed' } })
+      expect(await updateCampaign(db, otherOrgId, row.id, input)).toEqual({ ok: false, reason: 'not_found' })
+    })
+
+    it('creates an SMS campaign through the input schema, with auto-send off', async () => {
+      const parsed = campaignInput.parse({ name: 'Opted-in SMS', channel: 'sms', dailyCap: 20, quietStart: '21:00', quietEnd: '09:00' })
+      const row = await createCampaign(db, orgId, parsed)
+      expect(row.channel).toBe('sms')
+      expect(row.autoSend).toBe(false)
     })
 
     it('lists one org’s campaigns and nobody else’s', async () => {
@@ -129,9 +165,10 @@ describe('against a real engine', () => {
 
     /**
      * §2.1 in the schema: `campaigns_no_auto_send_on_voice_or_sms`. Unreachable
-     * through `campaignInput`, which does not offer those channels — asserted
-     * here against the database, because the constraint is what holds when
-     * something writes a row without going through the form.
+     * through `campaignInput`, which offers no voice campaign and refuses an
+     * auto-sending SMS one — asserted here against the database, because the
+     * constraint is what holds when something writes a row without going
+     * through the form.
      */
     it('refuses auto-send on a voice or sms campaign at the database', async () => {
       for (const channel of ['voice', 'sms']) {
@@ -194,6 +231,19 @@ describe('against a real engine', () => {
       expect(added).toMatchObject({ ok: true, value: 'stop@example.com', alreadyPresent: false })
       const rows = await listSuppressions(db, orgId)
       expect(rows[0]!.value).toBe('stop@example.com')
+    })
+
+    /**
+     * 0018: WHICH path recorded the opt-out is a column, stamped by the
+     * writer. A caller that says nothing writes null — never an invented
+     * 'manual'.
+     */
+    it('stores the source the writer names, and null when none is named', async () => {
+      await addSuppression(db, { orgId, kind: 'email', value: 'a@example.com', reason: 'asked', source: 'manual' })
+      await addSuppression(db, { orgId, kind: 'email', value: 'b@example.com', reason: 'asked' })
+      const rows = await listSuppressions(db, orgId)
+      expect(rows.find((r) => r.value === 'a@example.com')!.source).toBe('manual')
+      expect(rows.find((r) => r.value === 'b@example.com')!.source).toBeNull()
     })
 
     /**
@@ -317,6 +367,191 @@ describe('against a real engine', () => {
     it('is empty when nobody is paused', async () => {
       await db.insert(schema.contacts).values({ orgId, companyId, email: 'c@rentman.io' })
       expect(await pausedContacts(db, orgId)).toEqual([])
+    })
+  })
+  /**
+   * A campaign whose addresses bounce past a threshold pauses itself. The
+   * RATE is people, not messages; the pause is one UPDATE with
+   * `status = 'active'` in its predicate, so it happens — and is audited —
+   * once; and a person re-activating it starts a fresh window, so the
+   * addresses that caused the pause do not cause the next one.
+   */
+  describe('bounce rates and the automatic pause', () => {
+    const DAY = 24 * 60 * 60 * 1000
+    const now = Date.now()
+    const since = new Date(now - 30 * DAY)
+    const sentAt = new Date(now - 5 * DAY)
+    const bouncedAt = new Date(now - 4 * DAY)
+
+    const active = async (over: { org?: string; channel?: 'email' | 'linkedin'; status?: 'active' | 'paused' } = {}) =>
+      createCampaign(db, over.org ?? orgId, {
+        name: `Q4 ${Math.random()}`,
+        channel: over.channel ?? 'email',
+        icpProfileId: null,
+        dailyCap: 25,
+        quietStart: '21:00',
+        quietEnd: '08:00',
+        autoSend: false,
+        status: over.status ?? 'active',
+      })
+
+    /** `n` new people, each written to once by this campaign at `at`. */
+    const sendTo = async (campaignId: string, n: number, at = sentAt, org = orgId, company = companyId) => {
+      const ids: string[] = []
+      for (let i = 0; i < n; i += 1) {
+        const [c] = await db
+          .insert(schema.contacts)
+          .values({ orgId: org, companyId: company, email: `p${i}-${Math.random().toString(36).slice(2, 10)}@rentman.io` })
+          .returning({ id: schema.contacts.id })
+        ids.push(c!.id)
+      }
+      await db.insert(schema.touches).values(
+        ids.map((contactId) => ({
+          orgId: org, campaignId, contactId, companyId: company, channel: 'email', direction: 'out',
+          status: 'sent', sentAt: at, subject: 's', body: 'b',
+        })),
+      )
+      return ids
+    }
+    const bounce = (ids: string[], at = bouncedAt) =>
+      db.update(schema.contacts).set({ emailBouncedAt: at, emailBounceCode: '5.1.1' }).where(inArray(schema.contacts.id, ids))
+
+    it('counts the people a campaign wrote to, and how many of their addresses bounced since', async () => {
+      const c = await active()
+      const ids = await sendTo(c.id, 20)
+      await bounce(ids.slice(0, 3))
+      expect(await campaignBounceRates(db, { since, minSentTo: 20 })).toEqual([
+        { orgId, campaignId: c.id, sentTo: 20, bounced: 3, pct: 15 },
+      ])
+    })
+
+    it('counts a person once however many messages went to them', async () => {
+      const c = await active()
+      const ids = await sendTo(c.id, 20)
+      await db.insert(schema.touches).values({
+        orgId, campaignId: c.id, contactId: ids[0]!, companyId, channel: 'email', direction: 'out',
+        status: 'sent', sentAt, subject: 'follow-up', body: 'b',
+      })
+      await bounce([ids[0]!])
+      expect(await campaignBounceRates(db, { since, minSentTo: 20 })).toMatchObject([{ sentTo: 20, bounced: 1, pct: 5 }])
+    })
+
+    it('leaves out a campaign that has written to fewer people than the minimum', async () => {
+      const c = await active()
+      await bounce(await sendTo(c.id, 19))
+      expect(await campaignBounceRates(db, { since, minSentTo: 20 })).toEqual([])
+    })
+
+    /** An address already dead was refused, never sent: it cannot count against this campaign. */
+    it('does not count a mark that came BEFORE the campaign wrote to the person', async () => {
+      const c = await active()
+      const ids = await sendTo(c.id, 20)
+      await bounce(ids.slice(0, 5), new Date(sentAt.getTime() - DAY))
+      expect(await campaignBounceRates(db, { since, minSentTo: 20 })).toMatchObject([{ bounced: 0 }])
+    })
+
+    it('reads only the window, only email, and only active campaigns', async () => {
+      const old = await active()
+      await bounce(await sendTo(old.id, 20, new Date(since.getTime() - DAY)))
+      const paused = await active({ status: 'paused' })
+      await bounce(await sendTo(paused.id, 20))
+      const li = await active({ channel: 'linkedin' })
+      await sendTo(li.id, 20)
+      expect(await campaignBounceRates(db, { since, minSentTo: 20 })).toEqual([])
+    })
+
+    it('reads every org, as the worker must', async () => {
+      const [otherCompany] = await db.insert(schema.companies).values({ orgId: otherOrgId, domain: 'rival.io' }).returning({ id: schema.companies.id })
+      const mine = await active()
+      const theirs = await active({ org: otherOrgId })
+      await sendTo(mine.id, 20)
+      await bounce((await sendTo(theirs.id, 20, sentAt, otherOrgId, otherCompany!.id)).slice(0, 2))
+      const rates = await campaignBounceRates(db, { since, minSentTo: 20 })
+      expect(rates.map((r) => [r.orgId, r.bounced]).sort()).toEqual([[orgId, 0], [otherOrgId, 2]].sort())
+    })
+
+    const detail = { bouncePct: 15, threshold: 5, sentTo: 20, bounced: 3 }
+
+    it('pauses an active campaign once, and audits exactly that once', async () => {
+      const c = await active()
+      expect(await campaignAutoPause(db, { orgId, campaignId: c.id, detail })).toBe(true)
+      expect(await campaignAutoPause(db, { orgId, campaignId: c.id, detail })).toBe(false)
+      const [row] = await db.select().from(schema.campaigns).where(eq(schema.campaigns.id, c.id))
+      expect(row!.status).toBe('paused')
+      const audit = (await db.select().from(schema.auditLog)).filter((a) => a.action === 'campaign.auto_paused')
+      expect(audit).toHaveLength(1)
+      expect(audit[0]).toMatchObject({ actor: 'system', subjectType: 'campaign', subjectId: c.id, detail })
+    })
+
+    /** The predicate is `status = 'active'`: a campaign a person paused, drafted or finished is not touched. */
+    it.each(['paused', 'draft', 'done'] as const)('does nothing to a %s campaign', async (status) => {
+      const c = await active()
+      await db.update(schema.campaigns).set({ status }).where(eq(schema.campaigns.id, c.id))
+      expect(await campaignAutoPause(db, { orgId, campaignId: c.id, detail })).toBe(false)
+      const [row] = await db.select().from(schema.campaigns).where(eq(schema.campaigns.id, c.id))
+      expect(row!.status).toBe(status)
+      expect((await db.select().from(schema.auditLog)).filter((a) => a.action === 'campaign.auto_paused')).toEqual([])
+    })
+
+    it('will not pause another org’s campaign', async () => {
+      const c = await active()
+      expect(await campaignAutoPause(db, { orgId: otherOrgId, campaignId: c.id, detail })).toBe(false)
+      const [row] = await db.select().from(schema.campaigns).where(eq(schema.campaigns.id, c.id))
+      expect(row!.status).toBe('active')
+    })
+
+    /**
+     * The people who caused the pause are not counted again after a person
+     * re-activates it — otherwise the next tick pauses it for the problem
+     * that person just fixed.
+     */
+    it('starts a fresh window after the pause, so re-activating is not undone on the next tick', async () => {
+      const c = await active()
+      await bounce((await sendTo(c.id, 20)).slice(0, 5))
+      expect(await campaignBounceRates(db, { since, minSentTo: 20 })).toHaveLength(1)
+      await campaignAutoPause(db, { orgId, campaignId: c.id, detail })
+      await db.update(schema.campaigns).set({ status: 'active' }).where(eq(schema.campaigns.id, c.id))
+      expect(await campaignBounceRates(db, { since, minSentTo: 20 })).toEqual([])
+
+      // Twenty NEW people, written to after the pause, and it can be judged again.
+      const later = new Date(Date.now() + 60_000)
+      await bounce((await sendTo(c.id, 20, later)).slice(0, 4), new Date(later.getTime() + 60_000))
+      expect(await campaignBounceRates(db, { since, minSentTo: 20 })).toMatchObject([{ campaignId: c.id, sentTo: 20, bounced: 4 }])
+    })
+
+    describe('campaignAutoPauses — what the campaigns page quotes', () => {
+      const saved = (campaignId: string, action: string, status: string, at: Date) =>
+        db.insert(schema.auditLog).values({
+          orgId, actor: 'someone', action, subjectType: 'campaign', subjectId: campaignId,
+          detail: { name: 'Q4', status }, createdAt: at,
+        })
+
+      it('names the numbers the pause was made on', async () => {
+        const c = await active()
+        await campaignAutoPause(db, { orgId, campaignId: c.id, detail })
+        const pauses = await campaignAutoPauses(db, orgId)
+        expect(pauses.get(c.id)).toMatchObject(detail)
+        expect(pauses.get(c.id)!.at).toBeInstanceOf(Date)
+        expect(await campaignAutoPauses(db, otherOrgId)).toEqual(new Map())
+      })
+
+      it('forgets it once a person sets the campaign active again, and not when they only rename it', async () => {
+        const c = await active()
+        await campaignAutoPause(db, { orgId, campaignId: c.id, detail })
+        await saved(c.id, 'campaign.updated', 'paused', new Date(Date.now() + 60_000))
+        expect((await campaignAutoPauses(db, orgId)).has(c.id)).toBe(true)
+        await saved(c.id, 'campaign.auto_send_off', 'active', new Date(Date.now() + 120_000))
+        expect((await campaignAutoPauses(db, orgId)).has(c.id)).toBe(false)
+      })
+
+      it('does not quote a row that is missing its numbers', async () => {
+        const c = await active()
+        await appendAudit(db, {
+          orgId, actor: 'system', action: 'campaign.auto_paused', subjectType: 'campaign', subjectId: c.id,
+          detail: { bouncePct: 12 },
+        })
+        expect(await campaignAutoPauses(db, orgId)).toEqual(new Map())
+      })
     })
   })
 })

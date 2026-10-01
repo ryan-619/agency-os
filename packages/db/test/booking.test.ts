@@ -64,6 +64,9 @@ describe('the booking page', () => {
     expect(r.ok).toBe(true)
     if (!r.ok) return
     expect(r.companyDomain).toBe('rentman.io')
+    // The org the slug resolved to, for the caller's own notification — the
+    // visitor learns nothing but the display name.
+    expect(r.orgId).toBe(orgId)
 
     const [company] = await db.select().from(schema.companies).where(eq(schema.companies.domain, 'rentman.io'))
     expect(company!.name).toBe('Rentman')

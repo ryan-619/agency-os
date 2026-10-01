@@ -12,9 +12,13 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
-import { eq } from 'drizzle-orm'
-import { createDryRunProvider, schema, type AgencyDb } from '@agency/db'
+import { eq, inArray } from 'drizzle-orm'
+import { createDryRunProvider, schema, type AgencyDb, type MessageProvider } from '@agency/db'
+import { verifyUnsubscribeToken } from '@agency/db/queries'
 import { migratedDb,type TestDb } from '../../../packages/db/test/helpers.js'
+import type { loadEnv } from '../src/env.js'
+import type { Logger } from '../src/logger.js'
+import { outreachOptions } from '../src/outreach/options.js'
 import { runSenderTick } from '../src/outreach/sender.js'
 
 const silent = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} }
@@ -22,6 +26,34 @@ const silent = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {
 const NOON = new Date('2026-09-15T12:00:00.000Z')
 /** 23:30 UTC: quiet hours in London. */
 const NIGHT = new Date('2026-09-15T23:30:00.000Z')
+
+const UNSUBSCRIBE_SECRET = 'u'.repeat(32) + '-sender-test'
+/** Just the variables `outreachOptions` reads; the rest of the env is not its business. */
+const envWith = (vars: { UNSUBSCRIBE_SECRET?: string; WEB_PUBLIC_URL?: string; OUTREACH_BOUNCE_PAUSE_PCT?: number }) =>
+  vars as unknown as ReturnType<typeof loadEnv>
+
+/** Records what each send carried — headers included — and never sends. */
+function recordingProvider(): MessageProvider & {
+  seen: { to: string; subject: string; body: string; headers: Readonly<Record<string, string>> | undefined }[]
+} {
+  const seen: { to: string; subject: string; body: string; headers: Readonly<Record<string, string>> | undefined }[] = []
+  return {
+    name: 'recording',
+    channels: ['email', 'linkedin'],
+    seen,
+    async send(m) {
+      seen.push({ to: m.to, subject: m.subject, body: m.body, headers: m.headers })
+      return { providerId: `recording-${seen.length}` }
+    },
+  }
+}
+
+/** A logger that keeps its lines, to assert what boot said. */
+function keepingLog() {
+  const lines: { level: string; msg: string; fields: Record<string, unknown> | undefined }[] = []
+  const at = (level: string) => (msg: string, fields?: Record<string, unknown>) => void lines.push({ level, msg, fields })
+  return { lines, debug: at('debug'), info: at('info'), warn: at('warn'), error: at('error') }
+}
 
 describe('the sender tick', () => {
   let test: TestDb
@@ -271,4 +303,235 @@ describe('the sender tick', () => {
     expect((await reread(t.id)).status).toBe('approved')
   })
 
+  /**
+   * A campaign whose addresses bounce past the threshold pauses itself at the
+   * start of a tick — once, audited, one log line — and the existing
+   * `campaign_inactive` deferral is what stops it. Only a person re-activates.
+   */
+  describe('pausing a campaign that bounces', () => {
+    /** `n` people this campaign wrote to yesterday, `bounced` of whose addresses have since bounced. */
+    const history = async (n: number, bounced: number, over: { org?: string; company?: string; campaign?: string } = {}) => {
+      const ids: string[] = []
+      for (let i = 0; i < n; i += 1) {
+        const [c] = await db
+          .insert(schema.contacts)
+          .values({ orgId: over.org ?? orgId, companyId: over.company ?? companyId, email: `p${i}-${Math.random().toString(36).slice(2, 10)}@rentman.io`, timeZone: 'Europe/London' })
+          .returning({ id: schema.contacts.id })
+        ids.push(c!.id)
+      }
+      const yesterday = new Date(NOON.getTime() - 24 * 60 * 60 * 1000)
+      await db.insert(schema.touches).values(
+        ids.map((id) => ({
+          orgId: over.org ?? orgId, campaignId: over.campaign ?? campaignId, contactId: id, companyId: over.company ?? companyId,
+          channel: 'email', direction: 'out', status: 'sent', sentAt: yesterday, subject: 's', body: 'b',
+        })),
+      )
+      if (bounced > 0) {
+        await db
+          .update(schema.contacts)
+          .set({ emailBouncedAt: new Date(NOON.getTime() - 60 * 60 * 1000), emailBounceCode: '5.1.1' })
+          .where(inArray(schema.contacts.id, ids.slice(0, bounced)))
+      }
+    }
+    const tickAt5 = (log: Logger = silent) => runSenderTick({ db, provider, log, batch: 20, now: () => NOON, bouncePausePct: 5 })
+    const status = async (id = campaignId) =>
+      (await db.select({ s: schema.campaigns.status }).from(schema.campaigns).where(eq(schema.campaigns.id, id)))[0]!.s
+    const pauses = async () => (await db.select().from(schema.auditLog)).filter((a) => a.action === 'campaign.auto_paused')
+
+    it('does nothing at or below the threshold', async () => {
+      await history(20, 1) // 5% — not past 5%
+      expect((await tickAt5()).autoPaused).toBe(0)
+      expect(await status()).toBe('active')
+      expect(await pauses()).toEqual([])
+    })
+
+    it('does nothing above the threshold before twenty people were written to', async () => {
+      await history(19, 5)
+      expect((await tickAt5()).autoPaused).toBe(0)
+      expect(await status()).toBe('active')
+    })
+
+    it('does nothing when the deployment set no threshold', async () => {
+      await history(20, 10)
+      expect((await tick()).autoPaused).toBe(0)
+      expect(await status()).toBe('active')
+    })
+
+    /** A worker with DoveSoft and no mailbox writes to no address, so it judges none. */
+    it('is left to a tick that sends email', async () => {
+      await history(20, 2)
+      const smsOnly: MessageProvider = { name: 'sms-only', channels: ['sms'], send: provider.send }
+      const s = await runSenderTick({ db, provider: smsOnly, log: silent, batch: 20, now: () => NOON, bouncePausePct: 5 })
+      expect(s.autoPaused).toBe(0)
+      expect(await status()).toBe('active')
+      expect((await tickAt5()).autoPaused).toBe(1)
+      expect(await status()).toBe('paused')
+    })
+
+    it('pauses once past the threshold with twenty sent — audited once, one log line — and a second tick does not re-audit', async () => {
+      await history(20, 2) // 10%
+      const log = keepingLog()
+      expect((await tickAt5(log)).autoPaused).toBe(1)
+      expect(await status()).toBe('paused')
+      const [row] = await pauses()
+      expect(row).toMatchObject({ actor: 'system', subjectId: campaignId, detail: { bouncePct: 10, threshold: 5, sentTo: 20, bounced: 2 } })
+      const said = log.lines.filter((l) => l.msg.startsWith('campaign paused automatically'))
+      expect(said).toHaveLength(1)
+      expect(said[0]!.fields).toMatchObject({ campaignId, bouncePct: 10, threshold: 5 })
+      // §2.3: counts and ids, never who bounced.
+      expect(JSON.stringify(log.lines)).not.toContain('@rentman.io')
+
+      expect((await tickAt5()).autoPaused).toBe(0)
+      expect(await pauses()).toHaveLength(1)
+    })
+
+    /** No new stop mechanism: the pause IS `campaign_inactive`, which defers. */
+    it('defers what a person had already approved in it, rather than refusing it', async () => {
+      await history(20, 2)
+      await tickAt5()
+      const t = await approved()
+      const s = await tickAt5()
+      expect(s).toMatchObject({ picked: 1, sent: 0, deferred: 1, refused: 0 })
+      const row = await reread(t.id)
+      expect(row.status).toBe('approved')
+      expect(row.approvedBy).toBe(userId)
+      expect(provider.sent).toEqual([])
+    })
+
+    /**
+     * The bounces that cross the threshold arrive between ticks. Paused AFTER
+     * the pass, the tick that first saw them still sent up to a batch into
+     * the bouncing list; paused BEFORE it, the same tick defers them.
+     */
+    it('pauses before the pass, so the tick that finds the threshold crossed sends nothing more in it', async () => {
+      await history(20, 2)
+      const t = await approved()
+      const s = await tickAt5()
+      expect(s).toMatchObject({ autoPaused: 1, picked: 1, sent: 0, deferred: 1, refused: 0 })
+      expect(provider.sent).toEqual([])
+      expect((await reread(t.id)).status).toBe('approved')
+      expect(await status()).toBe('paused')
+    })
+
+    it('leaves another org’s campaign alone', async () => {
+      const [other] = await db.insert(schema.orgs).values({ name: 'Rival' }).returning({ id: schema.orgs.id })
+      const [otherCompany] = await db.insert(schema.companies).values({ orgId: other!.id, domain: 'rival.io' }).returning({ id: schema.companies.id })
+      const [theirs] = await db
+        .insert(schema.campaigns)
+        .values({ orgId: other!.id, name: 'Theirs', channel: 'email', autoSend: false, dailyCap: 25, status: 'active' })
+        .returning({ id: schema.campaigns.id })
+      await history(20, 0, { org: other!.id, company: otherCompany!.id, campaign: theirs!.id })
+      await history(20, 3)
+      expect((await tickAt5()).autoPaused).toBe(1)
+      expect(await status()).toBe('paused')
+      expect(await status(theirs!.id)).toBe('active')
+    })
+  })
+
+  /**
+   * RFC 8058 (§2.1). The headers ride inside `dispatchTouch`, after every
+   * rule has passed, and only when the deployment can name a link the web
+   * app will verify. The message itself is not touched.
+   */
+  describe('the one-click unsubscribe headers', () => {
+    const on = () =>
+      outreachOptions(envWith({ UNSUBSCRIBE_SECRET, WEB_PUBLIC_URL: 'https://agency.example/' }), keepingLog())
+
+    it('are absent when no headersFor is given', async () => {
+      const recording = recordingProvider()
+      await approved()
+      await runSenderTick({ db, provider: recording, log: silent, batch: 20, now: () => NOON })
+      expect(recording.seen).toHaveLength(1)
+      expect(recording.seen[0]!.headers ?? {}).not.toHaveProperty('List-Unsubscribe')
+      expect(recording.seen[0]!.headers ?? {}).not.toHaveProperty('List-Unsubscribe-Post')
+    })
+
+    it('are on an email touch when headersFor is given, naming THAT touch, with the body unchanged', async () => {
+      const recording = recordingProvider()
+      const t = await approved({ subject: 'A gap on your security page', body: 'Hello.\n\nThe words a person approved.' })
+      await runSenderTick({ db, provider: recording, log: silent, batch: 20, now: () => NOON, ...on() })
+
+      expect(recording.seen).toHaveLength(1)
+      const m = recording.seen[0]!
+      expect(m.subject).toBe('A gap on your security page')
+      expect(m.body).toBe('Hello.\n\nThe words a person approved.')
+      expect(m.headers?.['List-Unsubscribe-Post']).toBe('List-Unsubscribe=One-Click')
+
+      const link = /^<https:\/\/agency\.example\/api\/unsubscribe\/([^>]+)>$/.exec(m.headers?.['List-Unsubscribe'] ?? '')
+      expect(link).not.toBeNull()
+      const token = link![1]!
+      // The web app, holding the same secret, reads back exactly this touch.
+      expect(verifyUnsubscribeToken(UNSUBSCRIBE_SECRET, token)).toEqual({ ok: true, touchId: t.id })
+      // §2.3: the link names a row, never the person.
+      expect(m.headers?.['List-Unsubscribe']).not.toContain('priya')
+      expect(m.headers?.['List-Unsubscribe']).not.toContain('%40')
+      expect((await reread(t.id)).status).toBe('sent')
+    })
+
+    it('are absent on a LinkedIn touch, even with headersFor given', async () => {
+      await db.update(schema.contacts).set({ linkedinUrl: 'https://linkedin.com/in/priya' }).where(eq(schema.contacts.id, contactId))
+      const [li] = await db
+        .insert(schema.campaigns)
+        .values({ orgId, name: 'LinkedIn', channel: 'linkedin', autoSend: true, dailyCap: 10, status: 'active' })
+        .returning({ id: schema.campaigns.id })
+      await approved({ campaignId: li!.id, channel: 'linkedin', status: 'queued', approvedBy: null, approvedAt: null })
+
+      const recording = recordingProvider()
+      await runSenderTick({ db, provider: recording, log: silent, batch: 20, now: () => NOON, ...on() })
+      expect(recording.seen).toHaveLength(1)
+      expect(recording.seen[0]!.headers ?? {}).not.toHaveProperty('List-Unsubscribe')
+      expect(recording.seen[0]!.headers ?? {}).not.toHaveProperty('List-Unsubscribe-Post')
+    })
+
+    it('never reach a message the rules refused', async () => {
+      await db.insert(schema.suppressions).values({ orgId, kind: 'email', value: 'priya@rentman.io', reason: 'opted out' })
+      const recording = recordingProvider()
+      await approved()
+      await runSenderTick({ db, provider: recording, log: silent, batch: 20, now: () => NOON, ...on() })
+      expect(recording.seen).toEqual([])
+    })
+  })
+})
+
+/** No database: this is the boot-time decision, and what it logs. */
+describe('outreachOptions', () => {
+  it('turns the headers on only when both the secret and the public origin are set, and says so once', () => {
+    const log = keepingLog()
+    const opts = outreachOptions(envWith({ UNSUBSCRIBE_SECRET, WEB_PUBLIC_URL: 'https://agency.example' }), log)
+    expect(typeof opts.headersFor).toBe('function')
+    expect(log.lines).toEqual([{ level: 'info', msg: 'unsubscribe: headers on', fields: undefined }])
+  })
+
+  it('is off, naming what is missing and never a value, when either is unset', () => {
+    for (const [vars, missing] of [
+      [{}, ['UNSUBSCRIBE_SECRET', 'WEB_PUBLIC_URL']],
+      [{ UNSUBSCRIBE_SECRET }, ['WEB_PUBLIC_URL']],
+      [{ WEB_PUBLIC_URL: 'https://agency.example' }, ['UNSUBSCRIBE_SECRET']],
+    ] as const) {
+      const log = keepingLog()
+      const opts = outreachOptions(envWith(vars), log)
+      expect(opts).toEqual({})
+      expect(log.lines).toEqual([{ level: 'warn', msg: 'unsubscribe: headers off', fields: { missing: [...missing] } }])
+      expect(JSON.stringify(log.lines)).not.toContain(UNSUBSCRIBE_SECRET)
+      expect(JSON.stringify(log.lines)).not.toContain('agency.example')
+    }
+  })
+
+  it('passes the bounce threshold through, and says so once at boot', () => {
+    const log = keepingLog()
+    const opts = outreachOptions(envWith({ OUTREACH_BOUNCE_PAUSE_PCT: 7 }), log)
+    expect(opts.bouncePausePct).toBe(7)
+    expect(log.lines).toContainEqual({ level: 'info', msg: 'bounce auto-pause: on', fields: { thresholdPct: 7, minSentTo: 20 } })
+  })
+
+  it('leaves the bounce check off when the environment names no threshold', () => {
+    expect('bouncePausePct' in outreachOptions(envWith({}), keepingLog())).toBe(false)
+  })
+
+  it('answers null for anything that is not an email', () => {
+    const { headersFor } = outreachOptions(envWith({ UNSUBSCRIBE_SECRET, WEB_PUBLIC_URL: 'https://agency.example' }), keepingLog())
+    const touch = { id: '0b8f5a8e-2f1c-4b7e-9a4b-3c2d1e0f9a8b', channel: 'linkedin' } as Parameters<NonNullable<typeof headersFor>>[0]
+    expect(headersFor!(touch)).toBeNull()
+    expect(headersFor!({ ...touch, channel: 'email' })).toHaveProperty('List-Unsubscribe')
+  })
 })

@@ -8,7 +8,7 @@
  * the one high-risk tool Phase 2 ships.
  */
 import { z } from 'zod'
-import { DEFAULT_STALE_AFTER_DAYS, isStale, parseIcpDefinition, type IcpDefinition } from '@agency/core'
+import { isStale, parseIcpDefinition, staleAfterDaysOf, type IcpDefinition } from '@agency/core'
 import {
   activeIcpProfile, findCompanyByDomain, importCompanies, latestScanWithFindings,
   recordScan, type AgencyDb,
@@ -153,7 +153,8 @@ export const scoreCompanyTool: AgencyToolSpec<typeof scoreShape> = {
 
     const icp = await requireIcp(ctx.db, ctx.orgId)
     if (!icp) return fail('invalid_state', 'No active ICP profile, so there is nothing to score against.')
-    const days = icp.definition.freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
+    // Never the raw value: `isStale` throws on one that is not a positive number.
+    const days = staleAfterDaysOf(icp.definition)
 
     const found = await latestScanWithFindings(ctx.db, ctx.orgId, company.id)
     const fresh =
@@ -214,9 +215,11 @@ const touchShape = {
 export const queueTouch: AgencyToolSpec<typeof touchShape> = {
   name: 'queue_touch',
   description:
-    'Draft an outbound message about a company and put it in the approval queue. It is NOT sent: ' +
-    'a human reads it and decides, and nothing in this system can send anything yet. Email and ' +
-    'LinkedIn only. Quote only findings you have read from get_company that are marked quotable.',
+    'Draft an outbound message about a company and put it in the approval queue. It is NOT sent now: ' +
+    'a person reads it, names the recipient and the campaign, and decides. The worker sends an ' +
+    'approved email only after every send rule is re-checked at that moment, and only where outbound ' +
+    'mail is configured; a LinkedIn draft is sent by a person, by hand. Email and LinkedIn only. ' +
+    'Quote only findings you have read from get_company that are marked quotable.',
   shape: touchShape,
   async handler(input, ctx): Promise<ToolOutcome<unknown>> {
     const domain = normaliseDomain(input.domain)

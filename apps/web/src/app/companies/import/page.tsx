@@ -1,14 +1,16 @@
+import { Fragment, type ReactNode } from 'react'
 import { redirect } from 'next/navigation'
 import { revalidatePath } from 'next/cache'
-import { assertCan, parseIcpDefinition } from '@agency/core'
+import { assertCan } from '@agency/core'
 import { importCompanies, parseCompanySeeds } from '@agency/db/repository'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
-import { icpForOrg } from '@/lib/queries'
 import { getDb } from '@/lib/db'
+import { deployment } from '@/lib/deployment'
 import { log } from '@/lib/logger'
 
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 /** Cap the paste box so a mis-paste cannot try to import a novel. */
 const MAX_ROWS = 5000
@@ -21,9 +23,19 @@ export default async function ImportCompanies({
   const session = await auth()
   if (!session?.user) redirect('/signin')
   const user = session.user
-  const icpRow = await icpForOrg(user.orgId)
-  const icp = icpRow ? parseIcpDefinition(icpRow.definition) : null
   const { inserted, present, error } = await searchParams
+  // Which of the things that can scan an imported company exist HERE: a
+  // terminal always does; the daily rescan route only with a cron secret, and
+  // the agent's scan_company only with a worker (§2.2 — a page does not
+  // promise a scan nothing on this deployment will run). A secret says the
+  // route will accept a call, not that anything calls it — Vercel's cron does,
+  // compose has no scheduler — so the sentence says "when".
+  const live = deployment()
+  const scanWays: ReactNode[] = [<><code>npm run scan</code> from a terminal</>]
+  if (live.cron) {
+    scanWays.push('the daily rescan when a scheduler calls it (never-scanned companies first, a few per run)')
+  }
+  if (live.worker) scanWays.push(<><code>scan_company</code> from the agent in chat</>)
 
   const signOutAction = async () => {
     'use server'
@@ -31,7 +43,7 @@ export default async function ImportCompanies({
   }
 
   return (
-    <Shell user={user} orgName={icp?.label ?? 'Agency'} current="companies" signOut={signOutAction}>
+    <Shell user={user} current="companies" signOut={signOutAction}>
       <p className="crumb"><a href="/companies">← Companies</a></p>
       <h1>Import companies</h1>
       <p className="lede">
@@ -46,8 +58,11 @@ export default async function ImportCompanies({
           <strong>Imported {inserted} new {Number(inserted) === 1 ? 'company' : 'companies'}.</strong>
           {present && Number(present) > 0 ? <> {present} were already in the pipeline.</> : null}
           <p style={{ margin: '8px 0 0' }}>
-            Nothing has been scanned yet — they have no score and no findings until{' '}
-            <code>npm run scan</code> runs.
+            Nothing has been scanned yet — they have no score and no findings until a scan runs:{' '}
+            {scanWays.map((way, i) => (
+              <Fragment key={i}>{i === 0 ? null : i === scanWays.length - 1 ? ', or ' : ', '}{way}</Fragment>
+            ))}
+            .
           </p>
         </div>
       ) : null}
@@ -96,7 +111,8 @@ export default async function ImportCompanies({
 
       <div className="note" style={{ marginTop: 24 }}>
         Importing a company records only that you intend to look at it. Nothing is fetched, nothing
-        is claimed, and no message can be sent — the send path does not exist until Phase 4.
+        is claimed, and nothing is sent — importing puts nobody in a campaign, and a message leaves
+        only through the send path, which checks every rule at the moment it sends.
       </div>
     </Shell>
   )

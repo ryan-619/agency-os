@@ -60,11 +60,19 @@ export function createSmtpProvider(config: SmtpConfig): MessageProvider {
     name: 'smtp',
     channels: ['email'],
     async send(message) {
+      // Headers are passed through as the send path built them. `In-Reply-To`
+      // and `References` are ALSO set through nodemailer's own fields, which
+      // it formats and folds correctly; `setHeader` replaces rather than
+      // duplicates, so the same value arriving both ways is one header.
+      const headers = message.headers ?? {}
+      const inReplyTo = headers['In-Reply-To']
       const info = await get().sendMail({
         from: config.from,
         to: message.to,
         subject: message.subject,
         text: message.body,
+        headers,
+        ...(inReplyTo ? { inReplyTo, references: headers['References'] ?? inReplyTo } : {}),
       })
       // The Message-ID the server assigned. Kept on the touch row, and it is
       // what ties a bounce or a reply webhook back to the message that caused

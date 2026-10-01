@@ -96,6 +96,40 @@ describe('proposals', () => {
     expect(await openDealFor(db, orgId, companyId)).toBeNull()
   })
 
+  // After an informational key is promoted into the ICP, a scan recorded
+  // before the promotion holds that key observed but scored = false. The
+  // generator used to drop the row and list the signal as "not assessed" in
+  // the buyer's document.
+  it('refuses a scan recorded before an informational signal was promoted into the ICP', async () => {
+    const s = await scan(new Date('2026-09-12T08:00:00.000Z'))
+    await db.insert(schema.findings).values({
+      orgId, scanId: s.id, companyId, signalKey: 'hsts_quality', observed: true, gap: true, weight: 0, scored: false,
+      detail: 'max-age=300 is under 180 days', evidence: { maxAge: 300 },
+    })
+    // Fine before the promotion: the row is context.
+    const before = await generate()
+    expect(before.ok).toBe(true)
+    // Promote it, in place.
+    const order = Object.keys(ICP.signals).length + 1
+    await db.update(schema.icpProfiles).set({
+      definition: { ...ICP, signals: { ...ICP.signals, hsts_quality: { weight: 4, order, why: 'HSTS max-age under 180 days' } } },
+    })
+    const r = await generate()
+    expect(r).toMatchObject({ ok: false, reason: 'rescore' })
+    if (r.ok) return
+    expect(r.message).toContain('scored under a different profile — re-scan')
+  })
+
+  it('refuses a scan whose score names a profile that is no longer the active one', async () => {
+    const s = await scan(new Date('2026-09-12T08:00:00.000Z'))
+    const [earlier] = await db.select({ id: schema.icpProfiles.id }).from(schema.icpProfiles)
+    await db.insert(schema.scores).values({ orgId, companyId, scanId: s.id, icpProfileId: earlier!.id, score: 60, tier: 'B' })
+    expect((await generate()).ok).toBe(true)
+    await db.update(schema.icpProfiles).set({ active: false })
+    await db.insert(schema.icpProfiles).values({ orgId, name: 'ICP v2', definition: ICP, active: true })
+    expect(await generate()).toMatchObject({ ok: false, reason: 'rescore' })
+  })
+
   it('refuses a company that was never scanned', async () => {
     expect(await generate()).toMatchObject({ ok: false, reason: 'no_scan' })
   })
@@ -141,6 +175,40 @@ describe('proposals', () => {
       if (!r.ok) throw new Error(r.message)
       expect((await setProposalStatus(db, { orgId, id: r.proposal.id, status: 'sent', actor: userId }))!.decidedAt).toBeNull()
       expect((await setProposalStatus(db, { orgId, id: r.proposal.id, status: 'withdrawn', actor: userId }))!.decidedAt).toBeNull()
+    })
+
+    /**
+     * The team's route reads the status, checks the move against that read,
+     * and writes. A buyer's acceptance through the share link can commit in
+     * between — and without the expected status in the UPDATE, a teammate's
+     * "Declined" overwrote it: proposal declined, deal won, share accepted.
+     * Review round 3, finding [12].
+     */
+    it('changes nothing when the status is no longer the one the caller read', async () => {
+      await scan(new Date('2026-09-12T08:00:00.000Z'))
+      const r = await generate()
+      if (!r.ok) throw new Error(r.message)
+      await setProposalStatus(db, { orgId, id: r.proposal.id, status: 'sent', actor: userId, from: 'draft' })
+      // The buyer accepts from their link…
+      await setProposalStatus(db, { orgId, id: r.proposal.id, status: 'accepted', actor: 'share_link', now: NOW, from: 'sent' })
+      // …while a teammate's "Declined", read as `sent` a moment ago, lands.
+      const late = await setProposalStatus(db, { orgId, id: r.proposal.id, status: 'declined', actor: userId, from: 'sent' })
+
+      expect(late).toBeNull()
+      expect((await readProposal(db, orgId, r.proposal.id))!.status).toBe('accepted')
+      const [deal] = await db.select().from(schema.deals)
+      expect(deal!.stage).toBe('won')
+      const actions = (await db.select().from(schema.auditLog)).map((a) => a.action)
+      expect(actions).toContain('proposal.accepted')
+      expect(actions).not.toContain('proposal.declined')
+    })
+
+    it('writes when the status is still the one the caller read', async () => {
+      await scan(new Date('2026-09-12T08:00:00.000Z'))
+      const r = await generate()
+      if (!r.ok) throw new Error(r.message)
+      const sent = await setProposalStatus(db, { orgId, id: r.proposal.id, status: 'sent', actor: userId, from: 'draft' })
+      expect(sent!.status).toBe('sent')
     })
 
     it('will not touch another org’s proposal', async () => {

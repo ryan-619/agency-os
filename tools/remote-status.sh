@@ -99,6 +99,55 @@ const { Client } = require("pg");
     ["touches_org_reply_kind_idx"]);
   console.log("  its index:", idx.rows.length ? idx.rows[0].indexname : "MISSING");
 
+  // 0018 must land BEFORE the code that needs it: findings.scored is the
+  // first column a page reads (every company page), and the dashboard,
+  // /inbox, /tasks and /contacts read tables and columns that only 0018
+  // creates. Code one migration ahead boots, serves /signin, and 500s on
+  // every one of those pages.
+  const scored = await c.query(`
+    select data_type, is_nullable
+      from information_schema.columns
+     where table_schema = current_schema()
+       and table_name = $1 and column_name = $2`, ["findings", "scored"]);
+  console.log("  findings.scored:",
+    scored.rows.length
+      ? scored.rows[0].data_type + ", nullable=" + scored.rows[0].is_nullable + "   <- 0018 is applied"
+      : "MISSING   <- 0018 is NOT applied, do not deploy");
+
+  const t18 = await c.query(`
+    select t, to_regclass(t) is not null as present
+      from unnest($1::text[]) as t order by t`,
+    [["notes", "proposal_shares", "tasks", "worker_heartbeats"]]);
+  console.log("  0018 tables:", t18.rows.map(r => r.t + (r.present ? "" : " MISSING")).join(", "));
+
+  // 0019 the same way: touches.template_id is read by the send path for
+  // every message (sendFactsFor), so code ahead of it fails to send at all,
+  // and /settings/templates reads message_templates.
+  const tpl = await c.query(`
+    select data_type, is_nullable
+      from information_schema.columns
+     where table_schema = current_schema()
+       and table_name = $1 and column_name = $2`, ["touches", "template_id"]);
+  console.log("  touches.template_id:",
+    tpl.rows.length
+      ? tpl.rows[0].data_type + ", nullable=" + tpl.rows[0].is_nullable + "   <- 0019 is applied"
+      : "MISSING   <- 0019 is NOT applied, do not deploy");
+  const t19 = await c.query(`select to_regclass('message_templates') is not null as present`);
+  console.log("  0019 table: message_templates" + (t19.rows[0].present ? "" : " MISSING"));
+
+  // A count and an age, like the users count below: never a row. /api/health
+  // already publishes the same age as worker.ageSeconds.
+  if (t18.rows.find(r => r.t === "worker_heartbeats" && r.present)) {
+    const hb = await c.query(`
+      select count(*)::int n,
+             extract(epoch from now() - max(last_tick_at))::int age
+        from worker_heartbeats`);
+    console.log("  worker heartbeats:", hb.rows[0].n,
+      hb.rows[0].n === 0
+        ? "<- no worker has written one; none runs against this database, or it predates 0018"
+        : "(newest " + hb.rows[0].age + " s ago)");
+  }
+
   // 0016, because it is the other migration production needed recently and a
   // half-applied pair is worth seeing rather than guessing at.
   const sup = await c.query(`

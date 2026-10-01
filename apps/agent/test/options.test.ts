@@ -8,7 +8,8 @@
  * cannot be adopted silently, and a contributor who wants one has to edit the
  * list in the same commit, where a reviewer sees it.
  */
-import { describe, it, expect } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
+import { AGENCY_TOOL_NAMES } from '@agency/core'
 import {
   ALLOWED_OPTION_KEYS, FORBIDDEN_TOOLS, buildQueryOptions, childEnv, systemPrompt,
 } from '../src/runtime/options.js'
@@ -189,6 +190,10 @@ describe('the agent has no shell, no filesystem and no web', () => {
 })
 
 describe('the child environment', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
   /**
    * §2.3: no credential in an agent's context window. `env` REPLACES the
    * subprocess environment rather than extending it, so the child gets the API
@@ -249,16 +254,29 @@ describe('the child environment', () => {
   })
 
   it('sets no API key at all under a local login, rather than an empty one', () => {
+    /**
+     * Stubbed rather than read from the machine running the suite: a
+     * container started with no USER at all is ordinary, and a test that
+     * asserted `toBeDefined()` against the host's own variable failed there
+     * while proving nothing on a laptop, where USER is always set. Equality
+     * with a stubbed value is the stronger check — it proves the variable is
+     * passed THROUGH, not merely that something by that name exists.
+     */
+    vi.stubEnv('USER', 'someone')
+    vi.stubEnv('HOME', '/home/someone')
+    // Present in the PARENT, so the absence below is a filter doing its job
+    // rather than a variable that was never there to leak.
+    vi.stubEnv('DATABASE_URL', 'postgres://agency:secret@db:5432/agency')
     const env = childEnv({ kind: 'local_login' })
     expect(Object.keys(env)).not.toContain('ANTHROPIC_API_KEY')
     expect(env['ANTHROPIC_API_KEY']).toBeUndefined()
     // Still everything the CLI needs to find its own session, and no more.
-    expect(env['HOME']).toBeDefined()
+    expect(env['HOME']).toBe('/home/someone')
     // The keychain lookup is BY USERNAME, so a child without USER reports
     // itself logged out — and the turn then fails with "Anthropic rejected
     // the API key", about a key it never sent. A username is not a
     // credential; omitting it cost an afternoon.
-    expect(env['USER']).toBeDefined()
+    expect(env['USER']).toBe('someone')
     expect(Object.keys(env)).not.toContain('DATABASE_URL')
   })
 })
@@ -289,12 +307,68 @@ describe('the system prompt', () => {
   })
 
   /**
-   * A tool that reliably returns nothing teaches the model a false shape of
-   * the business (§12). The prompt redirects the phrase instead.
+   * §12 in the other direction. The prompt used to say deal stages "do not
+   * exist yet", which was true when Phase 2 wrote it and false from Phase 5
+   * on — so a model asked about deals was told to deny a board the team was
+   * looking at. A prompt that describes the product as it was is the same
+   * mistake as a tool that reliably returns nothing: a false shape of the
+   * business, stated with confidence.
    */
-  it('says plainly that deal stages do not exist yet', () => {
-    expect(prompt).toMatch(/deal stages.*do not exist yet/is)
+  it('names the deal tools, and no longer says deals do not exist', () => {
+    expect(prompt).toContain('get_pipeline')
+    expect(prompt).toContain('update_deal')
+    expect(prompt).toContain('book_meeting')
     expect(prompt).toContain('search_companies')
+    expect(prompt).toContain('search_crm')
+    expect(prompt).not.toMatch(/do not exist yet/i)
+    expect(prompt).not.toMatch(/kanban/i)
+  })
+
+  /**
+   * The gate-side tools. Each of these is a rule the model would otherwise
+   * guess at — whether somebody may be written to, whether a finding still
+   * holds — and a guess stated to a customer is a claim nobody checked.
+   */
+  it('sends the model to the rule before a draft, not to its own judgement', () => {
+    expect(prompt).toContain('check_send')
+    expect(prompt).toContain('get_consent')
+    expect(prompt).toMatch(/the rule, not your guess/i)
+  })
+
+  it('sends the model to the evidence history before it repeats a finding', () => {
+    expect(prompt).toContain('get_evidence_changes')
+    expect(prompt).toContain('get_stale_companies')
+  })
+
+  /**
+   * §2.1: an opt-out is read from the person's own words by a pure function,
+   * before any model sees the reply. `classify_reply`'s enum has no
+   * `opted_out` — the prompt says so too, so the model does not try.
+   */
+  it('lets the model classify a reply and never mark an opt-out', () => {
+    expect(prompt).toContain('get_replies')
+    expect(prompt).toContain('classify_reply')
+    expect(prompt).toMatch(/never mark an opt-out/i)
+  })
+
+  it('says a note is never evidence', () => {
+    for (const tool of ['add_note', 'create_task', 'list_tasks']) expect(prompt, tool).toContain(tool)
+    expect(prompt).toMatch(/a note is your words, never evidence/i)
+    // add_note files the note under the chat owner's name (author_user_id is
+    // NOT NULL), so the model is told whose name its words will carry.
+    expect(prompt).toMatch(/filed under the name of the person you are helping/i)
+  })
+
+  /**
+   * Every tool the prompt names must be one the agent really has. A prompt
+   * naming a tool that does not exist sends the model after it, and the
+   * turn is spent on a refusal.
+   */
+  it('names only tools the agency server exposes', () => {
+    const named = new Set(prompt.match(/\b[a-z]+(?:_[a-z]+)+\b/g) ?? [])
+    for (const name of named) {
+      expect((AGENCY_TOOL_NAMES as readonly string[]).includes(name), name).toBe(true)
+    }
   })
 
   it('says so rather than inventing a profile when none is configured', () => {

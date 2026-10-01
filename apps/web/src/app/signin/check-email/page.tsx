@@ -16,6 +16,7 @@ import { deployment } from '@/lib/deployment'
  * the shell exports them.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export default function CheckEmail() {
   return (

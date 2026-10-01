@@ -1,11 +1,10 @@
 import { redirect } from 'next/navigation'
-import { AGENCY_TOOL_NAMES, can, parseIcpDefinition } from '@agency/core'
+import { AGENCY_TOOL_NAMES, can } from '@agency/core'
 import { enabledConnectors, listAgentDefs, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { AgentsPanel } from '@/components/settings/agents'
 import { getDb } from '@/lib/db'
-import { icpForOrg } from '@/lib/queries'
 
 /**
  * Settings → Agents (PROMPT.md §7).
@@ -20,6 +19,7 @@ import { icpForOrg } from '@/lib/queries'
  * job, and the failure surfaces as a confusing answer rather than an error.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export default async function AgentsPage() {
   const session = await auth()
@@ -31,16 +31,6 @@ export default async function AgentsPage() {
     listAgentDefs(db, user.orgId),
     enabledConnectors(db, user.orgId),
   ])
-
-  const icpRow = await icpForOrg(user.orgId)
-  let orgLabel = 'Agency'
-  if (icpRow) {
-    try {
-      orgLabel = parseIcpDefinition(icpRow.definition).label
-    } catch {
-      orgLabel = 'Agency'
-    }
-  }
 
   /**
    * The app's own tools, then a wildcard per enabled connector.
@@ -69,7 +59,7 @@ export default async function AgentsPage() {
   }
 
   return (
-    <Shell user={user} orgName={orgLabel} current="agents" signOut={signOutAction}>
+    <Shell user={user} current="agents" signOut={signOutAction}>
       <h1>Agents</h1>
       <p className="lede">
         Subagents the main agent can hand work to. Each has its own instructions and its own tools,

@@ -6,6 +6,7 @@ import { getDb, schema } from '@/lib/db'
 import { env } from '@/lib/env'
 import { transport } from '@/lib/mail'
 import { log } from '@/lib/logger'
+import { memberMayAccess } from '@/lib/member-access'
 import type { Role } from '@agency/core'
 
 /**
@@ -74,15 +75,24 @@ const { handlers, auth, signIn, signOut } = NextAuth(() => {
            * exact roster worth phishing. The check-email page promises the
            * system will not reveal who has access; this is what keeps that
            * promise. A stranger gets the same redirect and no mail.
+           *
+           * A REVOKED member is refused here too, by the same early return:
+           * the row stays after a revocation (§2.4), so "has a row" stopped
+           * meaning "may sign in", and a different response for "was on the
+           * team" would be the oracle in a new shape. The reason is in the
+           * log line, which only the operator reads.
            */
           const known = await getDb()
-            .select({ id: schema.users.id })
+            .select({ revokedAt: schema.users.revokedAt })
             .from(schema.users)
             .where(eq(schema.users.email, identifier.toLowerCase()))
             .limit(1)
 
-          if (known.length === 0) {
-            log.warn('sign-in requested for an address that is not a team member', { identifier })
+          if (!memberMayAccess(known[0])) {
+            log.warn('sign-in requested for an address that may not sign in', {
+              identifier,
+              reason: known[0] ? 'access_revoked' : 'not_a_member',
+            })
             return
           }
 
@@ -167,13 +177,18 @@ const { handlers, auth, signIn, signOut } = NextAuth(() => {
          * anything but the trimmed, lower-cased form.
          */
         const rows = await getDb()
-          .select({ id: schema.users.id })
+          .select({ revokedAt: schema.users.revokedAt })
           .from(schema.users)
           .where(eq(schema.users.email, address.toLowerCase()))
           .limit(1)
 
-        if (rows.length === 0) {
-          log.warn('sign-in refused: address is not a team member', { identifier: address })
+        // A link sent before the revocation is still a valid token for
+        // fifteen minutes; this is what makes it worthless.
+        if (!memberMayAccess(rows[0])) {
+          log.warn('sign-in refused: address may not sign in', {
+            identifier: address,
+            reason: rows[0] ? 'access_revoked' : 'not_a_member',
+          })
           return false
         }
         return true
@@ -191,12 +206,31 @@ const { handlers, auth, signIn, signOut } = NextAuth(() => {
        */
       async session({ session, user }) {
         const rows = await getDb()
-          .select({ orgId: schema.users.orgId, role: schema.users.role })
+          .select({ orgId: schema.users.orgId, role: schema.users.role, revokedAt: schema.users.revokedAt })
           .from(schema.users)
           .where(eq(schema.users.id, user.id))
           .limit(1)
 
         const row = rows[0]
+        /**
+         * A revoked person holding a session is refused on every request, not
+         * only at sign-in. `usersRevoke` deletes their sessions in the same
+         * transaction as the stamp, but the callback leg above reads the row
+         * BEFORE @auth/core writes the new session — so a link completed a
+         * moment before the revocation can mint a session a moment after it,
+         * and that session would otherwise live for thirty days.
+         *
+         * Throwing is how this callback says "no session": @auth/core catches
+         * it and answers with a null body, so `auth()` is null and every page
+         * redirects to /signin. Returning nothing instead would NOT refuse —
+         * next-auth falls back to the raw adapter session, sessionToken and
+         * all. The rows go too, so the next request finds nothing to refuse.
+         */
+        if (!row || !memberMayAccess(row)) {
+          await getDb().delete(schema.sessions).where(eq(schema.sessions.userId, user.id))
+          log.warn('session refused: access revoked', { userId: user.id })
+          throw new Error('access revoked')
+        }
         return {
           expires: session.expires,
           user: {
@@ -204,8 +238,8 @@ const { handlers, auth, signIn, signOut } = NextAuth(() => {
             email: user.email,
             name: user.name,
             image: user.image,
-            orgId: row?.orgId ?? '',
-            role: (row?.role ?? 'member') as Role,
+            orgId: row.orgId,
+            role: row.role as Role,
           },
         }
       },

@@ -48,6 +48,14 @@ export interface HealthInputs {
    * wonders why a campaign is not moving.
    */
   readonly outreach: 'disabled' | 'send-only' | 'send-and-receive' | 'receive-only'
+  /**
+   * When this worker's heartbeat last REACHED the database, or null when none
+   * has (§2.4). The web app reads the same fact from the row and reports its
+   * age; this is the worker's own view of it, costs no query, and is what
+   * lets an operator on the worker's port tell "the tick is running" from
+   * "the tick is running and its writes are failing".
+   */
+  readonly heartbeatAt: Date | null
 }
 
 export async function answerHealth(
@@ -87,6 +95,8 @@ export async function answerHealth(
       database: 'ok',
       chat: inputs.chatEnabled ? 'enabled' : 'disabled',
       outreach: inputs.outreach,
+      // Always present, and null is an answer: no heartbeat has been written.
+      heartbeatWrittenAt: inputs.heartbeatAt?.toISOString() ?? null,
       // Reported rather than made fatal. The restart reconciler is scoped by
       // boot time, so a lock lost mid-run does not endanger live turns — but
       // the exclusion is gone until someone restarts, and that should be

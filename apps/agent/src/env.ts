@@ -1,4 +1,60 @@
 import { z } from 'zod'
+import { isScannableHost } from '@agency/scanner'
+
+/**
+ * A blank value is UNSET, not a present value that happens to be empty — the
+ * web app's rule (apps/web/src/lib/env.ts), now the worker's too.
+ *
+ * `node --env-file` reads `NAME=` as the empty string, and so does a compose
+ * `NAME: ${NAME:-}` line for a variable the operator never set. Every feature
+ * behind these variables fails closed when it is absent, so a blank one must
+ * not stop the worker booting — and must not be READ as a value either: a
+ * blank `LLM_MODEL` named the model `''`, and a blank
+ * `OUTREACH_BOUNCE_PAUSE_PCT` coerced to 0, which paused a campaign on its
+ * first bounce. A PRESENT value is still held to its shape.
+ */
+const blankIsUnset = (v: unknown): unknown => (typeof v === 'string' && v.trim() === '' ? undefined : v)
+
+/**
+ * The one host a Slack incoming webhook lives on — the web app's refinement
+ * (apps/web/src/lib/env.ts), word for word. Written out here so the schema
+ * entry stays on one line: `packages/db/test/deployment.test.ts` reads this
+ * file line by line to find the variables the worker REQUIRES, and an entry
+ * whose `.optional()` sits three lines down reads as one of them.
+ */
+const slackWebhookUrl = z
+  .string()
+  .url()
+  .refine(
+    (v) => {
+      try {
+        const u = new URL(v)
+        return u.protocol === 'https:' && u.hostname === 'hooks.slack.com'
+      } catch {
+        return false
+      }
+    },
+    'SLACK_WEBHOOK_URL must be an https://hooks.slack.com/… URL',
+  )
+
+/**
+ * DoveSoft's API origin, with an optional path prefix and nothing else. The
+ * worker sends the API key to whatever this names, so a URL carrying
+ * userinfo, a query or a fragment is refused rather than half-honoured.
+ * Production additionally needs `https:` on a public host (`loadEnv`).
+ * Written out here so the schema entry stays on one line (see above).
+ */
+const doveSoftBaseUrl = z
+  .string()
+  .url()
+  .refine((v) => {
+    try {
+      const u = new URL(v)
+      return (u.protocol === 'https:' || u.protocol === 'http:') && !u.username && !u.password && !u.search && !u.hash
+    } catch {
+      return false
+    }
+  }, 'DOVESOFT_BASE_URL must be an http(s) origin, optionally with a path, and no credentials, query or fragment')
 
 /** Validated at startup, like the web app's (PROMPT.md §10). Never logged. */
 const schema = z.object({
@@ -101,7 +157,7 @@ const schema = z.object({
   AGENT_SKILLS_DIR: z.string().optional(),
 
   /** Overrides the SDK's default model per §5.5's "pick a model per task". */
-  AGENT_MODEL: z.string().optional(),
+  AGENT_MODEL: z.preprocess(blankIsUnset, z.string().optional()),
 
   /**
    * §5.5's single-shot seam, used here for reply triage (`classify_reply`).
@@ -112,9 +168,9 @@ const schema = z.object({
    * need LLM_ALLOW_REMOTE_LEAD_DATA, because a reply is a named person's
    * words.
    */
-  LLM_PROVIDER: z.enum(['ollama', 'openai', 'anthropic']).optional(),
-  LLM_MODEL: z.string().optional(),
-  OLLAMA_BASE_URL: z.string().url().default('http://127.0.0.1:11434'),
+  LLM_PROVIDER: z.preprocess(blankIsUnset, z.enum(['ollama', 'openai', 'anthropic']).optional()),
+  LLM_MODEL: z.preprocess(blankIsUnset, z.string().optional()),
+  OLLAMA_BASE_URL: z.preprocess(blankIsUnset, z.string().url().default('http://127.0.0.1:11434')),
   /** Declared, never inferred from the URL — see packages/llm. */
   OLLAMA_IS_LOCAL: z
     .string()
@@ -198,6 +254,76 @@ const schema = z.object({
   OUTREACH_TICK_MS: z.coerce.number().int().positive().default(15_000),
   /** How many it will dispatch per tick, across every campaign. */
   OUTREACH_BATCH: z.coerce.number().int().positive().default(20),
+
+  // The three below are read through `outreach/options.ts`, the one place the
+  // sender's optional settings are derived from the environment. Every one of
+  // them is optional or defaulted: unset, the sender behaves exactly as it did
+  // before the variable existed. Every message here names a variable and
+  // never its value (§2.3).
+
+  /**
+   * Signs the one-click unsubscribe token (RFC 8058) that rides in the
+   * List-Unsubscribe headers of every outreach email. The SAME value as the
+   * web app's, because the web app is what verifies the click. Either this or
+   * WEB_PUBLIC_URL unset means no header, said once in the boot log — an
+   * opt-out link nobody can verify is worse than none.
+   */
+  UNSUBSCRIBE_SECRET: z.preprocess(blankIsUnset, z.string().min(32, 'UNSUBSCRIBE_SECRET must be at least 32 characters').optional()),
+
+  /**
+   * The web app's public origin: the origin a recipient's mail client can
+   * reach — where `/api/unsubscribe` lives, e.g. https://agency.example. The
+   * header's link is built from this and nothing else: not the address the
+   * worker binds, and not the compose service name, neither of which anybody
+   * outside can reach. In production it must be `https:` on a public
+   * multi-label host (checked in `loadEnv`): RFC 8058 one-click needs an
+   * HTTPS URI, and mailbox providers ignore any other.
+   */
+  WEB_PUBLIC_URL: z.preprocess(blankIsUnset, z.string().url().optional()),
+
+  /**
+   * A campaign whose addresses bounce past this percentage pauses itself,
+   * once it has been sent to at least twenty — below that the ratio is
+   * noise. The existing `campaign_inactive` deferral is the stop; a person
+   * re-activates it after fixing the list.
+   */
+  OUTREACH_BOUNCE_PAUSE_PCT: z.preprocess(blankIsUnset, z.coerce.number().min(0).max(100).default(5)),
+
+  /**
+   * The alarm for an opt-out the worker could not record (§2.1's Phase 4
+   * obligation): a reply read over IMAP said stop, and its suppression row
+   * could not be written. The audit row and the `OPT-OUT NOT RECORDED` log
+   * line are written either way; this is the real-time half, the same Slack
+   * message the web routes send (`notify.ts`). The SAME value as the web
+   * app's. The URL IS the credential — never logged, never in an audit row,
+   * and `redact()` cannot see it, because it matches on key names and this
+   * one lives in a URL. Host-pinned: the worker POSTs to whatever it names.
+   * Unset → no alarm, said once at boot.
+   */
+  SLACK_WEBHOOK_URL: z.preprocess(blankIsUnset, slackWebhookUrl.optional()),
+
+  // --- SMS through DoveSoft (0019) ------------------------------------------
+  //
+  // All optional, and SMS sending is on only with BOTH the key and the entity
+  // id: either one unset means no SMS provider, said once at boot naming the
+  // missing variable and never a value, and approved SMS rows wait in the
+  // queue rather than being picked up by a tick that cannot carry them. The
+  // web app's DLR and inbound routes read their own variables; nothing here
+  // records a delivery report or an inbound text, so the org those are filed
+  // under is not declared here. Voice and WhatsApp over DoveSoft are not
+  // built: their APIs are not public (DOVESOFT.md).
+
+  /**
+   * The account's API key, sent as the `key` header and nowhere else — never
+   * in a log line, an error, an audit row or a URL (§2.3).
+   */
+  DOVESOFT_API_KEY: z.preprocess(blankIsUnset, z.string().min(8, 'DOVESOFT_API_KEY must be at least 8 characters').optional()),
+
+  /** The DLT principal entity id (PE ID) the account's templates are registered under: digits. */
+  DOVESOFT_ENTITY_ID: z.preprocess(blankIsUnset, z.string().regex(/^\d{1,32}$/, 'DOVESOFT_ENTITY_ID must be the DLT entity id, digits only').optional()),
+
+  /** Where the send API lives. https on a public host in production (checked in `loadEnv`). */
+  DOVESOFT_BASE_URL: z.preprocess(blankIsUnset, doveSoftBaseUrl.default('https://api.dovesoft.io')),
 })
 
 export type Env = z.infer<typeof schema>
@@ -251,5 +377,55 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     )
   }
 
+  /**
+   * The one-click link must be one a recipient can press (RFC 8058 §3.1: an
+   * HTTPS URI). `http://localhost:3000` or `http://web:3000` is a URL that
+   * validates and that nobody outside can reach, and a header built on it is
+   * the "worse than no link" case `outreach/options.ts` exists to prevent —
+   * the person believes they asked. Refused at boot in production, naming
+   * the variable and never its value; development may still point at
+   * localhost, where the only recipient is the developer.
+   */
+  if (env.WEB_PUBLIC_URL !== undefined && env.NODE_ENV === 'production' && !isRecipientReachable(env.WEB_PUBLIC_URL)) {
+    throw new Error(
+      'WEB_PUBLIC_URL must be an https:// origin on a public multi-label host in production — the ' +
+        "origin a recipient's mail client can reach. One-click unsubscribe (RFC 8058) needs an HTTPS " +
+        'URI, and a loopback, an IP literal or a compose service name is a link nobody can press. ' +
+        'Unset it to send without the header (said once at boot) until the web app has one.',
+    )
+  }
+
+  /**
+   * The SMS API key rides in a header to whatever DOVESOFT_BASE_URL names, so
+   * in production that must be https on a public host — the same test as the
+   * one-click origin above. A plain-http URL would put the key on the wire in
+   * the clear, and a loopback, an IP literal or an internal name would hand
+   * it to whatever answers there. Refused at boot, naming the variable and
+   * never its value; development may point at a local stand-in.
+   */
+  if (env.NODE_ENV === 'production' && !isRecipientReachable(env.DOVESOFT_BASE_URL)) {
+    throw new Error(
+      'DOVESOFT_BASE_URL must be an https:// URL on a public multi-label host in production: the ' +
+        'DoveSoft API key is sent to it. Unset it to use DoveSoft’s own API.',
+    )
+  }
+
   return env
+}
+
+/**
+ * `https:` on a public DNS name: at least one dot, no IP literal, no
+ * `localhost`, no reserved or internal-use suffix — the scanner's own test
+ * for a host out on the internet (`isScannableHost`), which is the same
+ * question asked from the other side. Asked of the one-click origin and of
+ * the SMS API the DoveSoft key is sent to.
+ */
+function isRecipientReachable(raw: string): boolean {
+  let url: URL
+  try {
+    url = new URL(raw)
+  } catch {
+    return false
+  }
+  return url.protocol === 'https:' && isScannableHost(url.hostname.toLowerCase())
 }

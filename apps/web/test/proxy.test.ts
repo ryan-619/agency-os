@@ -12,9 +12,15 @@
  *   /api/health   an orchestrator has to reach it
  *   /api/inbound  a mail provider's webhook cannot carry a session cookie;
  *                 the route demands a shared secret and fails closed
+ *   /book         the public booking page; a lead has no account
+ *   /api/cron     Vercel's scheduler; the route demands CRON_SECRET as a
+ *                 bearer and refuses to run outside production
+ *   /unsubscribe  a one-click unsubscribe link, from a mail client, signed;
+ *                 the route verifies the token and fails closed
+ *   /p            a proposal's share link; the token IS the credential
  *
- * The last one was found by probing: the first live POST to the webhook came
- * back as a 307 to /signin, because nothing had exempted it.
+ * The inbound one was found by probing: the first live POST to the webhook
+ * came back as a 307 to /signin, because nothing had exempted it.
  */
 import { describe, it, expect } from 'vitest'
 import { NextRequest } from 'next/server'
@@ -50,7 +56,33 @@ describe('the cookie gate', () => {
     expect(res.headers.get('location')).toBeNull()
   })
 
-  it.each(['/', '/companies', '/chat', '/approvals', '/campaigns', '/suppressions', '/api/chat/turns', '/api/touches/x/decide'])(
+  /**
+   * Each of these authenticates the request itself, inside the handler,
+   * because the caller cannot carry a session: a scheduler, a mail client,
+   * a buyer with a link.
+   */
+  it.each([
+    '/api/cron/rescan', '/api/cron/digest',
+    '/api/unsubscribe/abc.def', '/unsubscribe/abc.def',
+    '/p/abc', '/api/p/abc/accept',
+    '/api/inbound/resend',
+    // DoveSoft's pushes (0019): each route demands DOVESOFT_WEBHOOK_SECRET.
+    '/api/inbound/dovesoft/dlr', '/api/inbound/dovesoft/sms', '/api/inbound/dovesoft/sms?token=x',
+  ])('lets a caller with no session reach %s', (path) => {
+    const res = proxy(request(path))
+    expect(res.status).toBe(200)
+    expect(res.headers.get('location')).toBeNull()
+  })
+
+  it.each([
+    '/', '/companies', '/chat', '/approvals', '/campaigns', '/suppressions', '/api/chat/turns', '/api/touches/x/decide',
+    // Every private page and route planned beside the public ones above.
+    '/contacts', '/inbox', '/tasks', '/audit', '/compliance', '/settings', '/settings/team',
+    '/api/search', '/api/export/companies', '/api/meetings/x/ics', '/api/users', '/api/notes', '/api/tasks',
+    '/api/proposals/x/share', '/api/contacts/x/erase', '/pipeline/analytics',
+    // The DoveSoft screens and the routes behind them are a member's, not a provider's.
+    '/settings/templates', '/api/templates', '/api/templates/import', '/api/templates/x', '/api/contacts/x/sms',
+  ])(
     'sends anonymous traffic on %s to /signin',
     (path) => {
       const res = proxy(request(path))
@@ -76,7 +108,13 @@ describe('the cookie gate', () => {
    * not the public routes, and a startsWith without the slash would let them
    * through.
    */
-  it.each(['/signinx', '/api/healthz', '/api/inboundish', '/booking', '/api/bookings'])('does not exempt the lookalike %s', (path) => {
+  it.each([
+    '/signinx', '/api/healthz', '/api/inboundish', '/booking', '/api/bookings',
+    '/api/cronjob', '/unsubscribed', '/px', '/api/px',
+    // `/p` is a whole segment, not a prefix: the pipeline and the proposals
+    // are the two most private pages in the product.
+    '/pipeline', '/proposals/x', '/api/proposals/x',
+  ])('does not exempt the lookalike %s', (path) => {
     expect(proxy(request(path)).status).toBe(307)
   })
 })

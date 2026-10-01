@@ -1,8 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { scoreCompany, parseIcpDefinition, type IcpDefinition } from '@agency/core'
-import { SEED_DIR } from '@agency/db'
+import { ADDITIVE_SIGNAL_KEYS } from '../src/additive.js'
 import { extractProfile } from '../src/extract.js'
 import { fixtureNames, loadFixture, loadGoldens } from './fixtures.js'
 
@@ -22,8 +21,16 @@ import { fixtureNames, loadFixture, loadGoldens } from './fixtures.js'
  *   npm run fixtures:golden      re-run the Python engine over the recordings
  */
 
+/**
+ * The ICP the goldens were computed against, FROZEN here rather than read
+ * from the seed. The seed is editable product data: promoting an
+ * informational signal into it (adding the key with a weight) is exactly how
+ * one starts to count, and it would move every score below while the Python
+ * goldens stayed where they were. This file is today's seed, verbatim; it
+ * changes only when the goldens are regenerated against a new one.
+ */
 const icp: IcpDefinition = parseIcpDefinition(
-  JSON.parse(readFileSync(join(SEED_DIR, 'icp-security-gap-saas.json'), 'utf8')),
+  JSON.parse(readFileSync(new URL('./icp-parity.json', import.meta.url), 'utf8')),
 )
 
 const domains = fixtureNames()
@@ -57,7 +64,13 @@ describe('the port agrees with the Python engine it came from', () => {
       const theirs = Object.fromEntries(
         Object.entries(golden.profile.observations).map(([k, o]) => [k, { observed: o.observed, gap: o.gap, detail: o.detail }]),
       )
-      expect(Object.keys(mine).sort()).toEqual(Object.keys(theirs).sort())
+      // Every key the reference produced, and nothing beyond it but the
+      // informational signals, which the reference does not have and which
+      // score nothing. "No extra keys" became "no UNEXPECTED keys": a key
+      // that is in neither list is still a failure.
+      for (const key of Object.keys(theirs)) expect(mine, `signal "${key}" is missing`).toHaveProperty(key)
+      const extra = Object.keys(mine).filter((k) => !(k in theirs))
+      expect(extra.filter((k) => !(ADDITIVE_SIGNAL_KEYS as readonly string[]).includes(k))).toEqual([])
       for (const key of Object.keys(theirs)) {
         expect(mine[key], `signal "${key}"`).toEqual(theirs[key])
       }

@@ -1,19 +1,29 @@
 import { notFound, redirect } from 'next/navigation'
-import { DEFAULT_STALE_AFTER_DAYS, isStale, parseIcpDefinition } from '@agency/core'
+import {
+  PROPOSAL_RESCORE_SENTENCE, isStale, parseIcpDefinition, proposalNeedsRescore, staleAfterDaysOf,
+} from '@agency/core'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { can } from '@agency/core'
 import {
-  companyThread, listContactsForCompany, meetingsForCompany, openDealFor, proposalsForCompany, type AgencyDb,
+  companyThread, linkedinThreadWithheld, listContactsForCompany, meetingsForCompany, openDealFor, proposalsForCompany,
+  type AgencyDb, type LinkedinThreadWithheld,
 } from '@agency/db/queries'
+import { CompanyEditSlot } from '@/components/company/edit'
+import { EvidencePanelsSlot } from '@/components/company/evidence'
+import { InformationalSlot } from '@/components/company/informational'
+import { NotesSlot } from '@/components/company/notes'
+import type { CompanySlotProps } from '@/components/company/slot'
 import { ContactsPanel } from '@/components/outreach/contacts'
 import { CompanyActions } from '@/components/pipeline/company-actions'
 import { When } from '@/components/when'
 import { getDb } from '@/lib/db'
+import { deliveryLine } from '@/lib/delivery-view'
 import { inZone } from '@/lib/format'
 import { companyByDomain, icpForOrg, scanWithFindings } from '@/lib/queries'
 
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 function evidenceLines(evidence: unknown): Array<[string, string]> {
   if (!evidence || typeof evidence !== 'object') return []
@@ -21,6 +31,29 @@ function evidenceLines(evidence: unknown): Array<[string, string]> {
     k,
     typeof v === 'string' ? v : JSON.stringify(v),
   ])
+}
+
+/**
+ * What the Conversation panel prints in place of LinkedIn words /tasks would
+ * not show (review round 3). The rule is /tasks' own
+ * (`linkedinThreadWithheld`); this only words it.
+ */
+const LINKEDIN_HELD: Record<Exclude<LinkedinThreadWithheld, 'not_handed'>, string> = {
+  refused: 'the send rules now refuse this person',
+  paused: 'the contact is paused',
+  unchecked: 'the rules cannot be checked — the contact or the campaign is gone',
+  expired: 'it was handed over more than a day ago',
+}
+
+function linkedinHeldLine(why: LinkedinThreadWithheld, status: string): string {
+  if (why !== 'not_handed') return `Words withheld: ${LINKEDIN_HELD[why]}. They are shown in /tasks when the rules allow.`
+  if (status === 'awaiting_approval') {
+    return 'The words are on /approvals for a person to approve; after that they are shown in /tasks when the rules allow.'
+  }
+  if (status === 'approved' || status === 'queued' || status === 'sending') {
+    return 'Words shown in /tasks when the rules allow — Start checks every send rule at that moment.'
+  }
+  return 'Not sent, so the words are not shown here. A LinkedIn message’s words are shown in /tasks when the rules allow.'
 }
 
 export default async function CompanyDetail({ params }: { params: Promise<{ domain: string }> }) {
@@ -42,8 +75,19 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
     meetingsForCompany(db, user.orgId, company.id),
     proposalsForCompany(db, user.orgId, company.id),
   ])
-  const icp = icpRow ? parseIcpDefinition(icpRow.definition) : null
-  const staleAfter = icp?.freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
+  // LinkedIn words this panel may not print — /tasks' rule, read once.
+  const withheld = await linkedinThreadWithheld(db, user.orgId, thread)
+  // A profile that does not parse is read as no profile, as every other page
+  // reads it: one bad ICP edit must not make the company page a 500.
+  let icp: ReturnType<typeof parseIcpDefinition> | null
+  try {
+    icp = icpRow ? parseIcpDefinition(icpRow.definition) : null
+  } catch {
+    icp = null
+  }
+  // Never the raw value: `isStale` throws on one that is not a positive number,
+  // which made this page a 500 over a hand-edited 0.
+  const staleAfter = staleAfterDaysOf(icp)
 
   // The score shown is the one computed FROM the scan whose findings are shown,
   // not the newest score row for the company. Pairing those independently puts
@@ -51,11 +95,17 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
   const score = found?.score ?? null
 
   const findings = found?.findings ?? []
+  // Only the SCORED rows are a gap, a strength or a missing observation; an
+  // informational signal is context and belongs to <InformationalSlot>.
+  // `findings.scored` arrives in the same PR as this line (0018, from the
+  // parallel schema worktree), so it is read structurally: an absent property
+  // means "scored", which is what every row was before that migration.
+  const scoredRows = findings.filter((f) => ('scored' in f ? (f as { scored: boolean }).scored : true))
   // §2.2 and §12: a finding whose `observed` is false is NEVER rendered as a
   // gap. The two lists are built from the column, not from a convention.
-  const gaps = findings.filter((f) => f.observed && f.gap === true)
-  const inPlace = findings.filter((f) => f.observed && f.gap === false)
-  const notObserved = findings.filter((f) => !f.observed)
+  const gaps = scoredRows.filter((f) => f.observed && f.gap === true)
+  const inPlace = scoredRows.filter((f) => f.observed && f.gap === false)
+  const notObserved = scoredRows.filter((f) => !f.observed)
 
   // Derived from when the scan RAN, not read from `findings.stale`. That column
   // is a cache written by a sweep that only runs during `npm run scan`, so it
@@ -74,10 +124,28 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
       ? { ok: false, why: 'The last scan never reached the site; nothing was observed to propose from.' }
       : stale
         ? { ok: false, why: `The findings are stale (older than ${staleAfter} days). Re-scan before generating (§2.2).` }
-        : gaps.length === 0
-          ? { ok: false, why: 'No gaps were observed. There is nothing to propose.' }
-          : { ok: true }
+        : icp && icpRow &&
+            proposalNeedsRescore({
+              icp,
+              findings: found.findings,
+              profiles: { activeProfileId: icpRow.id, scoreProfileId: found.score?.icpProfileId ?? null },
+            })
+          ? {
+              ok: false,
+              why: `The last scan was ${PROPOSAL_RESCORE_SENTENCE} before generating: the active ICP scores signals it did not.`,
+            }
+          : gaps.length === 0
+            ? { ok: false, why: 'No gaps were observed. There is nothing to propose.' }
+            : { ok: true }
   const principal = { id: user.id, orgId: user.orgId, role: user.role }
+  const slot: CompanySlotProps = {
+    orgId: user.orgId,
+    companyId: company.id,
+    domain: company.domain,
+    userId: user.id,
+    canWrite: can(principal, 'companies:write'),
+    staleAfterDays: staleAfter,
+  }
 
   const signOutAction = async () => {
     'use server'
@@ -85,7 +153,7 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
   }
 
   return (
-    <Shell user={user} orgName={icp?.label ?? 'Agency'} current="companies" signOut={signOutAction}>
+    <Shell user={user} current="companies" signOut={signOutAction}>
       <p className="crumb"><a href="/companies">← Companies</a></p>
       <h1>{company.name ?? company.domain}</h1>
       <p className="lede">
@@ -101,6 +169,7 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
           ' · never scanned'
         )}
       </p>
+      <CompanyEditSlot {...slot} />
 
       {!found ? (
         <div className="note">
@@ -208,17 +277,20 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
             </>
           ) : null}
 
+          <InformationalSlot {...slot} />
+
           <h2>Scan</h2>
           <table>
             <tbody>
               <tr><th>Ran at</th><td className="mono">{new Date(found.scan.ranAt).toISOString()}</td></tr>
               <tr><th>Reached the site</th><td className="mono">{found.scan.ok ? 'yes' : 'no'}</td></tr>
-              <tr><th>Signals observed</th><td className="mono">{gaps.length + inPlace.length} of {findings.length}</td></tr>
+              <tr><th>Signals observed</th><td className="mono">{gaps.length + inPlace.length} of {scoredRows.length}</td></tr>
               <tr><th>Score computed</th><td className="mono">{score ? new Date(score.computedAt).toISOString() : '—'}</td></tr>
             </tbody>
           </table>
         </>
       )}
+      <EvidencePanelsSlot {...slot} />
       <CompanyActions
         companyId={company.id}
         companyDomain={company.domain}
@@ -289,6 +361,7 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
           consents: c.consents.map((k) => ({ channel: k.channel, granted: k.granted, source: k.source })),
         }))}
       />
+      <NotesSlot {...slot} />
 
       <section className="card" style={{ marginTop: 18 }}>
         <h2>Conversation</h2>
@@ -302,25 +375,50 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
           <p className="muted" style={{ fontSize: 13 }}>Nothing has been sent or received yet.</p>
         ) : (
           <div className="thread">
-            {thread.map((t) => (
-              <div key={t.id} className={`touch touch-${t.direction}`}>
-                <div className="touch-head">
-                  <span className="pill">{t.direction === 'in' ? 'reply' : t.channel}</span>
-                  <span className={`tag${t.status === 'sent' || t.status === 'replied' ? ' on' : t.status === 'refused' || t.status === 'failed' ? ' warn' : ''}`}>
-                    {t.status}
-                    {t.refusalCode ? ` — ${t.refusalCode.replace(/_/g, ' ')}` : ''}
-                  </span>
-                  <span className="muted" style={{ fontSize: 12 }}>
-                    <When iso={(t.sentAt ?? t.createdAt).toISOString()} />
-                    {t.recipient ? ` · ${t.recipient}` : ''}
-                  </span>
+            {thread.map((t) => {
+              // A LinkedIn message's words are printed only where /tasks would
+              // print them: never before Start hands them over, and not while
+              // the step is open and its re-check withholds them. Not printed
+              // means not sent to the browser at all.
+              const held = withheld.get(t.id)
+              return (
+                <div key={t.id} className={`touch touch-${t.direction}`}>
+                  <div className="touch-head">
+                    <span className="pill">{t.direction === 'in' ? 'reply' : t.channel}</span>
+                    <span className={`tag${t.status === 'sent' || t.status === 'replied' ? ' on' : t.status === 'refused' || t.status === 'failed' ? ' warn' : ''}`}>
+                      {t.status}
+                      {t.refusalCode ? ` — ${t.refusalCode.replace(/_/g, ' ')}` : ''}
+                    </span>
+                    <span className="muted" style={{ fontSize: 12 }}>
+                      <When iso={(t.sentAt ?? t.createdAt).toISOString()} />
+                      {t.recipient ? ` · ${t.recipient}` : ''}
+                    </span>
+                  </div>
+                  {held ? (
+                    <div className="muted" style={{ fontSize: 12.5 }}>{linkedinHeldLine(held, t.status)}</div>
+                  ) : (
+                    <>
+                      {t.subject ? <div style={{ fontSize: 13.5, fontWeight: 600 }}>{t.subject}</div> : null}
+                      {t.body ? <pre className="mono touch-body">{t.body}</pre> : null}
+                    </>
+                  )}
+                  {t.error ? <div className="err-line">{t.error}</div> : null}
+                  {(() => {
+                    // 0019: an SMS delivery report, its own line beside the
+                    // status — a report never moves `status` (delivery-view.ts).
+                    const d = deliveryLine(t)
+                    if (!d) return null
+                    return (
+                      <div className={d.tone === 'warn' ? 'err-line' : 'muted'} style={{ fontSize: 12.5 }}>
+                        {d.text}
+                        {d.at ? <> · <When iso={d.at.toISOString()} /></> : null}
+                      </div>
+                    )
+                  })()}
+                  {t.decisionNote ? <div className="muted" style={{ fontSize: 12.5 }}>Note: {t.decisionNote}</div> : null}
                 </div>
-                {t.subject ? <div style={{ fontSize: 13.5, fontWeight: 600 }}>{t.subject}</div> : null}
-                {t.body ? <pre className="mono touch-body">{t.body}</pre> : null}
-                {t.error ? <div className="err-line">{t.error}</div> : null}
-                {t.decisionNote ? <div className="muted" style={{ fontSize: 12.5 }}>Note: {t.decisionNote}</div> : null}
-              </div>
-            ))}
+              )
+            })}
           </div>
         )}
       </section>

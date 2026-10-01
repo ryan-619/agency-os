@@ -11,8 +11,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import {
-  DEAL_STAGES, advanceDeal, listDeals, listDealsForBoard, openDealFor, schema, setDealOwner,
-  setDealStage, type AgencyDb,
+  DEAL_STAGES, advanceDeal, dealsDue, dealsSetNextActionAt, listDeals, listDealsForBoard, openDealFor,
+  schema, setDealOwner, setDealStage, type AgencyDb,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
 
@@ -227,6 +227,255 @@ describe('deals', () => {
       await setDealOwner(db, { orgId, dealId: deal.id, ownerUserId: priya })
       board = await listDealsForBoard(db, orgId)
       expect(board[0]!.ownerEmail).toBe('priya@agency.test')
+    })
+  })
+  /**
+   * The pipeline's history is the audit log. A person's move writes
+   * `deal.moved` from the route; the moves nobody made by hand — a send, a
+   * reply, a booking, a proposal — are `advanceDeal`'s, so it writes its own
+   * row naming the stage it LEFT. Before it did, /pipeline/analytics could not
+   * count a conversion it never saw.
+   */
+  describe('the audit row every automatic move writes', () => {
+    const moves = async () =>
+      (await db.select().from(schema.auditLog))
+        .filter((a) => a.action === 'deal.created' || a.action === 'deal.advanced')
+        .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+
+    it('records a creation from nothing and an advance from the stage it left', async () => {
+      const created = await advanceDeal(db, { orgId, companyId, to: 'contacted' })
+      await advanceDeal(db, { orgId, companyId, to: 'replied' })
+      const rows = await moves()
+      expect(rows.map((r) => [r.action, r.actor, r.subjectType, r.subjectId, r.detail])).toEqual([
+        ['deal.created', 'system', 'deal', created.deal.id, { companyId, from: null, to: 'contacted' }],
+        ['deal.advanced', 'system', 'deal', created.deal.id, { companyId, from: 'contacted', to: 'replied' }],
+      ])
+    })
+
+    it('writes nothing when nothing moved', async () => {
+      await advanceDeal(db, { orgId, companyId, to: 'meeting' })
+      await advanceDeal(db, { orgId, companyId, to: 'replied' })
+      await advanceDeal(db, { orgId, companyId, to: 'meeting' })
+      expect((await moves()).map((r) => r.action)).toEqual(['deal.created'])
+    })
+
+    it('names the actor a caller gives it', async () => {
+      await advanceDeal(db, { orgId, companyId, to: 'new', actor: 'agent' })
+      expect((await moves())[0]!.actor).toBe('agent')
+    })
+
+    /** The race's loser re-reads and advances; one creation, not two. */
+    it('records one creation when two callers race', async () => {
+      await Promise.all([
+        advanceDeal(db, { orgId, companyId, to: 'contacted' }),
+        advanceDeal(db, { orgId, companyId, to: 'replied' }),
+      ])
+      const rows = await moves()
+      expect(rows.filter((r) => r.action === 'deal.created')).toHaveLength(1)
+      expect(rows.at(-1)!.detail).toMatchObject({ to: 'replied' })
+    })
+  })
+
+  /**
+   * `advanceDeal` reads the open deal and then writes it, and under READ
+   * COMMITTED another session can commit in between: a booking moving the
+   * deal to meeting, or a person closing it lost on the board. The rules —
+   * forward only, open deals only — are in the UPDATE's own WHERE, and the
+   * audit row names the stage the UPDATE actually replaced.
+   *
+   * PGlite is one connection, so two sessions cannot interleave for real.
+   * `afterFirstDealRead` runs the other session's write right after the
+   * first read of `deals` returns — exactly where its commit would land.
+   * Review round 3, finding [11].
+   */
+  describe('a move that lands between the read and the write', () => {
+    let restore: (() => void) | null = null
+    afterEach(() => {
+      restore?.()
+      restore = null
+    })
+
+    const afterFirstDealRead = (between: () => Promise<unknown>): void => {
+      const pg = test.pg
+      const original = pg.query.bind(pg)
+      let fired = false
+      pg.query = (async (...args: Parameters<typeof pg.query>) => {
+        const out = await original(...args)
+        if (!fired && /^\s*select\b[\s\S]*\bfrom "deals"/i.test(String(args[0]))) {
+          fired = true
+          await between()
+        }
+        return out
+      }) as typeof pg.query
+      restore = () => {
+        pg.query = original
+      }
+    }
+
+    const stageNow = async (id: string) =>
+      (await db.select().from(schema.deals).where(eq(schema.deals.id, id)))[0]!
+
+    const advances = async () =>
+      (await db.select().from(schema.auditLog)).filter((a) => a.action === 'deal.advanced').map((a) => a.detail)
+
+    it('does not knock back a deal a concurrent move took further', async () => {
+      const { deal } = await advanceDeal(db, { orgId, companyId, to: 'contacted' })
+      afterFirstDealRead(() => db.update(schema.deals).set({ stage: 'meeting' }).where(eq(schema.deals.id, deal.id)))
+
+      const r = await advanceDeal(db, { orgId, companyId, to: 'replied' })
+
+      expect(r.outcome).toBe('unchanged')
+      expect(r.deal.stage).toBe('meeting')
+      expect((await stageNow(deal.id)).stage).toBe('meeting')
+      // Nothing moved, so nothing says it did.
+      expect(await advances()).toEqual([])
+    })
+
+    it('does not give a deal closed in between an open stage', async () => {
+      const { deal } = await advanceDeal(db, { orgId, companyId, to: 'contacted' })
+      afterFirstDealRead(() =>
+        setDealStage(db, { orgId, dealId: deal.id, stage: 'lost', lostReason: 'went with a competitor' }),
+      )
+
+      const r = await advanceDeal(db, { orgId, companyId, to: 'replied' })
+
+      const closed = await stageNow(deal.id)
+      expect(closed.stage).toBe('lost')
+      expect(closed.closedAt).not.toBeNull()
+      // The event is still recorded somewhere true: the closed deal is a
+      // closed deal, and a reply after a close opens a new one — what the two
+      // would do one after the other.
+      expect(r.deal.id).not.toBe(deal.id)
+      expect(r.outcome).toBe('created')
+      expect(r.deal.stage).toBe('replied')
+      expect(await advances()).toEqual([])
+    })
+
+    it('records the stage it actually replaced, not the one it read', async () => {
+      const { deal } = await advanceDeal(db, { orgId, companyId, to: 'contacted' })
+      afterFirstDealRead(() => db.update(schema.deals).set({ stage: 'replied' }).where(eq(schema.deals.id, deal.id)))
+
+      const r = await advanceDeal(db, { orgId, companyId, to: 'meeting' })
+
+      expect(r.outcome).toBe('advanced')
+      expect(r.deal.stage).toBe('meeting')
+      expect(await advances()).toEqual([{ companyId, from: 'replied', to: 'meeting' }])
+    })
+  })
+
+  /**
+   * `deals.next_action_at` existed since 0003 and nothing wrote it. A column
+   * nobody can set teaches a shape the product does not have.
+   */
+  describe('dealsSetNextActionAt', () => {
+    const due = new Date('2026-10-02T23:59:59.999Z')
+
+    it('sets the date and audits where it came from and where it went', async () => {
+      const { deal } = await advanceDeal(db, { orgId, companyId, to: 'contacted' })
+      const set = await dealsSetNextActionAt(db, { orgId, dealId: deal.id, at: due, actor: 'user-1' })
+      expect(set.ok && set.deal.nextActionAt?.toISOString()).toBe(due.toISOString())
+      expect(set.ok && set.from).toBeNull()
+
+      const later = new Date('2026-10-09T23:59:59.999Z')
+      const moved = await dealsSetNextActionAt(db, { orgId, dealId: deal.id, at: later, actor: 'user-1' })
+      expect(moved.ok && moved.from?.toISOString()).toBe(due.toISOString())
+
+      const audit = (await db.select().from(schema.auditLog))
+        .filter((a) => a.action === 'deal.next_action_set')
+        .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+      expect(audit.map((a) => [a.actor, a.subjectId, a.detail])).toEqual([
+        ['user-1', deal.id, { companyId, from: null, to: due.toISOString() }],
+        ['user-1', deal.id, { companyId, from: due.toISOString(), to: later.toISOString() }],
+      ])
+    })
+
+    it('clears the date with null, and audits the clearing', async () => {
+      const { deal } = await advanceDeal(db, { orgId, companyId, to: 'contacted' })
+      await dealsSetNextActionAt(db, { orgId, dealId: deal.id, at: due, actor: 'user-1' })
+      const cleared = await dealsSetNextActionAt(db, { orgId, dealId: deal.id, at: null, actor: 'user-1' })
+      expect(cleared.ok && cleared.deal.nextActionAt).toBeNull()
+      const [row] = await db.select().from(schema.deals).where(eq(schema.deals.id, deal.id))
+      expect(row!.nextActionAt).toBeNull()
+      const last = (await db.select().from(schema.auditLog))
+        .filter((a) => a.action === 'deal.next_action_set')
+        .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+        .at(-1)
+      expect(last!.detail).toEqual({ companyId, from: due.toISOString(), to: null })
+    })
+
+    /** It is a change to the deal, so it is what "untouched" measures from. */
+    it('touches the deal', async () => {
+      const { deal } = await advanceDeal(db, { orgId, companyId, to: 'contacted' })
+      await dealsSetNextActionAt(db, { orgId, dealId: deal.id, at: due, actor: 'user-1' })
+      const [row] = await db.select().from(schema.deals).where(eq(schema.deals.id, deal.id))
+      expect(row!.updatedAt).not.toBeNull()
+    })
+
+    it('refuses a date on a closed deal, but lets it be cleared', async () => {
+      const { deal } = await advanceDeal(db, { orgId, companyId, to: 'proposal' })
+      await dealsSetNextActionAt(db, { orgId, dealId: deal.id, at: due, actor: 'user-1' })
+      await setDealStage(db, { orgId, dealId: deal.id, stage: 'won' })
+      const refused = await dealsSetNextActionAt(db, { orgId, dealId: deal.id, at: due, actor: 'user-1' })
+      expect(refused).toMatchObject({ ok: false, reason: 'closed' })
+      const cleared = await dealsSetNextActionAt(db, { orgId, dealId: deal.id, at: null, actor: 'user-1' })
+      expect(cleared.ok).toBe(true)
+    })
+
+    it('will not touch another org’s deal, and writes no audit row for it', async () => {
+      const { deal } = await advanceDeal(db, { orgId, companyId, to: 'contacted' })
+      const [other] = await db.insert(schema.orgs).values({ name: 'Rival' }).returning({ id: schema.orgs.id })
+      const r = await dealsSetNextActionAt(db, { orgId: other!.id, dealId: deal.id, at: due, actor: 'user-2' })
+      expect(r).toMatchObject({ ok: false, reason: 'not_found' })
+      const [row] = await db.select().from(schema.deals).where(eq(schema.deals.id, deal.id))
+      expect(row!.nextActionAt).toBeNull()
+      expect((await db.select().from(schema.auditLog)).filter((a) => a.action === 'deal.next_action_set')).toEqual([])
+    })
+
+    it('refuses a date that is not one', async () => {
+      const { deal } = await advanceDeal(db, { orgId, companyId, to: 'contacted' })
+      const r = await dealsSetNextActionAt(db, { orgId, dealId: deal.id, at: new Date('nope'), actor: 'user-1' })
+      expect(r).toMatchObject({ ok: false, reason: 'invalid_date' })
+    })
+  })
+
+  describe('dealsDue', () => {
+    const now = new Date('2026-09-30T12:00:00.000Z')
+    const hours = (n: number): Date => new Date(now.getTime() + n * 3_600_000)
+    const company = async (org: string, domain: string): Promise<string> => {
+      const [c] = await db.insert(schema.companies).values({ orgId: org, domain }).returning({ id: schema.companies.id })
+      return c!.id
+    }
+    const dealAt = async (org: string, domain: string, at: Date | null): Promise<string> => {
+      const { deal } = await advanceDeal(db, { orgId: org, companyId: await company(org, domain), to: 'contacted' })
+      if (at) await dealsSetNextActionAt(db, { orgId: org, dealId: deal.id, at, actor: 'user-1' })
+      return deal.id
+    }
+
+    it('lists open deals due by the cutoff, most overdue first, with the company', async () => {
+      const overdue = await dealAt(orgId, 'late.test', hours(-48))
+      const today = await dealAt(orgId, 'today.test', hours(6))
+      await dealAt(orgId, 'next-week.test', hours(24 * 7))
+      await dealAt(orgId, 'no-date.test', null)
+      const due = await dealsDue(db, orgId, hours(24))
+      expect(due.map((d) => d.id)).toEqual([overdue, today])
+      expect(due[0]!.companyDomain).toBe('late.test')
+    })
+
+    /** An outcome has no next step. */
+    it('excludes closed deals, won and lost alike', async () => {
+      const won = await dealAt(orgId, 'won.test', hours(-2))
+      const lost = await dealAt(orgId, 'lost.test', hours(-2))
+      const open = await dealAt(orgId, 'open.test', hours(-2))
+      await setDealStage(db, { orgId, dealId: won, stage: 'won' })
+      await setDealStage(db, { orgId, dealId: lost, stage: 'lost', lostReason: 'went quiet' })
+      expect((await dealsDue(db, orgId, hours(24))).map((d) => d.id)).toEqual([open])
+    })
+
+    it('excludes another org’s deals', async () => {
+      const [other] = await db.insert(schema.orgs).values({ name: 'Rival' }).returning({ id: schema.orgs.id })
+      await dealAt(other!.id, 'theirs.test', hours(-2))
+      const mine = await dealAt(orgId, 'mine.test', hours(-2))
+      expect((await dealsDue(db, orgId, hours(24))).map((d) => d.id)).toEqual([mine])
     })
   })
 })

@@ -46,6 +46,30 @@ export interface RawCapture {
      * is what `email.message.Message.get` gives the Python engine.
      */
     readonly headers: Readonly<Record<string, string>>
+    /**
+     * EVERY `Set-Cookie` the homepage response carried, in order — `headers`
+     * above holds only the first, by parity, and a site sets several. Each
+     * entry has its VALUE replaced by `<redacted>`: no rule reads it, and a
+     * session cookie's value is a bearer credential for the session the
+     * scanner was handed (§2.3). Names and attributes are what `cookie_flags`
+     * judges.
+     *
+     * Optional because the sixteen recorded fixtures predate it. Absent means
+     * "not captured", which the extractor reports as unobserved — never as a
+     * site that sets no cookies.
+     */
+    readonly setCookies?: readonly string[]
+    /**
+     * EVERY enforced `Content-Security-Policy` value the homepage response
+     * carried, in order — `headers` above holds only the first, by parity. A
+     * browser enforces each of them, so a policy split across two headers
+     * judged on the first alone reads as a gap the site does not have.
+     *
+     * Optional because the sixteen recorded fixtures predate it. Absent means
+     * "not captured", and `csp_quality` then reads the first-value map exactly
+     * as it did before this field existed.
+     */
+    readonly cspHeaders?: readonly string[]
     readonly body: string
     /** See RawResponse.truncated. */
     readonly truncated?: boolean

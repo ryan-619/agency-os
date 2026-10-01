@@ -12,8 +12,10 @@
  * nobody has done anything about, which is a true and useful state; a deal in
  * `new` for every imported row would make the pipeline a copy of the CRM.
  */
-import { and, desc, eq, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, getTableColumns, inArray, isNotNull, isNull, lte, sql } from 'drizzle-orm'
+import { alias } from 'drizzle-orm/pg-core'
 import * as schema from './schema.js'
+import { appendAudit } from './approvals.js'
 import type { AgencyDb } from './repository.js'
 
 export type DealRow = typeof schema.deals.$inferSelect
@@ -59,6 +61,17 @@ export async function openDealFor(
  *
  * Returns what happened, because the caller usually wants to say it: "moved
  * to replied" and "already at meeting" are different sentences.
+ *
+ * Every creation and every advance writes its OWN audit row — `deal.created`
+ * or `deal.advanced`, `{ companyId, from, to }` — because the pipeline's
+ * history is the audit log and this is the function that moves deals on its
+ * own. Before it did, an automatic move was recorded only inside whatever
+ * caused it (`send.sent`, `contact.replied`, `meeting.booked`,
+ * `proposal.generated`), none of which says the stage the deal LEFT, so
+ * /pipeline/analytics could not count a conversion it did not see. The row
+ * is written with the caller's `db`, so inside a caller's transaction it
+ * commits or rolls back with the move. `actor` defaults to `'system'`: the
+ * caller that knows the person writes its own row beside this one.
  */
 export async function advanceDeal(
   db: AgencyDb,
@@ -67,6 +80,8 @@ export async function advanceDeal(
     readonly companyId: string
     readonly to: DealStage
     readonly nextAction?: string | null
+    /** Who the audit row names. A users.id, 'agent', or 'system' (the default). */
+    readonly actor?: string
   },
 ): Promise<{ deal: DealRow; outcome: 'created' | 'advanced' | 'unchanged' }> {
   const existing = await openDealFor(db, args.orgId, args.companyId)
@@ -90,7 +105,10 @@ export async function advanceDeal(
       })
       .returning()
     const deal = rows[0]
-    if (deal) return { deal, outcome: 'created' }
+    if (deal) {
+      await recordMove(db, args.actor, 'deal.created', deal, null)
+      return { deal, outcome: 'created' }
+    }
     const winner = await openDealFor(db, args.orgId, args.companyId)
     if (!winner) throw new Error('deal insert conflicted but no open deal was found')
     return advanceDeal(db, args)
@@ -100,15 +118,70 @@ export async function advanceDeal(
     return { deal: existing, outcome: 'unchanged' }
   }
 
+  // The read above decided only that a move is worth trying. Under READ
+  // COMMITTED another session can commit between it and this write — a
+  // booking taking the deal to meeting, a person closing it lost — so both
+  // rules are in the statement itself: the row is locked only while it is
+  // still open and still behind `to`, and `before_stage` is the stage the
+  // UPDATE actually replaced, read under that lock rather than remembered
+  // from the read. Review round 3, finding [11].
+  const behind = DEAL_STAGES.filter((s) => RANK[s] < RANK[args.to])
+  const stillBehind = and(
+    eq(schema.deals.orgId, args.orgId),
+    isNull(schema.deals.closedAt),
+    inArray(schema.deals.stage, behind),
+  )
+  const prior = db.$with('prior').as(
+    db
+      .select({ id: schema.deals.id, beforeStage: sql<string>`${schema.deals.stage}`.as('before_stage') })
+      .from(schema.deals)
+      .where(and(eq(schema.deals.id, existing.id), stillBehind))
+      .for('update'),
+  )
   const rows = await db
+    .with(prior)
     .update(schema.deals)
     .set({
       stage: args.to,
       ...(args.nextAction !== undefined ? { nextAction: args.nextAction } : {}),
     })
-    .where(eq(schema.deals.id, existing.id))
-    .returning()
-  return { deal: rows[0] ?? existing, outcome: 'advanced' }
+    .from(prior)
+    .where(and(eq(schema.deals.id, prior.id), stillBehind))
+    .returning({ ...getTableColumns(schema.deals), beforeStage: prior.beforeStage })
+  const moved = rows[0]
+  if (!moved) {
+    // Somebody else moved it first. Ask again from the top: a deal now at or
+    // past `to` is `unchanged`, and one closed meanwhile is no longer this
+    // company's open deal — the event opens a new one, exactly what the two
+    // would have done one after the other. Nothing is audited for a move
+    // that did not happen.
+    return advanceDeal(db, args)
+  }
+  const { beforeStage, ...deal } = moved
+  await recordMove(db, args.actor, 'deal.advanced', deal, beforeStage)
+  return { deal, outcome: 'advanced' }
+}
+
+/**
+ * The audit row for an automatic move. Swallowed on failure like every other
+ * audit write on the send path: the move is the fact, and a deal that moved
+ * must not be reported as not having moved because its log line failed.
+ */
+async function recordMove(
+  db: AgencyDb,
+  actor: string | undefined,
+  action: 'deal.created' | 'deal.advanced',
+  deal: DealRow,
+  from: string | null,
+): Promise<void> {
+  await appendAudit(db, {
+    orgId: deal.orgId,
+    actor: actor ?? 'system',
+    action,
+    subjectType: 'deal',
+    subjectId: deal.id,
+    detail: { companyId: deal.companyId, from, to: deal.stage },
+  }).catch(() => {})
 }
 
 /**
@@ -218,6 +291,39 @@ export interface BoardDeal extends DealRow {
  * show them.
  */
 export async function listDealsForBoard(db: AgencyDb, orgId: string): Promise<BoardDeal[]> {
+  return boardRows(db, eq(schema.deals.orgId, orgId), [
+    desc(schema.deals.updatedAt),
+    desc(schema.deals.createdAt),
+  ])
+}
+
+/**
+ * The open deals that are due by `before`, soonest (most overdue) first.
+ *
+ * A closed deal is never due — an outcome has no next step — and a deal with
+ * no `next_action_at` is not due either: "nobody set a date" is a different
+ * fact from "the date has come", and the board shows the first as its own
+ * thing. The caller picks `before`; the pipeline page passes now + 24 hours,
+ * which is the end of today in every zone for a date set from the board.
+ */
+export async function dealsDue(db: AgencyDb, orgId: string, before: Date): Promise<BoardDeal[]> {
+  return boardRows(
+    db,
+    and(
+      eq(schema.deals.orgId, orgId),
+      isNull(schema.deals.closedAt),
+      isNotNull(schema.deals.nextActionAt),
+      lte(schema.deals.nextActionAt, before),
+    ),
+    [asc(schema.deals.nextActionAt), asc(schema.deals.createdAt)],
+  )
+}
+
+async function boardRows(
+  db: AgencyDb,
+  where: ReturnType<typeof and>,
+  order: ReturnType<typeof asc>[],
+): Promise<BoardDeal[]> {
   const rows = await db
     .select({
       deal: schema.deals,
@@ -231,8 +337,8 @@ export async function listDealsForBoard(db: AgencyDb, orgId: string): Promise<Bo
     // LEFT, not inner: an unowned deal is the common case on a fresh board
     // and an inner join would hide every one of them.
     .leftJoin(schema.users, eq(schema.users.id, schema.deals.ownerUserId))
-    .where(eq(schema.deals.orgId, orgId))
-    .orderBy(desc(schema.deals.updatedAt), desc(schema.deals.createdAt))
+    .where(where)
+    .orderBy(...order)
   return rows.map((r) => ({
     ...r.deal,
     companyDomain: r.companyDomain,
@@ -240,4 +346,87 @@ export async function listDealsForBoard(db: AgencyDb, orgId: string): Promise<Bo
     ownerEmail: r.ownerEmail,
     ownerName: r.ownerName,
   }))
+}
+
+export type DealsSetNextActionAtResult =
+  | { readonly ok: true; readonly deal: DealRow; readonly from: Date | null }
+  | { readonly ok: false; readonly reason: 'not_found' | 'closed' | 'invalid_date'; readonly message: string }
+
+/**
+ * Set or clear the date a deal's next action is due.
+ *
+ * `deals.next_action_at` has existed since 0003 and nothing wrote it —
+ * `update_deal` writes the `next_action` TEXT only — so a column nobody
+ * could set sat on every row, teaching whoever read the schema a shape the
+ * product did not have. This is its writer, and the only one.
+ *
+ * One UPDATE, which also reads the value it replaced (a self-join sees the
+ * row as it was before the statement), and one audit row naming both —
+ * `deal.next_action_set { companyId, from, to }` — in one transaction, so a
+ * due date never changes without its record. Clearing (`null`) is always
+ * allowed; setting a date on a closed deal is refused, because an outcome
+ * has no next step and `dealsDue` would never show it. Note what it touches:
+ * `deals_set_updated_at` fires on this UPDATE too, so setting a date counts
+ * as touching the deal — which is what "untouched for N days" means.
+ */
+export async function dealsSetNextActionAt(
+  db: AgencyDb,
+  args: {
+    readonly orgId: string
+    readonly dealId: string
+    readonly at: Date | null
+    /** A users.id, or 'agent'. */
+    readonly actor: string
+  },
+): Promise<DealsSetNextActionAtResult> {
+  if (args.at !== null && !Number.isFinite(args.at.getTime())) {
+    return { ok: false, reason: 'invalid_date', message: 'That is not a date.' }
+  }
+  const before = alias(schema.deals, 'before')
+  return db.transaction(async (tx) => {
+    const rows = await tx
+      .update(schema.deals)
+      .set({ nextActionAt: args.at })
+      .from(before)
+      .where(
+        and(
+          eq(before.id, schema.deals.id),
+          eq(schema.deals.orgId, args.orgId),
+          eq(schema.deals.id, args.dealId),
+          ...(args.at !== null ? [isNull(schema.deals.closedAt)] : []),
+        ),
+      )
+      .returning({ id: schema.deals.id, from: before.nextActionAt })
+    const updated = rows[0]
+    if (!updated) {
+      const [exists] = await tx
+        .select({ closedAt: schema.deals.closedAt })
+        .from(schema.deals)
+        .where(and(eq(schema.deals.orgId, args.orgId), eq(schema.deals.id, args.dealId)))
+        .limit(1)
+      // Another org's deal is answered exactly like a deal that does not
+      // exist: the id is the only thing that crossed the boundary.
+      if (!exists) return { ok: false, reason: 'not_found', message: 'No such deal.' } as const
+      return {
+        ok: false,
+        reason: 'closed',
+        message: 'This deal is closed. An outcome has no next step, so it cannot be due.',
+      } as const
+    }
+    const [deal] = await tx.select().from(schema.deals).where(eq(schema.deals.id, updated.id)).limit(1)
+    if (!deal) throw new Error('an updated deal could not be read back')
+    await appendAudit(tx as unknown as AgencyDb, {
+      orgId: args.orgId,
+      actor: args.actor,
+      action: 'deal.next_action_set',
+      subjectType: 'deal',
+      subjectId: deal.id,
+      detail: {
+        companyId: deal.companyId,
+        from: updated.from ? updated.from.toISOString() : null,
+        to: args.at ? args.at.toISOString() : null,
+      },
+    })
+    return { ok: true, deal, from: updated.from } as const
+  })
 }

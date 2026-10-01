@@ -19,15 +19,36 @@
  * Note also that `classifyRisk` is called INSIDE the try. It is a pure
  * function that should not throw, which is exactly why forgetting to guard it
  * is easy — and a throw from there would escape the fail-closed catch.
+ *
+ * A tool an owner turned off in Settings → Connectors is refused BEFORE
+ * classification, and before anything that could raise a card: nobody is
+ * asked, because a person approving it is the thing the owner switched off.
+ * It is a refusal added on top of `high`, never an allow — there is no branch
+ * in this file that a disabled list can reach and come out allowed.
  */
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 import { classifyRisk, type ChatEventBody } from '@agency/core'
-import { canonicalJson, type ApprovalRow } from '@agency/db'
+import { canonicalJson, connectorToolsIsDisabled, type ApprovalRow } from '@agency/db'
 import { fingerprint, type AuthorisationLedger } from './ledger.js'
 import type { ApprovalWaiter } from './waiter.js'
 
 const allow = (): PermissionResult => ({ behavior: 'allow' })
 const deny = (message: string): PermissionResult => ({ behavior: 'deny', message })
+
+/**
+ * What the model is told about a tool an owner turned off. One sentence for
+ * both rings, so whichever refuses it the model hears the same thing.
+ *
+ * "Disabled in Settings", not "disabled by an owner": for a catalog server
+ * nobody has reviewed yet the catalog turned it off, and the model repeats
+ * this to a person who may know that nobody did.
+ */
+export function disabledToolMessage(toolName: string): string {
+  return (
+    `${toolName} is disabled in Settings → Connectors, so it was refused without asking anyone. ` +
+    'Do not try a variation; tell the user an owner can turn it on there.'
+  )
+}
 
 /** The earlier of the approval's own TTL and the turn's wall clock. */
 function approvalDeadline(deps: Pick<GateDeps, 'now' | 'ttlMs' | 'turnDeadline'>): Date {
@@ -72,6 +93,11 @@ export interface GateDeps {
   }) => Promise<ApprovalRow>
   readonly waiter: ApprovalWaiter
   readonly ledger: AuthorisationLedger
+  /**
+   * The connector calls this turn refuses outright (`BuildResult.disabledTools`),
+   * read fresh with the rest of the runtime. Checked before classification.
+   */
+  readonly disabledTools: ReadonlySet<string>
   readonly audit: (action: string, detail: Record<string, unknown>) => Promise<void>
   readonly emit: (event: ChatEventBody) => void
   /** Marks a tool_use_id as having passed the gate, so a bypass is detectable. */
@@ -110,6 +136,14 @@ export function makeCanUseTool(deps: GateDeps): CanUseTool {
           'The agent runtime has stopped accepting tool calls because it detected a call it ' +
             'never authorised. Tell the user and stop.',
         )
+      }
+
+      // --- turned off by an owner: refused before anyone is asked ------------
+      // Before `classifyRisk`, so it holds whatever tier the classifier would
+      // have given, and before `ensureApproval`, so no card is ever raised.
+      if (connectorToolsIsDisabled(deps.disabledTools, toolName)) {
+        await deps.audit('agent.tool_disabled', { toolName, toolUseId: options.toolUseID })
+        return deny(disabledToolMessage(toolName))
       }
 
       const verdict = classifyRisk({ toolName, input, agentId: options.agentID ?? null })

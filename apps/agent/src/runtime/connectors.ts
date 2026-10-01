@@ -26,6 +26,16 @@
  * nobody in this codebase has read, and the place to relax it is a per-tool
  * review recorded in the database — not a wildcard that turns the gate off.
  *
+ * ## A per-tool review that can only DISABLE
+ *
+ * The half of that review that adds no bypass ships: `disabledTools` below is
+ * the set of calls an owner turned off (or the catalog turned off for a server
+ * nobody has reviewed yet — `connectorToolsState` in `@agency/db`), and both
+ * gate rings refuse a name in it before classification. It is a DENY list and
+ * nothing else. It never reaches `allowedTools`, which stays `[]`: a name
+ * there auto-approves, and an allow-shaped option is the wrong place to put a
+ * refusal even if it happened to work.
+ *
  * ## Credentials
  *
  * `revealSecret` is called here and the plaintext goes straight into a header
@@ -33,11 +43,42 @@
  * put in an error message, and never reaches the model: §2.3 says the agent is
  * never handed a raw key, and the agent's context contains only the server's
  * NAME.
+ *
+ * WHERE it goes is the row's to say, as a NAME: `secretPlacement` for http and
+ * sse (a header and the text before the value), `secretEnvName` for stdio. Both
+ * live in `@agency/db` beside the schema that validates them, so the web form
+ * and this builder cannot disagree about where a credential lands.
+ *
+ * ## A stdio child and the CLI's own environment
+ *
+ * The `env` this module emits is exactly `config.env` plus the credential, and
+ * that is what `test/connectors.test.ts` asserts of the object. It is NOT what
+ * the child receives. The CLI spawns a stdio server with
+ * `{ ...its own environment, ...env }` — read from the installed binary, not
+ * assumed — and its own environment is
+ * `childEnv()`, which on the api_key path carries ANTHROPIC_API_KEY. So every
+ * stdio connector was being handed the key that bills the agency, one process
+ * down from the place this file was careful not to put it.
+ *
+ * The child is therefore launched through `env -u …`, which removes those
+ * variables after the CLI has merged them in and then execs the real command.
+ * `env` replaces itself, so the connector's own argv is unchanged and `ps`
+ * shows nothing new.
+ *
+ * ## Not on the CLI's argv either
+ *
+ * What this module builds never goes in `options.mcpServers`: the SDK writes
+ * that option onto the CLI's own argv as `--mcp-config <json>`, decrypted
+ * credentials included, for every transport. A turn and a probe hand these
+ * servers over the CLI's control channel on stdin instead
+ * (`runtime/open-query.ts`), and `buildQueryOptions` accepts in-process
+ * servers only. A stdio credential still reaches its child through the
+ * child's environment, which is where it has to be.
  */
 import type { AgencyDb, ConnectorRow } from '@agency/db'
 import {
-  enabledConnectors, isReachableConnectorUrl, parseConnectorConfig, revealSecret,
-  type HttpConfig, type StdioConfig,
+  connectorToolsDenied, enabledConnectors, isReachableConnectorUrl, parseConnectorConfig, revealSecret,
+  secretEnvName, secretPlacement, type HttpConfig, type StdioConfig,
 } from '@agency/db'
 import type { Logger } from '../logger.js'
 
@@ -56,18 +97,40 @@ export interface BuildResult {
   readonly servers: Record<string, BuiltMcpServer>
   /** Rows that were enabled but could not be built, and why. For the log. */
   readonly skipped: readonly { readonly name: string; readonly why: string }[]
+  /**
+   * The calls both gate rings refuse before classification: `mcp__<name>__<tool>`
+   * for each tool turned off on a server in `servers`, and `mcp__<name>__*`
+   * where every tool is. Ask `connectorToolsIsDisabled`, not `.has()`, or the
+   * second form is missed. Names only (§2.3).
+   */
+  readonly disabledTools: ReadonlySet<string>
 }
 
 /**
- * How a credential reaches a connector.
+ * What the CLI's environment carries that a stdio connector must never see.
  *
- * `Authorization: Bearer <secret>` for http and sse; `MCP_SECRET` in the
- * environment for stdio. Fixed rather than configurable on purpose: a
- * per-connector "which header?" field is a field somebody fills in with the
- * secret itself, and `config` is plain `jsonb`.
+ * `childEnv()` in `options.ts` is the CLI's environment, and the CLI's
+ * environment is the base every stdio child's is merged onto. These are the
+ * names in it — or that the CLI reads from it — that carry a credential or
+ * the agency's Anthropic account. `test/connectors.test.ts` walks `childEnv()`
+ * and fails on any name it emits that is neither scrubbed here nor on its
+ * short list of things a child may see, so a variable added there later has
+ * to be decided about here.
  */
-const SECRET_HEADER = 'authorization'
-const SECRET_ENV = 'MCP_SECRET'
+export const SCRUBBED_FROM_STDIO: readonly string[] = Object.freeze([
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_CUSTOM_HEADERS',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+])
+
+/**
+ * The launcher. An absolute path rather than a PATH lookup, and not a new
+ * dependency: every `npx` server already needs it, because `npx` is a script
+ * whose first line is `#!/usr/bin/env node`. GNU, BusyBox (the alpine image)
+ * and BSD `env` all take `-u NAME` and `--`.
+ */
+export const STDIO_LAUNCHER = '/usr/bin/env'
 
 /**
  * Build the `mcpServers` option from this org's enabled connectors.
@@ -86,6 +149,7 @@ export async function buildMcpServers(
   const rows = await enabledConnectors(db, orgId)
   const servers: Record<string, BuiltMcpServer> = {}
   const skipped: { name: string; why: string }[] = []
+  const disabledTools = new Set<string>()
 
   for (const row of rows) {
     const built = await buildConnector(db, row, masterKey, log)
@@ -95,9 +159,16 @@ export async function buildMcpServers(
       continue
     }
     servers[row.name] = built.server
+    // Only a server this turn will actually have, and never one named
+    // `agency`: the session spreads the in-process server LAST, so such a row
+    // is displaced, and a tool list an owner ticked for a server that never
+    // runs must not quietly switch off the agency's own tools.
+    if (row.name !== 'agency') {
+      for (const name of connectorToolsDenied(row)) disabledTools.add(name)
+    }
   }
 
-  return { servers, skipped }
+  return { servers, skipped, disabledTools }
 }
 
 /**
@@ -139,16 +210,27 @@ export async function buildConnector(
 
   if (row.kind === 'stdio') {
     const config = parsed.value as StdioConfig
+    // `env` reads every leading NAME=VALUE argument as an assignment, `--` or
+    // not, so a command containing `=` would be run as something else.
+    if (config.command.includes('=')) {
+      return { why: 'Its command contains "=", which cannot be launched with the worker’s credentials removed.' }
+    }
+    // Refused rather than silently removed by the launcher below: a variable
+    // somebody set that never arrives is a connector that fails for no reason
+    // anyone can see.
+    const claimed = Object.keys(config.env).find((name) => SCRUBBED_FROM_STDIO.includes(name))
+    if (claimed) return { why: `Its environment sets ${claimed}, which belongs to the worker.` }
     return {
       server: {
         type: 'stdio',
-        command: config.command,
-        args: config.args,
-        // The child inherits NOTHING from the worker's environment. Otherwise
-        // a connector an owner installed would be handed ANTHROPIC_API_KEY,
-        // DATABASE_URL and SECRETS_KEY — every credential the product has, to
-        // a process chosen through a web form.
-        env: { ...config.env, ...(secret ? { [SECRET_ENV]: secret } : {}) },
+        command: STDIO_LAUNCHER,
+        args: [...SCRUBBED_FROM_STDIO.flatMap((name) => ['-u', name]), '--', config.command, ...config.args],
+        // What THIS module hands the child: `config.env` and the credential
+        // under the name the row gives, nothing from `process.env`. Otherwise a
+        // connector an owner installed would be handed DATABASE_URL and
+        // SECRETS_KEY — every credential the product has, to a process chosen
+        // through a web form. The launcher above removes what the CLI adds.
+        env: { ...config.env, ...(secret ? { [secretEnvName(config)]: secret } : {}) },
       },
     }
   }
@@ -159,13 +241,18 @@ export async function buildConnector(
     // predate this rule, and the check is cheap.
     return { why: 'Its URL points inside the network the worker runs in.' }
   }
+  // The header and scheme the row names: `authorization: Bearer` unless it
+  // says otherwise (`x-api-key` bare, `authorization: Sentry-Bearer`). The
+  // schema refuses a `headers` entry under the same name, so the spread order
+  // below never decides anything.
+  const { header, prefix } = secretPlacement(config)
   return {
     server: {
       type: row.kind === 'sse' ? 'sse' : 'http',
       url: config.url,
       headers: {
         ...config.headers,
-        ...(secret ? { [SECRET_HEADER]: `Bearer ${secret}` } : {}),
+        ...(secret ? { [header]: `${prefix}${secret}` } : {}),
       },
     },
   }

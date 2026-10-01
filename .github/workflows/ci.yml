@@ -95,9 +95,15 @@ jobs:
           node packages/db/dist/cli.js down all
           node packages/db/dist/cli.js up
 
+      # The expected count is DERIVED from the migrations rather than written
+      # down: every CREATE TABLE in the up files, plus the ledger. A literal
+      # here was wrong by two the moment a migration added a table, and a
+      # step that fails on every honest change is a step people stop reading.
       - name: No table survived the rollback except the ledger
         run: |
-          node -e "
+          EXPECTED=$(( $(grep -hoE 'CREATE TABLE (IF NOT EXISTS )?[a-z_]+' packages/db/migrations/*.up.sql | sort -u | wc -l) + 1 ))
+          echo "expected $EXPECTED tables"
+          EXPECTED_TABLES=$EXPECTED node -e "
           const {Client} = require('pg');
           (async () => {
             const c = new Client({connectionString: process.env.DATABASE_URL});
@@ -107,8 +113,8 @@ jobs:
             );
             const names = rows.map(r => r.tablename);
             console.log(names.length, 'tables:', names.join(', '));
-            if (names.length !== 25) {
-              console.error('expected 23 application tables + schema_migrations');
+            if (names.length !== Number(process.env.EXPECTED_TABLES)) {
+              console.error('expected', process.env.EXPECTED_TABLES, 'tables (every CREATE TABLE in the migrations + schema_migrations), found', names.length);
               process.exit(1);
             }
             await c.end();
@@ -126,6 +132,10 @@ jobs:
         run: docker compose config --quiet
         env:
           AUTH_SECRET: ci-secret
+          # Compose refuses to start without it (web and worker share it), and
+          # `config` evaluates the same interpolation — so without a value here
+          # this step was red on every push.
+          AGENT_INTERNAL_TOKEN: ci-secret-ci-secret-ci-secret-32
           SEED_OWNER_EMAIL: owner@example.com
       - name: Build the web image
         run: docker build -f apps/web/Dockerfile -t agency-os-web .

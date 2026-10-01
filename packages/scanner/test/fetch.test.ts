@@ -4,7 +4,7 @@ import { gzipSync, deflateRawSync } from 'node:zlib'
 import { describe, it, expect } from 'vitest'
 import {
   MAX_ENCODED_BYTES, capture, decodeBody, firstHeaders, readCapped, redirectTarget,
-  RedirectRefused, UnscannableHostError,
+  RedirectRefused, UnscannableHostError, headerValues, setCookieHeaders,
 } from '../src/fetch.js'
 import { ALL_PUBLIC_PATHS, PUBLIC_PATHS } from '../src/types.js'
 
@@ -88,6 +88,49 @@ describe('the reference engine\'s wire semantics', () => {
     expect(headers['constructor']).toBe('not a function')
     expect(headers['tostring']).toBeUndefined()
     expect(headers['__proto__']).toBeUndefined()
+  })
+
+  /**
+   * `cookie_flags` needs every cookie, and the header map keeps one. The map
+   * must still keep the FIRST — parity reads it — so the cookies are a second
+   * read of the same pairs rather than a change to `firstHeaders`.
+   */
+  it('records every Set-Cookie beside the first-value map, values redacted', () => {
+    const raw = [
+      'Set-Cookie', 'session_id=abc123; Path=/; Secure; HttpOnly',
+      'Content-Type', 'text/html',
+      'set-cookie', '__cf_bm=zzz; SameSite=None; Secure',
+      'SET-COOKIE', 'flag',
+    ]
+    expect(firstHeaders(raw)['set-cookie']).toBe('session_id=abc123; Path=/; Secure; HttpOnly')
+    const all = setCookieHeaders(raw)
+    expect(all).toEqual([
+      'session_id=<redacted>; Path=/; Secure; HttpOnly',
+      '__cf_bm=<redacted>; SameSite=None; Secure',
+      '=<redacted>',
+    ])
+    // The value is a bearer credential for the scanner's session, and no rule
+    // reads it, so it never reaches scans.raw.
+    expect(all.join('\n')).not.toContain('abc123')
+    expect(all.join('\n')).not.toContain('zzz')
+  })
+
+  /**
+   * A browser enforces EVERY Content-Security-Policy it is sent, and the map
+   * keeps one, so csp_quality needs a second read of the pairs — beside the
+   * map, which parity still reads.
+   */
+  it('records every value of one header beside the first-value map, in order', () => {
+    const raw = [
+      'Content-Security-Policy', "frame-ancestors 'self'",
+      'Content-Type', 'text/html',
+      'content-security-policy', "script-src 'self'",
+      'Content-Security-Policy-Report-Only', "default-src 'none'",
+    ]
+    expect(firstHeaders(raw)['content-security-policy']).toBe("frame-ancestors 'self'")
+    expect(headerValues(raw, 'content-security-policy')).toEqual(["frame-ancestors 'self'", "script-src 'self'"])
+    expect(headerValues(raw, 'Content-Security-Policy')).toHaveLength(2)
+    expect(headerValues(raw, 'x-absent')).toEqual([])
   })
 
   it('gunzips and inflates, and keeps the raw bytes when it cannot', () => {

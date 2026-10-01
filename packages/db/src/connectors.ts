@@ -25,7 +25,9 @@
  */
 import { and, asc, eq } from 'drizzle-orm'
 import { z } from 'zod'
+import { SENSITIVE_KEY, SENSITIVE_VALUE } from '@agency/core'
 import * as schema from './schema.js'
+import { isCheckViolation } from './pg-errors.js'
 import type { AgencyDb } from './repository.js'
 
 export type ConnectorRow = typeof schema.connectors.$inferSelect
@@ -52,25 +54,169 @@ export const connectorNameSchema = z
 /** A header value may not be a credential. Credentials go in `secret_ref`. */
 const headerValue = z.string().max(4096)
 
-const stdioConfig = z.object({
-  command: z.string().min(1, 'A command is required.'),
-  args: z.array(z.string()).max(64).default([]),
-  /**
-   * Environment for the child process. NOT a place for a credential: the
-   * worker injects the decrypted secret at launch, and anything typed here is
-   * stored in plain `jsonb` where §2.3 says a credential may never be.
-   */
-  env: z.record(z.string(), z.string().max(4096)).default({}),
-})
+/**
+ * Variables the credential may NOT be injected under: they reconfigure the
+ * child or the CLI itself. `secretEnv` says WHERE the worker puts the
+ * decrypted secret, and a name on this list would hand it to something other
+ * than the connector — `NODE_OPTIONS` runs code, `PATH` picks the binary,
+ * `ANTHROPIC_API_KEY` would make the child's calls bill the agency.
+ */
+export const FORBIDDEN_SECRET_ENV: readonly string[] = Object.freeze([
+  'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_CUSTOM_HEADERS', 'NODE_OPTIONS', 'PATH', 'HOME', 'USER',
+  'LOGNAME', 'SHELL', 'TMPDIR', 'LD_PRELOAD', 'NODE_EXTRA_CA_CERTS', 'DATABASE_URL', 'SECRETS_KEY', 'CLAUDE_CONFIG_DIR',
+])
 
-const httpConfig = z.object({
-  url: z.url('Must be an absolute http(s) URL.'),
-  headers: z.record(z.string(), headerValue).default({}),
-})
+/**
+ * A config KEY that looks like a credential. `SENSITIVE_KEY` from @agency/core
+ * matches `api_key` and `apikey` but NOT the hyphenated `x-api-key` the presets
+ * use (verified against redact.ts), so this covers the hyphenated spellings.
+ */
+const CREDENTIAL_SHAPED_KEY = /api[-_]?key|api[-_]?token/i
+
+/**
+ * A config VALUE that looks like a credential, whatever its key is called.
+ * The key check above stops `api_key: …`; this stops `x-custom: sk-ant-…`,
+ * which is the same credential under a name the key check cannot see.
+ * `SENSITIVE_VALUE` catches the `scheme://user:password@` form; the rest are
+ * the documented prefixes of the keys this product's presets take, plus an
+ * HTTP auth scheme typed in by hand. A prefix list cannot be complete — it
+ * is a guard against a mistake, and the credential field is the design.
+ */
+const CREDENTIAL_SHAPED_VALUE =
+  /^(bearer|basic|token|sentry-bearer)\s+\S|^(sk|pk|rk|ghp|gho|ghu|ghs|ghr|github_pat|xox[abpe]|hf|tvly|fc|whsec|re|sntrys|glpat|cal_(live|test)|akia|asia)[-_]/i
+
+/**
+ * A bare tool name, as `mcp__<server>__<tool>` carries it after the server.
+ * No double underscore: `disabledToolNames` prefixes `mcp__<name>__`, so a
+ * stored value already carrying that prefix would never match anything and
+ * a person would believe a tool was off that was not.
+ */
+const toolName = z
+  .string()
+  .regex(/^(?!.*__)[A-Za-z0-9][A-Za-z0-9_-]*$/, 'A tool name is letters, digits, underscores and hyphens, with no double underscore.')
+  .max(120)
+
+/**
+ * Refuse a `headers` or `env` entry whose KEY is credential-shaped, or is the
+ * connector's own secret slot — or whose VALUE is. The credential goes through
+ * `putSecret` and is injected by the worker at the moment of use; anything
+ * typed into these maps is stored in plain `jsonb`, where §2.3 says a
+ * credential may never be. A non-secret header a preset needs
+ * (`close-scope: mcp.read`) passes.
+ */
+function refuseCredentialShapedKeys<T extends { readonly [k: string]: unknown }>(
+  field: 'headers' | 'env',
+  slotOf: (config: T) => string,
+): (config: T, ctx: z.RefinementCtx) => void {
+  const where = field === 'headers' ? 'a header' : 'the environment'
+  return (config, ctx) => {
+    const entries = config[field]
+    if (!entries || typeof entries !== 'object') return
+    const slot = slotOf(config).toLowerCase()
+    for (const [key, value] of Object.entries(entries as Record<string, unknown>)) {
+      const folded = key.toLowerCase()
+      const keyLooksSecret = SENSITIVE_KEY.test(folded) || CREDENTIAL_SHAPED_KEY.test(folded) || folded === slot
+      const valueLooksSecret =
+        typeof value === 'string' && (SENSITIVE_VALUE.test(value) || CREDENTIAL_SHAPED_VALUE.test(value.trim()))
+      if (keyLooksSecret || valueLooksSecret) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [field, key],
+          message: `Put the credential in the credential field, not in ${where}.`,
+        })
+      }
+    }
+  }
+}
+
+const stdioConfig = z
+  .object({
+    command: z.string().min(1, 'A command is required.'),
+    args: z.array(z.string()).max(64).default([]),
+    /**
+     * Environment for the child process. NOT a place for a credential: the
+     * worker injects the decrypted secret at launch, and anything typed here is
+     * stored in plain `jsonb` where §2.3 says a credential may never be.
+     */
+    env: z.record(z.string(), z.string().max(4096)).default({}),
+    /**
+     * The env var NAME the credential is injected under. Default `MCP_SECRET`.
+     * A name, never a value: the value lives in `secrets` and reaches the
+     * child at launch, from the worker.
+     */
+    secretEnv: z
+      .string()
+      .regex(/^[A-Z][A-Z0-9_]{0,63}$/, 'An environment variable name is upper-case letters, digits and underscores.')
+      .refine(
+        (n) => !FORBIDDEN_SECRET_ENV.includes(n) && !n.startsWith('CLAUDE_'),
+        'That variable belongs to the worker, not to a connector.',
+      )
+      .optional(),
+    /**
+     * Bare tool names the gate refuses outright for this server, before
+     * classification — a DENY, never an allow. Names, never credentials.
+     * Optional rather than defaulted, so a row written before 0018 — and
+     * every caller that builds a config literal — keeps its shape; absent
+     * reads as nothing turned off, in `disabledToolNames`.
+     */
+    disabledTools: z.array(toolName).max(64).optional(),
+  })
+  .superRefine(refuseCredentialShapedKeys('env', (c) => c.secretEnv ?? 'MCP_SECRET'))
+
+const httpConfig = z
+  .object({
+    url: z.url('Must be an absolute http(s) URL.'),
+    headers: z.record(z.string(), headerValue).default({}),
+    /**
+     * The header NAME the credential is sent in. Default `authorization`.
+     * Lower-case, because that is how the worker builds the map and how the
+     * refusal above compares it.
+     */
+    secretHeader: z
+      .string()
+      .regex(/^[a-z][a-z0-9-]{0,63}$/, 'A header name is lower-case letters, digits and hyphens.')
+      .optional(),
+    /**
+     * Text before the value: `Bearer ` (the default when the header is
+     * `authorization`), `` (the default otherwise), or a vendor's own scheme
+     * such as `Sentry-Bearer `. Sixteen characters is enough for any scheme
+     * and too few for a token.
+     */
+    secretPrefix: z.string().max(16).optional(),
+    /** As on the stdio config. */
+    disabledTools: z.array(toolName).max(64).optional(),
+  })
+  .superRefine(refuseCredentialShapedKeys('headers', (c) => c.secretHeader ?? 'authorization'))
 
 export type StdioConfig = z.infer<typeof stdioConfig>
 export type HttpConfig = z.infer<typeof httpConfig>
 export type ConnectorConfig = StdioConfig | HttpConfig
+
+/** Where the credential goes for an http/sse row: the header, and the text before the value. */
+export function secretPlacement(config: HttpConfig): { header: string; prefix: string } {
+  const header = config.secretHeader ?? 'authorization'
+  const prefix = config.secretPrefix ?? (header === 'authorization' ? 'Bearer ' : '')
+  return { header, prefix }
+}
+
+/** The environment variable a stdio row's credential is injected under. */
+export function secretEnvName(config: StdioConfig): string {
+  return config.secretEnv ?? 'MCP_SECRET'
+}
+
+/**
+ * The fully-qualified names of the tools a row has turned off, as the gate
+ * sees them: `mcp__<name>__<tool>`. Empty when the config does not parse —
+ * a row the worker cannot build has no tools to disable.
+ */
+export function disabledToolNames(row: { readonly name: string; readonly config: unknown }): ReadonlySet<string> {
+  // Read loosely rather than by transport: `disabledTools` has the same
+  // shape on both configs, and this is called from places that hold a row
+  // and not its parsed kind.
+  const parsed = z.object({ disabledTools: z.array(toolName).max(64).optional() }).safeParse(row.config ?? {})
+  if (!parsed.success) return new Set()
+  return new Set((parsed.data.disabledTools ?? []).map((tool) => `mcp__${row.name}__${tool}`))
+}
 
 /**
  * Validate a connector's config for its transport.
@@ -201,6 +347,32 @@ export async function createConnector(db: AgencyDb, input: ConnectorInput): Prom
   const row = rows[0]
   if (!row) throw new Error('connector insert returned no row')
   return row
+}
+
+/**
+ * What a person is told about a connector named `agency` that predates 0018.
+ *
+ * 0018 added `connectors_name_is_not_agency` NOT VALID, which spares the rows
+ * already there only at the moment the constraint is added. A CHECK is
+ * evaluated on every later UPDATE of a row, whatever column it changes — so
+ * such a row can no longer be enabled, disabled, probed, re-credentialed or
+ * have its tools narrowed, and each of those answered a 500. The row does
+ * nothing meanwhile: the in-process server is spread last when a turn is
+ * assembled and takes its place. Deleting it still works (a CHECK is not
+ * evaluated on DELETE), which is why the sentence names that. 0018 is
+ * shipped and is not edited; a rename in a later migration would decide a
+ * name for somebody's server, so the person does it.
+ */
+export const LEGACY_AGENCY_CONNECTOR_MESSAGE =
+  "A connector named 'agency' predates this release and can no longer be changed; delete it and add it again under another name."
+
+/**
+ * True for exactly the refusal above: SQLSTATE 23514 on
+ * `connectors_name_is_not_agency`. Every connector write that can reach such
+ * a row answers it with `LEGACY_AGENCY_CONNECTOR_MESSAGE` and a 409.
+ */
+export function isLegacyAgencyConnectorRefusal(err: unknown): boolean {
+  return isCheckViolation(err, 'connectors_name_is_not_agency')
 }
 
 export async function updateConnector(

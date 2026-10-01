@@ -12,7 +12,7 @@
  */
 import { and, desc, eq } from 'drizzle-orm'
 import {
-  DEFAULT_STALE_AFTER_DAYS, isStale, parseIcpDefinition, proposalFromFindings,
+  isStale, parseIcpDefinition, proposalFromFindings, staleAfterDaysOf,
   type Proposal, type ProposalOutcome,
 } from '@agency/core'
 import * as schema from './schema.js'
@@ -28,9 +28,10 @@ export type ProposalStatus = 'draft' | 'sent' | 'accepted' | 'declined' | 'withd
  * Generate and store a proposal for a company, from its latest scan.
  *
  * Refuses, with the generator's own words, when there is nothing honest to
- * propose from: no scan, an unreachable site, a stale scan, no gaps. A stale
- * scan is the important one — a proposal is the most outbound draft there is,
- * and §2.2 says stale findings are re-verified before appearing in one.
+ * propose from: no scan, an unreachable site, a stale scan, a scan scored
+ * under a different ICP profile (`rescore`), no gaps. A stale scan is the
+ * important one — a proposal is the most outbound draft there is, and §2.2
+ * says stale findings are re-verified before appearing in one.
  */
 export async function generateProposal(
   db: AgencyDb,
@@ -60,7 +61,8 @@ export async function generateProposal(
   const icpRow = await activeIcpProfile(db, args.orgId)
   if (!icpRow) return { ok: false, reason: 'no_scan', message: 'There is no active ICP profile to write scope from.' }
   const icp = parseIcpDefinition(icpRow.definition)
-  const staleAfter = icp.freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
+  // Never the raw value: `isStale` throws on one that is not a positive number.
+  const staleAfter = staleAfterDaysOf(icp)
 
   const found = await latestScanWithFindings(db, args.orgId, args.companyId)
   if (!found) {
@@ -71,6 +73,12 @@ export async function generateProposal(
     company: { domain: company.domain, name: company.name },
     agency: { name: org.name },
     icp,
+    // EVERY row, informational ones included, each with its `scored` flag.
+    // The generator leaves the unscored ones out of the scope and the
+    // buyer's "of N signals observed" itself — and it needs to see them: a
+    // row for a key the ACTIVE ICP scores that this scan recorded unscored is
+    // a scan from before a promotion, which it refuses as `rescore` rather
+    // than calling the signal not assessed.
     findings: found.findings.map((f) => ({
       signalKey: f.signalKey,
       observed: f.observed,
@@ -78,9 +86,11 @@ export async function generateProposal(
       weight: f.weight,
       detail: f.detail,
       evidence: (f.evidence ?? {}) as Record<string, unknown>,
+      scored: f.scored,
     })),
     scan: { ranAt: found.scan.ranAt, ok: found.scan.ok, stale: isStale(found.scan.ranAt, staleAfter, now) },
     score: found.score ? { score: found.score.score, tier: found.score.tier } : null,
+    profiles: { activeProfileId: icpRow.id, scoreProfileId: found.score?.icpProfileId ?? null },
     dayRate: args.dayRate ?? null,
     currency: args.currency ?? 'USD',
     generatedAt: now,
@@ -166,6 +176,15 @@ export async function listProposals(db: AgencyDb, orgId: string, limit = 100): P
  * `accepted` moves the deal to `won` and `declined` needs the reason the
  * board will show; both are a person's decision, recorded with a time by the
  * constraint (`proposals_decided_has_time`).
+ *
+ * `from` is the status the caller read and decided against. When it is
+ * given, it is in the UPDATE's own WHERE, so a status that changed in
+ * between is not overwritten: the team's route reads, checks the move, and
+ * writes, and a buyer accepting through their link can commit between the
+ * two — without the predicate a teammate's "Declined" turned an accepted
+ * proposal declined while its deal stayed won. No match answers null, as an
+ * unknown proposal does, and nothing is written or audited; the caller
+ * re-reads to say which. Review round 3, finding [12].
  */
 export async function setProposalStatus(
   db: AgencyDb,
@@ -175,6 +194,8 @@ export async function setProposalStatus(
     readonly status: ProposalStatus
     readonly actor: string
     readonly now?: Date
+    /** The status the caller read. Omitted only by a caller that holds the row locked (`shareAccept`). */
+    readonly from?: ProposalStatus
   },
 ): Promise<ProposalRow | null> {
   const now = args.now ?? new Date()
@@ -182,7 +203,13 @@ export async function setProposalStatus(
   const rows = await db
     .update(schema.proposals)
     .set({ status: args.status, decidedAt: decided ? now : null })
-    .where(and(eq(schema.proposals.orgId, args.orgId), eq(schema.proposals.id, args.id)))
+    .where(
+      and(
+        eq(schema.proposals.orgId, args.orgId),
+        eq(schema.proposals.id, args.id),
+        ...(args.from !== undefined ? [eq(schema.proposals.status, args.from)] : []),
+      ),
+    )
     .returning()
   const row = rows[0]
   if (!row) return null

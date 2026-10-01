@@ -5,14 +5,22 @@ security and DevSecOps engagements. It runs the funnel end to end: find
 companies, qualify them on evidence, reach out, hold the conversation, and
 carry a deal to a signed client.
 
-Single organisation. No billing, no signup, no marketing site. Self-hosted, so
-lead data stays on the agency's own hardware.
+Single organisation. No billing, no signup, no marketing site. The spec asks
+for self-hosting, so that lead data stays on the agency's own hardware; the
+live instance runs on Vercel and Neon instead, a deliberate departure
+[DEPLOYING.md](DEPLOYING.md) states rather than hides.
 
-> **Phases 0 and 1 of 6 are complete.** The foundation is in place, and
-> companies can now be imported, scanned against their public surface, and
-> scored against an editable ICP. Nothing reaches out yet.
-> See [CLAUDE.md](CLAUDE.md) §2 for what arrives in which phase, and
-> [PROMPT.md](PROMPT.md) for the full spec.
+> **Phases 0–6 are built, and every Definition of Done is proved** —
+> [CLAUDE.md](CLAUDE.md) says exactly what "proved" means for each, and what it
+> does not. Phase 6 (inbound voice) is built and deliberately not switched on
+> until A2P 10DLC registration clears. One further release, on migration 0018,
+> added the operating layer around the pipeline: an inbox, notes and tasks, a
+> consent ledger, compliance and audit pages, search and exports, settings,
+> proposal share links, LinkedIn steps a person sends, bounce handling,
+> one-click unsubscribe, a worker heartbeat, and a nightly rescan and Slack
+> digest on Vercel. Then SMS through DoveSoft, on migration 0019: opt-in only,
+> sent only as DLT-registered templates a person approves, with delivery
+> reports and STOP replies read back. [PROMPT.md](PROMPT.md) is the full spec.
 
 ---
 
@@ -28,15 +36,25 @@ git clone <this repo> && cd agency-os
 cp .env.example .env
 ```
 
-Set two values in `.env`:
+Set three values in `.env` — compose refuses to start without the first two,
+because a stack that half-starts is harder to diagnose than one that stops:
 
 ```bash
 # a signing key for sessions
 AUTH_SECRET=$(openssl rand -base64 32)
 
+# proves a call to the agent worker came from the web app; both share it
+AGENT_INTERNAL_TOKEN=$(openssl rand -base64 32)
+
 # the only address that will be able to sign in
 SEED_OWNER_EMAIL=you@youragency.com
 ```
+
+Everything else in `.env.example` is optional and fails closed: unset or
+blank, the feature behind it is off and the screens that need it say so.
+`docker-compose.yml` names the optional variables each app reads, so a value
+set in `.env` reaches its container; the few it deliberately does not pass
+are listed there with the reason.
 
 Then:
 
@@ -72,7 +90,10 @@ npm run scan
 That reads each company's public surface, scores it against the active ICP, and
 writes what it observed. Then **Companies** lists them by fit, and each company
 page shows every finding beside the evidence that produced it — the header that
-was checked, the URL fetched, the library version served.
+was checked, the URL fetched, the library version served. On Vercel a nightly
+cron does the same for never-scanned and stale companies once `CRON_SECRET` is
+set; nothing under compose schedules it — drive it from the host's crontab
+with `curl` and the bearer, as `docker-compose.yml` shows.
 
 ---
 
@@ -81,7 +102,8 @@ was checked, the URL fetched, the library version served.
 ```bash
 npm install
 npm run typecheck     # packages and tests, strict
-npm test              # 639 tests, no Docker required
+npm test              # 5243 tests, no Docker required
+npx vitest run --maxWorkers=1 --minWorkers=1   # the same, on a machine short of memory
 ```
 
 The test suite runs against [PGlite](https://pglite.dev), an embedded Postgres,
@@ -108,11 +130,14 @@ which rejects `--env-file`. One file, linked, rather than two that drift.
 
 | Path | What it is |
 |---|---|
-| `apps/web` | Next.js 16 App Router — UI, BFF routes, Auth.js magic link |
-| `apps/agent` | the long-running worker; gets the agent runtime in Phase 2 |
+| `apps/web` | Next.js 16 App Router — UI, BFF routes, Auth.js magic link, two Vercel crons |
+| `apps/agent` | the long-running worker — agent turns over the Agent SDK, the send tick (email over SMTP, SMS through DoveSoft), IMAP reply detection, recovery, a heartbeat |
+| `apps/voice` | inbound voice over Twilio ConversationRelay — built, not switched on |
 | `packages/core` | domain logic — pure, no I/O, no framework, no database |
 | `packages/scanner` | the public-surface collector, and the port of the Python engine |
-| `packages/db` | schema, reversible SQL migrations, typed queries, seed |
+| `packages/db` | schema, reversible SQL migrations (`0001`–`0019`), typed queries, seed |
+| `packages/tools` | the agent's twenty-three typed tools, as plain data |
+| `packages/llm` | the single-shot model clients behind §5.5's seam — optional; lead data stays local by default |
 
 ### Migrations
 
@@ -129,7 +154,10 @@ npm run db:migrate -- reset      # down all, then up (refuses in production)
 Every `.up.sql` has a matching `.down.sql` — the migrator refuses to load one
 without the other. It records a checksum over **both halves** of each applied
 migration and **will not run if a shipped migration has been edited**, in
-either direction. Add a new migration instead.
+either direction. Add a new migration instead. A `down` that would revert
+0018 is refused while any user has revoked access — 0018's down drops
+`users.revoked_at`, which would let them sign in again — unless you pass
+`--restores-revoked-access`.
 
 ---
 

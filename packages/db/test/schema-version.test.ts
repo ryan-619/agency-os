@@ -40,7 +40,7 @@ describe('compareSchema', () => {
 
   it('reports behind when the database is older — the dangerous direction', () => {
     expect(compareSchema('0001')).toBe('behind')
-    expect(compareSchema('0016')).toBe('behind')
+    expect(compareSchema('0017')).toBe('behind')
   })
 
   it('reports ahead when a newer revision has already migrated', () => {
@@ -116,13 +116,13 @@ describe('reading the ledger, as the health route does', () => {
 
   it('reports behind when the database stopped one migration short', async () => {
     // The exact situation this whole mechanism exists for: production sitting
-    // at 0016 while the code that needs 0017 is about to be deployed.
+    // at 0017 while the code that needs 0018 is about to be deployed.
     const db = await freshDb()
     try {
-      const upTo0016 = migrations().filter((m) => m.version < '0017')
-      await migrateUp(db.driver, upTo0016)
+      const upTo0017 = migrations().filter((m) => m.version < '0018')
+      await migrateUp(db.driver, upTo0017)
       const applied = parseAppliedMigration(await db.driver.select<unknown>(APPLIED_MIGRATION_SQL))
-      expect(applied).toBe('0016')
+      expect(applied).toBe('0017')
       expect(compareSchema(applied)).toBe('behind')
     } finally {
       await db.close()

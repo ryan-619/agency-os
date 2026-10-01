@@ -27,12 +27,21 @@
  * query string despite every instruction not to put one there. §2.3 has no
  * exception for error messages, so the reason is REWRITTEN from a small set
  * rather than passed through.
+ *
+ * ## Where the credential travels
+ *
+ * Over the session's control channel (`handOverServers`), exactly as a
+ * turn's connectors do — never in `options.mcpServers`, which the SDK writes
+ * onto the CLI's argv as `--mcp-config <json>`. A Test button is pressed on
+ * a server somebody has just pasted a key for, so it is the first place that
+ * key would have been readable in `ps`.
  */
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import type { AgencyDb, ConnectorRow } from '@agency/db'
 import { recordConnectorProbe } from '@agency/db'
 import type { Logger } from '../logger.js'
 import { buildConnector } from './connectors.js'
+import { handOverServers } from './open-query.js'
 import { childEnv, type AgentCredential } from './options.js'
 
 export interface ProbeResult {
@@ -49,18 +58,20 @@ const PROBE_TIMEOUT_MS = 20_000
 /**
  * How often to re-ask while the server is still connecting.
  *
- * MCP startup is NON-BLOCKING in this SDK: `mcpServerStatus()` answers
- * immediately, and a server that is perfectly healthy reports `pending` for
- * the first second or two. Taking that first answer as the result made Test
- * connection report "could not be reached" for every working server — the
- * worst possible failure for a button whose entire job is to tell you whether
- * a server works.
+ * MCP startup from `options.mcpServers` is NON-BLOCKING in this SDK:
+ * `mcpServerStatus()` answers immediately, and a server that is perfectly
+ * healthy reports `pending` for the first second or two. Taking that first
+ * answer as the result made Test connection report "could not be reached"
+ * for every working server — the worst possible failure for a button whose
+ * entire job is to tell you whether a server works.
  *
- * `pending` is "not yet", so this asks again until it becomes something else
- * or the deadline passes. (The `alwaysLoad` flag would make startup blocking
- * instead, but it is capped at a 5s connect timeout and it changes how the
- * server's tools are loaded into a real turn — a probe should not need a
- * different server config from the one it is testing.)
+ * The hand-over that replaced that option waits for the connection, so the
+ * first answer is now normally final. The poll stays: `pending` is "not
+ * yet", whatever produced it, and a hand-over cut short by the deadline
+ * leaves the status to say so. (The `alwaysLoad` flag would make startup
+ * blocking instead, but it is capped at a 5s connect timeout and it changes
+ * how the server's tools are loaded into a real turn — a probe should not
+ * need a different server config from the one it is testing.)
  */
 const POLL_MS = 400
 
@@ -108,6 +119,12 @@ export async function probeConnector(
   credential: AgentCredential,
   cwd: string,
   log: Logger,
+  /**
+   * The binary a turn uses (`CLAUDE_CODE_PATH`), when it is not on PATH. A
+   * probe that ran a different CLI from the turn would be testing something
+   * else.
+   */
+  claudeCodePath?: string | undefined,
 ): Promise<ProbeResult> {
   const record = async (result: ProbeResult): Promise<ProbeResult> => {
     try {
@@ -167,16 +184,21 @@ export async function probeConnector(
           behavior: 'deny' as const,
           message: 'A connection test does not run tools.',
         }),
-        mcpServers: { [row.name]: server } as never,
+        // No `mcpServers`: the server under test is handed over below.
         abortController: abort,
         cwd,
         env: childEnv(credential),
         maxTurns: 1,
+        ...(claudeCodePath ? { pathToClaudeCodeExecutable: claudeCodePath } : {}),
       },
     })
 
     let statuses
     try {
+      // Waits for the server to connect or fail; the reply's error text is
+      // not read here — `mcpServerStatus` below says the same, and `explain`
+      // rewrites it. Names only reach the log.
+      await handOverServers(session, { [row.name]: server }, { signal: abort.signal, log })
       // Ask until the server stops saying "pending", or we run out of time.
       for (;;) {
         statuses = await session.mcpServerStatus()

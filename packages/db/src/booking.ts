@@ -95,6 +95,9 @@ export interface BookingRequest {
 export type BookingOutcome =
   | {
       readonly ok: true
+      /** The org the slug resolved to — for the caller's own notification,
+       *  never for the visitor, who learns nothing but the display name. */
+      readonly orgId: string
       readonly meetingId: string
       readonly companyDomain: string
       /** True when the booking matched records already on file and changed none of them. */
@@ -339,7 +342,7 @@ export async function bookInbound(db: AgencyDb, req: BookingRequest): Promise<Bo
       return { meetingId: meeting.meeting.id }
     })
 
-    return { ok: true, meetingId: result.meetingId, companyDomain, needsReview }
+    return { ok: true, orgId: org.id, meetingId: result.meetingId, companyDomain, needsReview }
   } catch (err) {
     if (err instanceof BookingRefused) return { ok: false, status: 400, message: err.message }
     throw err

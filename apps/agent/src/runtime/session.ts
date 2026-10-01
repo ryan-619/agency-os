@@ -14,8 +14,8 @@
  * consulted — and that is a statement about the process, not about the turn.
  */
 import { randomUUID } from 'node:crypto'
-import { and, eq } from 'drizzle-orm'
-import type { Options } from '@anthropic-ai/claude-agent-sdk'
+import { and, eq, isNull } from 'drizzle-orm'
+import type { McpServerConfig, Options } from '@anthropic-ai/claude-agent-sdk'
 import { parseIcpDefinition, type ChatEventBody, type Principal } from '@agency/core'
 import {
   activeIcpProfile, appendAudit, enabledAgentDefs, ensureApproval, expireApproval, readApproval,
@@ -90,7 +90,17 @@ export interface SessionDeps {
 
 export interface TurnRuntime {
   readonly turnId: string
+  /** Carries the in-process `agency` server and no connector (`buildQueryOptions`). */
   readonly options: Options
+  /**
+   * What the turn hands the CLI over its control channel before the prompt
+   * (`runtime/open-query.ts`): every connector this turn has, with its
+   * credential, and `agency` again — the same instance — because the hand-over
+   * REPLACES the dynamic set and an in-process server missing from it is
+   * disconnected. Empty when there are no connectors, and the turn runs
+   * exactly as it did before connectors moved off the argv.
+   */
+  readonly mcpServers: Readonly<Record<string, McpServerConfig>>
   readonly abort: AbortController
 }
 
@@ -147,6 +157,35 @@ export async function buildTurnRuntime(
     log: deps.log,
   })
 
+  /**
+   * §6 and §7's promise, kept literally: read on every turn, never cached.
+   *
+   * "The owner adds an MCP server through the UI and the agent uses one of its
+   * tools in the very next chat message, with no restart." A cache with any
+   * TTL at all breaks that in a way nobody can debug from the outside — the
+   * connector works, the row is right, and the agent cannot see it.
+   *
+   * Both builders SKIP a row they cannot use rather than throwing: one broken
+   * connector must not take the whole chat down.
+   */
+  const [connectors, agentRows] = await Promise.all([
+    buildMcpServers(deps.db, args.orgId, deps.secretsKey, deps.log),
+    enabledAgentDefs(deps.db, args.orgId),
+  ])
+  const subagents = buildAgents(agentRows, deps.log)
+  if (Object.keys(connectors.servers).length > 0 || Object.keys(subagents.agents).length > 0) {
+    deps.log.info('runtime assembled from the database', {
+      // Names and transports only. A connector URL can carry a token in a
+      // query string despite every instruction not to put one there (§2.3).
+      connectors: describeServers(connectors.servers),
+      subagents: Object.keys(subagents.agents),
+      ...(connectors.skipped.length > 0 ? { skippedConnectors: connectors.skipped } : {}),
+      // Tool NAMES — what the gate will refuse this turn, and nothing else.
+      ...(connectors.disabledTools.size > 0 ? { disabledTools: [...connectors.disabledTools] } : {}),
+      ...(subagents.skipped.length > 0 ? { skippedSubagents: subagents.skipped } : {}),
+    })
+  }
+
   const canUseTool = makeCanUseTool({
     orgId: args.orgId,
     chatSessionId: args.chatSessionId,
@@ -164,6 +203,10 @@ export async function buildTurnRuntime(
       }),
     waiter,
     ledger,
+    // Read with the connectors, on this turn: a tool an owner turns off is
+    // refused from the very next message, the same promise §6 makes for a
+    // server that is turned on.
+    disabledTools: connectors.disabledTools,
     audit,
     emit: args.emit,
     markGated: () => {},
@@ -200,34 +243,9 @@ export async function buildTurnRuntime(
     log: deps.log,
   })
 
-  const hookDeps = { audit, log: deps.log }
-
-  /**
-   * §6 and §7's promise, kept literally: read on every turn, never cached.
-   *
-   * "The owner adds an MCP server through the UI and the agent uses one of its
-   * tools in the very next chat message, with no restart." A cache with any
-   * TTL at all breaks that in a way nobody can debug from the outside — the
-   * connector works, the row is right, and the agent cannot see it.
-   *
-   * Both builders SKIP a row they cannot use rather than throwing: one broken
-   * connector must not take the whole chat down.
-   */
-  const [connectors, agentRows] = await Promise.all([
-    buildMcpServers(deps.db, args.orgId, deps.secretsKey, deps.log),
-    enabledAgentDefs(deps.db, args.orgId),
-  ])
-  const subagents = buildAgents(agentRows, deps.log)
-  if (Object.keys(connectors.servers).length > 0 || Object.keys(subagents.agents).length > 0) {
-    deps.log.info('runtime assembled from the database', {
-      // Names and transports only. A connector URL can carry a token in a
-      // query string despite every instruction not to put one there (§2.3).
-      connectors: describeServers(connectors.servers),
-      subagents: Object.keys(subagents.agents),
-      ...(connectors.skipped.length > 0 ? { skippedConnectors: connectors.skipped } : {}),
-      ...(subagents.skipped.length > 0 ? { skippedSubagents: subagents.skipped } : {}),
-    })
-  }
+  // The same set both rings refuse: the hook denies first, and canUseTool
+  // denies again if the hook was ever not consulted.
+  const hookDeps = { audit, log: deps.log, disabledTools: connectors.disabledTools }
 
   const icpRow = await activeIcpProfile(deps.db, args.orgId)
   let icpLabel: string | null = null
@@ -241,11 +259,11 @@ export async function buildTurnRuntime(
 
   const options = buildQueryOptions({
     canUseTool,
-    // The in-process agency server always, plus whatever is registered and
-    // enabled. `agency` is spread LAST so a connector named "agency" cannot
-    // displace the app's own tools — the unique index on (org_id, name) does
-    // not know that name is taken.
-    mcpServers: { ...connectors.servers, agency: mcpServer },
+    // The in-process agency server and nothing else. The SDK writes every
+    // server in this option that is not in-process onto the CLI's argv as
+    // `--mcp-config <json>`, decrypted credentials included, so the
+    // connectors are handed over the control channel instead (below).
+    mcpServers: { agency: mcpServer },
     agents: subagents.agents,
     skills: deps.skills,
     hooks: {
@@ -263,7 +281,14 @@ export async function buildTurnRuntime(
     ...(deps.claudeCodePath ? { pathToClaudeCodeExecutable: deps.claudeCodePath } : {}),
   })
 
-  return { turnId, options, abort }
+  // Everything registered and enabled, plus the agency server again. `agency`
+  // is spread LAST so a connector named "agency" cannot displace the app's own
+  // tools — the unique index on (org_id, name) does not know that name is
+  // taken, and a row from before 0018's CHECK can still hold it.
+  const handedOver = Object.keys(connectors.servers).some((name) => name !== 'agency')
+  const mcpServers = handedOver ? { ...connectors.servers, agency: mcpServer } : {}
+
+  return { turnId, options, mcpServers, abort }
 }
 
 /**
@@ -273,6 +298,11 @@ export async function buildTurnRuntime(
  * the conversation and checks it actually belongs to them. So the worst a
  * forged body can do is address a thread that already exists and already
  * belongs to the user it claims.
+ *
+ * A REVOKED person resolves to nobody (0018's `users.revoked_at`). The web
+ * refuses their session, but the worker is a separate process with its own
+ * door and a turn can run for half an hour — so it asks for itself, per
+ * turn, from the row, exactly as it already reads the role.
  */
 export async function resolvePrincipal(
   db: AgencyDb,
@@ -290,7 +320,11 @@ export async function resolvePrincipal(
     .from(schema.chatSessions)
     .innerJoin(schema.users, eq(schema.users.id, schema.chatSessions.userId))
     .innerJoin(schema.orgs, eq(schema.orgs.id, schema.chatSessions.orgId))
-    .where(and(eq(schema.chatSessions.id, chatSessionId), eq(schema.chatSessions.userId, userId)))
+    .where(and(
+      eq(schema.chatSessions.id, chatSessionId),
+      eq(schema.chatSessions.userId, userId),
+      isNull(schema.users.revokedAt),
+    ))
     .limit(1)
 
   const row = rows[0]

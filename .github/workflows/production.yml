@@ -54,7 +54,26 @@ jobs:
     name: production ${{ inputs.action }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # So a secret saved under Settings → Environments → production is seen
+    # as well as a repository secret.
+    environment: production
     steps:
+      # Where each credential is visible, as true/false only: a value saved
+      # as a Variable instead of a Secret would be printed in the step's env
+      # block, so it is detected here and never read.
+      - name: Which credentials this run can see
+        env:
+          TOKEN_SECRET: ${{ secrets.VERCEL_TOKEN != '' }}
+          TOKEN_VARIABLE: ${{ vars.VERCEL_TOKEN != '' }}
+          DB_SECRET: ${{ secrets.PRODUCTION_DATABASE_URL != '' }}
+          DB_VARIABLE: ${{ vars.PRODUCTION_DATABASE_URL != '' }}
+        run: |
+          echo "VERCEL_TOKEN            secret: $TOKEN_SECRET  variable: $TOKEN_VARIABLE"
+          echo "PRODUCTION_DATABASE_URL secret: $DB_SECRET  variable: $DB_VARIABLE"
+          if [ "$TOKEN_VARIABLE" = true ] || [ "$DB_VARIABLE" = true ]; then
+            echo "::error::A credential is saved as a Variable, which is shown in plain text. Delete it there and add it under Secrets instead."
+            exit 1
+          fi
       - name: Refuse an unconfirmed change
         if: inputs.action != 'status' && inputs.confirm != inputs.action
         env:

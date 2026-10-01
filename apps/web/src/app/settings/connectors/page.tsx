@@ -1,14 +1,14 @@
 import { redirect } from 'next/navigation'
-import { can, parseIcpDefinition } from '@agency/core'
+import { can, CONNECTOR_CATALOG } from '@agency/core'
 import {
-  listConnectors, parseConnectorConfig, secretsKeyFromEnv, type AgencyDb, type ConnectorRow,
+  connectorToolsState, listConnectors, parseConnectorConfig, secretsKeyFromEnv, type AgencyDb, type ConnectorRow,
 } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { ConnectorsPanel, type ConnectorView } from '@/components/settings/connectors'
+import { browserPresets } from '@/components/settings/connector-presets'
 import { getDb } from '@/lib/db'
 import { agentConfigured } from '@/lib/agent'
-import { icpForOrg } from '@/lib/queries'
 
 /**
  * Settings → Connectors (PROMPT.md §6).
@@ -23,8 +23,14 @@ import { icpForOrg } from '@/lib/queries'
  * whose only purpose is to be dereferenced by the worker. `toView` below is
  * the boundary, and it is the reason this page holds a mapping function rather
  * than passing rows straight through.
+ *
+ * The catalog crosses the same way, through `browserPresets`: the fields a
+ * card renders and the `config` Install posts, never a URL with a query
+ * string, and the decision about whether there is an Install button at all
+ * already made on this side.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export default async function ConnectorsPage() {
   const session = await auth()
@@ -34,32 +40,24 @@ export default async function ConnectorsPage() {
   const db = getDb() as unknown as AgencyDb
   const rows = await listConnectors(db, user.orgId)
 
-  const icpRow = await icpForOrg(user.orgId)
-  let orgLabel = 'Agency'
-  if (icpRow) {
-    try {
-      orgLabel = parseIcpDefinition(icpRow.definition).label
-    } catch {
-      orgLabel = 'Agency'
-    }
-  }
-
   const signOutAction = async () => {
     'use server'
     await signOut({ redirectTo: '/signin' })
   }
 
   return (
-    <Shell user={user} orgName={orgLabel} current="connectors" signOut={signOutAction}>
+    <Shell user={user} current="connectors" signOut={signOutAction}>
       <h1>Connectors</h1>
       <p className="lede">
         Each of these is an MCP server. The agent builds its tool set from the enabled ones at the
         start of every message, so a server added here is usable immediately — no restart. Its tools
         are not pre-approved: a third-party tool nobody here has reviewed asks a person every time
-        the agent calls it.
+        the agent calls it. An owner can also turn a tool off, and then it is refused without asking
+        anyone.
       </p>
       <ConnectorsPanel
         connectors={rows.map(toView)}
+        presets={browserPresets(CONNECTOR_CATALOG)}
         canWrite={can({ id: user.id, orgId: user.orgId, role: user.role }, 'connectors:write')}
         agentAvailable={agentConfigured()}
         secretsConfigured={secretsKeyFromEnv() !== null}
@@ -85,6 +83,10 @@ function toView(row: ConnectorRow): ConnectorView {
     lastOkAt: row.lastOkAt ? row.lastOkAt.toISOString() : null,
     lastError: row.lastError,
     summary: summarise(row),
+    // Tool NAMES and who turned them off — derived from the row by the same
+    // function the worker's gate uses, so this page cannot show a list the
+    // gate is not enforcing. The config it reads never crosses.
+    disabledTools: connectorToolsState(row),
   }
 }
 

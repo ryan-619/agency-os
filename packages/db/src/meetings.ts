@@ -16,9 +16,9 @@
  * connector — through the gate, with a person approving — and `external_ref`
  * is where its event id is kept.
  */
-import { and, asc, desc, eq, gte, isNull } from 'drizzle-orm'
+import { and, asc, desc, eq, gte, isNull, lte, ne, or, sql } from 'drizzle-orm'
 import {
-  DEFAULT_STALE_AFTER_DAYS, isStale, meetingBrief, parseIcpDefinition,
+  isStale, meetingBrief, parseIcpDefinition, staleAfterDaysOf,
   type Brief, type IcpDefinition,
 } from '@agency/core'
 import * as schema from './schema.js'
@@ -60,6 +60,13 @@ export interface MeetingInput {
    * address at that domain must not be able to walk it forward.
    */
   readonly moveDeal?: boolean
+  /**
+   * The meeting this one replaces, when it is recorded by `rescheduleMeeting`.
+   * Written into the `meeting.booked` audit row so the new meeting can name
+   * the one it came from — there is no column for it, and the audit log is
+   * where the history of a meeting already lives.
+   */
+  readonly rescheduledFrom?: string | null
 }
 
 /**
@@ -148,6 +155,7 @@ export async function createMeeting(
       source: input.source,
       deal: dealLabel,
       needsReview: input.needsReview ?? false,
+      ...(input.rescheduledFrom ? { rescheduledFrom: input.rescheduledFrom } : {}),
     },
   }).catch(() => {})
 
@@ -188,11 +196,25 @@ export async function meetingsForCompany(db: AgencyDb, orgId: string, companyId:
     .orderBy(desc(schema.meetings.startsAt))
 }
 
+/**
+ * Call a meeting off. Nobody is told — no invitation was sent from here, so
+ * there is none to withdraw; a person who sent one from their calendar
+ * cancels it there.
+ *
+ * A meeting whose outcome is recorded cannot be cancelled: "it was held"
+ * and "it was called off" are opposite facts, and `outcome IS NULL` in the
+ * predicate (with `cancelled_at IS NULL` in `setMeetingOutcome`'s) is what
+ * makes the two writers exclude each other in one statement each, rather
+ * than by a read that a concurrent click can slip between.
+ */
 export async function cancelMeeting(db: AgencyDb, orgId: string, id: string, actor: string): Promise<boolean> {
   const rows = await db
     .update(schema.meetings)
     .set({ cancelledAt: new Date() })
-    .where(and(eq(schema.meetings.orgId, orgId), eq(schema.meetings.id, id), isNull(schema.meetings.cancelledAt)))
+    .where(and(
+      eq(schema.meetings.orgId, orgId), eq(schema.meetings.id, id),
+      isNull(schema.meetings.cancelledAt), isNull(schema.meetings.outcome),
+    ))
     .returning({ id: schema.meetings.id })
   if (rows.length === 1) {
     await appendAudit(db, {
@@ -200,6 +222,302 @@ export async function cancelMeeting(db: AgencyDb, orgId: string, id: string, act
     }).catch(() => {})
   }
   return rows.length === 1
+}
+
+// ---------------------------------------------------------------------------
+// What happened at it (0018's `meetings.outcome`)
+// ---------------------------------------------------------------------------
+
+/**
+ * What happened, the one fact a pipeline learns from a meeting. NULL means
+ * nobody has said yet; cancellation stays `cancelled_at`, because a meeting
+ * that was called off did not happen and so has no outcome.
+ *
+ * None of the three moves the deal. A meeting that was held has already
+ * moved it to `meeting`, and where it goes next is a person's call on the
+ * board; a no-show is not a lost deal, and writing it as one would be the
+ * product stating something nobody decided.
+ */
+export type MeetingOutcome = 'held' | 'no_show' | 'rescheduled'
+export const MEETING_OUTCOMES: readonly MeetingOutcome[] = ['held', 'no_show', 'rescheduled']
+
+export type MeetingOutcomeRefusal = 'not_found' | 'not_yet' | 'cancelled'
+
+const OUTCOME_REFUSALS: Readonly<Record<MeetingOutcomeRefusal | 'already_rescheduled', string>> = {
+  not_found: 'No such meeting.',
+  not_yet:
+    'This meeting has not started yet, so nothing has happened at it to record. ' +
+    'To move it before then, cancel it and book the new time from the company page.',
+  cancelled: 'This meeting was cancelled, so there is nothing to record about it.',
+  already_rescheduled: 'This meeting was already rescheduled — change the new meeting instead.',
+}
+
+/**
+ * Why the outcome UPDATE matched nothing, named by re-reading the row. The
+ * UPDATE decides; this only explains, so a race between the two can make
+ * the sentence imprecise but never makes a refused write succeed.
+ */
+async function outcomeRefusal(
+  db: AgencyDb,
+  orgId: string,
+  id: string,
+  now: Date,
+): Promise<{ reason: MeetingOutcomeRefusal | 'already_rescheduled'; message: string }> {
+  const m = await readMeeting(db, orgId, id)
+  const reason: MeetingOutcomeRefusal | 'already_rescheduled' =
+    !m ? 'not_found'
+      : m.cancelledAt ? 'cancelled'
+        : m.startsAt.getTime() > now.getTime() ? 'not_yet'
+          : m.outcome === 'rescheduled' ? 'already_rescheduled'
+            : 'not_found'
+  return { reason, message: OUTCOME_REFUSALS[reason] }
+}
+
+/**
+ * Record that a meeting was held, or that they did not turn up.
+ *
+ * One UPDATE decides, with the org, the id, `cancelled_at IS NULL` and
+ * `starts_at <= now` in its predicate — a meeting that has not started has
+ * no outcome yet, and saying "held" about next Tuesday is a claim about the
+ * future. A second call overwrites the first on purpose: a person who
+ * clicked "held" and meant "no-show" may correct it, and each write leaves
+ * its own audit row, so the correction is visible rather than silent.
+ *
+ * "Rescheduled" is not written here. It names a new meeting, and an outcome
+ * that says "moved" with nowhere it moved to is a claim with no evidence —
+ * `rescheduleMeeting` writes it together with the meeting it points at.
+ *
+ * Nor is it overwritten here: the predicate refuses a `rescheduled` row,
+ * NULL-safely, and the answer is `already_rescheduled`. It used to be
+ * allowed, as a correction, and that reopened `rescheduleMeeting`'s own
+ * guard — "held" over "rescheduled" made the meeting reschedulable again, so
+ * a second reschedule recorded a second new meeting and left the first on
+ * the books with nothing pointing at it. The replacement is where anything
+ * further about that booking is recorded; one that is not happening is
+ * cancelled from its own page.
+ */
+export async function setMeetingOutcome(
+  db: AgencyDb,
+  args: {
+    readonly orgId: string
+    readonly id: string
+    readonly outcome: Exclude<MeetingOutcome, 'rescheduled'>
+    readonly actor: string
+    readonly now?: Date
+  },
+): Promise<
+  | { ok: true; meeting: MeetingRow }
+  | { ok: false; reason: MeetingOutcomeRefusal | 'already_rescheduled'; message: string }
+> {
+  const now = args.now ?? new Date()
+  const rows = await db
+    .update(schema.meetings)
+    .set({ outcome: args.outcome })
+    .where(and(
+      eq(schema.meetings.orgId, args.orgId), eq(schema.meetings.id, args.id),
+      isNull(schema.meetings.cancelledAt), lte(schema.meetings.startsAt, now),
+      // NULL-safe: `outcome <> 'rescheduled'` alone is NULL for a meeting with
+      // no outcome yet, and would refuse the first outcome anybody records.
+      or(isNull(schema.meetings.outcome), ne(schema.meetings.outcome, 'rescheduled')),
+    ))
+    .returning()
+  const meeting = rows[0]
+  if (!meeting) {
+    const why = await outcomeRefusal(db, args.orgId, args.id, now)
+    return { ok: false, reason: why.reason, message: why.message }
+  }
+  await appendAudit(db, {
+    orgId: args.orgId,
+    actor: args.actor,
+    action: 'meeting.outcome_recorded',
+    subjectType: 'meeting',
+    subjectId: meeting.id,
+    detail: { outcome: args.outcome, companyId: meeting.companyId },
+  }).catch(() => {})
+  return { ok: true, meeting }
+}
+
+/**
+ * The meeting happened at another time: mark this one `rescheduled` and
+ * record the new one, in one transaction, so neither exists without the
+ * other.
+ *
+ * The new meeting goes through `createMeeting`, so it passes every check a
+ * booking does (a zone the runtime knows, a company and contact in this
+ * org). It keeps the contact, title, length, notes and review flag of the
+ * one it replaces — a reschedule does not confirm who booked — and not its
+ * `external_ref`, which named the old calendar event. It keeps the `source`
+ * too: it is the same booking at a new time, and the teammate who moved it
+ * is the audit row's actor and `created_by`. That matters beyond the label —
+ * a booking-page title is written by the system from the visitor's name, and
+ * the `.ics` download recognises it by the source and leaves the name out;
+ * a reschedule relabelled `manual` would carry the name into the file.
+ *
+ * It moves the deal only if the original did: a stranger's booking at a
+ * company already on file never moved it, and a teammate moving the time is
+ * not the team deciding that booking was genuine.
+ *
+ * The audit row on the OLD meeting names the new one (`rescheduledTo`), and
+ * the new meeting's `meeting.booked` row names the old (`rescheduledFrom`),
+ * which is how each page links to the other; there is no column for it.
+ * Like the other outcomes it needs the meeting to have started; a meeting
+ * that has not is moved by cancelling it and booking again. Rescheduling
+ * the same meeting twice is refused, since the first new meeting would be
+ * left on the books with nothing pointing at it.
+ */
+export async function rescheduleMeeting(
+  db: AgencyDb,
+  args: {
+    readonly orgId: string
+    readonly id: string
+    /** The new start, as an instant — the caller applies the zone. */
+    readonly startsAt: Date
+    readonly timeZone: string
+    readonly actor: string
+    readonly createdBy?: string | null
+    readonly now?: Date
+  },
+): Promise<
+  | { ok: true; meeting: MeetingRow; replacement: MeetingRow; deal: string }
+  | { ok: false; reason: MeetingOutcomeRefusal | 'already_rescheduled' | 'invalid'; message: string }
+> {
+  const now = args.now ?? new Date()
+  if (Number.isNaN(args.startsAt.getTime())) {
+    return { ok: false, reason: 'invalid', message: 'The new time could not be read.' }
+  }
+  if (!isKnownTimeZone(args.timeZone)) {
+    return { ok: false, reason: 'invalid', message: `"${args.timeZone}" is not a timezone this system recognises.` }
+  }
+
+  try {
+    return await db.transaction(async (tx) => {
+      const txDb = tx as unknown as AgencyDb
+      const rows = await txDb
+        .update(schema.meetings)
+        .set({ outcome: 'rescheduled' })
+        .where(and(
+          eq(schema.meetings.orgId, args.orgId), eq(schema.meetings.id, args.id),
+          isNull(schema.meetings.cancelledAt), lte(schema.meetings.startsAt, now),
+          or(isNull(schema.meetings.outcome), ne(schema.meetings.outcome, 'rescheduled')),
+        ))
+        .returning()
+      const old = rows[0]
+      if (!old) throw new RescheduleRefused(await outcomeRefusal(txDb, args.orgId, args.id, now))
+
+      const created = await createMeeting(txDb, {
+        orgId: args.orgId,
+        companyId: old.companyId,
+        contactId: old.contactId,
+        title: old.title,
+        startsAt: args.startsAt,
+        endsAt: old.endsAt ? new Date(args.startsAt.getTime() + (old.endsAt.getTime() - old.startsAt.getTime())) : null,
+        timeZone: args.timeZone,
+        source: old.source as MeetingInput['source'],
+        notes: old.notes,
+        createdBy: args.createdBy ?? null,
+        actor: args.actor,
+        needsReview: old.needsReview,
+        moveDeal: old.dealId !== null,
+        rescheduledFrom: old.id,
+      })
+      if (!created.ok) throw new RescheduleRefused({ reason: 'invalid', message: created.message })
+
+      // Not `.catch`-ed: this row IS the link from the old meeting to the new
+      // one, and a reschedule whose link failed to write should not happen.
+      await appendAudit(txDb, {
+        orgId: args.orgId,
+        actor: args.actor,
+        action: 'meeting.outcome_recorded',
+        subjectType: 'meeting',
+        subjectId: old.id,
+        detail: {
+          outcome: 'rescheduled',
+          companyId: old.companyId,
+          rescheduledTo: created.meeting.id,
+          startsAt: args.startsAt.toISOString(),
+          timeZone: args.timeZone,
+        },
+      })
+      return { ok: true as const, meeting: old, replacement: created.meeting, deal: created.deal }
+    })
+  } catch (err) {
+    if (err instanceof RescheduleRefused) return { ok: false, ...err.refusal }
+    throw err
+  }
+}
+
+/** Carries a refusal out through the transaction rollback. */
+class RescheduleRefused extends Error {
+  constructor(readonly refusal: { reason: MeetingOutcomeRefusal | 'already_rescheduled' | 'invalid'; message: string }) {
+    super(refusal.message)
+  }
+}
+
+/** One end of a reschedule, as the page links to it. */
+export interface MeetingLink {
+  readonly id: string
+  readonly startsAt: Date
+  readonly timeZone: string
+}
+
+/**
+ * The meeting this one was rescheduled to, and the one it was rescheduled
+ * from, read from the audit rows `rescheduleMeeting` writes. Both lookups
+ * go by `subject_id` (indexed) and join back to `meetings` in the same org,
+ * so an id in a row's detail that names nothing here is not linked to.
+ */
+export async function meetingRescheduleLinks(
+  db: AgencyDb,
+  orgId: string,
+  id: string,
+): Promise<{ to: MeetingLink | null; from: MeetingLink | null }> {
+  const a = schema.auditLog
+  const m = schema.meetings
+  const link = { id: m.id, startsAt: m.startsAt, timeZone: m.timeZone }
+  const [to, from] = await Promise.all([
+    db
+      .select(link)
+      .from(a)
+      .innerJoin(m, and(eq(m.orgId, a.orgId), sql`${m.id}::text = ${a.detail}->>'rescheduledTo'`))
+      .where(and(
+        eq(a.orgId, orgId), eq(a.subjectType, 'meeting'), eq(a.subjectId, id),
+        eq(a.action, 'meeting.outcome_recorded'), sql`${a.detail}->>'outcome' = 'rescheduled'`,
+      ))
+      .orderBy(desc(a.createdAt))
+      .limit(1),
+    db
+      .select(link)
+      .from(a)
+      .innerJoin(m, and(eq(m.orgId, a.orgId), sql`${m.id}::text = ${a.detail}->>'rescheduledFrom'`))
+      .where(and(
+        eq(a.orgId, orgId), eq(a.subjectType, 'meeting'), eq(a.subjectId, id), eq(a.action, 'meeting.booked'),
+      ))
+      .limit(1),
+  ])
+  return { to: to[0] ?? null, from: from[0] ?? null }
+}
+
+/**
+ * A meeting and the company it is with — what the `.ics` download needs and
+ * nothing else. The contact is deliberately not resolved: the file leaves
+ * for a laptop and a phone, and it names nobody.
+ */
+export async function readMeetingWithCompany(
+  db: AgencyDb,
+  orgId: string,
+  id: string,
+): Promise<{ meeting: MeetingRow; company: { domain: string; name: string | null } } | null> {
+  const rows = await db
+    .select({ meeting: schema.meetings, domain: schema.companies.domain, name: schema.companies.name })
+    .from(schema.meetings)
+    .innerJoin(
+      schema.companies,
+      and(eq(schema.companies.id, schema.meetings.companyId), eq(schema.companies.orgId, schema.meetings.orgId)),
+    )
+    .where(and(eq(schema.meetings.orgId, orgId), eq(schema.meetings.id, id)))
+    .limit(1)
+  const row = rows[0]
+  return row ? { meeting: row.meeting, company: { domain: row.domain, name: row.name } } : null
 }
 
 /**
@@ -234,7 +552,8 @@ export async function briefForMeeting(
   } catch {
     icp = null
   }
-  const staleAfter = icp?.freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
+  // Never the raw value: `isStale` throws on one that is not a positive number.
+  const staleAfter = staleAfterDaysOf(icp)
 
   const [contacts, deal, found, thread] = await Promise.all([
     listContactsForCompany(db, orgId, meeting.companyId),
@@ -254,7 +573,7 @@ export async function briefForMeeting(
     deal: deal ? { stage: deal.stage, nextAction: deal.nextAction, valueCents: deal.valueCents } : null,
     signals: icp?.signals ?? {},
     findings: (found?.findings ?? []).map((f) => ({
-      signalKey: f.signalKey, observed: f.observed, gap: f.gap, weight: f.weight, detail: f.detail,
+      signalKey: f.signalKey, observed: f.observed, gap: f.gap, weight: f.weight, detail: f.detail, scored: f.scored,
     })),
     scan: found ? { ranAt: found.scan.ranAt, ok: found.scan.ok, stale: isStale(found.scan.ranAt, staleAfter, now) } : null,
     score: found?.score ? { score: found.score.score, tier: found.score.tier } : null,

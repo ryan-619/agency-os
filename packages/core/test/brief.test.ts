@@ -102,6 +102,40 @@ describe('§2.2 — evidence that cannot be quoted', () => {
   })
 })
 
+/**
+ * An informational signal is context on the company page, never a talking
+ * point: it is not in the score, so the brief neither asks about it nor lists
+ * it as in place. The meeting-page caller maps `scored`; the ICP-key filter
+ * catches a caller that does not.
+ */
+describe('informational signals', () => {
+  const info = { signalKey: 'cross_origin_policies', observed: true, gap: true, weight: 0, detail: 'none sent' }
+
+  it('leaves an unscored gap out of the gaps and the questions', () => {
+    const b = meetingBrief(input({ findings: [...input().findings, { ...info, scored: false }] }))
+    expect(b.posture.gaps.map((g) => g.signalKey)).toEqual(['csp', 'hsts'])
+    expect(b.questions.join(' ')).not.toMatch(/cross_origin|COOP/)
+  })
+
+  it('leaves an unscored non-gap out of what is in place', () => {
+    const b = meetingBrief(input({
+      findings: [...input().findings, { ...info, gap: false, detail: 'COOP same-origin', scored: false }],
+    }))
+    expect(b.posture.strengths).toEqual(['tls'])
+  })
+
+  it('excludes it by `scored` even with no ICP to consult', () => {
+    const b = meetingBrief(input({ signals: {}, findings: [...input().findings, { ...info, scored: false }] }))
+    expect(b.posture.gaps.map((g) => g.signalKey)).toEqual(['csp', 'hsts'])
+  })
+
+  it('excludes a key the ICP does not name when `scored` was never mapped', () => {
+    const b = meetingBrief(input({ findings: [...input().findings, info] }))
+    expect(b.posture.gaps.map((g) => g.signalKey)).toEqual(['csp', 'hsts'])
+    expect(b.posture.summary).toContain('2 gaps observed, 1 thing already in place')
+  })
+})
+
 describe('missing pieces', () => {
   it('copes with no deal, no contacts, no thread and no ICP', () => {
     const b = meetingBrief(input({ deal: null, contacts: [], thread: [], signals: {} }))

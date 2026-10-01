@@ -10,8 +10,8 @@ import {
 /**
  * The chat panel (PROMPT.md §8.1).
  *
- * The only client component in the app, and it stays small: the reducer beside
- * it does the ordering, and this does the network and the markup. That split
+ * A client component that stays small: the reducer beside it does the
+ * ordering, and this does the network and the markup. That split
  * is what makes the ordering testable — there is no DOM test environment
  * installed here, so anything that lives inside a component is untested by
  * construction.
@@ -27,11 +27,24 @@ import {
 export function ChatPanel({
   sessionId,
   agentAvailable,
+  archived = false,
   canDecide,
   initialBlocks = [],
 }: {
+  /**
+   * The thread this panel speaks in. The page renders the panel with
+   * `key={sessionId}`: the conversation lives in this component's state,
+   * initialised once, so moving to another thread without a remount would
+   * keep showing the last one's.
+   */
   sessionId: string
   agentAvailable: boolean
+  /**
+   * Hidden from the thread list. Read-only here, because a turn started in a
+   * thread the list does not show is a conversation its owner cannot find
+   * again; putting it back in the list is one click beside it.
+   */
+  archived?: boolean
   canDecide: boolean
   /**
    * The conversation as it was written down, rebuilt on the server.
@@ -222,8 +235,12 @@ export function ChatPanel({
    * `canDecide` is passed as false: the approve/deny buttons on a parked tool
    * call resume the turn by POSTing to the worker, so offering them here
    * would be offering a button that cannot work.
+   *
+   * The note does not say "API key". It used to, and that sent people to buy
+   * credit for a worker that can run on a developer's own login (CLAUDE.md
+   * §8) — what is missing here is the WORKER, and the sentence names it.
    */
-  if (!agentAvailable) {
+  if (!agentAvailable || archived) {
     return (
       <div className="chat">
         {state.blocks.length > 0 ? (
@@ -233,14 +250,23 @@ export function ChatPanel({
             ))}
           </div>
         ) : null}
-        <div className="note">
-          <strong>The agent is not configured.</strong> Chat needs the agent worker running and
-          reachable at <code>AGENT_URL</code>, with an <code>ANTHROPIC_API_KEY</code> set on it.
-          Everything else in Agency OS works without it.
-          {state.blocks.length > 0 ? (
-            <> Earlier conversations are shown above and are read-only until it is back.</>
-          ) : null}
-        </div>
+        {archived ? (
+          <div className="note">
+            <strong>This thread is archived.</strong> It is read-only while it is out of the list;
+            put it back in the list to carry on the conversation.
+          </div>
+        ) : (
+          <div className="note">
+            <strong>No worker is connected.</strong> Chat needs the agent worker, which runs on an
+            API key or a developer&apos;s own login, and this deployment reaches it through{' '}
+            <code>AGENT_URL</code> and <code>AGENT_INTERNAL_TOKEN</code>, which are not both set
+            here. Everything else in Agency OS works without it, and so do your threads: you can
+            start, rename and archive them now.
+            {state.blocks.length > 0 ? (
+              <> This conversation is shown above and is read-only until a worker is connected.</>
+            ) : null}
+          </div>
+        )}
       </div>
     )
   }
@@ -306,7 +332,7 @@ function messageForRefusal(code: string | undefined): string {
     case 'agent_unreachable':
       return 'The agent worker is not responding. Everything else still works.'
     case 'chat_disabled':
-      return 'The agent worker has no API key, so it cannot answer. Everything else still works.'
+      return 'The agent worker is running but cannot reach a model: it has neither an API key nor a developer login. Everything else still works.'
     case 'runtime_halted':
       return 'The agent runtime has stopped because a tool ran that it never authorised. Tell an owner.'
     case 'no_such_conversation':
