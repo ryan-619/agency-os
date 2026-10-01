@@ -110,3 +110,54 @@ export function noRepliesReadNote(d: Deployment): string | null {
     ? null
     : 'No worker is reading a mailbox and no inbound webhook is configured on this deployment, so nothing here can learn that somebody replied. The queue is honest — it is just not being read.'
 }
+
+/**
+ * The placeholder the DoveSoft URLs carry where the token goes. The secret
+ * itself is never shown (§2.3): a person pastes it in when they register the
+ * URL on DoveSoft's side.
+ */
+export const DOVESOFT_TOKEN_PLACEHOLDER = '<DOVESOFT_WEBHOOK_SECRET>'
+
+/** The web half of DoveSoft (0019), by variable name, for /settings/deployment. */
+export interface DoveSoftFacts {
+  /** `DOVESOFT_WEBHOOK_SECRET` is set, so the two webhook routes accept a request. */
+  readonly webhooks: boolean
+  /** `DOVESOFT_ORG_ID` is set: unplaceable texts and reports are filed under it. */
+  readonly org: boolean
+  /**
+   * The two URLs to register with DoveSoft, built from `AUTH_URL` — never a
+   * request's Host header — with the token as `DOVESOFT_TOKEN_PLACEHOLDER`.
+   */
+  readonly urls: { readonly dlr: string; readonly sms: string }
+  /** What the configuration means, one sentence each, in reading order. */
+  readonly sentences: readonly string[]
+}
+
+/**
+ * What this web deployment does with DoveSoft, from the configuration. The
+ * SENDING half — `DOVESOFT_API_KEY`, `DOVESOFT_ENTITY_ID` — lives on the
+ * worker's host, which nothing here can see, and the sentences say so rather
+ * than guessing.
+ */
+export function dovesoftFacts(
+  e: Pick<Env, 'AUTH_URL' | 'DOVESOFT_WEBHOOK_SECRET' | 'DOVESOFT_ORG_ID'>,
+): DoveSoftFacts {
+  const url = (path: string): string => `${new URL(path, e.AUTH_URL).toString()}?token=${DOVESOFT_TOKEN_PLACEHOLDER}`
+  const webhooks = Boolean(e.DOVESOFT_WEBHOOK_SECRET)
+  const org = Boolean(e.DOVESOFT_ORG_ID)
+  return {
+    webhooks,
+    org,
+    urls: { dlr: url('/api/inbound/dovesoft/dlr'), sms: url('/api/inbound/dovesoft/sms') },
+    sentences: [
+      webhooks
+        ? 'Delivery reports and texts a contact sends back are accepted at the two URLs below, with DOVESOFT_WEBHOOK_SECRET as their token.'
+        : 'DOVESOFT_WEBHOOK_SECRET is not set, so both DoveSoft routes answer 503: no delivery report is recorded, and no text a contact sends back — a STOP included — reaches this deployment.',
+      org
+        ? 'A text from a number no contact holds, and a report naming a message this system did not send, are audited in the org DOVESOFT_ORG_ID names; a STOP from such a number is put on that org’s suppression list.'
+        : 'DOVESOFT_ORG_ID is not set: a text from a number no contact holds is logged and filed under no org, and a STOP from it can be recorded only in an org where a contact holds the number.',
+      'DoveSoft’s report and inbound formats are not public. The routes read the common field names, and a payload they cannot read is refused with a 4xx, audited and logged — never answered 200 and dropped.',
+      'Sending is the worker’s: DOVESOFT_API_KEY and DOVESOFT_ENTITY_ID live on its host, which this page cannot see. Every SMS is drafted from a registered template with Draft SMS on /contacts, and approved by a person on /approvals.',
+    ],
+  }
+}

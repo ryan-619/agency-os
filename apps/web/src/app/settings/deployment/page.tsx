@@ -9,7 +9,7 @@ import { Shell } from '@/components/shell'
 import { When } from '@/components/when'
 import { agentConfigured } from '@/lib/agent'
 import { getDb } from '@/lib/db'
-import { deployment } from '@/lib/deployment'
+import { deployment, dovesoft } from '@/lib/deployment'
 import { env } from '@/lib/env'
 import { workerStatus, type WorkerStatus } from '@/lib/worker-status'
 import { deploymentFacts, schemaSentence, sendingAnswer, workerLine, workerModes } from '../facts'
@@ -64,6 +64,8 @@ const VARIABLES: readonly { readonly name: string; readonly reads: string; reado
   { name: 'CRON_SECRET', reads: '/api/cron/rescan and /api/cron/digest' },
   { name: 'SLACK_WEBHOOK_URL', reads: 'notifications' },
   { name: 'UNSUBSCRIBE_SECRET', reads: '/api/unsubscribe' },
+  { name: 'DOVESOFT_WEBHOOK_SECRET', reads: '/api/inbound/dovesoft/dlr and /sms (SMS delivery reports and replies)' },
+  { name: 'DOVESOFT_ORG_ID', reads: 'the org an unplaceable DoveSoft text or report is filed under' },
   { name: 'SECRETS_KEY', reads: 'encrypting connector credentials' },
   { name: 'VERCEL_ENV', reads: 'the cron routes, which run only in production (set by the platform)' },
 ]
@@ -76,6 +78,7 @@ export default async function DeploymentPage() {
 
   const e = env()
   const flags = deployment()
+  const sms = dovesoft()
 
   let worker: WorkerStatus | null = null
   let workerError: string | undefined
@@ -147,8 +150,9 @@ export default async function DeploymentPage() {
       </div>
       <p className="muted" style={{ fontSize: 13 }}>
         The worker&apos;s own variables — its model credential, its mail relay and <code>MAIL_FROM</code>,{' '}
-        <code>WEB_PUBLIC_URL</code>, <code>OUTREACH_BOUNCE_PAUSE_PCT</code> — live on its host. This page sees only
-        what its heartbeat reports.
+        <code>WEB_PUBLIC_URL</code>, <code>OUTREACH_BOUNCE_PAUSE_PCT</code>, and DoveSoft&apos;s{' '}
+        <code>DOVESOFT_API_KEY</code> and <code>DOVESOFT_ENTITY_ID</code> for sending SMS — live on its host. This page
+        sees only what its heartbeat reports.
       </p>
 
       <h2>Schema</h2>
@@ -185,6 +189,34 @@ export default async function DeploymentPage() {
       <p className="muted" style={{ fontSize: 13 }}>
         Each line is configuration: it says a route exists and holds what it needs, never that the thing behind it
         has been seen to work.
+      </p>
+
+      <h2>SMS through DoveSoft</h2>
+      {sms.sentences.map((sentence, i) => (
+        <div
+          key={sentence}
+          className={(i === 0 && !sms.webhooks) || (i === 1 && !sms.org) ? 'note note-warn' : 'note'}
+          style={{ marginBottom: 8 }}
+        >
+          {sentence}
+        </div>
+      ))}
+      <table>
+        <tbody>
+          <tr>
+            <th style={{ width: 200 }}>Delivery reports</th>
+            <td className="mono" style={{ fontSize: 12, wordBreak: 'break-all' }}>{sms.urls.dlr}</td>
+          </tr>
+          <tr>
+            <th>Texts sent back</th>
+            <td className="mono" style={{ fontSize: 12, wordBreak: 'break-all' }}>{sms.urls.sms}</td>
+          </tr>
+        </tbody>
+      </table>
+      <p className="muted" style={{ fontSize: 13 }}>
+        Register these two with DoveSoft, with the secret in place of <code>&lt;DOVESOFT_WEBHOOK_SECRET&gt;</code> —
+        it is never shown here. A route that can carry a header may send it as <code>x-dovesoft-token</code> instead.
+        The registered DLT templates are recorded on <a href="/settings/templates">Templates</a>.
       </p>
 
       <h2>Variables</h2>

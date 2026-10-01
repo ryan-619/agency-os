@@ -63,6 +63,10 @@ describe('every page and route that exports dynamic runs on the Node runtime, sa
       'approvals/page.tsx', 'book/[slug]/page.tsx', 'suppressions/page.tsx',
       // Routes too: these three exported `dynamic` alone after the pages were fixed.
       'api/approvals/[id]/decide/route.ts', 'api/chat/sessions/route.ts', 'api/health/route.ts',
+      // DoveSoft (0019): the templates page, its routes, the composer's route and the two webhooks.
+      'settings/templates/page.tsx', 'api/templates/route.ts', 'api/templates/[id]/route.ts',
+      'api/templates/import/route.ts', 'api/contacts/[id]/sms/route.ts',
+      'api/inbound/dovesoft/dlr/route.ts', 'api/inbound/dovesoft/sms/route.ts',
     ]) {
       expect(DYNAMIC).toContain(p)
     }
@@ -151,6 +155,9 @@ describe('the new routes check an id’s full shape, so a malformed one is a 404
     'api/deals/route.ts',
     'api/proposals/route.ts',
     'api/campaigns/[id]/enrol/route.ts',
+    // DoveSoft (0019): a template switched by id, and an SMS drafted to a contact.
+    'api/templates/[id]/route.ts',
+    'api/contacts/[id]/sms/route.ts',
   ]
   const MALFORMED = [
     '------------------------------------',

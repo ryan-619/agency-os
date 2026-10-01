@@ -12,7 +12,9 @@
  * `lib/deployment-facts.ts`, which imports nothing but a type.
  */
 import { describe, expect, it } from 'vitest'
-import { flagsFrom, noRepliesReadNote, nothingWillSendNote, type Deployment } from '../src/lib/deployment-facts'
+import {
+  DOVESOFT_TOKEN_PLACEHOLDER, dovesoftFacts, flagsFrom, noRepliesReadNote, nothingWillSendNote, type Deployment,
+} from '../src/lib/deployment-facts'
 
 /** Nothing configured but the mailbox every deployment has. */
 const BARE = {
@@ -125,5 +127,55 @@ describe('noRepliesReadNote', () => {
     expect(noRepliesReadNote(facts({}))).toBe(
       'No worker is reading a mailbox and no inbound webhook is configured on this deployment, so nothing here can learn that somebody replied. The queue is honest — it is just not being read.',
     )
+  })
+})
+
+describe('dovesoftFacts', () => {
+  const SECRET = 'S'.repeat(40)
+  const ORG = '0b0e5a4e-7d1c-4c8e-9a51-1f7d1c0c0001'
+  const base = { AUTH_URL: 'https://myagencyos.in', DOVESOFT_WEBHOOK_SECRET: undefined, DOVESOFT_ORG_ID: undefined }
+
+  /**
+   * The URLs a person registers with DoveSoft: built from AUTH_URL, never a
+   * request's Host, and carrying the token as a placeholder — the secret is
+   * a credential, and no page shows one (§2.3).
+   */
+  it('builds the two URLs from AUTH_URL with the token as a placeholder, never the secret', () => {
+    const f = dovesoftFacts({ ...base, DOVESOFT_WEBHOOK_SECRET: SECRET })
+    expect(f.urls).toEqual({
+      dlr: 'https://myagencyos.in/api/inbound/dovesoft/dlr?token=<DOVESOFT_WEBHOOK_SECRET>',
+      sms: 'https://myagencyos.in/api/inbound/dovesoft/sms?token=<DOVESOFT_WEBHOOK_SECRET>',
+    })
+    expect(DOVESOFT_TOKEN_PLACEHOLDER).toBe('<DOVESOFT_WEBHOOK_SECRET>')
+    expect(JSON.stringify(f)).not.toContain(SECRET)
+  })
+
+  it('keeps a trailing slash or a path on AUTH_URL from doubling the slash', () => {
+    expect(dovesoftFacts({ ...base, AUTH_URL: 'http://localhost:3000/' }).urls.sms).toBe(
+      'http://localhost:3000/api/inbound/dovesoft/sms?token=<DOVESOFT_WEBHOOK_SECRET>',
+    )
+  })
+
+  it('says both routes refuse everything without the secret — a STOP included', () => {
+    const f = dovesoftFacts(base)
+    expect(f.webhooks).toBe(false)
+    expect(f.org).toBe(false)
+    expect(f.sentences[0]).toContain('both DoveSoft routes answer 503')
+    expect(f.sentences[0]).toContain('a STOP included')
+    expect(f.sentences[1]).toContain('DOVESOFT_ORG_ID is not set')
+  })
+
+  it('flips each fact on exactly its own variable', () => {
+    expect(dovesoftFacts({ ...base, DOVESOFT_WEBHOOK_SECRET: SECRET })).toMatchObject({ webhooks: true, org: false })
+    expect(dovesoftFacts({ ...base, DOVESOFT_ORG_ID: ORG })).toMatchObject({ webhooks: false, org: true })
+    expect(dovesoftFacts({ ...base, DOVESOFT_ORG_ID: ORG }).sentences[1]).toContain('audited in the org DOVESOFT_ORG_ID names')
+  })
+
+  /** The sending half lives on the worker; the page says so rather than guessing at it. */
+  it('names the worker’s sending variables as invisible from here', () => {
+    const last = dovesoftFacts(base).sentences.at(-1) ?? ''
+    expect(last).toContain('DOVESOFT_API_KEY')
+    expect(last).toContain('DOVESOFT_ENTITY_ID')
+    expect(last).toContain('which this page cannot see')
   })
 })

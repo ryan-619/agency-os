@@ -576,16 +576,20 @@ export type ReplyDraftRefusal =
   | 'already_queued'
 
 /**
- * Two refusals that send a person to /contacts rather than to the draft, each
- * answered by the route with this module's own sentence and a 409. Kept apart
- * from `ReplyDraftRefusal`, whose statuses and words the web app keeps.
+ * Three refusals that send a person to /contacts rather than to the draft,
+ * each answered by the route with this module's own sentence and a 409. Kept
+ * apart from `ReplyDraftRefusal`, whose statuses and words the web app keeps.
  *
  * - `paused_for_another_reason` the person is paused, and not by a reply.
  * - `opt_out_not_recorded`      somebody asked to stop and no suppression
  *                               row records it (the audit log says so, or
  *                               an opted_out reply matches none).
+ * - `template_required`         the reply came by SMS or WhatsApp, where an
+ *                               answer must be a registered template (0019)
+ *                               — drafted with Draft SMS on /contacts, never
+ *                               as free text here.
  */
-export type ReplyDraftHold = 'paused_for_another_reason' | 'opt_out_not_recorded'
+export type ReplyDraftHold = 'paused_for_another_reason' | 'opt_out_not_recorded' | 'template_required'
 
 export type ReplyDraftOutcome =
   | {
@@ -622,6 +626,15 @@ const NOT_RECORDED =
   'row for it: the audit log says it could not be recorded, or a reply of theirs read as an opt-out matches no ' +
   'suppression row today. Record the opt-out by hand on /suppressions (or finish the erasure). Answering them is ' +
   'not the fix. Nothing was drafted and nobody was resumed.'
+
+const TEMPLATE_REQUIRED: Readonly<Record<'sms' | 'whatsapp', string>> = {
+  sms:
+    'This reply came by SMS, and under DLT an answer must be a registered template, not free text. Use Draft SMS ' +
+    'on this contact on /contacts, which drafts from an active template. Nothing was drafted and nobody was resumed.',
+  whatsapp:
+    'This reply came by WhatsApp, where an answer must be a registered template, not free text — and sending ' +
+    'WhatsApp is not available yet. Nothing was drafted and nobody was resumed.',
+}
 
 const PAUSED_ELSEWHERE =
   'This person is paused for another reason, not by this reply. Resume them on /contacts first, if that is right — ' +
@@ -698,6 +711,13 @@ export async function replyQueueDraft(
         .limit(1)
         .for('update')
       const reply = locked[0] ?? refuse('not_found', 'That reply is not in this inbox.')
+      // 0019: on SMS and WhatsApp an answer is a registered template, never
+      // free text — 0019's CHECK would refuse this row as a 500. An opt-out
+      // keeps its own refusal: nobody is sent to draft to a person who said stop.
+      if (reply.channel === 'sms' || reply.channel === 'whatsapp') {
+        if (reply.replyKind === 'opted_out') refuse('opted_out', STOPPED)
+        refuse('template_required', TEMPLATE_REQUIRED[reply.channel])
+      }
       const contactId =
         reply.contactId ??
         refuse('no_contact', 'This reply is not attached to a contact, so there is nobody to address an answer to.')

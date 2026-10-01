@@ -21,6 +21,14 @@ import type { NextRequest } from 'next/server'
  * reading — the first live POST came back as a 307 to /signin.
  */
 /**
+ * `/api/inbound/dovesoft/dlr` and `/api/inbound/dovesoft/sms` — DoveSoft's SMS
+ * delivery reports and the texts a contact sends back (0019) — are under that
+ * same `/api/inbound` entry, deliberately not a second one: an operator's
+ * push carries no cookie either. Each route demands `DOVESOFT_WEBHOOK_SECRET`
+ * (a `token` query parameter or `x-dovesoft-token`), in constant time, and
+ * answers 503 to everything while it is unset.
+ */
+/**
  * `/book` and `/api/book` are the public booking page (§8.6): an inbound lead
  * has no account and never will. The route validates everything it is given,
  * creates rows only under the org whose slug is in the URL, and writes an

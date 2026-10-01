@@ -18,8 +18,8 @@ import { drizzle } from 'drizzle-orm/pglite'
 import { and, eq } from 'drizzle-orm'
 import {
   approveDraft, denyDraft, dispatchTouch, handleInboundEmail, inboxKindFilter, inboxTouches,
-  inboxUnhandledCount, isCheckViolation, pauseReasonClass, recordInboundReply, replyMarkHandled, replyQueueDraft,
-  replyReclassify, schema, type AgencyDb, type MessageProvider, type ReplyHumanKind,
+  inboxUnhandledCount, isCheckViolation, pauseReasonClass, recordInboundReply, recordInboundSms, replyMarkHandled,
+  replyQueueDraft, replyReclassify, schema, type AgencyDb, type MessageProvider, type ReplyHumanKind,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
 
@@ -437,6 +437,79 @@ describe('the inbox', () => {
   // -------------------------------------------------------------------------
   // Answer
   // -------------------------------------------------------------------------
+
+  /**
+   * 0019's handoff: an SMS or WhatsApp answer must be a registered template,
+   * and 0019's CHECK refuses a free-text outbound row on either channel — so
+   * without the guard, answering a text from /inbox was a 500 (nothing
+   * written, but no sentence). Now it is a refusal that names the way that
+   * works, and it writes nothing: no draft, no resume, no audit row.
+   */
+  describe('replyQueueDraft on a template channel (0019)', () => {
+    const PHONE = '+919876543210'
+    let smsCampaignId: string
+
+    beforeEach(async () => {
+      await db.update(schema.contacts).set({ phone: PHONE }).where(eq(schema.contacts.id, contactId))
+      const [sms] = await db
+        .insert(schema.campaigns)
+        .values({ orgId, name: 'Opted-in SMS', channel: 'sms', autoSend: false, status: 'active' })
+        .returning({ id: schema.campaigns.id })
+      smsCampaignId = sms!.id
+    })
+
+    const text = async (body: string, providerMessageId: string) => {
+      const r = await recordInboundSms(db, { from: PHONE, text: body, providerMessageId, receivedAt: NOON, orgId })
+      if (r.matched !== 'contact') throw new Error(`the text was not matched: ${r.why}`)
+      return r.touchId
+    }
+
+    it('refuses to answer an SMS with free text, names Draft SMS, and writes nothing', async () => {
+      const id = await text('Yes, call me on Thursday', 'mo-1')
+      const before = await auditActions()
+      for (const campaign of [undefined, smsCampaignId]) {
+        const r = await draft(id, campaign ? { campaignId: campaign } : {})
+        expect(r).toEqual({
+          ok: false,
+          reason: 'template_required',
+          message:
+            'This reply came by SMS, and under DLT an answer must be a registered template, not free text. Use Draft SMS ' +
+            'on this contact on /contacts, which drafts from an active template. Nothing was drafted and nobody was resumed.',
+        })
+      }
+      expect(await answersTo(id)).toEqual([])
+      // Their reply paused them; refusing to draft leaves the pause where it was.
+      expect((await contactRow()).pausedAt).not.toBeNull()
+      expect(await auditActions()).toEqual(before)
+    })
+
+    it('answers an SMS that asked to stop as an opt-out, never as "use Draft SMS"', async () => {
+      const id = await text('STOP', 'mo-2')
+      const r = await draft(id, { campaignId: smsCampaignId })
+      expect(r).toMatchObject({ ok: false, reason: 'opted_out' })
+      expect(await answersTo(id)).toEqual([])
+    })
+
+    it('refuses a WhatsApp reply too, and says sending WhatsApp is not available', async () => {
+      const [row] = await db
+        .insert(schema.touches)
+        .values({
+          orgId, contactId, companyId, channel: 'whatsapp', direction: 'in', status: 'replied',
+          body: 'Interested', recipient: PHONE, replyKind: 'interested',
+        })
+        .returning({ id: schema.touches.id })
+      const r = await draft(row!.id)
+      expect(r).toMatchObject({ ok: false, reason: 'template_required' })
+      if (r.ok) return
+      expect(r.message).toContain('sending WhatsApp is not available yet')
+      expect(await answersTo(row!.id)).toEqual([])
+    })
+
+    it('leaves an email reply exactly as it was', async () => {
+      const id = await reply()
+      expect(await draft(id)).toMatchObject({ ok: true })
+    })
+  })
 
   describe('replyQueueDraft', () => {
     it('parks an awaiting_approval answer naming the reply, under the parent’s campaign, and no in_reply_to', async () => {

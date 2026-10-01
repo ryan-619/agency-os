@@ -15,9 +15,9 @@ import {
   ANSWER_EVIDENCE_NOTE, APPROVE_DOES_NOT_SEND, DEFERRED_CODES, EVIDENCE_LINES_SHOWN, MISSING_EVIDENCE_NOTE,
   NO_WORKER_FOOTNOTE, OTHER_CAMPAIGN_NOTE, STALE_EVIDENCE_NOTE,
   addressedByLabel, addressedByOf, approvability, approveBlock, approveFootnote, campaignToCheck, candidateLine,
-  checkedUnderLabel, decisionView, draftEvidenceFrom, evidenceHeading, evidenceLine, evidenceNote, keyAction, nextFocus,
-  uncheckedDecision,
-  type Approvability, type CandidateDecision,
+  checkedUnderLabel, decisionView, draftEvidenceFrom, draftTitle, evidenceHeading, evidenceLine, evidenceNote, keyAction,
+  nextFocus, smsCandidates, templateLine, uncheckedDecision,
+  type Approvability, type CandidateDecision, type DraftTemplate,
 } from '../src/lib/approval-view'
 
 /**
@@ -476,5 +476,46 @@ describe('approvability', () => {
     expect(approvability({ ...card, settled: true }).ok).toBe(false)
     expect(approvability({ ...card, busy: true }).ok).toBe(false)
     expect(approvability({ ...card, canDecide: false }).ok).toBe(false)
+  })
+})
+
+/**
+ * An SMS card (0019). The body is the rendered message, shown whole like
+ * every other; what an SMS card adds is the registration it was rendered
+ * from — the operator delivers it only as those exact words — and it can be
+ * approved only to the person it was rendered for.
+ */
+describe('an SMS draft’s card', () => {
+  const tpl: DraftTemplate = { externalId: '1107160000000012345', senderId: 'ACMEIN', category: 'service_explicit', active: true }
+
+  it('is titled by its template, having no subject of its own', () => {
+    expect(draftTitle(null, tpl)).toBe('From template 1107160000000012345')
+    expect(draftTitle('Re: the CSP gap', tpl)).toBe('Re: the CSP gap')
+    expect(draftTitle(null, null)).toBe('(no subject)')
+    expect(draftTitle(null, undefined)).toBe('(no subject)')
+  })
+
+  it('names the template id, the header and the category — never the template’s text', () => {
+    expect(templateLine(tpl)).toBe(
+      'Rendered from DLT template 1107160000000012345, header ACMEIN, service explicit. The operator delivers it only as these exact words.',
+    )
+    expect(templateLine({ ...tpl, active: false })).toBe(
+      'Rendered from DLT template 1107160000000012345, header ACMEIN, service explicit — switched off since this was drafted.',
+    )
+  })
+
+  it('offers only the person it was rendered for; an email draft keeps everyone at its company', () => {
+    const people = [{ id: 'a' }, { id: 'b' }, { id: 'c' }]
+    expect(smsCandidates('sms', 'b', people)).toEqual([{ id: 'b' }])
+    expect(smsCandidates('sms', 'gone', people)).toEqual([])
+    expect(smsCandidates('email', 'b', people)).toEqual(people)
+    // An SMS row always names its person (`smsDraft` writes one); a row that does not is left as it was.
+    expect(smsCandidates('sms', null, people)).toEqual(people)
+  })
+
+  it('blocks approving words the operator would not deliver, and says to draft again', () => {
+    const block = approveBlock({ code: 'template_mismatch', words: 'not its registered template', reason: 'x', humanCanResolve: false })
+    expect(block).toContain('the operator would not deliver it')
+    expect(block).toContain('draft it again from an active registered template')
   })
 })

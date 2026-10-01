@@ -3,7 +3,7 @@ import { can, isStale, parseIcpDefinition, staleAfterDaysOf, type IcpDefinition 
 import { and, desc, eq, sql } from 'drizzle-orm'
 import {
   evidenceAsOfFor, listCampaigns, listContactsForCompany, pendingApprovals, pendingDrafts, previewSend, quotableFindings,
-  readContact, schema, type AgencyDb, type StoredWords,
+  readContact, schema, templatesList, type AgencyDb, type StoredWords,
 } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
@@ -11,8 +11,8 @@ import { getDb } from '@/lib/db'
 import { deployment, nothingWillSendNote } from '@/lib/deployment'
 import { icpForOrg } from '@/lib/queries'
 import {
-  addressedByOf, campaignToCheck, decisionView, draftEvidenceFrom, evidenceLine, uncheckedDecision,
-  type CandidateDecision, type DraftEvidence, type EvidenceScan,
+  addressedByOf, campaignToCheck, decisionView, draftEvidenceFrom, evidenceLine, smsCandidates, uncheckedDecision,
+  type CandidateDecision, type DraftEvidence, type DraftTemplate, type EvidenceScan,
 } from '@/lib/approval-view'
 import { ApprovalQueue } from '@/components/chat/queue'
 import { DraftQueue, type DraftView } from '@/components/outreach/drafts'
@@ -89,12 +89,17 @@ export default async function ApprovalsPage() {
 
   const db = getDb() as unknown as AgencyDb
   const now = new Date()
-  const [rows, drafts, campaigns, icpRow] = await Promise.all([
+  const [rows, drafts, campaigns, icpRow, templates] = await Promise.all([
     pendingApprovals(db, user.orgId),
     pendingDrafts(db, user.orgId),
     listCampaigns(db, user.orgId),
     icpForOrg(user.orgId),
+    templatesList(db, user.orgId),
   ])
+  // 0019: the registration an SMS draft names, by id — its ids for the card, never a second copy of its body.
+  const templateById = new Map<string, DraftTemplate>(
+    templates.map((t) => [t.id, { externalId: t.externalId, senderId: t.senderId, category: t.category, active: t.active }]),
+  )
 
   let icp: IcpDefinition | null = null
   try {
@@ -149,7 +154,7 @@ export default async function ApprovalsPage() {
     const own = d.touch.contactId ? strays.get(d.touch.contactId) : undefined
     return {
       d,
-      people: own ? [...people, own] : people,
+      people: smsCandidates(d.touch.channel, d.touch.contactId, own ? [...people, own] : people),
       checked: campaignToCheck({ channel: d.touch.channel, campaignId: d.touch.campaignId }, campaignChoices),
     }
   })
@@ -340,6 +345,7 @@ export default async function ApprovalsPage() {
         }
       }),
       evidence: evidenceFor(d),
+      template: d.touch.templateId ? templateById.get(d.touch.templateId) ?? null : null,
     }
   })
 

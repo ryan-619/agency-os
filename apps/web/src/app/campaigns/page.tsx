@@ -40,7 +40,7 @@ export default async function CampaignsPage() {
     rows.map(async (c) => ({
       id: c.id,
       name: c.name,
-      channel: (c.channel === 'linkedin' ? 'linkedin' : 'email') as 'email' | 'linkedin',
+      channel: (c.channel === 'linkedin' || c.channel === 'sms' ? c.channel : 'email') as CampaignView['channel'],
       dailyCap: c.dailyCap,
       quietStart: c.quietStart,
       quietEnd: c.quietEnd,
@@ -80,7 +80,8 @@ export default async function CampaignsPage() {
         A campaign is where a message&apos;s daily cap and quiet hours come from, and whether it needs
         a person per message. Every message, approved or automatic, is checked against the
         suppression list, consent, quiet hours and the cap at the moment it is sent — the campaign
-        sets the numbers, it does not skip the rules.
+        sets the numbers, it does not skip the rules. An SMS campaign never sends by itself: each SMS
+        is drafted per person from a registered template and approved by a person.
       </p>
       <CampaignsPanel
         campaigns={views}

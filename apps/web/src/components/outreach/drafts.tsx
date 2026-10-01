@@ -5,8 +5,9 @@ import { When } from '@/components/when'
 import {
   EVIDENCE_LINES_SHOWN, KEY_HELP, OTHER_CAMPAIGN_NOTE,
   addressedByLabel, approvability, approveBlock, approveFootnote, candidateLine, checkedUnderLabel,
-  evidenceHeading, evidenceNote, keyAction,
+  draftTitle, evidenceHeading, evidenceNote, keyAction, templateLine,
   type AddressedBy, type Approvability, type CandidateDecision, type CheckedUnder, type DraftEvidence,
+  type DraftTemplate,
 } from '@/lib/approval-view'
 
 /**
@@ -54,6 +55,8 @@ export interface DraftView {
   readonly candidates: readonly DraftCandidate[]
   /** The quotable evidence and its scan's date; null when there is no successful scan. */
   readonly evidence: DraftEvidence | null
+  /** The registered template an SMS draft was rendered from (0019); absent on every other channel. */
+  readonly template?: DraftTemplate | null
 }
 
 export interface CampaignChoice {
@@ -297,7 +300,7 @@ export function DraftQueue({
               data-draft-card={d.id}
               tabIndex={0}
               role="group"
-              aria-label={`Draft: ${d.subject ?? '(no subject)'}`}
+              aria-label={`Draft: ${draftTitle(d.subject, d.template)}`}
               onFocus={(e) => {
                 if (e.target === e.currentTarget) setFocused(d.id)
               }}
@@ -311,7 +314,7 @@ export function DraftQueue({
               style={{ outline: focused === d.id ? '2px solid var(--accent)' : 'none', outlineOffset: 2 }}
             >
               <div className="approval-head">
-                <strong>{d.subject ?? '(no subject)'}</strong>
+                <strong>{draftTitle(d.subject, d.template)}</strong>
                 <span className="pill">{d.channel}</span>
                 {d.company && companyHref ? (
                   <a href={companyHref} className="muted" style={{ fontSize: 12.5 }}>
@@ -324,6 +327,11 @@ export function DraftQueue({
               </div>
 
               <pre className="mono approval-payload">{d.body ?? ''}</pre>
+              {d.template ? (
+                <p className="hint" style={{ margin: '-4px 0 10px' }}>
+                  {templateLine(d.template)}
+                </p>
+              ) : null}
 
               {/*
                 The evidence BEFORE the decision, so the words are read against
