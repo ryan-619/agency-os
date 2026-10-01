@@ -1,8 +1,9 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { sendCheckSentence, type SendCheckView } from '@/lib/consent-view'
-import { SMS_VAR_MAX_CHARS, lengthLine, renderPreview, smsLength, type ComposerPart } from '@/components/contacts/sms-text'
+import { DEFERRED_CODES } from '../../lib/approval-view'
+import { sendCheckSentence, type SendCheckView } from '../../lib/consent-view'
+import { SMS_VAR_MAX_CHARS, lengthLine, renderPreview, smsLength, type ComposerPart } from './sms-text'
 
 /**
  * "Draft SMS" (0019): one SMS to one person, from a registered DLT template,
@@ -17,6 +18,9 @@ import { SMS_VAR_MAX_CHARS, lengthLine, renderPreview, smsLength, type ComposerP
  * template that does not match) blocks the draft and says why. "Draft" then
  * parks it on /approvals. Nothing here sends, and nothing decides: the
  * server renders, checks and refuses, and the worker checks again at sending.
+ *
+ * Imported relatively, with its words as pure functions, so
+ * `apps/web/test/sms-route.test.ts` reads what it says.
  */
 
 export interface ComposerCampaign {
@@ -36,10 +40,43 @@ interface TemplateOption {
   readonly slots: number
 }
 
-interface CheckAnswer extends SendCheckView {
+export interface CheckAnswer extends SendCheckView {
   readonly rendered: true
   readonly body: string
   readonly blocked: boolean
+}
+
+/**
+ * What the worker does at sending with a refusal a person CAN resolve. Only
+ * the clock's refusals are held and tried again (`DEFERRED_CODES`: quiet
+ * hours — TRAI's band included — the daily cap, a paused campaign). Every
+ * other one — a contact with no timezone, say — is refused for good at the
+ * tick, and the draft never goes. The composer said "would wait" for all of
+ * them, and an approver who believed it approved a message that was then
+ * refused.
+ */
+export function atSending(code: string): 'held' | 'refused' {
+  return DEFERRED_CODES.has(code) ? 'held' : 'refused'
+}
+
+const withoutStop = (s: string): string => s.trim().replace(/\.+$/, '')
+
+/** The line under Check: the send path's answer, and what that means for a draft. */
+export function checkLine(answer: CheckAnswer): string {
+  const said = sendCheckSentence(answer)
+  const d = answer.decision
+  if (answer.blocked) return `${said} The draft is not offered.`
+  if (d.allowed || d.code === 'needs_approval') return said
+  return atSending(d.code) === 'held'
+    ? `${said} If it were approved now, the worker would hold it and try again later.`
+    : `${said} The worker would refuse it at sending as things stand — fix it before drafting.`
+}
+
+/** The line beside a draft written with a hold: wait only where the worker waits. */
+export function holdLine(hold: { readonly code: string; readonly reason: string }): string {
+  return atSending(hold.code) === 'held'
+    ? `If it were approved right now it would wait: ${hold.reason}`
+    : `If it were approved right now it would be refused at sending: ${withoutStop(hold.reason)} — fix it before approving.`
 }
 
 type Check =
@@ -147,8 +184,8 @@ export function SmsComposer({
     setBusy(null)
     if (!b) return
     const lines = [typeof b.note === 'string' ? b.note : 'Drafted. A person approves it on /approvals.']
-    const hold = b.wouldHold as { reason?: unknown } | null | undefined
-    if (hold && typeof hold.reason === 'string') lines.push(`If it were approved right now it would wait: ${hold.reason}`)
+    const hold = b.wouldHold as { code?: unknown; reason?: unknown } | null | undefined
+    if (hold && typeof hold.code === 'string' && typeof hold.reason === 'string') lines.push(holdLine({ code: hold.code, reason: hold.reason }))
     if (typeof b.deployment === 'string') lines.push(b.deployment)
     setDrafted(lines)
   }
@@ -259,8 +296,7 @@ export function SmsComposer({
           {current?.kind === 'refused' ? <div className="err-line">{current.message}</div> : null}
           {current?.kind === 'answer' ? (
             <div className={current.answer.blocked ? 'err-line' : current.answer.decision.allowed ? 'ok-line' : 'muted'} style={{ fontSize: 12.5 }}>
-              {sendCheckSentence(current.answer)}
-              {current.answer.blocked ? ' The draft is not offered.' : ''}
+              {checkLine(current.answer)}
             </div>
           ) : null}
           {error ? <div className="err-line">{error}</div> : null}

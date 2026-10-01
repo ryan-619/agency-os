@@ -21,6 +21,8 @@ import { migratedDb, type TestDb } from '../../../packages/db/test/helpers.js'
 import {
   SMS_FAULT, smsComposerAnswer, smsDryRunAnswer, smsRenderAnswer, type ComposerLog, type SmsDraftInput,
 } from '../src/app/api/contacts/[id]/sms/outcome'
+import { atSending, checkLine, holdLine, type CheckAnswer } from '../src/components/contacts/sms-composer'
+import { DEFERRED_CODES } from '../src/lib/approval-view'
 
 const PHONE = '+919876543210'
 const BODY = 'Hi {#var#}, your call with Acme is at {#var#}. Reply STOP to opt out.'
@@ -194,5 +196,57 @@ describe('the route is the session and one call', () => {
     expect(src).toContain('smsComposerAnswer(')
     // No second copy of smsDraft's checks to drift from it.
     expect(src).not.toMatch(/previewSend\(|renderTemplate\(|readCampaign\(|templatesList\(|smsDraft\(/)
+  })
+})
+
+/**
+ * What the composer says the worker would do. Only the clock's refusals are
+ * held at sending; a contact with no timezone is refused for good. It said
+ * "would wait" for both, and an approver who believed it approved an SMS
+ * that never went.
+ */
+describe('what the composer says the worker would do', () => {
+  const answer = (code: string, humanCanResolve: boolean): CheckAnswer => ({
+    rendered: true,
+    body: 'Hi',
+    blocked: !humanCanResolve,
+    wouldNeedApproval: true,
+    decision: { allowed: false, code, reason: 'The rule says so.', humanCanResolve },
+  })
+
+  it('holds only the clock’s refusals — the worker’s own deferred codes', () => {
+    for (const code of ['quiet_hours', 'daily_cap', 'campaign_inactive']) expect(atSending(code)).toBe('held')
+    for (const code of ['unknown_timezone', 'unparseable_recipient', 'bounced', 'stale_evidence']) expect(atSending(code)).toBe('refused')
+    expect([...DEFERRED_CODES].sort()).toEqual(['campaign_inactive', 'daily_cap', 'quiet_hours'])
+  })
+
+  it('says a draft would wait only where the worker waits', () => {
+    expect(holdLine({ code: 'quiet_hours', reason: 'It is 23:00 where they are.' })).toBe(
+      'If it were approved right now it would wait: It is 23:00 where they are.',
+    )
+    const tz = holdLine({ code: 'unknown_timezone', reason: 'This contact has no timezone, so quiet hours cannot be checked.' })
+    expect(tz).toBe(
+      'If it were approved right now it would be refused at sending: This contact has no timezone, so quiet hours cannot be checked — fix it before approving.',
+    )
+    expect(tz).not.toContain('wait')
+  })
+
+  it('says under Check what a draft would meet at sending, keeping Draft as humanCanResolve says', () => {
+    expect(checkLine(answer('quiet_hours', true))).toMatch(/A person can resolve this\. If it were approved now, the worker would hold it and try again later\.$/)
+    expect(checkLine(answer('unknown_timezone', true))).toMatch(
+      /A person can resolve this\. The worker would refuse it at sending as things stand — fix it before drafting\.$/,
+    )
+    expect(checkLine(answer('suppressed', false))).toMatch(/Nobody may approve past this\. The draft is not offered\.$/)
+    expect(checkLine({ rendered: true, body: 'Hi', blocked: false, wouldNeedApproval: true, decision: { allowed: true, code: 'send_now' } })).toBe(
+      'Nothing stops a message to them under this campaign right now. It would still wait for a person to approve it.',
+    )
+  })
+
+  it('renders those lines, and no other "would wait"', () => {
+    const src = readFileSync(fileURLToPath(new URL('../src/components/contacts/sms-composer.tsx', import.meta.url)), 'utf8')
+    expect(src).toContain('{checkLine(current.answer)}')
+    expect(src).toContain('lines.push(holdLine(')
+    // The old line said "would wait" for every resolvable refusal.
+    expect(src).not.toContain('lines.push(`If it were approved right now it would wait')
   })
 })
