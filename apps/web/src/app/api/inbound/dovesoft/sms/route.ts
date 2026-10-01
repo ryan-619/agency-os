@@ -4,7 +4,7 @@ import { getDb } from '@/lib/db'
 import { env } from '@/lib/env'
 import { log } from '@/lib/logger'
 import { notify } from '@/lib/slack'
-import { authoriseDoveSoft, handleDoveSoftMo, readDoveSoftRequest, tokenFrom } from '../webhook'
+import { authoriseDoveSoft, handleDoveSoftMo, logRefusalOnce, readDoveSoftRequest, tokenFrom } from '../webhook'
 
 /**
  * A text a contact sent back, pushed by DoveSoft (0019).
@@ -15,6 +15,15 @@ import { authoriseDoveSoft, handleDoveSoftMo, readDoveSoftRequest, tokenFrom } f
  * number on the suppression list. GET and POST alike, because the push
  * format is not public; the fields are read from the query, a form or JSON
  * under the common names (`../webhook.ts`).
+ *
+ * GET is kept although it costs something, because a STOP that cannot
+ * arrive is worse: Indian gateways commonly forward an inbound text by GET,
+ * and DoveSoft's format is not public. But a GET push carries its fields in
+ * the URL, so the SENDER'S NUMBER AND THE WORDS of every text land in the
+ * platform's request log (Vercel's, and DoveSoft's own URL log), beside the
+ * token — this route's own lines never carry them, and cannot stop the
+ * platform logging a URL. Ask DoveSoft to push by POST, a form or JSON,
+ * where it offers it; /settings/deployment says so.
  *
  * What the words MEAN is decided once, by `recordInboundSms`: a reply that
  * pauses the person and cancels what was queued, as an email reply does, and
@@ -30,7 +39,10 @@ export const runtime = 'nodejs'
 async function handle(request: Request): Promise<NextResponse> {
   const e = env()
   const auth = authoriseDoveSoft(e.DOVESOFT_WEBHOOK_SECRET, tokenFrom(request))
-  if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status })
+  if (!auth.ok) {
+    logRefusalOnce('sms', auth, log)
+    return NextResponse.json({ error: auth.error }, { status: auth.status })
+  }
 
   const req = await readDoveSoftRequest(request)
 

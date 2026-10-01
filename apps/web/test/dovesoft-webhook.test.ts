@@ -20,9 +20,10 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import type { InboundSmsOutcome, SmsDeliveryOutcome } from '@agency/db/queries'
 import {
-  DLR_ID_FIELDS, DLR_STATUS_FIELDS, DOVESOFT_MAX_BODY_BYTES, MO_FROM_FIELDS, MO_ID_FIELDS, MO_TEXT_FIELDS,
-  MO_TIME_FIELDS, MO_TO_FIELDS, authoriseDoveSoft, handleDoveSoftDlr, handleDoveSoftMo, readDlr, readDoveSoftRequest,
-  readFields, readMo, readReceivedAt, readSender, type FieldsRead,
+  DELIVERED_WORDS, DLR_ID_FIELDS, DLR_STATUS_FIELDS, DOVESOFT_MAX_BODY_BYTES, FAILED_WORDS, MO_FROM_FIELDS, MO_ID_FIELDS,
+  MO_TEXT_FIELDS, MO_TIME_FIELDS, MO_TO_FIELDS, authoriseDoveSoft, handleDoveSoftDlr, handleDoveSoftMo, logRefusalOnce,
+  rawQueryValue, readDlr, readDoveSoftRequest, readFields, readMo, readReceivedAt, readSender, tokenFrom,
+  type DoveSoftRoute, type FieldsRead,
 } from '../src/app/api/inbound/dovesoft/webhook'
 import { smsOptOutNotRecordedNotification, smsReplyNotification } from '../src/app/api/inbound/dovesoft/notification'
 import { slackMessage, type NotificationEvent } from '../src/lib/slack-message'
@@ -81,6 +82,61 @@ describe('who may post', () => {
     expect(authoriseDoveSoft(SECRET, { query: null, header: SECRET })).toEqual({ ok: true })
     expect(authoriseDoveSoft(SECRET, { query: 'wrong', header: SECRET })).toEqual({ ok: true })
   })
+
+  /**
+   * About half of all `openssl rand -base64 32` secrets carry a `+`, and the
+   * query parser reads `+` as a space: a secret pasted raw into `?token=` —
+   * as the registration instructions said — refused every push, STOPs
+   * included, with nothing logged. Now raw, percent-encoded and header all
+   * match.
+   */
+  describe('a base64 secret with + and /', () => {
+    const B64 = 'q+7Lw/9ZpXo3+Rk1vY2u/HnTe8mJc4A6dG0sF5bE1iU='
+    const at = (query: string, header?: string) =>
+      tokenFrom(new Request(`https://x.test/api/inbound/dovesoft/sms${query}`, header ? { headers: { 'x-dovesoft-token': header } } : {}))
+
+    it('matches it pasted raw into the URL', () => {
+      expect(authoriseDoveSoft(B64, at(`?token=${B64}`))).toEqual({ ok: true })
+      expect(authoriseDoveSoft(B64, at(`?mobile=919876543210&token=${B64}&message=hi`))).toEqual({ ok: true })
+    })
+
+    it('matches it percent-encoded in the URL, and in the header', () => {
+      expect(authoriseDoveSoft(B64, at(`?token=${encodeURIComponent(B64)}`))).toEqual({ ok: true })
+      expect(authoriseDoveSoft(B64, at('', B64))).toEqual({ ok: true })
+    })
+
+    it('still refuses a near miss, in any of the three places', () => {
+      const near = B64.replace(/\+/g, ' ')
+      expect(authoriseDoveSoft(B64, at(`?token=${encodeURIComponent(near)}`))).toMatchObject({ ok: false, status: 401 })
+      expect(authoriseDoveSoft(B64, at(`?token=${B64.slice(1)}`, B64.slice(1)))).toMatchObject({ ok: false, status: 401 })
+      expect(authoriseDoveSoft(B64, at(''))).toMatchObject({ ok: false, status: 401 })
+    })
+
+    it('reads the raw value without + as a space, and an escape that does not decode as nothing', () => {
+      expect(rawQueryValue(`?token=${B64}`, 'token')).toBe(B64)
+      expect(rawQueryValue('?token=a%2Bb%2Fc', 'token')).toBe('a+b/c')
+      expect(rawQueryValue('?tokens=x&token=y&token=z', 'token')).toBe('y')
+      expect(rawQueryValue('?token=%E0%A4', 'token')).toBeNull()
+      expect(rawQueryValue('?mobile=1', 'token')).toBeNull()
+      expect(rawQueryValue('', 'token')).toBeNull()
+    })
+  })
+
+  /** A 401 used to be silent; now the first one per route says so, by the route's name alone. */
+  it('logs a refused token once per route per process, naming the route and nothing sent', () => {
+    const w = world()
+    const logged = new Set<DoveSoftRoute>()
+    const refused = authoriseDoveSoft(SECRET, { query: 'WRONG-TOKEN-VALUE', header: null })
+    logRefusalOnce('sms', refused, w.deps.log, logged)
+    logRefusalOnce('sms', refused, w.deps.log, logged)
+    logRefusalOnce('dlr', refused, w.deps.log, logged)
+    // Not a refusal of a token: an unset secret is the deployment page's to say, and a match is fine.
+    logRefusalOnce('sms', authoriseDoveSoft(undefined, { query: null, header: null }), w.deps.log, new Set())
+    logRefusalOnce('sms', { ok: true }, w.deps.log, new Set())
+    expect(w.logs.map((l) => [l.level, l.fields])).toEqual([['error', { route: 'sms' }], ['error', { route: 'dlr' }]])
+    expect(w.logs[0]!.message).toContain('percent-encoded')
+    expect(w.everything()).not.toContain('WRONG-TOKEN-VALUE')
+  })
 })
 
 describe('reading a payload — query, form or JSON', () => {
@@ -134,12 +190,17 @@ describe('a delivery report', () => {
     expect(DLR_STATUS_FIELDS).toEqual(['errorstatus', 'status'])
   })
 
-  it('maps DELIVRD to delivered, whatever its case', () => {
-    for (const word of ['DELIVRD', 'delivrd']) {
+  /** A spelled-out "Delivered" was stored as pending, while the failure list took spelled-out words. */
+  it('maps DELIVRD and the spelled-out Delivered to delivered, whatever its case', () => {
+    for (const word of ['DELIVRD', 'delivrd', 'Delivered', 'DELIVERED', ' delivered ']) {
       expect(readDlr(new Map([['messageid', 'm-1'], ['errorstatus', word]]))).toEqual({
         ok: true, providerMessageId: 'm-1', status: 'delivered', reason: null,
       })
     }
+    expect([...DELIVERED_WORDS]).toEqual(['delivrd', 'delivered'])
+    expect(readDlr(new Map([['messageid', 'm'], ['errorstatus', 'UNDELIVERABLE']]))).toMatchObject({ status: 'failed' })
+    // No word is both.
+    expect([...DELIVERED_WORDS].filter((w) => FAILED_WORDS.has(w))).toEqual([])
   })
 
   it('maps a final failure word to failed, with the operator’s reason — or its word when it gave none', () => {
@@ -224,6 +285,13 @@ describe('an inbound text', () => {
     expect(readMo(new Map([['mobile', NUMBER]]), NOW)).toEqual({ ok: false, missing: ['text'] })
     expect(readMo(new Map([['message', 'STOP']]), NOW)).toEqual({ ok: false, missing: ['from'] })
     expect(readMo(new Map([['mobile', '  '], ['msg', 'STOP']]), NOW)).toEqual({ ok: false, missing: ['from', 'text'] })
+  })
+
+  /** Some gateways decode GSM-7 `@` as U+0000, which Postgres refuses: every retry failed. */
+  it('hands over U+0000 as U+FFFD, in the words and the message id', () => {
+    expect(readMo(new Map([['mobile', NUMBER], ['message', 'STOP\u0000 jo'], ['msgid', 'mo\u00001']]), NOW)).toMatchObject({
+      ok: true, text: 'STOP\uFFFD jo', providerMessageId: 'mo\uFFFD1',
+    })
   })
 
   /** `normalisePhone` guesses no country, and neither does this — except the one bare form that is unambiguous. */
@@ -475,6 +543,112 @@ describe('what an inbound text is answered with', () => {
   })
 })
 
+/**
+ * A fault while recording. drizzle's error message lists every bound
+ * parameter — the number and the words — and Next `console.error`s an
+ * escaping error whole, so it used to reach the platform log; and a STOP
+ * that failed this way left no audit row and raised no alarm.
+ */
+describe('a fault while recording', () => {
+  /** Shaped like drizzle's DrizzleQueryError: the SQL, then every parameter. */
+  class DrizzleQueryError extends Error {
+    override name = 'DrizzleQueryError'
+  }
+  const fault = (words: string) =>
+    new DrizzleQueryError(`Failed query: insert into "touches" … params: org,contact,sms,in,replied,,${words},${NUMBER},mo-1`)
+
+  const UNPLACED_ALARM = { kind: 'opt_out_not_recorded', orgId: ORG, touchId: null, contactId: null, path: 'reply' } as const
+
+  function mo(words: string, orgId: string | null = ORG) {
+    const w = world(orgId)
+    const alarms: NotificationEvent[] = []
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let answered = false
+    const answer = handleDoveSoftMo(fields({ mobile: '919876543210', message: words }), shape, NOW, {
+      ...w.deps,
+      record: async () => {
+        throw fault(words)
+      },
+      alarm: async (event) => {
+        alarms.push(event)
+        await gate
+      },
+      later: () => {
+        throw new Error('no reply notice for a text nobody recorded')
+      },
+    }).then((a) => {
+      answered = true
+      return a
+    })
+    return { w, alarms, answer, release, answered: () => answered }
+  }
+
+  it('answers a delivery report 500, so DoveSoft retries, and logs the fault’s class only', async () => {
+    const w = world()
+    const answer = await handleDoveSoftDlr(fields({ messageid: 'm-9', errorstatus: 'UNDELIV', errorreason: WORDS }), shape, {
+      ...w.deps,
+      record: async () => {
+        throw fault(WORDS)
+      },
+    })
+    expect(answer).toEqual({ status: 500, body: { error: 'delivery report not recorded' } })
+    expect(w.logs).toEqual([
+      {
+        level: 'error',
+        message: 'DoveSoft delivery report could not be recorded; it was refused so DoveSoft retries',
+        fields: { error: 'DrizzleQueryError', status: 'failed' },
+      },
+    ])
+    expect(w.everything()).not.toContain('DECOY')
+    expect(w.everything()).not.toContain('9876543210')
+  })
+
+  it('answers an ordinary text 500 and logs the fault’s class only — never the number or the words', async () => {
+    const r = mo(WORDS.replace('STOP', 'Thanks for'))
+    expect(await r.answer).toEqual({ status: 500, body: { error: 'inbound text not recorded' } })
+    expect(r.alarms).toEqual([])
+    expect(r.w.audits).toEqual([])
+    expect(r.w.logs).toEqual([
+      {
+        level: 'error',
+        message: 'DoveSoft inbound text could not be recorded; it was refused so DoveSoft retries',
+        fields: { error: 'DrizzleQueryError', bytes: 120, contentType: 'application/x-www-form-urlencoded' },
+      },
+    ])
+    expect(r.w.everything()).not.toContain('DECOY')
+    expect(r.w.everything()).not.toContain('9876543210')
+  })
+
+  it('takes the loud path for a STOP: audits it, awaits the alarm, then answers 500', async () => {
+    const r = mo('STOP')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(r.alarms).toEqual([UNPLACED_ALARM])
+    expect(r.answered()).toBe(false)
+    r.release()
+    expect(await r.answer).toEqual({ status: 500, body: { error: 'opt-out not recorded' } })
+    expect(r.w.audits).toEqual([{ action: 'contact.opt_out_not_recorded', detail: { channel: 'sms', why: 'record_failed' } }])
+    expect(r.w.logs).toEqual([
+      {
+        level: 'error',
+        message: 'OPT-OUT NOT RECORDED — a text that asked to stop could not be recorded; follow up by hand',
+        fields: { error: 'DrizzleQueryError', orgConfigured: true, audited: true, alarm: 'raised' },
+      },
+    ])
+    expect(r.w.everything()).not.toContain('9876543210')
+  })
+
+  it('says no alarm was raised for such a STOP when no org is named, and still answers 500', async () => {
+    const r = mo('Please stop texting me', null)
+    expect(await r.answer).toMatchObject({ status: 500 })
+    expect(r.alarms).toEqual([])
+    expect(r.w.audits).toEqual([])
+    expect(r.w.logs[0]!.fields).toEqual({ error: 'DrizzleQueryError', orgConfigured: false, audited: false, alarm: 'not_raised_no_org' })
+  })
+})
+
 describe('the Slack events an inbound text raises', () => {
   const outcome: InboundSmsOutcome & { decoy: string } = {
     matched: 'contact',
@@ -542,5 +716,17 @@ describe('the routes are the wiring and nothing more', () => {
   it('awaits the alarm and schedules only the ordinary notice', () => {
     expect(SMS).toContain('alarm: (event) => notify(event)')
     expect(SMS).toContain('later: (event) => after(() => notify(event))')
+  })
+
+  it.each([['dlr', DLR], ['sms', SMS]])('%s logs its first refused token, by the route’s name, before it answers 401', (name, src) => {
+    expect(src).toContain(`logRefusalOnce('${name}', auth, log)`)
+    expect(src.indexOf('logRefusalOnce(')).toBeLessThan(src.indexOf('readDoveSoftRequest('))
+  })
+
+  /** A GET push puts its fields in the URL: the inbound-text route says what that costs. */
+  it('says a GET text puts the number and the words in the platform’s request log', () => {
+    expect(SMS).toContain("SENDER'S NUMBER AND THE WORDS")
+    expect(SMS).toContain('request log')
+    expect(SMS).toContain('POST')
   })
 })

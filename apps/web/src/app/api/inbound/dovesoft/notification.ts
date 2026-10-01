@@ -56,10 +56,7 @@ export function smsOptOutNotRecordedNotification(
   unplacedOrgId: string | null,
 ): Extract<NotificationEvent, { kind: 'opt_out_not_recorded' }> | null {
   if (!outcome.optOutNotRecorded) return null
-  if (outcome.matched === 'none') {
-    if (unplacedOrgId === null) return null
-    return { kind: 'opt_out_not_recorded', orgId: unplacedOrgId, touchId: null, contactId: null, path: 'reply' }
-  }
+  if (outcome.matched === 'none') return smsUnplacedOptOutNotification(unplacedOrgId)
   if (outcome.duplicate) return null
   return {
     kind: 'opt_out_not_recorded',
@@ -68,4 +65,17 @@ export function smsOptOutNotRecordedNotification(
     contactId: outcome.contactId,
     path: 'reply',
   }
+}
+
+/**
+ * The alarm for a STOP no message row and no contact can be named for — one
+ * from a number no single contact holds, and one whose recording failed
+ * outright, before anything said whose it was. Filed under `unplacedOrgId`
+ * (`DOVESOFT_ORG_ID`); null without one.
+ */
+export function smsUnplacedOptOutNotification(
+  unplacedOrgId: string | null,
+): Extract<NotificationEvent, { kind: 'opt_out_not_recorded' }> | null {
+  if (unplacedOrgId === null) return null
+  return { kind: 'opt_out_not_recorded', orgId: unplacedOrgId, touchId: null, contactId: null, path: 'reply' }
 }
