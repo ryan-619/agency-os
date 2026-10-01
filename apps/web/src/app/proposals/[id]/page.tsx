@@ -12,6 +12,7 @@ import { ProposalStatus } from '@/components/pipeline/proposal-status'
 import { When } from '@/components/when'
 import { readIcp } from '@/lib/company-list'
 import { getDb } from '@/lib/db'
+import { orgIdentity } from '@/lib/org-identity'
 import { supersededBannerText } from '@/lib/proposal-markdown'
 import { icpForOrg } from '@/lib/queries'
 
@@ -36,7 +37,9 @@ export default async function ProposalPage({ params }: { params: Promise<{ id: s
   if (!UUID.test(id)) notFound()
 
   const db = getDb() as unknown as AgencyDb
-  const [row, icpRow] = await Promise.all([readProposal(db, user.orgId, id), icpForOrg(user.orgId)])
+  const [row, icpRow, org] = await Promise.all([
+    readProposal(db, user.orgId, id), icpForOrg(user.orgId), orgIdentity(user.orgId),
+  ])
   if (!row) notFound()
   const [company] = await db
     .select({ domain: schema.companies.domain, name: schema.companies.name })
@@ -51,8 +54,7 @@ export default async function ProposalPage({ params }: { params: Promise<{ id: s
   // Guarded, like the print view and the Markdown export this page links to:
   // `isStale` throws on a threshold that is not a positive number, and the
   // raw `stale_after_days` made this page a 500 over a hand-edited 0.
-  const { icp, staleAfterDays: staleAfter } = readIcp(icpRow?.definition)
-  const orgLabel = icp?.label ?? 'Agency'
+  const { staleAfterDays: staleAfter } = readIcp(icpRow?.definition)
 
   // §2.2. The generator refuses to write a proposal from a stale scan — but a
   // proposal written while the scan was fresh keeps sitting here, and the
@@ -79,7 +81,7 @@ export default async function ProposalPage({ params }: { params: Promise<{ id: s
   const slot: ProposalSlotProps = { orgId: user.orgId, proposalId: row.id, status: row.status, evidenceStale, canWrite }
 
   return (
-    <Shell user={user} orgName={orgLabel} current="pipeline" signOut={signOutAction}>
+    <Shell user={user} current="pipeline" signOut={signOutAction}>
       <p className="crumb"><a href="/pipeline">← Pipeline</a></p>
       <h1>{doc.title}</h1>
       <p className="lede">
@@ -110,7 +112,9 @@ export default async function ProposalPage({ params }: { params: Promise<{ id: s
       <ProposalDocument
         doc={doc}
         company={{ domain: company.domain, name: company.name }}
-        agency={{ name: orgLabel }}
+        // The org's name, as the print view and the buyer's page print it —
+        // not the ICP's label, which names a market rather than an agency.
+        agency={{ name: org.name }}
         status={row.status}
         evidenceAsOf={scan ? scan.ranAt.toISOString() : null}
         evidenceStale={evidenceStale}

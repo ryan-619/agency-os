@@ -1,11 +1,10 @@
 import { Fragment, type ReactNode } from 'react'
 import { redirect } from 'next/navigation'
 import { revalidatePath } from 'next/cache'
-import { assertCan, parseIcpDefinition } from '@agency/core'
+import { assertCan } from '@agency/core'
 import { importCompanies, parseCompanySeeds } from '@agency/db/repository'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
-import { icpForOrg } from '@/lib/queries'
 import { getDb } from '@/lib/db'
 import { deployment } from '@/lib/deployment'
 import { log } from '@/lib/logger'
@@ -24,8 +23,6 @@ export default async function ImportCompanies({
   const session = await auth()
   if (!session?.user) redirect('/signin')
   const user = session.user
-  const icpRow = await icpForOrg(user.orgId)
-  const icp = icpRow ? parseIcpDefinition(icpRow.definition) : null
   const { inserted, present, error } = await searchParams
   // Which of the things that can scan an imported company exist HERE: a
   // terminal always does; the daily rescan route only with a cron secret, and
@@ -46,7 +43,7 @@ export default async function ImportCompanies({
   }
 
   return (
-    <Shell user={user} orgName={icp?.label ?? 'Agency'} current="companies" signOut={signOutAction}>
+    <Shell user={user} current="companies" signOut={signOutAction}>
       <p className="crumb"><a href="/companies">← Companies</a></p>
       <h1>Import companies</h1>
       <p className="lede">

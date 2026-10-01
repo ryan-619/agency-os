@@ -84,8 +84,7 @@ export default async function CompliancePage() {
   // a positive number, and `parseIcpDefinition` does not check it, so an ICP
   // with `stale_after_days: 0` made this page a 500 while the dashboard beside
   // it fell back to the default. Both now fall back, and this page says so.
-  const { icp, unreadable, staleAfterDays: staleDays } = readIcp((await icpForOrg(user.orgId))?.definition)
-  const orgLabel = icp?.label ?? 'Agency'
+  const { unreadable, staleAfterDays: staleDays } = readIcp((await icpForOrg(user.orgId))?.definition)
   const signOutAction = async () => {
     'use server'
     await signOut({ redirectTo: '/signin' })
@@ -93,7 +92,7 @@ export default async function CompliancePage() {
 
   if (!can(principal, 'audit:read')) {
     return (
-      <Shell user={user} orgName={orgLabel} current="compliance" signOut={signOutAction}>
+      <Shell user={user} current="compliance" signOut={signOutAction}>
         <h1>Compliance</h1>
         <div className="note">Your role cannot read the audit counts.</div>
       </Shell>
@@ -117,7 +116,7 @@ export default async function CompliancePage() {
   const banner = workerBanner(live, worker)
 
   return (
-    <Shell user={user} orgName={orgLabel} current="compliance" signOut={signOutAction}>
+    <Shell user={user} current="compliance" signOut={signOutAction}>
       <h1>Compliance</h1>
       <p className="lede">
         Every number here is a count of rows, and every count links to its rows. A zero is &apos;none

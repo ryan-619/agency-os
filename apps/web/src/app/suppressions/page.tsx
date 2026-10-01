@@ -1,12 +1,11 @@
 import { redirect } from 'next/navigation'
-import { can, parseIcpDefinition } from '@agency/core'
+import { can } from '@agency/core'
 import { listSuppressions, pausedContacts, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { SuppressionsPanel } from '@/components/outreach/suppressions'
 import { SUPPRESSION_SOURCE_WORDS, UNRECORDED_SOURCE, suppressionSource } from '@/lib/audit-copy'
 import { getDb } from '@/lib/db'
-import { icpForOrg } from '@/lib/queries'
 
 /**
  * The suppression list and the paused contacts (PROMPT.md §2.1, §8.4).
@@ -38,23 +37,13 @@ export default async function SuppressionsPage() {
     pausedContacts(db, user.orgId),
   ])
 
-  const icpRow = await icpForOrg(user.orgId)
-  let orgLabel = 'Agency'
-  if (icpRow) {
-    try {
-      orgLabel = parseIcpDefinition(icpRow.definition).label
-    } catch {
-      orgLabel = 'Agency'
-    }
-  }
-
   const signOutAction = async () => {
     'use server'
     await signOut({ redirectTo: '/signin' })
   }
 
   return (
-    <Shell user={user} orgName={orgLabel} current="suppressions" signOut={signOutAction}>
+    <Shell user={user} current="suppressions" signOut={signOutAction}>
       <h1>Suppressions</h1>
       <p className="lede">
         One row here and no channel may ever contact that address, number or domain again. It is

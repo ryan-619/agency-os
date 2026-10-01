@@ -6,10 +6,8 @@ import {
 } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
-import { readIcp } from '@/lib/company-list'
 import { getDb } from '@/lib/db'
 import { log } from '@/lib/logger'
-import { icpForOrg } from '@/lib/queries'
 import { ContactImportForm, type ContactImportState } from './import-form'
 
 export const dynamic = 'force-dynamic'
@@ -91,9 +89,6 @@ export default async function ImportContacts() {
   const session = await auth()
   if (!session?.user) redirect('/signin')
   const user = session.user
-  // Guarded: the ICP is only the sidebar's label here, and a malformed
-  // profile made this page a 500 when the parse was bare.
-  const { icp } = readIcp((await icpForOrg(user.orgId))?.definition)
   const header = CONTACT_IMPORT_COLUMNS.join(',')
 
   const signOutAction = async () => {
@@ -102,7 +97,7 @@ export default async function ImportContacts() {
   }
 
   return (
-    <Shell user={user} orgName={icp?.label ?? 'Agency'} current="contacts" signOut={signOutAction}>
+    <Shell user={user} current="contacts" signOut={signOutAction}>
       <p className="crumb"><a href="/contacts">← Contacts</a></p>
       <h1>Import contacts</h1>
 

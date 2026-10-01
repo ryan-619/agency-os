@@ -1,11 +1,10 @@
 import { redirect } from 'next/navigation'
-import { parseIcpDefinition, pipelineMetrics } from '@agency/core'
+import { pipelineMetrics } from '@agency/core'
 import { analyticsTransitions, listDeals, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { When } from '@/components/when'
 import { getDb } from '@/lib/db'
-import { icpForOrg } from '@/lib/queries'
 
 /**
  * Pipeline analytics: counts per stage, conversion from each stage to the
@@ -29,30 +28,21 @@ export default async function PipelineAnalyticsPage() {
 
   const db = getDb() as unknown as AgencyDb
   const now = new Date()
-  const [deals, moves, icpRow] = await Promise.all([
+  const [deals, moves] = await Promise.all([
     listDeals(db, user.orgId),
     analyticsTransitions(db, user.orgId),
-    icpForOrg(user.orgId),
   ])
   const m = pipelineMetrics(deals, moves, now)
   const insufficient = `insufficient data (< ${m.minSample})`
   const pct = (rate: number): string => `${Math.round(rate * 100)}%`
 
-  let orgLabel = 'Agency'
-  if (icpRow) {
-    try {
-      orgLabel = parseIcpDefinition(icpRow.definition).label
-    } catch {
-      orgLabel = 'Agency'
-    }
-  }
   const signOutAction = async () => {
     'use server'
     await signOut({ redirectTo: '/signin' })
   }
 
   return (
-    <Shell user={user} orgName={orgLabel} current="pipeline" signOut={signOutAction}>
+    <Shell user={user} current="pipeline" signOut={signOutAction}>
       <p className="crumb"><a href="/pipeline">← Pipeline</a></p>
       <h1>Pipeline analytics</h1>
       <p className="lede">

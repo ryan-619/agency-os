@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation'
-import { can, parseIcpDefinition } from '@agency/core'
+import { can } from '@agency/core'
 import { usersList, type AgencyDb, type TeamMember } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
@@ -7,7 +7,6 @@ import { TeamPanel, type TeamMemberView } from '@/components/settings/team'
 import { getDb } from '@/lib/db'
 import { deployment } from '@/lib/deployment'
 import { env } from '@/lib/env'
-import { icpForOrg } from '@/lib/queries'
 
 /**
  * Settings → Team: who can sign in, as what, and taking that away.
@@ -35,16 +34,6 @@ export default async function TeamPage() {
   const db = getDb() as unknown as AgencyDb
   const members = await usersList(db, user.orgId)
 
-  const icpRow = await icpForOrg(user.orgId)
-  let orgLabel = 'Agency'
-  if (icpRow) {
-    try {
-      orgLabel = parseIcpDefinition(icpRow.definition).label
-    } catch {
-      orgLabel = 'Agency'
-    }
-  }
-
   const signOutAction = async () => {
     'use server'
     await signOut({ redirectTo: '/signin' })
@@ -54,7 +43,7 @@ export default async function TeamPage() {
   const { mailIsLocalSink } = deployment()
 
   return (
-    <Shell user={user} orgName={orgLabel} current="team" signOut={signOutAction}>
+    <Shell user={user} current="team" signOut={signOutAction}>
       <h1>Team</h1>
       <p className="lede">
         Who can sign in, and as what. Access is revoked, never deleted: every approval and message

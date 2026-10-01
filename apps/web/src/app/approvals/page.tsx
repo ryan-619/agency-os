@@ -107,7 +107,6 @@ export default async function ApprovalsPage() {
   } catch {
     icp = null
   }
-  const orgLabel = icp?.label ?? 'Agency'
   // `isStale` throws on a non-positive threshold, and one bad ICP value must
   // not take the approval queue down with it. The default is §2.2's own 14.
   const staleAfter = staleAfterDaysOf(icp)
@@ -359,7 +358,6 @@ export default async function ApprovalsPage() {
   return (
     <Shell
       user={user}
-      orgName={orgLabel}
       current="approvals"
       signOut={signOutAction}
       pendingApprovals={rows.length}

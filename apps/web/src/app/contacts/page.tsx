@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation'
-import { can, parseIcpDefinition } from '@agency/core'
+import { can } from '@agency/core'
 import {
   consentLedgerFor, contactsLedger, listCampaigns, LEDGER_DEFAULT_LIMIT, type AgencyDb,
 } from '@agency/db/queries'
@@ -8,7 +8,6 @@ import { Shell } from '@/components/shell'
 import { ContactsLedger, type LedgerView } from '@/components/contacts/ledger'
 import { getDb } from '@/lib/db'
 import { deployment, noRepliesReadNote } from '@/lib/deployment'
-import { icpForOrg } from '@/lib/queries'
 import {
   consentStateClass, consentStateLabel, suppressionClass, suppressionLabel, zoneLabel,
 } from '@/lib/consent-view'
@@ -62,22 +61,12 @@ export default async function ContactsPage({
   const limit = LEDGER_DEFAULT_LIMIT
 
   const db = getDb() as unknown as AgencyDb
-  const [rows, campaigns, icpRow] = await Promise.all([
+  const [rows, campaigns] = await Promise.all([
     contactsLedger(db, user.orgId, { q: q || undefined, paused, companyId, limit, offset: (page - 1) * limit }),
     listCampaigns(db, user.orgId),
-    icpForOrg(user.orgId),
   ])
   // One ledger read per person on the page — at most `limit` of them.
   const ledgers = await Promise.all(rows.map((r) => consentLedgerFor(db, user.orgId, r.id)))
-
-  let orgLabel = 'Agency'
-  if (icpRow) {
-    try {
-      orgLabel = parseIcpDefinition(icpRow.definition).label
-    } catch {
-      orgLabel = 'Agency'
-    }
-  }
 
   const views: LedgerView[] = []
   rows.forEach((r, i) => {
@@ -138,7 +127,7 @@ export default async function ContactsPage({
   }
 
   return (
-    <Shell user={user} orgName={orgLabel} current="contacts" signOut={signOutAction}>
+    <Shell user={user} current="contacts" signOut={signOutAction}>
       <h1>Contacts</h1>
       <p className="lede">
         Every person in the CRM, with what is on record for them: consent per channel — granted, refused, or

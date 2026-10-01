@@ -152,7 +152,7 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
   }
 
   return (
-    <Shell user={user} orgName={icp?.label ?? 'Agency'} current="companies" signOut={signOutAction}>
+    <Shell user={user} current="companies" signOut={signOutAction}>
       <p className="crumb"><a href="/companies">← Companies</a></p>
       <h1>{company.name ?? company.domain}</h1>
       <p className="lede">

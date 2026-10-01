@@ -1,5 +1,5 @@
 import { notFound, redirect } from 'next/navigation'
-import { can, parseIcpDefinition } from '@agency/core'
+import { can } from '@agency/core'
 import {
   approvalsForSession, chatMessages, chatReadOwnSession, chatSessionCosts, listChatSessions, type AgencyDb,
 } from '@agency/db/queries'
@@ -10,7 +10,6 @@ import { ChatThreads, type ThreadView } from '@/components/chat/threads'
 import { blocksFromTranscript } from '@/components/chat/reducer'
 import { getDb } from '@/lib/db'
 import { agentConfigured } from '@/lib/agent'
-import { icpForOrg } from '@/lib/queries'
 
 /**
  * One chat thread, and the list of the others (PROMPT.md §8.1).
@@ -42,12 +41,11 @@ export default async function ChatThreadPage({ params }: { params: Promise<{ ses
 
   // What was said last time. Rebuilt on the server so the panel is never blank
   // while the worker resumes a conversation the model still remembers in full.
-  const [rows, approvals, listed, costs, icpRow] = await Promise.all([
+  const [rows, approvals, listed, costs] = await Promise.all([
     chatMessages(db, user.orgId, thread.id),
     approvalsForSession(db, user.orgId, thread.id),
     listChatSessions(db, user.orgId, user.id),
     chatSessionCosts(db, user.orgId, user.id),
-    icpForOrg(user.orgId),
   ])
   const initialBlocks = blocksFromTranscript(
     rows.map((r) => ({
@@ -75,15 +73,6 @@ export default async function ChatThreadPage({ params }: { params: Promise<{ ses
     costUsd: costs.get(s.id) ?? null,
   }))
 
-  let orgLabel = 'Agency'
-  if (icpRow) {
-    try {
-      orgLabel = parseIcpDefinition(icpRow.definition).label
-    } catch {
-      orgLabel = 'Agency'
-    }
-  }
-
   const signOutAction = async () => {
     'use server'
     await signOut({ redirectTo: '/signin' })
@@ -92,7 +81,7 @@ export default async function ChatThreadPage({ params }: { params: Promise<{ ses
   const principal = { id: user.id, orgId: user.orgId, role: user.role }
 
   return (
-    <Shell user={user} orgName={orgLabel} current="chat" signOut={signOutAction}>
+    <Shell user={user} current="chat" signOut={signOutAction}>
       <h1>Chat</h1>
       <p className="lede">
         The agent reads the CRM and can scan a company&apos;s public pages. It cannot send
