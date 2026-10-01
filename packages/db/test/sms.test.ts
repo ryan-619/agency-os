@@ -15,7 +15,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import {
-  approveDraft, dispatchTouch, pauseReasonClass, previewSend, recordInboundSms, recordSmsDelivery, schema, smsDraft,
+  approveDraft, dispatchTouch, pauseReasonClass, previewSend, recordInboundReply, recordInboundSms, recordSmsDelivery, schema, smsDraft,
   smsTextAsksToStop, templatesSetActive,
   type AgencyDb, type InboundLog, type MessageProvider, type MessageTemplateRegistration,
 } from '../src/index.js'
@@ -491,6 +491,38 @@ describe('SMS (0019)', () => {
       expect(rows).toHaveLength(1)
     })
 
+    /**
+     * Review round 5: two deliveries of one STOP both read "not seen". The
+     * winner records it with its suppression; the loser's INSERT meets
+     * 0019's unique index and is answered as the duplicate it is — and it
+     * also said "OPT-OUT NOT RECORDED … follow up by hand" about an opt-out
+     * that WAS recorded, which teaches a person to skip the true alarm.
+     */
+    it('says nothing about a raced duplicate of a STOP the winner recorded', async () => {
+      const l = log()
+      const both = await Promise.all([inbound({ text: 'STOP', log: l }), inbound({ text: 'STOP', log: l })])
+      expect(both.map((r) => r.matched === 'contact' && r.duplicate).sort()).toEqual([false, true])
+      expect(await db.select().from(schema.suppressions)).toEqual([expect.objectContaining({ orgId, kind: 'phone', value: PHONE })])
+      expect(l.lines).toEqual([])
+    })
+
+    it('rolls a raced duplicate back without the not-recorded line, and still says it for any other fault', async () => {
+      await inbound({ text: 'STOP' })
+      const l = log()
+      const again = { orgId, contactId, channel: 'sms' as const, from: PHONE, subject: null, body: 'STOP', providerId: 'mo-1', now: NOON_IST, log: l }
+      await expect(recordInboundReply(db, again)).rejects.toThrow()
+      expect(l.lines).toEqual([])
+      // A refusal that is NOT the duplicate's index is still loud.
+      const flaky = throughTransactions(db, {
+        get(target, prop, receiver) {
+          if (prop === 'update') return () => { throw new Error('Connection terminated unexpectedly') }
+          return Reflect.get(target, prop, receiver)
+        },
+      })
+      await expect(recordInboundReply(flaky, { ...again, providerId: 'mo-3' })).rejects.toThrow('Connection terminated')
+      expect(l.lines).toEqual([expect.stringContaining('OPT-OUT NOT RECORDED')])
+    })
+
     it('takes the loud path when the suppression write throws', async () => {
       // Through every transaction: the reply is one transaction and the
       // suppression a savepoint inside it, which a Proxy over `db` alone
@@ -531,18 +563,125 @@ describe('SMS (0019)', () => {
         otherContactId = ct!.id
       })
 
-      it('drops a reply two orgs could own, and audits it in each — files nothing under a guess', async () => {
+      /** What this system sent to a contact at the number: the evidence a reply is theirs. */
+      const texted = async (org: string, contact: string) => {
+        await db.insert(schema.touches).values({
+          orgId: org, contactId: contact, channel: 'sms', direction: 'out', status: 'sent',
+          body: 'Hi Priya, your call with Acme is at 3pm. Reply STOP to opt out.', recipient: PHONE,
+          sentAt: new Date(NOON_IST.getTime() - 86_400_000), providerId: `ds-${contact}`,
+        })
+      }
+      const contactRow = async (id: string) => (await db.select().from(schema.contacts).where(eq(schema.contacts.id, id)))[0]!
+      const inboundRows = async () => (await db.select().from(schema.touches)).filter((t) => t.direction === 'in')
+
+      /**
+       * Review round 5: a text from a number two contacts held was dropped
+       * whole — nobody paused, nothing cancelled — so an approved SMS to
+       * that person still went on the next tick. Pausing needs no
+       * attribution: each of them is held, and the reply is still filed
+       * under nobody.
+       */
+      it('files a reply two orgs could own under nobody, but pauses each holder and audits it in each', async () => {
+        const d = await draft()
+        if (!d.ok) throw new Error(d.message)
         const r = await inbound()
         expect(r).toEqual({ matched: 'none', why: 'ambiguous', optOut: false, suppressed: false, optOutNotRecorded: false })
-        expect((await db.select().from(schema.touches)).filter((t) => t.direction === 'in')).toHaveLength(0)
+        expect(await inboundRows()).toHaveLength(0)
         const rows = await audits('sms.inbound_unmatched')
         expect(rows.map((a) => a.orgId).sort()).toEqual([orgId, otherOrgId].sort())
         for (const a of rows) {
-          expect(a.detail).toEqual({ why: 'ambiguous', optOut: false, contacts: 1 })
+          expect(a.detail).toEqual({
+            why: 'ambiguous', optOut: false, contacts: 1, paused: 1, cancelledQueued: a.orgId === orgId ? 1 : 0,
+          })
           expect(JSON.stringify(a)).not.toContain(PHONE)
         }
-        const [c] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, contactId))
-        expect(c!.pausedAt).toBeNull()
+        for (const id of [contactId, otherContactId]) {
+          const c = await contactRow(id)
+          expect(c.pausedReason).toBe(`replied ${NOON_IST.toISOString()}`)
+          expect(pauseReasonClass(c.pausedReason)).toBe('replied')
+        }
+        // The approved text does not go on the next tick.
+        expect(await touch(d.touchId)).toMatchObject({ status: 'refused', refusalCode: 'consent_revoked' })
+        // A pause already in place keeps its own reason, as a reply's does.
+        await db.update(schema.contacts).set({ pausedReason: 'held by a teammate' }).where(eq(schema.contacts.id, contactId))
+        await inbound({ providerMessageId: 'mo-2' })
+        expect((await contactRow(contactId)).pausedReason).toBe('held by a teammate')
+      })
+
+      it('files a reply under the one holder this system texted, and leaves the other alone', async () => {
+        await texted(otherOrgId, otherContactId)
+        const r = await inbound()
+        expect(r).toMatchObject({ matched: 'contact', orgId: otherOrgId, contactId: otherContactId, paused: true, duplicate: false })
+        expect(await inboundRows()).toEqual([expect.objectContaining({ orgId: otherOrgId, contactId: otherContactId, channel: 'sms' })])
+        expect((await contactRow(otherContactId)).pausedAt).not.toBeNull()
+        expect((await contactRow(contactId)).pausedAt).toBeNull()
+        // Filed, so nothing was unmatched — and an ordinary reply is nothing
+        // to the org that did not text them.
+        expect(await audits('sms.inbound_unmatched')).toEqual([])
+      })
+
+      it('still suppresses a STOP filed under the one it texted in every org that holds the number', async () => {
+        await texted(orgId, contactId)
+        const r = await inbound({ text: 'STOP' })
+        expect(r).toMatchObject({ matched: 'contact', orgId, contactId, suppressed: true, optOutNotRecorded: false })
+        const rows = await db.select().from(schema.suppressions)
+        expect(rows.map((s) => [s.orgId, s.kind, s.value, s.source]).sort()).toEqual(
+          [[orgId, 'phone', PHONE, 'reply'], [otherOrgId, 'phone', PHONE, 'reply']].sort(),
+        )
+        const [a] = await audits('sms.inbound_unmatched')
+        expect(a).toMatchObject({ orgId: otherOrgId, detail: { why: 'ambiguous', optOut: true, contacts: 1, suppressed: true } })
+      })
+
+      it('prefers the holder in the deployment’s org when both were texted', async () => {
+        await texted(orgId, contactId)
+        await texted(otherOrgId, otherContactId)
+        expect(await inbound({ orgId: otherOrgId })).toMatchObject({ matched: 'contact', orgId: otherOrgId, contactId: otherContactId })
+        expect((await contactRow(contactId)).pausedAt).toBeNull()
+      })
+
+      it('holds both, and files nothing, when both were texted and the deployment names neither org', async () => {
+        await texted(orgId, contactId)
+        await texted(otherOrgId, otherContactId)
+        expect(await inbound()).toMatchObject({ matched: 'none', why: 'ambiguous' })
+        expect(await inboundRows()).toHaveLength(0)
+        expect((await contactRow(contactId)).pausedAt).not.toBeNull()
+        expect((await contactRow(otherContactId)).pausedAt).not.toBeNull()
+      })
+
+      /**
+       * The probe's own case: one person on file twice in ONE org (a work
+       * and a personal row), sharing a mobile, an SMS drafted and approved
+       * to one of them, and a reply that is not a STOP.
+       */
+      it('holds both of two contacts in one org who share the number, and cancels the approved text', async () => {
+        await db.delete(schema.contacts).where(eq(schema.contacts.id, otherContactId))
+        const [twin] = await db
+          .insert(schema.contacts)
+          .values({ orgId, companyId, firstName: 'Priya (personal)', phone: PHONE })
+          .returning({ id: schema.contacts.id })
+        const d = await draft()
+        if (!d.ok) throw new Error(d.message)
+        expect(await approveDraft(db, { orgId, touchId: d.touchId, contactId, campaignId, approvedBy: userId, now: NOON_IST }))
+          .toMatchObject({ ok: true })
+        const r = await inbound({ text: 'Who is this? Not interested, please do not message again' })
+        expect(r).toEqual({ matched: 'none', why: 'ambiguous', optOut: false, suppressed: false, optOutNotRecorded: false })
+        for (const id of [contactId, twin!.id]) expect(pauseReasonClass((await contactRow(id)).pausedReason)).toBe('replied')
+        expect(await touch(d.touchId)).toMatchObject({ status: 'refused', refusalCode: 'consent_revoked' })
+        const [a] = await audits('sms.inbound_unmatched')
+        expect(a).toMatchObject({ orgId, detail: { why: 'ambiguous', contacts: 2, paused: 2, cancelledQueued: 1 } })
+        // What the sender would now say about Priya: held, never send-now.
+        const now = await previewSend(db, { orgId, contactId, campaignId, now: NOON_IST })
+        expect(now.ok && !now.decision.allowed && now.decision.code).toBe('paused')
+      })
+
+      it('files a reply under the one of two in one org it texted', async () => {
+        await db.delete(schema.contacts).where(eq(schema.contacts.id, otherContactId))
+        const [twin] = await db
+          .insert(schema.contacts)
+          .values({ orgId, companyId, firstName: 'Priya (personal)', phone: PHONE })
+          .returning({ id: schema.contacts.id })
+        await texted(orgId, twin!.id)
+        expect(await inbound()).toMatchObject({ matched: 'contact', orgId, contactId: twin!.id })
       })
 
       it('still records an opt-out from it, as a phone suppression in every org that holds the number', async () => {

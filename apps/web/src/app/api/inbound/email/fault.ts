@@ -1,0 +1,142 @@
+import { looksLikeOptOut, type InboundLog } from '@agency/db/queries'
+import type { NotificationEvent } from '../../../../lib/slack-message'
+
+/**
+ * `POST /api/inbound/email` when recording the mail THREW — a dropped
+ * connection, a statement timeout (review round 5).
+ *
+ * The route called `handleInboundEmail` with no try/catch, so a fault
+ * escaped to Next as drizzle's error, whose message quotes every bound
+ * parameter — the From address, the subject and up to 20,000 characters of
+ * the reply — and Next logs an escaping error whole, past `redact()`, on
+ * every retry. It is caught where it is thrown now, as the Resend and
+ * DoveSoft routes catch theirs: the line names the fault's CLASS only, and
+ * the answer is a 500 so the provider retries. `recordInboundReply` is one
+ * transaction, so nothing about the reply was stored and the retry records
+ * all of it.
+ *
+ * And a reply that asked to stop takes the loud path, as a text whose
+ * recording failed does on DoveSoft's route: §2.1's Phase 4 obligation
+ * does not wait for a retry that may fail the same way. Whose it was comes
+ * from the recorder itself — its rolled-back line names the org and the
+ * contact it was filing under (`keepingRolledBackOptOut`), so nothing is
+ * read again from a database that just failed, and nothing re-decides what
+ * the words meant. With that: a `contact.opt_out_not_recorded` row naming
+ * the contact (what /compliance and the digest count, and what keeps
+ * /inbox from drafting to them), the `opt_out_not_recorded` alarm AWAITED
+ * before the answer, and the error line. A fault before the recorder ran —
+ * the duplicate check or the match itself — leaves nothing saying whose it
+ * was: the words are read with the reply's own opt-out reader, and a stop
+ * is said at error with `alarm: 'not_raised_unplaced'`, because an alarm
+ * needs an org to be filed under and guessing one is the mistake the
+ * matcher exists not to make.
+ *
+ * Kept beside the route, with no `server-only` and no `@/` import, so
+ * `apps/web/test/inbound-email.test.ts` runs the route's own handling
+ * against a real recorder and a real fault. The route itself reaches
+ * `server-only` through `@/lib/db` and is pinned by reading its source.
+ */
+
+/** What the recorder said about a stop it rolled back: ids only. */
+export interface RolledBackOptOut {
+  readonly orgId: string
+  readonly contactId: string
+  /** The message the reply answered, when it was matched by one. */
+  readonly inReplyTo: string | null
+}
+
+/**
+ * The recorder's log, forwarded line for line to `forward` — and the last
+ * `OPT-OUT NOT RECORDED` line that names an org and a contact, kept. On a
+ * throw, the only line the recorder writes is the rolled-back one: its
+ * other loud lines are said only once the reply has COMMITTED.
+ */
+export function keepingRolledBackOptOut(
+  forward: InboundLog,
+): InboundLog & { readonly rolledBack: () => RolledBackOptOut | null } {
+  let kept: RolledBackOptOut | null = null
+  return {
+    error(message, fields) {
+      forward.error(message, fields)
+      const orgId = fields?.['orgId']
+      const contactId = fields?.['contactId']
+      if (message.startsWith('OPT-OUT NOT RECORDED') && typeof orgId === 'string' && typeof contactId === 'string') {
+        const inReplyTo = fields?.['inReplyTo']
+        kept = { orgId, contactId, inReplyTo: typeof inReplyTo === 'string' ? inReplyTo : null }
+      }
+    },
+    rolledBack: () => kept,
+  }
+}
+
+export interface InboundEmailFaultDeps {
+  readonly audit: (entry: {
+    readonly orgId: string
+    readonly actor: 'system'
+    readonly action: 'contact.opt_out_not_recorded'
+    readonly subjectType: 'contact'
+    readonly subjectId: string
+    readonly detail: Record<string, unknown>
+  }) => Promise<void>
+  /** Awaited: the opt-out alarm. Bounded and never throws (`notify`). */
+  readonly alarm: (event: NotificationEvent) => Promise<void>
+  readonly log: { error(message: string, fields?: Record<string, unknown>): void }
+}
+
+export interface InboundEmailFaultAnswer {
+  readonly status: 500
+  readonly body: Readonly<Record<string, unknown>>
+}
+
+/** The answer to a mail whose recording threw. Never throws itself. */
+export async function inboundEmailNotRecorded(
+  err: unknown,
+  mail: { readonly text: string | null; readonly rolledBack: RolledBackOptOut | null },
+  deps: InboundEmailFaultDeps,
+): Promise<InboundEmailFaultAnswer> {
+  // The CLASS of the fault, never its message: drizzle's quotes the address
+  // and the words.
+  const error = err instanceof Error ? err.name : 'UnknownError'
+  const placed = mail.rolledBack
+  if (placed) {
+    let audited = true
+    try {
+      await deps.audit({
+        orgId: placed.orgId,
+        actor: 'system',
+        action: 'contact.opt_out_not_recorded',
+        subjectType: 'contact',
+        subjectId: placed.contactId,
+        detail: { channel: 'email', why: 'record_failed' },
+      })
+    } catch {
+      audited = false
+    }
+    deps.log.error('OPT-OUT NOT RECORDED — an email that asked to stop could not be recorded; answering 500 so the provider retries, otherwise follow up by hand', {
+      error,
+      orgId: placed.orgId,
+      contactId: placed.contactId,
+      audited,
+      alarm: 'raised',
+    })
+    // The message the reply answered is the touch the alarm names; a reply
+    // matched by its address alone answered none on file.
+    await deps.alarm({
+      kind: 'opt_out_not_recorded',
+      orgId: placed.orgId,
+      touchId: placed.inReplyTo,
+      contactId: placed.contactId,
+      path: 'reply',
+    })
+    return { status: 500, body: { error: 'opt-out not recorded', retry: true } }
+  }
+  if (looksLikeOptOut(mail.text)) {
+    deps.log.error('OPT-OUT NOT RECORDED — an email that asked to stop could not be recorded, and nothing says whose it was; answering 500 so the provider retries', {
+      error,
+      alarm: 'not_raised_unplaced',
+    })
+    return { status: 500, body: { error: 'opt-out not recorded', retry: true } }
+  }
+  deps.log.error('inbound email could not be recorded; answering 500 so it is retried', { error })
+  return { status: 500, body: { error: 'the message could not be recorded', retry: true } }
+}

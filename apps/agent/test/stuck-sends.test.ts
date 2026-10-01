@@ -13,7 +13,7 @@ import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import { approveDraft, handleInboundEmail, pauseReasonClass, replyQueueDraft, schema, type AgencyDb } from '@agency/db'
 import { migratedDb,type TestDb } from '../../../packages/db/test/helpers.js'
-import { recoverStuckSends } from '../src/boot/reconcile.js'
+import { STUCK_SEND_ERRORS, recoverStuckSends } from '../src/boot/reconcile.js'
 
 const silent = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} }
 
@@ -39,10 +39,20 @@ describe('recoverStuckSends', () => {
     await test?.close()
   })
 
-  const touch = async (status: string) => {
+  const touch = async (status: string, channel: 'email' | 'sms' | 'linkedin' = 'email') => {
+    // An SMS that can still go out names its registered template (0019).
+    const templateId =
+      channel === 'sms'
+        ? (
+            await db
+              .insert(schema.messageTemplates)
+              .values({ orgId, channel: 'sms', externalId: '1107160000000012345', senderId: 'ACMEIN', category: 'service_explicit', body: 'Hi {#var#}' })
+              .returning({ id: schema.messageTemplates.id })
+          )[0]!.id
+        : null
     const [row] = await db
       .insert(schema.touches)
-      .values({ orgId, companyId, channel: 'email', direction: 'out', status })
+      .values({ orgId, companyId, channel, direction: 'out', status, templateId })
       .returning({ id: schema.touches.id })
     return row!.id
   }
@@ -55,7 +65,33 @@ describe('recoverStuckSends', () => {
     const [row] = await db.select().from(schema.touches).where(eq(schema.touches.id, id))
     expect(row!.status).toBe('failed')
     expect(row!.error).toMatch(/restarted/)
-    expect(row!.error).toMatch(/re-approve/)
+    expect(row!.error).toMatch(/check the mailbox before drafting it again/)
+  })
+
+  /**
+   * Review round 5: one sentence served every channel — "check the mailbox,
+   * then re-approve to send it again". A text's fate is in the DoveSoft
+   * console, not a mailbox, and nothing re-approves a `failed` row, so the
+   * only way to send it "again" is a new draft: the sentence says where to
+   * look BEFORE that, on the row's own channel.
+   */
+  it('words the reason by the row’s own channel, and never offers to re-approve', async () => {
+    const email = await touch('sending', 'email')
+    const sms = await touch('sending', 'sms')
+    const linkedin = await touch('sending', 'linkedin')
+    expect(await recoverStuckSends(db, new Date(Date.now() + 60_000), silent)).toBe(3)
+    const error = async (id: string) =>
+      (await db.select().from(schema.touches).where(eq(schema.touches.id, id)))[0]!.error
+    expect(await error(sms)).toBe(STUCK_SEND_ERRORS.sms)
+    expect(await error(sms)).toMatch(/DoveSoft console before drafting it again/)
+    expect(await error(sms)).not.toMatch(/mailbox/)
+    expect(await error(email)).toBe(STUCK_SEND_ERRORS.email)
+    expect(await error(linkedin)).toBe(STUCK_SEND_ERRORS.linkedin)
+    expect(await error(linkedin)).toMatch(/LinkedIn conversation/)
+    for (const sentence of Object.values(STUCK_SEND_ERRORS)) {
+      expect(sentence).not.toMatch(/re-approve/i)
+      expect(sentence).toMatch(/before drafting it again\.$/)
+    }
   })
 
   /**

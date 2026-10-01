@@ -250,6 +250,31 @@ export async function recoverStuckSends(db: AgencyDb, bootAt: Date, log: Logger)
   }
 }
 
+/**
+ * What a person reads on a row the last worker left mid-send, by the row's
+ * OWN channel (review round 5). One sentence used to serve every channel —
+ * "check the mailbox, then re-approve to send it again" — and since 0019 the
+ * worker claims SMS rows too: the place a text's fate is recorded is the
+ * DoveSoft console, not a mailbox. And nothing re-approves a `failed` row
+ * (`approveDraft` takes only `awaiting_approval`), so the only way to send it
+ * "again" is a new draft — a second text or a second mail to somebody who may
+ * already have the first. Each sentence names where to look BEFORE that.
+ */
+export const STUCK_SEND_ERRORS = {
+  sms:
+    'The worker restarted while this text was being sent. It may or may not have gone; check the DoveSoft console before drafting it again.',
+  email:
+    'The worker restarted while this was being sent. It may or may not have gone; check the mailbox before drafting it again.',
+  // A LinkedIn row is claimed by a person's Start on /tasks, not by the
+  // worker, and its words reach the screen only in Start's success response,
+  // written after the row says `sent` — so one still `sending` was never
+  // shown here (`LINKEDIN_STEP_STUCK_ERROR`'s reading).
+  linkedin:
+    'Found when the worker restarted: the hand-over of this LinkedIn step never finished, so the message was never shown to anybody here. Check the LinkedIn conversation in case it went some other way before drafting it again.',
+  other:
+    'The worker restarted while this was being sent. It may or may not have gone; check with the provider before drafting it again.',
+} as const
+
 async function recoverStuckRows(
   db: AgencyDb,
   bootAt: Date,
@@ -258,7 +283,11 @@ async function recoverStuckRows(
     .update(schema.touches)
     .set({
       status: 'failed',
-      error: 'The worker restarted while this was being sent. It may or may not have gone; check the mailbox, then re-approve to send it again.',
+      error: sql`CASE ${schema.touches.channel}
+        WHEN 'sms' THEN ${STUCK_SEND_ERRORS.sms}
+        WHEN 'email' THEN ${STUCK_SEND_ERRORS.email}
+        WHEN 'linkedin' THEN ${STUCK_SEND_ERRORS.linkedin}
+        ELSE ${STUCK_SEND_ERRORS.other} END`,
     })
     // `updated_at` is set by a trigger on UPDATE and is NULL until then; the
     // claim itself is an update, so it is normally set — but a row that

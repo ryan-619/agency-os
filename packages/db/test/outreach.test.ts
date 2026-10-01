@@ -1239,7 +1239,7 @@ describe('the send-path contract', () => {
           // What recoverStuckSends writes.
           await db
             .update(schema.touches)
-            .set({ status: 'failed', error: 'The worker restarted while this was being sent. It may or may not have gone; check the mailbox, then re-approve to send it again.' })
+            .set({ status: 'failed', error: 'The worker restarted while this was being sent. It may or may not have gone; check the mailbox before drafting it again.' })
             .where(eq(schema.touches.id, row.id))
           return provider.send(m)
         },
@@ -1253,7 +1253,7 @@ describe('the send-path contract', () => {
       const after = await touch(row.id)
       expect(after).toMatchObject({ status: 'sent', providerId: 'test-1', recipient: 'priya@rentman.io', refusalCode: null })
       expect(after.sentAt?.toISOString()).toBe(NOON.toISOString())
-      // "re-approve to send it again" on a row that went is an instruction to send a duplicate.
+      // "check … before drafting it again" on a row that went invites a duplicate.
       expect(after.error).toBeNull()
       expect(lines.some((l) => l.includes('already settled'))).toBe(false)
     })

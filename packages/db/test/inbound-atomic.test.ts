@@ -187,13 +187,40 @@ describe('an inbound reply, a fault, and the retry', () => {
     await expect(handleInboundEmail(db, mail('Stop'))).rejects.toThrow()
     expect(lines).toHaveLength(1)
     expect(lines[0]!.message).toContain('OPT-OUT NOT RECORDED')
-    expect(lines[0]!.fields).toMatchObject({ contactId, orgId, why: 'Error' })
+    // The message it answered, by id: what the email webhook names in the
+    // alarm it raises for a stop it could not record.
+    const [answered] = await db.select({ id: schema.touches.id }).from(schema.touches).where(eq(schema.touches.providerId, OUR_ID))
+    expect(lines[0]!.fields).toMatchObject({ contactId, orgId, why: 'Error', inReplyTo: answered!.id })
     expect(JSON.stringify(lines)).not.toContain('priya@rentman.io')
     expect(JSON.stringify(lines)).not.toContain('Stop')
 
     lines.length = 0
     await failOnce(test.pg, { table: 'contacts', event: 'UPDATE' })
     await expect(handleInboundEmail(db, mail('Yes, send pricing', '<yes-1@rentman.io>'))).rejects.toThrow()
+    expect(lines).toEqual([])
+  })
+
+  /**
+   * Review round 5: Postgres refuses U+0000 in text, and only the SMS path
+   * replaced it. An email reply carrying one — mailparser keeps a NUL
+   * decoded from quoted-printable `=00` — failed its INSERT on every retry,
+   * on IMAP, Resend and the generic webhook alike: a "stop" recorded
+   * nowhere, the person unpaused, their approved follow-up still going.
+   * Replaced in `recordInboundReply`, once, for every channel.
+   */
+  it.each([
+    { by: 'the message it answers', references: [OUR_ID], matched: 'message' },
+    { by: 'the address alone', references: [], matched: 'contact' },
+  ])('records an email reply carrying U+0000, matched by $by, with the character kept visible', async ({ references, matched }) => {
+    const words = 'Please unsubscribe me.\n\nJo Bloggs\u0000 +44 7700 900123'
+    const r = await handleInboundEmail(db, { ...mail(words, '<nul-1@rentman.io>'), subject: 'Re: A gap\u0000', references })
+    expect(r).toMatchObject({ matched, duplicate: false, paused: true, suppressed: true, replyKind: 'opted_out', optOutNotRecorded: false })
+    const s = await state()
+    expect(s.pausedReason).toBe(`replied ${NOON.toISOString()}`)
+    expect(s.followUp).toEqual({ status: 'refused', refusalCode: 'consent_revoked' })
+    expect(s.suppressions).toEqual([{ kind: 'email', value: 'priya@rentman.io', source: 'reply' }])
+    const [row] = s.inbound
+    expect(row).toMatchObject({ body: 'Please unsubscribe me.\n\nJo Bloggs\uFFFD +44 7700 900123', subject: 'Re: A gap\uFFFD' })
     expect(lines).toEqual([])
   })
 
