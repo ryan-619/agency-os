@@ -179,9 +179,10 @@ export interface SendRefusal {
    * over, and a promotional SMS's band open — read at the UTC offsets in
    * force at `now`. Absent when the campaign's window cannot be read, which
    * is always quiet. A hint for whoever waits, never a promise: the message
-   * is asked about again when it comes, and a daylight-saving change in
-   * between can only make it early, which defers it again. Read it through
-   * `deferUntil`, which bounds it.
+   * is asked about again when it comes, so a daylight-saving change in
+   * between, which can move the true minute by the size of the change, sends
+   * it late or defers it again — never early. Read it through `deferUntil`,
+   * which bounds it.
    */
   readonly retryAt?: Date
 }
@@ -490,27 +491,23 @@ export function decideSend(facts: SendFacts): SendDecision {
   //     the sender re-queues and /approvals shows as held — and the deferral
   //     names the first minute both let it go (`retryAt`), so whoever waits
   //     comes back then rather than an hour later.
-  const quiet = isQuiet(local, facts.quietStart, facts.quietEnd)
+  const quietAt = quietWindow(facts.quietStart, facts.quietEnd)
+  const quiet = quietAt?.(local) ?? true
   if (quiet || (band !== null && !band.open)) {
     const zone = facts.recipientTimeZone
     // An unreadable window is always quiet (`isQuiet`), so it has no minute
     // to name: the waiter's fallback applies, as it always did.
-    const readable = quietWindowReadable(facts.quietStart, facts.quietEnd)
-    const retryAt = readable
-      ? nextOpenMinute(
-          facts.now,
-          zone,
-          (l, i) =>
-            !isQuiet(l, facts.quietStart, facts.quietEnd) && (band === null || insidePromotionalBand(l, i, band.india)),
-        )
-      : null
+    const retryAt =
+      quietAt === null
+        ? null
+        : nextOpenMinute(facts.now, zone, (l, i) => !quietAt(l) && (band === null || insidePromotionalBand(l, i, band.india)))
     const at = retryAt === null ? {} : { retryAt }
 
     // 3''. The band opens, but only inside the campaign's own quiet hours, so
     //     no minute of the day is open on both: the dead end of 3', reached
     //     through the campaign. A readable window always leaves a minute of
     //     its own, so only a band can close the last one.
-    if (band !== null && readable && retryAt === null) {
+    if (band !== null && quietAt !== null && retryAt === null) {
       return refuse(
         'band_never_opens',
         `This is a promotional SMS, and one goes only inside ${PROMOTIONAL_WINDOW.hours} in ${zone}, where the ` +
@@ -755,24 +752,26 @@ export function localMinutes(at: Date, timeZone: string): number | null {
  * and every night as sendable.
  */
 export function isQuiet(local: number, quietStart: string, quietEnd: string): boolean {
-  const start = parseClock(quietStart)
-  const end = parseClock(quietEnd)
   // An unparseable window is treated as always quiet. It is a configuration
   // error, and the safe reading of "I do not know when I may send" is "not
   // now" — the campaign stalls visibly instead of sending at 3am.
-  if (start === null || end === null) return true
-  if (start === end) return false // A zero-length window is no quiet hours.
-  return start < end
-    ? local >= start && local < end // Does not wrap: e.g. 01:00–06:00.
-    : local >= start || local < end // Wraps midnight: e.g. 21:00–08:00.
+  return quietWindow(quietStart, quietEnd)?.(local) ?? true
 }
 
 /**
- * Whether a quiet window can be read at all. `isQuiet` reads one that cannot
- * as always quiet, so it has no minute at which it ends.
+ * The quiet window as a test on minutes past local midnight, read once — or
+ * null when either end cannot be read, which `isQuiet` treats as always
+ * quiet and which therefore has no minute at which it ends. The send path
+ * asks it about up to a day of minutes when it names a deferral's `retryAt`.
  */
-function quietWindowReadable(quietStart: string, quietEnd: string): boolean {
-  return parseClock(quietStart) !== null && parseClock(quietEnd) !== null
+function quietWindow(quietStart: string, quietEnd: string): ((local: number) => boolean) | null {
+  const start = parseClock(quietStart)
+  const end = parseClock(quietEnd)
+  if (start === null || end === null) return null
+  if (start === end) return () => false // A zero-length window is no quiet hours.
+  return start < end
+    ? (local) => local >= start && local < end // Does not wrap: e.g. 01:00–06:00.
+    : (local) => local >= start || local < end // Wraps midnight: e.g. 21:00–08:00.
 }
 
 /** `HH:MM` or `HH:MM:SS` (Postgres `time` renders the latter) to minutes. */
