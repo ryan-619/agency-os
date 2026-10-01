@@ -767,8 +767,12 @@ naming how many users have revoked access and reverting nothing, unless you
 pass `--restores-revoked-access`; remove or re-address those users' rows
 first. Reverting 0019 alone is not guarded, and its down says what it loses:
 every message template, the link from each SMS to its template, and every
-delivery report. Roll back the CODE first, then the schema — the reverse of
-the deploy order.
+delivery report. An SMS that could still go out is settled `refused`
+(`no_template`) — or `failed`, if it was caught mid-send — with an `error`
+saying why, since nothing before 0019 can send it. Re-applying 0019 is safe:
+its CHECK binds only messages that can still go out, so every earlier SMS
+stays updatable and its recipient erasable. Roll back the CODE first, then
+the schema — the reverse of the deploy order.
 
 **Existing agents do not pick up the new tool grants.** The seed inserts
 `agent_defs` with `ON CONFLICT (org_id, slug) DO NOTHING`, so re-running it
