@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { slackOptOutNotRecordedPayload } from '@agency/core'
 import { displayDomain, slackMessage, type NotificationEvent } from '../src/lib/slack-message'
 
 const ORG = '00000000-0000-4000-8000-00000000000a'
@@ -206,6 +207,23 @@ describe('slackMessage', () => {
       expect(words(path)).toMatch(/^OPT-OUT NOT RECORDED\./)
       expect(words(path)).toContain('A person has to record it now.')
     }
+  })
+
+  /**
+   * The worker raises this alarm too (apps/agent/src/notify.ts), through the
+   * same builder in packages/core. Pinned to the bytes the web posted before
+   * the builder moved, so neither process changed what the channel reads.
+   */
+  it('builds the opt-out alarm with the core builder the worker uses, byte for byte as before', () => {
+    const event = EVENTS[8] as Extract<NotificationEvent, { kind: 'opt_out_not_recorded' }>
+    expect(slackMessage(event, ORIGIN)).toEqual(slackOptOutNotRecordedPayload(event, ORIGIN))
+    expect(slackMessage(event, `${ORIGIN}/`)).toEqual({
+      text:
+        'OPT-OUT NOT RECORDED. Somebody asked to be left alone through a reply and no suppression row could be written. ' +
+        'A person has to record it now.\n' +
+        'touch 00000000-0000-4000-8000-000000000007 · contact 00000000-0000-4000-8000-000000000001\n' +
+        'https://app.test/suppressions',
+    })
   })
 
   it('says why a campaign paused itself', () => {

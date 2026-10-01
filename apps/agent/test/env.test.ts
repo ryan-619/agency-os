@@ -22,7 +22,7 @@ const BASE = {
 const load = (vars: Record<string, string>) => loadEnv({ ...BASE, ...vars } as NodeJS.ProcessEnv)
 
 describe('a blank optional variable is unset', () => {
-  it.each(['UNSUBSCRIBE_SECRET', 'WEB_PUBLIC_URL', 'LLM_PROVIDER', 'LLM_MODEL', 'AGENT_MODEL'] as const)(
+  it.each(['UNSUBSCRIBE_SECRET', 'WEB_PUBLIC_URL', 'LLM_PROVIDER', 'LLM_MODEL', 'AGENT_MODEL', 'SLACK_WEBHOOK_URL'] as const)(
     '%s', (name) => {
       expect(load({ [name]: '' })[name]).toBeUndefined()
       expect(load({ [name]: '   ' })[name]).toBeUndefined()
@@ -50,6 +50,7 @@ describe('a blank optional variable is unset', () => {
     ['WEB_PUBLIC_URL', 'not a url'],
     ['LLM_PROVIDER', 'gemini'],
     ['OUTREACH_BOUNCE_PAUSE_PCT', '101'],
+    ['SLACK_WEBHOOK_URL', 'not a url'],
   ])('still refuses a malformed %s', (name, value) => {
     expect(() => load({ [name]: value })).toThrow(new RegExp(name))
     try {
@@ -70,6 +71,7 @@ describe('a blank optional variable is unset', () => {
       LLM_MODEL: '',
       OLLAMA_BASE_URL: '',
       AGENT_MODEL: '',
+      SLACK_WEBHOOK_URL: '',
     })
     expect(env.UNSUBSCRIBE_SECRET).toBeUndefined()
     expect(env.WEB_PUBLIC_URL).toBeUndefined()
@@ -118,5 +120,38 @@ describe('WEB_PUBLIC_URL in production', () => {
     expect(load({ NODE_ENV: 'development', WEB_PUBLIC_URL: 'http://localhost:3000' }).WEB_PUBLIC_URL).toBe(
       'http://localhost:3000',
     )
+  })
+})
+
+/**
+ * The worker's half of the opt-out alarm posts to whatever this names, so the
+ * host is pinned exactly as the web app pins it: a value pointing at the cloud
+ * metadata endpoint would carry every alarm there. The URL is the credential,
+ * so a refusal names the variable and never the value.
+ */
+describe('SLACK_WEBHOOK_URL', () => {
+  it('accepts a Slack incoming webhook', () => {
+    const url = 'https://hooks.slack.com/services/T0000/B0000/XXXXXXXXXXXXXXXXXXXXXXXX'
+    expect(load({ SLACK_WEBHOOK_URL: url }).SLACK_WEBHOOK_URL).toBe(url)
+  })
+
+  it('is unset when absent — no alarm, not a failed one', () => {
+    expect(load({}).SLACK_WEBHOOK_URL).toBeUndefined()
+  })
+
+  it.each([
+    ['plain http', 'http://hooks.slack.com/services/T0000/B0000/secret-token-1'],
+    ['the metadata endpoint', 'https://169.254.169.254/services/T0000/B0000/secret-token-2'],
+    ['a look-alike host', 'https://hooks.slack.com.evil.example/services/secret-token-3'],
+    ['another Slack host', 'https://slack.com/services/T0000/B0000/secret-token-4'],
+  ])('refuses %s, naming the variable and never the value', (_why, url) => {
+    let message = ''
+    try {
+      load({ SLACK_WEBHOOK_URL: url })
+    } catch (e) {
+      message = e instanceof Error ? e.message : String(e)
+    }
+    expect(message).toMatch(/SLACK_WEBHOOK_URL/)
+    expect(message).not.toContain('secret-token')
   })
 })

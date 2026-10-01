@@ -15,6 +15,28 @@ import { isScannableHost } from '@agency/scanner'
  */
 const blankIsUnset = (v: unknown): unknown => (typeof v === 'string' && v.trim() === '' ? undefined : v)
 
+/**
+ * The one host a Slack incoming webhook lives on — the web app's refinement
+ * (apps/web/src/lib/env.ts), word for word. Written out here so the schema
+ * entry stays on one line: `packages/db/test/deployment.test.ts` reads this
+ * file line by line to find the variables the worker REQUIRES, and an entry
+ * whose `.optional()` sits three lines down reads as one of them.
+ */
+const slackWebhookUrl = z
+  .string()
+  .url()
+  .refine(
+    (v) => {
+      try {
+        const u = new URL(v)
+        return u.protocol === 'https:' && u.hostname === 'hooks.slack.com'
+      } catch {
+        return false
+      }
+    },
+    'SLACK_WEBHOOK_URL must be an https://hooks.slack.com/… URL',
+  )
+
 /** Validated at startup, like the web app's (PROMPT.md §10). Never logged. */
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -247,6 +269,19 @@ const schema = z.object({
    * re-activates it after fixing the list.
    */
   OUTREACH_BOUNCE_PAUSE_PCT: z.preprocess(blankIsUnset, z.coerce.number().min(0).max(100).default(5)),
+
+  /**
+   * The alarm for an opt-out the worker could not record (§2.1's Phase 4
+   * obligation): a reply read over IMAP said stop, and its suppression row
+   * could not be written. The audit row and the `OPT-OUT NOT RECORDED` log
+   * line are written either way; this is the real-time half, the same Slack
+   * message the web routes send (`notify.ts`). The SAME value as the web
+   * app's. The URL IS the credential — never logged, never in an audit row,
+   * and `redact()` cannot see it, because it matches on key names and this
+   * one lives in a URL. Host-pinned: the worker POSTs to whatever it names.
+   * Unset → no alarm, said once at boot.
+   */
+  SLACK_WEBHOOK_URL: z.preprocess(blankIsUnset, slackWebhookUrl.optional()),
 })
 
 export type Env = z.infer<typeof schema>

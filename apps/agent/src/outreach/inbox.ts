@@ -26,6 +26,11 @@
  *    connection is re-established on its own schedule; and nothing here can
  *    stop the worker's other work.
  *  - **Log a body.** §2.3. The log carries the outcome and the touch id.
+ *  - **Lose an opt-out quietly.** A reply that said stop and whose
+ *    suppression could not be written is audited and logged by
+ *    `handleInboundEmail`; this file then raises the same Slack alarm the
+ *    web routes raise (`notify.ts`), awaited, before anything else is done
+ *    with the reply.
  *
  * ## What the mail says about itself
  *
@@ -38,10 +43,11 @@
  */
 import { ImapFlow } from 'imapflow'
 import { simpleParser, type HeaderValue, type SimpleParserOptions } from 'mailparser'
-import { handleInboundEmail, type AgencyDb } from '@agency/db'
-import { MAIL_SIGNAL_HEADERS, MAIL_SIGNAL_LIMITS, type LlmProvider } from '@agency/core'
+import { handleInboundEmail, type AgencyDb, type InboundOutcome } from '@agency/db'
+import { MAIL_SIGNAL_HEADERS, MAIL_SIGNAL_LIMITS, htmlToText, type LlmProvider } from '@agency/core'
 import { refineReplyKind } from './classify.js'
 import type { Logger } from '../logger.js'
+import { optOutAlarmFromEnvironment, optOutNotRecordedEvent, type OptOutAlarm } from '../notify.js'
 
 export interface InboxConfig {
   readonly host: string
@@ -64,7 +70,22 @@ export interface InboxDeps {
   readonly allowRemoteForLeadData?: boolean
   /** For tests. Defaults to the wall clock. */
   readonly now?: () => Date
+  /**
+   * The Slack alarm for an opt-out that could not be recorded (`notify.ts`).
+   * Null is no alarm. Left out, it is built from the worker's own
+   * environment (`SLACK_WEBHOOK_URL`, `WEB_PUBLIC_URL`) when the inbox
+   * starts — `index.ts` names the inbox's settings one by one and passes
+   * none, so the alarm is on wherever the variable is set.
+   */
+  readonly optOutAlarm?: OptOutAlarm | null
 }
+
+/**
+ * What handling one message needs: the inbox's settings without the mailbox.
+ * Here a missing `optOutAlarm` means none — `startInbox` is what resolves it
+ * from the environment, once, and hands it in.
+ */
+export type InboundMessageDeps = Omit<InboxDeps, 'config'>
 
 /** Back-off between reconnects. Starts short, doubles, stops growing at five minutes. */
 const RECONNECT_MIN_MS = 5_000
@@ -165,15 +186,34 @@ export async function parseInbound(raw: Buffer | string): Promise<{
   return {
     from,
     subject: parsed.subject ?? null,
-    // The text part, or the HTML stripped to text if that is all there is. A
-    // reply that is only HTML must still be readable for the opt-out check.
-    text: parsed.text ?? (typeof parsed.html === 'string' ? parsed.html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : null),
+    text: replyText(parsed.text, parsed.html),
     messageId: parsed.messageId ?? null,
     references: [...new Set(refs)],
     headers,
     dsn,
     originalMessageIds: [...new Set(originalMessageIds)],
   }
+}
+
+/**
+ * The words of a reply: its plain text, or its HTML converted to text when
+ * there is no plain text worth the name — the Resend mapping's rule.
+ *
+ * mailparser converts a ROOT `text/html` itself (html-to-text, which keeps
+ * the lines and opens a quote with `>`), and that `text` is kept. An HTML
+ * part BELOW the root — Outlook's multipart/related, the HTML beside its
+ * signature image; a multipart/alternative with no plain part — it leaves
+ * unconverted, and this used to strip its tags to ONE line, which turned
+ * `Stop<blockquote>On Mon … wrote:` into a line that is not an opt-out: the
+ * contact was paused and never suppressed. `htmlToText` from packages/core
+ * keeps the lines, and it is the converter the Resend path uses, so a
+ * "Stop" above a quote is read the same whichever way it arrived.
+ */
+function replyText(text: string | undefined, html: string | false | undefined): string | null {
+  if (typeof text === 'string' && text.trim()) return text
+  const converted = typeof html === 'string' && html.trim() ? htmlToText(html) : ''
+  if (converted) return converted
+  return typeof text === 'string' ? text : null
 }
 
 /** One header's first value as text. mailparser structures some of them. */
@@ -189,6 +229,87 @@ function headerText(value: HeaderValue | undefined): string | null {
 }
 
 /**
+ * One raw message, from parse to every consequence: the record (and with it
+ * the pause, the suppression, the deal — `handleInboundEmail`), the log
+ * line, the alarm for an opt-out that could not be recorded, and the
+ * optional triage. Exported so the whole path can be driven without a
+ * mailbox; the IMAP session below only fetches and marks seen.
+ *
+ * Answers null for a message with no readable sender. Throws only what
+ * `parseInbound` or `handleInboundEmail` throw — the caller's per-message
+ * try owns that; the alarm and the triage never throw out of here.
+ */
+export async function handleInboundMessage(
+  source: Buffer | string,
+  uid: number | string,
+  deps: InboundMessageDeps,
+): Promise<InboundOutcome | null> {
+  const mail = await parseInbound(source)
+  if (!mail) {
+    deps.log.info('inbound mail had no readable sender; skipped', { uid })
+    return null
+  }
+  const outcome = await handleInboundEmail(deps.db, { ...mail, ...(deps.now ? { now: deps.now() } : {}) })
+  if (outcome.matched === 'none' && outcome.bounce) {
+    // A delivery report tied to a message this system sent. Ids and
+    // the report's status code: the address is in the row, not here.
+    deps.log.info('delivery report recorded', {
+      uid,
+      contactId: outcome.bounce.contactId,
+      touchId: outcome.bounce.touchId,
+      permanent: outcome.bounce.permanent,
+      code: outcome.bounce.code,
+      marked: outcome.bounce.marked,
+    })
+    return outcome
+  }
+  if (outcome.matched === 'none') {
+    deps.log.info('inbound mail did not match a contact', { uid, why: outcome.why })
+    return outcome
+  }
+  deps.log.info('inbound reply recorded', {
+    uid,
+    matched: outcome.matched,
+    touchId: outcome.touchId,
+    paused: outcome.paused,
+    suppressed: outcome.suppressed,
+    // True means a "stop" whose suppression could not be written; the alarm follows.
+    optOutNotRecorded: outcome.optOutNotRecorded,
+  })
+
+  // §2.1's Phase 4 obligation, in real time: AWAITED, before the triage —
+  // a model can take seconds, and this is the one message that must not
+  // wait behind it. `handleInboundEmail` has already audited it and logged
+  // OPT-OUT NOT RECORDED; this is the person being told.
+  const alarm = optOutNotRecordedEvent(outcome)
+  if (alarm && deps.optOutAlarm) {
+    await deps.optOutAlarm(alarm).catch((err: unknown) => {
+      deps.log.warn('opt-out alarm failed', { error: err instanceof Error ? err.name : 'UnknownError' })
+    })
+  }
+
+  // Triage, after the record exists and every §2.1 consequence has
+  // already been applied. Failing here costs a sorting hint and
+  // nothing else, so it never takes the tick down with it.
+  if (deps.llm) {
+    await refineReplyKind({
+      db: deps.db,
+      log: deps.log,
+      llm: deps.llm,
+      allowRemoteForLeadData: deps.allowRemoteForLeadData ?? false,
+      touchId: outcome.touchId,
+      body: mail.text ?? null,
+      deterministic: outcome.suppressed ? 'opted_out' : (outcome.replyKind ?? 'other'),
+    }).catch((err: unknown) => {
+      deps.log.warn('reply triage failed; the deterministic kind stands', {
+        error: err instanceof Error ? err.name : 'UnknownError',
+      })
+    })
+  }
+  return outcome
+}
+
+/**
  * Listen for replies until stopped.
  *
  * Returns a stop function. The loop inside reconnects forever with back-off;
@@ -198,6 +319,11 @@ export function startInbox(deps: InboxDeps): () => Promise<void> {
   let stopped = false
   let client: ImapFlow | null = null
   let backoff = RECONNECT_MIN_MS
+  // Resolved once, at start: the boot log says whether the alarm is on.
+  const handling: InboundMessageDeps = {
+    ...deps,
+    optOutAlarm: deps.optOutAlarm !== undefined ? deps.optOutAlarm : optOutAlarmFromEnvironment({ db: deps.db, log: deps.log }),
+  }
 
   const loop = async (): Promise<void> => {
     while (!stopped) {
@@ -265,52 +391,7 @@ export function startInbox(deps: InboxDeps): () => Promise<void> {
       try {
         const msg = await c.fetchOne(String(uid), { source: true }, { uid: true })
         if (!msg || !msg.source) continue
-        const mail = await parseInbound(msg.source)
-        if (!mail) {
-          deps.log.info('inbound mail had no readable sender; skipped', { uid })
-        } else {
-          const outcome = await handleInboundEmail(deps.db, { ...mail, ...(deps.now ? { now: deps.now() } : {}) })
-          if (outcome.matched === 'none' && outcome.bounce) {
-            // A delivery report tied to a message this system sent. Ids and
-            // the report's status code: the address is in the row, not here.
-            deps.log.info('delivery report recorded', {
-              uid,
-              contactId: outcome.bounce.contactId,
-              touchId: outcome.bounce.touchId,
-              permanent: outcome.bounce.permanent,
-              code: outcome.bounce.code,
-              marked: outcome.bounce.marked,
-            })
-          } else if (outcome.matched === 'none') {
-            deps.log.info('inbound mail did not match a contact', { uid, why: outcome.why })
-          } else {
-            deps.log.info('inbound reply recorded', {
-              uid,
-              matched: outcome.matched,
-              touchId: outcome.touchId,
-              paused: outcome.paused,
-              suppressed: outcome.suppressed,
-            })
-            // Triage, after the record exists and every §2.1 consequence has
-            // already been applied. Failing here costs a sorting hint and
-            // nothing else, so it never takes the tick down with it.
-            if (deps.llm) {
-              await refineReplyKind({
-                db: deps.db,
-                log: deps.log,
-                llm: deps.llm,
-                allowRemoteForLeadData: deps.allowRemoteForLeadData ?? false,
-                touchId: outcome.touchId,
-                body: mail.text ?? null,
-                deterministic: outcome.suppressed ? 'opted_out' : (outcome.replyKind ?? 'other'),
-              }).catch((err: unknown) => {
-                deps.log.warn('reply triage failed; the deterministic kind stands', {
-                  error: err instanceof Error ? err.name : 'UnknownError',
-                })
-              })
-            }
-          }
-        }
+        await handleInboundMessage(msg.source, uid, handling)
       } catch (err) {
         deps.log.error('could not handle an inbound message', {
           uid,
