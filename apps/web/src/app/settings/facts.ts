@@ -155,16 +155,24 @@ export function deploymentFacts(i: DeploymentFactInput): readonly DeploymentFact
   const workerPart = f.worker
     ? 'whether it reads a mailbox is the heartbeat’s question.'
     : null
+  // Texts a contact sends back — a STOP included — arrive through DoveSoft's
+  // webhook (0019) whatever is true of email, so with it set the line is on
+  // and everything else in it is about EMAIL replies. It said "no reply is
+  // read", off, while the SMS section on the same page listed the URLs texts
+  // arrive at. Round 4, finding [16].
+  const texts = f.smsInbound === true
+  const emailWebhook = texts ? 'inbound email webhook' : 'inbound webhook'
   let replies: string
   if (webhooks.length > 0) {
     replies = `Accepted by ${webhooks.join(' and ')}.${workerPart ? ` A worker is configured too; ${workerPart}` : ''}`
   } else if (workerPart) {
-    replies = `No inbound webhook is configured. This deployment is configured to reach a worker; ${workerPart}`
+    replies = `No ${emailWebhook} is configured. This deployment is configured to reach a worker; ${workerPart}`
   } else {
     replies =
-      'No inbound webhook is configured, and this deployment is not configured to reach a worker. Unless the ' +
-      'heartbeat shows one reading a mailbox against this database, no reply is read.'
+      `No ${emailWebhook} is configured, and this deployment is not configured to reach a worker. Unless the ` +
+      `heartbeat shows one reading a mailbox against this database, no ${texts ? 'email ' : ''}reply is read.`
   }
+  if (texts) replies += ' Texts a contact sends back, a STOP included, arrive through DoveSoft’s webhook.'
 
   let cron: string
   if (!f.cron) cron = 'Not run: every /api/cron route answers 503 without the secret, so nothing rescans or sends a digest on a schedule.'
@@ -198,9 +206,11 @@ export function deploymentFacts(i: DeploymentFactInput): readonly DeploymentFact
     },
     {
       area: 'Replies',
-      on: webhooks.length > 0 || f.worker,
+      on: webhooks.length > 0 || f.worker || texts,
       sentence: replies,
-      vars: ['AGENT_URL', 'AGENT_INTERNAL_TOKEN', 'INBOUND_WEBHOOK_SECRET', 'RESEND_WEBHOOK_SECRET', 'RESEND_API_KEY'],
+      vars: [
+        'AGENT_URL', 'AGENT_INTERNAL_TOKEN', 'INBOUND_WEBHOOK_SECRET', 'RESEND_WEBHOOK_SECRET', 'RESEND_API_KEY', 'DOVESOFT_WEBHOOK_SECRET',
+      ],
     },
     {
       // The web app's SMTP carries sign-in links only. Outreach goes through
@@ -302,9 +312,28 @@ export function sendingAnswer(report: HeartbeatReport | null): { tone: Tone; tex
       if (report.outreach === 'receive-only') {
         return { tone: 'warn', text: 'A worker is alive and reads a mailbox, but reports that it does not send.' }
       }
+      if (report.sms === 'on') {
+        return {
+          tone: 'ok',
+          text: 'A worker is alive and reports that it sends. A message that has still not gone out carries its reason on the message: a refusal, quiet hours, the daily cap, or an approval nobody has decided.',
+        }
+      }
+      // The sender leaves a due row on a channel it has no provider for
+      // exactly as it was — no refusal code, no `scheduled_for` — and only
+      // its log says why, so the promise above holds for email and not for
+      // an approved SMS. Still `ok`: email sends, and an agency that never
+      // switched SMS on has nothing waiting. Round 4, finding [17].
       return {
         tone: 'ok',
-        text: 'A worker is alive and reports that it sends. A message that has still not gone out carries its reason on the message: a refusal, quiet hours, the daily cap, or an approval nobody has decided.',
+        text:
+          'A worker is alive and reports that it sends. An email that has still not gone out carries its reason on the ' +
+          'message: a refusal, quiet hours, the daily cap, or an approval nobody has decided. ' +
+          (report.sms === 'off'
+            ? 'A text does not: SMS is off in that worker, so an approved SMS waits with no reason on it — only the ' +
+              'worker’s log says why — until '
+            : 'A text may not: the worker has not said whether it sends SMS (one from before DoveSoft says nothing), ' +
+              'and an approved SMS may wait with no reason on it until ') +
+          'SMS is switched on where the worker runs (DOVESOFT_API_KEY and DOVESOFT_ENTITY_ID on its host).',
       }
   }
 }
