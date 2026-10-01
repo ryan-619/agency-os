@@ -70,8 +70,8 @@ export async function POST(
     actor: user.id,
   })
   if (!r.ok) {
-    // The two holds carry their own sentence: each names where to go instead.
-    if (r.reason === 'paused_for_another_reason' || r.reason === 'opt_out_not_recorded') {
+    // The holds carry their own sentence: each names where to go instead.
+    if (r.reason === 'paused_for_another_reason' || r.reason === 'opt_out_not_recorded' || r.reason === 'template_required') {
       return NextResponse.json({ error: r.message, reason: r.reason }, { status: 409 })
     }
     const error = r.reason === 'opted_out' ? ANSWER_OPTED_OUT_ERROR : r.message

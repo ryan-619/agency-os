@@ -35,12 +35,41 @@ describe('campaignInput', () => {
   })
 
   /**
-   * §2.1: cold outreach is email and LinkedIn. A CAMPAIGN is by definition a
-   * sequence of cold messages, so the other channels are not offered — and
-   * the send path refuses them independently, because a form is not a control.
+   * §2.1: cold outreach is email and LinkedIn. Voice and WhatsApp are not
+   * offered — and the send path refuses cold messages on them independently,
+   * because a form is not a control.
    */
-  it.each(['sms', 'voice', 'whatsapp'])('refuses a %s campaign outright', (channel) => {
+  it.each(['voice', 'whatsapp'])('refuses a %s campaign outright', (channel) => {
     expect(campaignInput.safeParse({ ...valid, channel }).success).toBe(false)
+  })
+
+  /**
+   * SMS (0019): a campaign is where an SMS's cap and quiet hours live, so
+   * one may be created — but every SMS is drafted per person from a
+   * registered template and approved by a person, so never with auto-send.
+   */
+  it('accepts an SMS campaign, with auto-send off by default', () => {
+    const parsed = campaignInput.safeParse({ ...valid, channel: 'sms' })
+    expect(parsed.success).toBe(true)
+    if (!parsed.success) return
+    expect(parsed.data.channel).toBe('sms')
+    expect(parsed.data.autoSend).toBe(false)
+    expect(campaignInput.safeParse({ ...valid, channel: 'sms', autoSend: false }).success).toBe(true)
+  })
+
+  it('refuses an SMS campaign that auto-sends, with a sentence on the autoSend field', () => {
+    const parsed = campaignInput.safeParse({ ...valid, channel: 'sms', autoSend: true })
+    expect(parsed.success).toBe(false)
+    if (parsed.success) return
+    const issue = parsed.error.issues[0]
+    expect(issue?.path).toEqual(['autoSend'])
+    expect(issue?.message).toBe(
+      'An SMS campaign cannot auto-send: every SMS is approved by a person. Save it with auto-send off.',
+    )
+  })
+
+  it('still lets an email campaign auto-send — the owner gate on that is the route’s', () => {
+    expect(campaignInput.safeParse({ ...valid, autoSend: true }).success).toBe(true)
   })
 
   it.each(['9pm', '25:00', '21:60', '', '21'])('refuses the quiet time %j', (quietStart) => {
@@ -121,6 +150,13 @@ describe('against a real engine', () => {
       expect(await updateCampaign(db, otherOrgId, row.id, input)).toBeNull()
     })
 
+    it('creates an SMS campaign through the input schema, with auto-send off', async () => {
+      const parsed = campaignInput.parse({ name: 'Opted-in SMS', channel: 'sms', dailyCap: 20, quietStart: '21:00', quietEnd: '09:00' })
+      const row = await createCampaign(db, orgId, parsed)
+      expect(row.channel).toBe('sms')
+      expect(row.autoSend).toBe(false)
+    })
+
     it('lists one org’s campaigns and nobody else’s', async () => {
       await campaign()
       expect((await listCampaigns(db, orgId)).length).toBe(1)
@@ -129,9 +165,10 @@ describe('against a real engine', () => {
 
     /**
      * §2.1 in the schema: `campaigns_no_auto_send_on_voice_or_sms`. Unreachable
-     * through `campaignInput`, which does not offer those channels — asserted
-     * here against the database, because the constraint is what holds when
-     * something writes a row without going through the form.
+     * through `campaignInput`, which offers no voice campaign and refuses an
+     * auto-sending SMS one — asserted here against the database, because the
+     * constraint is what holds when something writes a row without going
+     * through the form.
      */
     it('refuses auto-send on a voice or sms campaign at the database', async () => {
       for (const channel of ['voice', 'sms']) {

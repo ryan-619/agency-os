@@ -26,30 +26,45 @@ const clock = z
   .string()
   .regex(/^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/, 'Use a 24-hour time, like 21:00.')
 
-export const campaignInput = z.object({
-  name: z.string().min(1, 'Give the campaign a name.').max(120),
+export const campaignInput = z
+  .object({
+    name: z.string().min(1, 'Give the campaign a name.').max(120),
+    /**
+     * §2.1: cold outreach is email and LinkedIn, and those are the two
+     * channels enrolment fills. SMS is here too (0019), as a campaign of a
+     * different kind: nothing is enrolled into it — every SMS is drafted per
+     * person, from a registered DLT template, to somebody with a recorded SMS
+     * opt-in (`smsDraft`) — and it exists because every outbound message
+     * carries a campaign, where its cap and quiet hours live. Voice and
+     * WhatsApp are not offered, and the send path refuses cold messages on
+     * all three independently, because a form is not a control.
+     */
+    channel: z.enum(['email', 'linkedin', 'sms']),
+    icpProfileId: z.uuid().nullable().default(null),
+    /**
+     * A cap, not a target. The upper bound is a deliverability judgement rather
+     * than a rule: a warmed mailbox sending 500 cold emails in a day stops being
+     * a warmed mailbox. The LOWER bound is the database's
+     * (`campaigns_daily_cap_check`, 0004): a campaign is paused by its status,
+     * not by a cap of zero, and a form that accepted zero would be a 500.
+     */
+    dailyCap: z.number().int().min(1).max(200),
+    quietStart: clock,
+    quietEnd: clock,
+    /** §2.4. Default off, and turning it on is owner-only at the route. */
+    autoSend: z.boolean().default(false),
+    status: z.enum(['draft', 'active', 'paused', 'done']).default('draft'),
+  })
   /**
-   * §2.1: cold outreach is email and LinkedIn. The other three exist as
-   * channels for contacts who opted in, but a CAMPAIGN is by definition a
-   * sequence of cold messages — so they are not offered here at all, and the
-   * send path refuses them independently.
+   * Every SMS is approved by a person: `campaigns_no_auto_send_on_voice_or_sms`
+   * refuses the row. Refused here first, as a sentence, rather than reaching
+   * the database as a CHECK violation and a 500 — and never quietly switched
+   * off, which would save something other than what the person asked for.
    */
-  channel: z.enum(['email', 'linkedin']),
-  icpProfileId: z.uuid().nullable().default(null),
-  /**
-   * A cap, not a target. The upper bound is a deliverability judgement rather
-   * than a rule: a warmed mailbox sending 500 cold emails in a day stops being
-   * a warmed mailbox. The LOWER bound is the database's
-   * (`campaigns_daily_cap_check`, 0004): a campaign is paused by its status,
-   * not by a cap of zero, and a form that accepted zero would be a 500.
-   */
-  dailyCap: z.number().int().min(1).max(200),
-  quietStart: clock,
-  quietEnd: clock,
-  /** §2.4. Default off, and turning it on is owner-only at the route. */
-  autoSend: z.boolean().default(false),
-  status: z.enum(['draft', 'active', 'paused', 'done']).default('draft'),
-})
+  .refine((c) => !(c.channel === 'sms' && c.autoSend), {
+    path: ['autoSend'],
+    message: 'An SMS campaign cannot auto-send: every SMS is approved by a person. Save it with auto-send off.',
+  })
 
 export type CampaignInput = z.infer<typeof campaignInput>
 export type CampaignRow = typeof schema.campaigns.$inferSelect
