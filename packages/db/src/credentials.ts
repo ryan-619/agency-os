@@ -18,7 +18,7 @@ import { and, asc, desc, eq, isNotNull } from 'drizzle-orm'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 import { updateConnector } from './connectors.js'
-import { isForeignKeyViolation } from './pg-errors.js'
+import { isReferencedRowRefusal } from './pg-errors.js'
 import { deleteSecret, putSecret } from './secrets.js'
 
 /**
@@ -36,24 +36,14 @@ const HELD_BY_A_CONNECTOR = 'connectors_secret_ref_points_at_a_secret'
  * the row.
  *
  * `isForeignKeyViolation` alone does NOT see this, and the difference is the
- * server version. Measured on PGlite's Postgres 18.3: a RESTRICT refusal is
- * SQLSTATE 23001 `restrict_violation` — the SQL standard's code — while a
- * NO ACTION refusal is 23503. Postgres 16 and 17 report both as 23503.
- * Production runs 18 and CI's real server runs 16, so both codes count here;
- * and only for THIS constraint, so an unrelated failure is never reported to a
- * person as "a connector still uses it".
+ * server version: Postgres 18 (PGlite here, Neon in production) refuses with
+ * 23001 `restrict_violation`, Postgres 16 and 17 with 23503 — production runs
+ * 18 and CI's real server 16. `isReferencedRowRefusal` knows both, and only
+ * for THIS constraint, so an unrelated failure is never reported to a person
+ * as "a connector still uses it".
  */
 function heldByAConnector(err: unknown): boolean {
-  if (isForeignKeyViolation(err)) return true
-  const seen = new Set<unknown>()
-  let cur: unknown = err
-  while (cur && typeof cur === 'object' && !seen.has(cur)) {
-    seen.add(cur)
-    const fields = cur as { code?: unknown; constraint?: unknown; cause?: unknown }
-    if (fields.code === '23001') return fields.constraint === undefined || fields.constraint === HELD_BY_A_CONNECTOR
-    cur = fields.cause
-  }
-  return false
+  return isReferencedRowRefusal(err, HELD_BY_A_CONNECTOR)
 }
 
 /** Long enough for any description, too short to be somewhere a PEM key fits. */
