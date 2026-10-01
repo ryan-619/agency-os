@@ -177,6 +177,40 @@ describe('proposals', () => {
       expect((await setProposalStatus(db, { orgId, id: r.proposal.id, status: 'withdrawn', actor: userId }))!.decidedAt).toBeNull()
     })
 
+    /**
+     * The team's route reads the status, checks the move against that read,
+     * and writes. A buyer's acceptance through the share link can commit in
+     * between — and without the expected status in the UPDATE, a teammate's
+     * "Declined" overwrote it: proposal declined, deal won, share accepted.
+     * Review round 3, finding [12].
+     */
+    it('changes nothing when the status is no longer the one the caller read', async () => {
+      await scan(new Date('2026-09-12T08:00:00.000Z'))
+      const r = await generate()
+      if (!r.ok) throw new Error(r.message)
+      await setProposalStatus(db, { orgId, id: r.proposal.id, status: 'sent', actor: userId, from: 'draft' })
+      // The buyer accepts from their link…
+      await setProposalStatus(db, { orgId, id: r.proposal.id, status: 'accepted', actor: 'share_link', now: NOW, from: 'sent' })
+      // …while a teammate's "Declined", read as `sent` a moment ago, lands.
+      const late = await setProposalStatus(db, { orgId, id: r.proposal.id, status: 'declined', actor: userId, from: 'sent' })
+
+      expect(late).toBeNull()
+      expect((await readProposal(db, orgId, r.proposal.id))!.status).toBe('accepted')
+      const [deal] = await db.select().from(schema.deals)
+      expect(deal!.stage).toBe('won')
+      const actions = (await db.select().from(schema.auditLog)).map((a) => a.action)
+      expect(actions).toContain('proposal.accepted')
+      expect(actions).not.toContain('proposal.declined')
+    })
+
+    it('writes when the status is still the one the caller read', async () => {
+      await scan(new Date('2026-09-12T08:00:00.000Z'))
+      const r = await generate()
+      if (!r.ok) throw new Error(r.message)
+      const sent = await setProposalStatus(db, { orgId, id: r.proposal.id, status: 'sent', actor: userId, from: 'draft' })
+      expect(sent!.status).toBe('sent')
+    })
+
     it('will not touch another org’s proposal', async () => {
       await scan(new Date('2026-09-12T08:00:00.000Z'))
       const r = await generate()

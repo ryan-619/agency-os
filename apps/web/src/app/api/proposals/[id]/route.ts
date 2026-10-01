@@ -71,8 +71,22 @@ export async function PATCH(
     )
   }
 
-  const row = await setProposalStatus(db, { orgId: user.orgId, id, status: to, actor: user.id })
-  if (!row) return NextResponse.json({ error: 'No such proposal.' }, { status: 404 })
+  // `from` puts the status this request read into the UPDATE, so a buyer's
+  // acceptance through their link that commits in between is not
+  // overwritten. Review round 3, finding [12].
+  const row = await setProposalStatus(db, { orgId: user.orgId, id, status: to, actor: user.id, from })
+  if (!row) {
+    const now = await readProposal(db, user.orgId, id)
+    if (!now) return NextResponse.json({ error: 'No such proposal.' }, { status: 404 })
+    return NextResponse.json(
+      {
+        error:
+          `This proposal became ${now.status} a moment ago — by a teammate, or by the buyer from their link — ` +
+          `so it was not marked ${to}. Nothing was changed; reload to see it.`,
+      },
+      { status: 409 },
+    )
+  }
 
   if (row.status === 'accepted') {
     const orgId = user.orgId
