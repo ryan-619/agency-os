@@ -112,7 +112,7 @@ describe('reading a payload — query, form or JSON', () => {
     ['a JSON array — a batch is not read as if it were one report', 'application/json', '[{"messageid":"a"}]'],
     ['multipart', 'multipart/form-data; boundary=x', '--x\r\nContent-Disposition: form-data; name="a"\r\n\r\n1\r\n--x--'],
   ])('refuses %s whole, rather than reading half of it', (_name, contentType, body) => {
-    expect(readFields({ query: q('messageid=a&status=DELIVRD'), contentType, body })).toEqual({ ok: false })
+    expect(readFields({ query: q('messageid=a&status=DELIVRD'), contentType, body })).toEqual({ ok: false, why: 'unreadable_body' })
   })
 
   it('bounds the body before it is read', async () => {
@@ -121,10 +121,10 @@ describe('reading a payload — query, form or JSON', () => {
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: `message=${'a'.repeat(DOVESOFT_MAX_BODY_BYTES)}`,
     })
-    expect(await readDoveSoftRequest(big)).toEqual({ ok: false, status: 413 })
+    expect((await readDoveSoftRequest(big)).read).toEqual({ ok: false, why: 'too_large' })
     const get = new Request(`https://x.test/api/inbound/dovesoft/sms?token=${SECRET}&mobile=919876543210&message=hi`)
     const r = await readDoveSoftRequest(get)
-    expect(r.ok && r.read.ok && Object.fromEntries(r.read.fields)).toEqual({ mobile: '919876543210', message: 'hi' })
+    expect(r.read.ok && Object.fromEntries(r.read.fields)).toEqual({ mobile: '919876543210', message: 'hi' })
   })
 })
 
@@ -192,7 +192,7 @@ describe('a delivery report', () => {
   it('still answers 400, and says nothing was audited, where no org is named', async () => {
     const w = world(null)
     const record = async (): Promise<SmsDeliveryOutcome> => ({ matched: false, why: 'blank_id' })
-    const answer = await handleDoveSoftDlr({ ok: false }, shape, { ...w.deps, record })
+    const answer = await handleDoveSoftDlr({ ok: false, why: 'unreadable_body' }, shape, { ...w.deps, record })
     expect(answer.status).toBe(400)
     expect(w.audits).toEqual([])
     expect(w.logs[0]).toMatchObject({ level: 'error', fields: { why: 'unreadable_body', audited: false } })
@@ -399,9 +399,18 @@ describe('what an inbound text is answered with', () => {
   })
 
   it('answers a body it could not parse 400 too', async () => {
-    const r = run(filed(), { ok: false })
+    const r = run(filed(), { ok: false, why: 'unreadable_body' })
     expect(await r.answer).toMatchObject({ status: 400, body: { why: 'unreadable_body' } })
     expect(r.w.audits).toEqual([{ action: 'sms.inbound_unreadable', detail: { why: 'unreadable_body' } }])
+  })
+
+  /** Too large to read is still a text nobody read — loud, and never a silent 413. */
+  it('answers a text too large to read 413, audited and logged like any unreadable one', async () => {
+    const r = run(filed(), { ok: false, why: 'too_large' })
+    expect(await r.answer).toMatchObject({ status: 413, body: { why: 'too_large' } })
+    expect(r.w.audits).toEqual([{ action: 'sms.inbound_unreadable', detail: { why: 'too_large' } }])
+    expect(r.w.logs[0]!.level).toBe('error')
+    expect(r.recorded).toEqual([])
   })
 })
 

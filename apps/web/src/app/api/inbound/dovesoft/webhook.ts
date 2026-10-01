@@ -70,7 +70,13 @@ export function tokenFrom(request: Request): { readonly query: string | null; re
 /** A payload's fields, keyed lower-case. The `token` is never among them. */
 export type Fields = ReadonlyMap<string, string>
 
-export type FieldsRead = { readonly ok: true; readonly fields: Fields } | { readonly ok: false }
+/**
+ * A payload's fields, or why there are none: a body that was neither a form
+ * nor a JSON object, or one larger than these routes read.
+ */
+export type FieldsRead =
+  | { readonly ok: true; readonly fields: Fields }
+  | { readonly ok: false; readonly why: 'unreadable_body' | 'too_large' }
 
 /**
  * The query string and the body, as one map: the body's value wins where
@@ -101,9 +107,9 @@ export function readFields(input: {
     try {
       parsed = JSON.parse(body)
     } catch {
-      return { ok: false }
+      return { ok: false, why: 'unreadable_body' }
     }
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return { ok: false }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return { ok: false, why: 'unreadable_body' }
     for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
       if (typeof v === 'string') put(k, v)
       else if (typeof v === 'number' || typeof v === 'boolean') put(k, String(v))
@@ -114,27 +120,30 @@ export function readFields(input: {
     for (const [k, v] of new URLSearchParams(body)) put(k, v)
     return { ok: true, fields: out }
   }
-  return { ok: false }
+  return { ok: false, why: 'unreadable_body' }
 }
 
-export type RequestRead =
-  | { readonly ok: true; readonly read: FieldsRead; readonly shape: RequestShape }
-  | { readonly ok: false; readonly status: 413 }
+export interface RequestRead {
+  readonly read: FieldsRead
+  readonly shape: RequestShape
+}
 
 /**
  * A request's fields, bounded: a declared or actual body over
- * `DOVESOFT_MAX_BODY_BYTES` is refused (413) before it is parsed. A GET's
- * fields are its query string.
+ * `DOVESOFT_MAX_BODY_BYTES` is not parsed, and is answered 413 by the
+ * handler — loudly, like any push that cannot be read. A GET's fields are
+ * its query string.
  */
 export async function readDoveSoftRequest(request: Request): Promise<RequestRead> {
+  const contentType = request.headers.get('content-type')
   const declared = Number(request.headers.get('content-length') ?? '0')
-  if (Number.isFinite(declared) && declared > DOVESOFT_MAX_BODY_BYTES) return { ok: false, status: 413 }
+  if (Number.isFinite(declared) && declared > DOVESOFT_MAX_BODY_BYTES) {
+    return { read: { ok: false, why: 'too_large' }, shape: { bytes: declared, contentType } }
+  }
   const body = request.method === 'GET' || request.method === 'HEAD' ? '' : await request.text()
   const bytes = new TextEncoder().encode(body).length
-  if (bytes > DOVESOFT_MAX_BODY_BYTES) return { ok: false, status: 413 }
-  const contentType = request.headers.get('content-type')
+  if (bytes > DOVESOFT_MAX_BODY_BYTES) return { read: { ok: false, why: 'too_large' }, shape: { bytes, contentType } }
   return {
-    ok: true,
     read: readFields({ query: new URL(request.url).searchParams, contentType, body }),
     shape: { bytes, contentType },
   }
@@ -363,7 +372,7 @@ export async function handleDoveSoftDlr(
 ): Promise<WebhookAnswer> {
   const dlr = read.ok ? readDlr(read.fields) : null
   if (!dlr || !dlr.ok) {
-    const detail = dlr ? { why: 'missing_fields', missing: [...dlr.missing] } : { why: 'unreadable_body' }
+    const detail = dlr ? { why: 'missing_fields', missing: [...dlr.missing] } : { why: read.ok ? 'unreadable_body' : read.why }
     const audited = await auditQuietly(deps, { action: 'sms.dlr_unreadable', detail })
     deps.log.error('DoveSoft delivery report could not be read', {
       ...detail,
@@ -371,7 +380,7 @@ export async function handleDoveSoftDlr(
       fields: read.ok ? fieldNames(read.fields) : null,
       audited,
     })
-    return { status: 400, body: { error: 'unreadable delivery report', ...detail } }
+    return { status: detail.why === 'too_large' ? 413 : 400, body: { error: 'unreadable delivery report', ...detail } }
   }
   const outcome = await deps.record({
     providerMessageId: dlr.providerMessageId,
@@ -439,7 +448,7 @@ export async function handleDoveSoftMo(
 ): Promise<WebhookAnswer> {
   const mo = read.ok ? readMo(read.fields, now) : null
   if (!mo || !mo.ok) {
-    const detail = mo ? { why: 'missing_fields', missing: [...mo.missing] } : { why: 'unreadable_body' }
+    const detail = mo ? { why: 'missing_fields', missing: [...mo.missing] } : { why: read.ok ? 'unreadable_body' : read.why }
     const audited = await auditQuietly(deps, { action: 'sms.inbound_unreadable', detail })
     deps.log.error('DoveSoft inbound text could not be read — it may have been a STOP; nothing was recorded', {
       ...detail,
@@ -447,7 +456,7 @@ export async function handleDoveSoftMo(
       fields: read.ok ? fieldNames(read.fields) : null,
       audited,
     })
-    return { status: 400, body: { error: 'unreadable inbound text', ...detail } }
+    return { status: detail.why === 'too_large' ? 413 : 400, body: { error: 'unreadable inbound text', ...detail } }
   }
 
   const outcome = await deps.record({

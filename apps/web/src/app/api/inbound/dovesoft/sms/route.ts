@@ -33,7 +33,6 @@ async function handle(request: Request): Promise<NextResponse> {
   if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   const req = await readDoveSoftRequest(request)
-  if (!req.ok) return NextResponse.json({ error: 'That request is too large.' }, { status: req.status })
 
   const db = getDb() as unknown as AgencyDb
   const answer = await handleDoveSoftMo(req.read, req.shape, new Date(), {

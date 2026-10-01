@@ -922,9 +922,10 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     'it was refused so DoveSoft retries, and the field names it did carry are in the error log',
 }
 
-/** " (no message id or status)", " (the body was not a form or a JSON object)", or nothing. */
+/** " (no message id or status)", " (the body was not a form or a JSON object)", " (it was larger …)", or nothing. */
 function unreadableWhy(d: unknown): string {
   if (word(d, 'why') === 'unreadable_body') return ' (the body was not a form or a JSON object)'
+  if (word(d, 'why') === 'too_large') return ' (it was larger than the route reads)'
   const missing = (words(d, 'missing') ?? []).map((m) => own(UNREADABLE_FIELD, m)).filter((m): m is string => Boolean(m))
   return missing.length ? ` (no ${missing.join(' or ')})` : ''
 }

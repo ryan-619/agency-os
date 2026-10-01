@@ -363,6 +363,7 @@ describe('sentenceFor', () => {
         'it was refused so DoveSoft retries, and the field names it did carry are in the error log',
     )
     expect(say('sms.inbound_unreadable', { why: 'unreadable_body' })).toContain('(the body was not a form or a JSON object)')
+    expect(say('sms.inbound_unreadable', { why: 'too_large' })).toContain('(it was larger than the route reads)')
     // An unknown field name is dropped, not echoed.
     expect(say('sms.dlr_unreadable', { why: 'missing_fields', missing: ['secret_thing'] })).toBe(
       'could not read a delivery report DoveSoft sent; it was refused so DoveSoft retries, and nothing was changed',
