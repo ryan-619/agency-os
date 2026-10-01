@@ -495,8 +495,20 @@ const SENTENCES: Readonly<Record<string, Template>> = {
       dealMove(text(c.d, 'deal', 40)),
     ])}`
   },
-  'contact.opt_out_not_recorded': (c) =>
-    `could not record an opt-out from a contact at ${c.co} — it is NOT on the suppression list; follow up by hand`,
+  // Two writers: a reply filed under a contact (`recordInboundReply`, the
+  // contact as subject), and an SMS STOP nobody could place — a number no
+  // single contact holds, or a text whose recording failed (`sms.ts`'s
+  // `optOutLost`, the DoveSoft route) — with no subject and no contact at
+  // all. That one names no contact, because there is none to look for.
+  'contact.opt_out_not_recorded': (c) => {
+    if (c.row.subjectType !== 'contact' && !has(c.d, 'contactId') && !has(c.d, 'touchId')) {
+      const why = own(UNPLACED_OPT_OUT_WHY, word(c.d, 'why'))
+      return `could not record an opt-out texted from a number no single contact holds${
+        why ? ` (${why})` : ''
+      } — it is NOT on the suppression list; read the number from the provider's inbound log and record it by hand`
+    }
+    return `could not record an opt-out from a contact at ${c.co} — it is NOT on the suppression list; follow up by hand`
+  },
   'contact.created': (c) => `added a contact at ${c.co}`,
   // Two writers. The contacts route, a person's reason, naming the reply's
   // pause it replaced by CLASS (`replacedPauseFor`) — answering that reply no
@@ -912,15 +924,17 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     `received a delivery report for an SMS this system did not send${
       word(c.d, 'why') === 'ambiguous' ? ' (it named more than one message)' : ''
     }; nothing was changed`,
+  // A suppression is claimed only where the row says one was written:
+  // `suppressed: true`. A row with no key — an unreadable number's, before
+  // r5 wrote `suppressed: false` there — had none written, and read as if it had.
   'sms.inbound_unmatched': (c) => {
     const why = own(SMS_UNMATCHED, word(c.d, 'why')) ?? 'that could not be placed'
     const optOut = flag(c.d, 'optOut') === true
-    const suppressed = flag(c.d, 'suppressed')
     return `received a text from a number ${why}, so it was filed under nobody${
       optOut
-        ? suppressed === false
-          ? '; it asked to stop, and the number is NOT on the suppression list — follow up by hand'
-          : '; it asked to stop, and the number was put on the suppression list'
+        ? flag(c.d, 'suppressed') === true
+          ? '; it asked to stop, and the number was put on the suppression list'
+          : '; it asked to stop, and the number is NOT on the suppression list — follow up by hand'
         : ''
     }`
   },
@@ -962,6 +976,16 @@ const SMS_UNMATCHED: Readonly<Record<string, string>> = {
   unreadable_number: 'that could not be read',
 }
 
+/**
+ * Why an SMS STOP nobody could place was not recorded: `sms.ts`'s reasons
+ * and the DoveSoft route's. Anything else is an error's class name, which
+ * says nothing a person can act on, and is left out.
+ */
+const UNPLACED_OPT_OUT_WHY: Readonly<Record<string, string>> = {
+  unparseable_number: 'the number could not be read',
+  record_failed: 'recording the text failed',
+}
+
 /** Every action this page has a sentence for. The test iterates it. */
 export const AUDIT_ACTIONS: readonly string[] = Object.freeze(Object.keys(SENTENCES).sort())
 
@@ -982,6 +1006,10 @@ export function isAlarm(row: AuditLine): boolean {
     // A text nobody could read may have been a STOP that is recorded nowhere.
     case 'sms.inbound_unreadable':
       return true
+    // A STOP from a number nobody could be placed under, and no suppression
+    // written for it. Only `suppressed: true` says one was.
+    case 'sms.inbound_unmatched':
+      return flag(row.detail, 'optOut') === true && flag(row.detail, 'suppressed') !== true
     case 'call.opted_out':
       return flag(row.detail, 'suppressed') === false
     case 'call.ended':

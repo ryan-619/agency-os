@@ -13,6 +13,15 @@
  * asking to be left alone (0019, as a bounce is not, 0018), and the line
  * says so, because "not delivered" next to a person's name reads like a no.
  *
+ * The time beside a delivery is when the REPORT reached this deployment,
+ * not when the handset took the message: the DoveSoft route reads no time
+ * from a report (its format is not public, and a time with no zone would be
+ * a guess — `readDlr`), so `recordSmsDelivery` stamps `delivered_at` on
+ * receipt. DoveSoft batches reports and retries the ones it was refused, so
+ * that can be hours later. The line says "Delivery reported", which is true
+ * of the time it is printed beside; "Delivered to the handset · <time>"
+ * dated the delivery by its report.
+ *
  * Pure, and imported by a test: no `server-only`, no `@/`.
  */
 export interface DeliveryFacts {
@@ -25,7 +34,11 @@ export interface DeliveryFacts {
 export interface DeliveryLine {
   readonly tone: 'ok' | 'warn' | 'plain'
   readonly text: string
-  /** The handset's time, for the page to render in the viewer's zone. */
+  /**
+   * When the delivery report reached this deployment (`delivered_at`, stamped
+   * on receipt) — at or after the handset took the message, never the
+   * handset's own time. For the page to render in the viewer's zone.
+   */
   readonly at: Date | null
 }
 
@@ -33,7 +46,7 @@ export function deliveryLine(t: DeliveryFacts): DeliveryLine | null {
   if (t.direction !== 'out') return null
   switch (t.deliveryStatus) {
     case 'delivered':
-      return { tone: 'ok', text: 'Delivered to the handset', at: t.deliveredAt }
+      return { tone: 'ok', text: 'Delivery reported', at: t.deliveredAt }
     case 'pending':
       return { tone: 'plain', text: 'The operator has it; no final delivery report yet.', at: null }
     case 'failed':

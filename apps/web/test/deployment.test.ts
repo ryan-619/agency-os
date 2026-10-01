@@ -11,6 +11,8 @@
  * which vitest can resolve, so the facts are tested where they live:
  * `lib/deployment-facts.ts`, which imports nothing but a type.
  */
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
   DOVESOFT_TOKEN_PLACEHOLDER, dovesoftFacts, flagsFrom, noRepliesReadNote, nothingWillSendNote, type Deployment,
@@ -199,6 +201,44 @@ describe('dovesoftFacts', () => {
     expect(dovesoftFacts({ ...base, DOVESOFT_WEBHOOK_SECRET: SECRET })).toMatchObject({ webhooks: true, org: false })
     expect(dovesoftFacts({ ...base, DOVESOFT_ORG_ID: ORG })).toMatchObject({ webhooks: false, org: true })
     expect(dovesoftFacts({ ...base, DOVESOFT_ORG_ID: ORG }).sentences[1]).toContain('audited in the org DOVESOFT_ORG_ID names')
+  })
+
+  /**
+   * The org is a FALLBACK: a text is matched across every org first, and
+   * only a number nobody holds is filed under it. The sentence without it
+   * said a STOP from such a number "can be recorded only in an org where a
+   * contact holds the number" — of a number no contact holds.
+   */
+  it('says texts are matched across every org, and the org is where a number nobody holds is filed', () => {
+    const on = dovesoftFacts({ ...base, DOVESOFT_ORG_ID: ORG }).sentences[1] ?? ''
+    expect(on).toContain('in whichever org holds them')
+    expect(on).toContain('Only a text from a number no contact anywhere holds')
+    const off = dovesoftFacts(base).sentences[1] ?? ''
+    expect(off).toContain('in whichever org holds them')
+    expect(off).toContain('recorded nowhere')
+    expect(off).toContain('OPT-OUT NOT RECORDED')
+    expect(off).not.toContain('can be recorded only in an org where a contact holds the number')
+  })
+
+  /** Half of all base64 secrets carry a `+`, which a query string reads as a space. */
+  it('says to generate the secret as hex, and to percent-encode any other in the URL', () => {
+    const all = dovesoftFacts(base).sentences.join(' ')
+    expect(all).toContain('openssl rand -hex 32')
+    expect(all).toContain('percent-encoded')
+    expect(all).not.toContain('base64')
+  })
+
+  it('says a GET push puts the number and the words in the request log, and to ask for POST', () => {
+    const get = dovesoftFacts(base).sentences.find((x) => x.startsWith('A push by GET')) ?? ''
+    expect(get).toContain('the sender’s number and the words of every text sent back')
+    expect(get).toContain('request log')
+    expect(get).toContain('Ask DoveSoft to push by POST')
+  })
+
+  it('renders every sentence, and repeats the encoding rule where the URLs are registered', () => {
+    const page = readFileSync(fileURLToPath(new URL('../src/app/settings/deployment/page.tsx', import.meta.url)), 'utf8')
+    expect(page).toContain('sms.sentences.map(')
+    expect(page).toContain('percent-encoded unless it is hex (<code>openssl rand -hex 32</code>)')
   })
 
   /** The sending half lives on the worker; the page says so rather than guessing at it. */
