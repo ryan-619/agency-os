@@ -276,6 +276,50 @@ describe('the SMS opt-out reader', () => {
     expect(smsOptOut('ＳＴＯＰ')).toBe(true)
   })
 
+  /**
+   * Review round 4: each of these was stored as an ordinary reply — paused, never suppressed, and
+   * resumable by answering it. A missed STOP is the worst error this reader can make.
+   */
+  it.each([
+    'STOP ALL 56161',
+    'stop all ACMEIN',
+    'UNSUBSCRIBE ALL ACMEIN',
+    'unsubscribe all 56161',
+    'STOPALL 56161',
+    'Reply STOP ALL 56161',
+    'STOP 👍',
+    'STOP🙏',
+    'stop 🙅‍♀️',
+    'STOP 👍🏽',
+    'STOP)',
+    'STOP :)',
+    '(STOP)',
+    '"STOP"',
+    '¡STOP!',
+    '¿Stop?',
+    '*STOP*',
+    '👎 STOP',
+    'STOP 56161 🙏',
+    'STOP-56161',
+    'STOP: ACMEIN',
+    'Unsubscribe, ACMEIN',
+    'Opt out!!! 😡😡',
+    'CANCEL 👋',
+  ])('reads %j as an opt-out — punctuation, an emoji or "all" around the keyword', (text) => {
+    expect(smsOptOut(text)).toBe(true)
+  })
+
+  /**
+   * The email reader's whole-message forms, which the SMS recorder ORs with this one — restated so
+   * a decoration it does not strip does not lose them — and the curly apostrophe a phone types.
+   */
+  it.each(['Please stop 🙏', 'Kindly unsubscribe.', 'Remove me :)', 'Opt me out!', 'Don’t text me again 🙏', 'don’t message me', 'Leave me alone 😡'])(
+    'reads %j as an opt-out',
+    (text) => {
+      expect(smsOptOut(text)).toBe(true)
+    },
+  )
+
   it.each([
     'Cancel tomorrow’s call please',
     'end of day works',
@@ -285,6 +329,21 @@ describe('the SMS opt-out reader', () => {
     'quit my job last week, call my colleague',
     'stoppage',
     '',
+    // Punctuation and emoji are stripped only from the ENDS: prose is still prose.
+    "Don't stop! 👍",
+    'don’t stop 🙂',
+    'stop by tomorrow 🙂',
+    'Stop by tomorrow?',
+    '(stop by on Friday)',
+    'Please do not stop :)',
+    'All good, stop worrying 😄',
+    'stop all the calls until Monday please',
+    'end of day? 👍',
+    'cancel the 3pm, move it to 4 🙏',
+    '👍',
+    '!!!',
+    'please stop by 🙂',
+    'Please cancel 🙏',
   ])('does not read %j as an opt-out — the words around it say otherwise', (text) => {
     expect(smsOptOut(text)).toBe(false)
   })

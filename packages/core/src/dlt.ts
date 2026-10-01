@@ -394,46 +394,85 @@ const SMS_STOP_WORDS = ['stop', 'stopall', 'stop all', 'unsubscribe', 'unsub', '
 /**
  * The keywords that may carry ONE trailing token — the "reply STOP <code>"
  * forms a commercial SMS footer asks for (`STOP 56161`, `STOP ACMEIN`,
- * `UNSUBSCRIBE ALL`). A token is one run of letters or digits, never a
- * sentence.
+ * `UNSUBSCRIBE ALL`), with an `all` allowed before the token
+ * (`STOP ALL 56161`, `UNSUBSCRIBE ALL ACMEIN`) and a comma, colon or dash
+ * allowed after the keyword (`STOP-56161`, `STOP: ACMEIN`). A token is one
+ * run of letters or digits, never a sentence.
  */
-const SMS_STOP_WITH_TOKEN = ['stop', 'stopall', 'unsubscribe', 'optout', 'opt out', 'opt-out']
+const SMS_STOP_WITH_TOKEN = ['stop', 'stopall', 'unsubscribe', 'unsub', 'optout', 'opt out', 'opt-out']
+const SMS_STOP_TOKEN_TAIL = /^[\s,:;-]+(?:all[\s,:;-]+)?[\p{L}\p{N}]{1,20}$/u
 
-/** SMS-shaped prose that says stop in so many words, whole-message only. */
-const SMS_STOP_PROSE =
-  /^(?:please\s+)?(?:stop\s+(?:texting|messaging|sms(?:ing)?|sending\s+(?:me\s+)?(?:texts|messages|sms))(?:\s+me)?|(?:do\s+not|don'?t)\s+(?:text|message|sms)\s+me(?:\s+again)?|no\s+more\s+(?:texts|messages|sms))$/
+/**
+ * SMS-shaped prose that says stop in so many words, whole-message only —
+ * and, after it, the whole-message forms of the email reader
+ * (`looksLikeOptOut` in packages/db), which the SMS recorder runs beside this
+ * one. Restated here so that a decoration at the ends the email reader does
+ * not strip ("Remove me 🙏", "Please stop :)") does not lose an opt-out both
+ * readers would otherwise have read. The apostrophe may be the typewriter one
+ * or the curly one a phone's keyboard puts in by default.
+ */
+const SMS_STOP_PROSE = new RegExp(
+  '^(?:(?:please|pls|plz|kindly)\\s+)?(?:' +
+    [
+      'stop\\s+(?:texting|messaging|sms(?:ing)?|sending\\s+(?:me\\s+)?(?:texts|messages|sms))(?:\\s+me)?',
+      "(?:do\\s+not|don['’]?t)\\s+(?:text|message|sms|contact|email)\\s+me(?:\\s+again)?",
+      'no\\s+more\\s+(?:texts|messages|sms|emails?)',
+      'stop',
+      'unsubscribe(?:\\s+me)?',
+      'remove\\s+me',
+      'opt(?:\\s+me)?[\\s-]?out',
+      'take\\s+me\\s+off\\s+(?:your|the)\\s+list',
+      'leave\\s+me\\s+alone',
+    ].join('|') +
+    ')$',
+  'u',
+)
+
+/**
+ * What may decorate an SMS at either END without changing what it says:
+ * whitespace, punctuation, symbols and emoji — a `)`, a `¡`, quotes, `:)`,
+ * `👍🏽`, a flag, a keycap's combining marks. Stripped only from the ends, so
+ * "Don't stop! 👍" is still prose about not stopping; digits and letters are
+ * never stripped, so a short code survives.
+ */
+const SMS_DECORATION =
+  '[\\s\\p{P}\\p{S}\\p{Extended_Pictographic}\\p{Emoji_Modifier}\\p{Regional_Indicator}\\u200d\\ufe0e\\ufe0f\\u20e3]+'
+const SMS_DECORATION_ENDS = new RegExp(`^${SMS_DECORATION}|${SMS_DECORATION}$`, 'gu')
 
 /**
  * Is this SMS an opt-out?
  *
  * Whole-message and case-insensitive: STOP, STOPALL, UNSUBSCRIBE, CANCEL,
  * END, QUIT and OPT OUT alone; the stop keywords followed by one token (a
- * short code or a brand keyword); any of them after "reply", "sms", "text"
- * or "send" (somebody repeating the footer back); and a few SMS-shaped
- * sentences ("stop texting me", "don't text me again"). Surrounding
- * whitespace and closing punctuation are ignored, and the text is NFKC-folded
- * so full-width letters read as letters.
+ * short code or a brand keyword), with an optional `all` before it; any of
+ * them after "reply", "sms", "text" or "send" (somebody repeating the footer
+ * back); and a few SMS-shaped sentences ("stop texting me", "don't text me
+ * again", "please stop"). Whitespace, punctuation, symbols and emoji at
+ * either end are ignored — `STOP)`, `¡STOP!`, `STOP 👍`, `"STOP"` — and the
+ * text is NFKC-folded so full-width letters read as letters.
  *
- * Deliberately narrow, like the email reader beside the send path
- * (`looksLikeOptOut` in packages/db), which the SMS recorder runs TOO — this
- * adds the keyword forms an SMS footer teaches people, and leaves prose to
- * the reader that already decides it. A match writes a SUPPRESSION, the
+ * Deliberately narrow in the middle, like the email reader beside the send
+ * path (`looksLikeOptOut` in packages/db), which the SMS recorder runs TOO —
+ * this adds the keyword forms an SMS footer teaches people, and the
+ * decoration a phone keyboard adds. A match writes a SUPPRESSION, the
  * strongest thing this system does, so a message that merely contains "stop"
- * somewhere is not one; every SMS reply pauses the person anyway.
+ * somewhere is not one ("stop by tomorrow", "don't stop"); every SMS reply
+ * pauses the person anyway. But a missed STOP is the worse error — it is
+ * stored as an ordinary reply, which answering it can resume — so the ends
+ * are read generously. CANCEL, END and QUIT stay opt-outs only alone.
  */
 export function smsOptOut(text: string | null | undefined): boolean {
   if (!text) return false
   const t = text
     .normalize('NFKC')
     .toLowerCase()
-    .replace(/[\s.!,;:]+$/u, '')
-    .replace(/^\s+/u, '')
+    .replace(SMS_DECORATION_ENDS, '')
     .replace(/\s+/gu, ' ')
   if (!t) return false
   const bare = t.replace(/^(?:reply|sms|text|send)\s+/, '')
   if (SMS_STOP_WORDS.includes(bare)) return true
   for (const word of SMS_STOP_WITH_TOKEN) {
-    if (bare.startsWith(`${word} `) && /^[\p{L}\p{N}]{1,20}$/u.test(bare.slice(word.length + 1))) return true
+    if (bare.startsWith(word) && SMS_STOP_TOKEN_TAIL.test(bare.slice(word.length))) return true
   }
   return SMS_STOP_PROSE.test(bare)
 }
