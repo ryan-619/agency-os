@@ -43,6 +43,8 @@ import {
 import {
   TEMPLATE_CHANNELS, matchesTemplate, smsOptOut, type TemplateCategory, type TemplateFacts,
 } from '@agency/core'
+// Review round 4: the deferrals a settle of an answer must not read as its end.
+import { REFUSALS_THE_CLOCK_RESOLVES } from '@agency/core'
 import * as schema from './schema.js'
 import { activeIcpProfile, type AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
@@ -336,7 +338,7 @@ export async function dispatchTouch(
 
   const facts = await gatherFacts(db, touch, now)
   if ('missing' in facts) {
-    await settle(db, touch.id, { status: 'refused', refusalCode: 'unparseable_recipient', error: facts.missing })
+    await settle(db, touch, { status: 'refused', refusalCode: 'unparseable_recipient', error: facts.missing }, now)
     return {
       touchId: touch.id,
       decision: { allowed: false, code: 'unparseable_recipient', reason: facts.missing, humanCanResolve: true },
@@ -352,9 +354,9 @@ export async function dispatchTouch(
       // A `queued` message whose campaign turned auto-send OFF between
       // queueing and now. Not refused: it goes to a person, which is what the
       // campaign now asks for.
-      await settle(db, touch.id, { status: 'awaiting_approval', refusalCode: null, recipient: facts.recipient })
+      await settle(db, touch, { status: 'awaiting_approval', refusalCode: null, recipient: facts.recipient }, now)
     } else {
-      await settle(db, touch.id, { status: 'refused', refusalCode: decision.code, recipient: facts.recipient })
+      await settle(db, touch, { status: 'refused', refusalCode: decision.code, recipient: facts.recipient }, now)
     }
     await appendAudit(db, {
       orgId: touch.orgId,
@@ -394,7 +396,7 @@ export async function dispatchTouch(
       // revoked consent — the answer to them is no, and nobody may approve
       // past it — and the recipient is NOT written back: the erasure blanked
       // it on purpose. Found by review.
-      await settle(db, touch.id, { status: 'refused', refusalCode: 'consent_revoked' })
+      await settle(db, touch, { status: 'refused', refusalCode: 'consent_revoked' }, now)
       return {
         touchId: touch.id,
         decision: {
@@ -410,7 +412,7 @@ export async function dispatchTouch(
     // suppression row — and a pause beside it, which must not be what is
     // recorded: the opt-out is the stronger statement.
     if (await anySuppressionMatches(db, touch.orgId, suppressionKeysFor(facts.recipient, facts.facts.channel) ?? [])) {
-      await settle(db, touch.id, { status: 'refused', refusalCode: 'suppressed', recipient: facts.recipient })
+      await settle(db, touch, { status: 'refused', refusalCode: 'suppressed', recipient: facts.recipient }, now)
       return {
         touchId: touch.id,
         decision: {
@@ -427,7 +429,7 @@ export async function dispatchTouch(
     // and enrolment reads it as one for good. Worded by its class, never its
     // text.
     if (fresh.pausedAt) {
-      await settle(db, touch.id, { status: 'refused', refusalCode: 'paused', recipient: facts.recipient })
+      await settle(db, touch, { status: 'refused', refusalCode: 'paused', recipient: facts.recipient }, now)
       return {
         touchId: touch.id,
         decision: {
@@ -440,7 +442,7 @@ export async function dispatchTouch(
       }
     }
     if (fresh.emailBouncedAt && facts.facts.channel === 'email') {
-      await settle(db, touch.id, { status: 'refused', refusalCode: 'bounced', recipient: facts.recipient })
+      await settle(db, touch, { status: 'refused', refusalCode: 'bounced', recipient: facts.recipient }, now)
       return {
         touchId: touch.id,
         decision: { allowed: false, code: 'bounced', reason: 'This address bounced a moment ago. Nothing was sent. Correct the address.', humanCanResolve: true },
@@ -483,7 +485,7 @@ export async function dispatchTouch(
     ? await registrationFor(db, touch)
     : undefined
   if (template === null) {
-    await settle(db, touch.id, { status: 'refused', refusalCode: 'no_template', recipient: facts.recipient })
+    await settle(db, touch, { status: 'refused', refusalCode: 'no_template', recipient: facts.recipient }, now)
     return {
       touchId: touch.id,
       decision: {
@@ -510,12 +512,12 @@ export async function dispatchTouch(
     // A provider failure is NOT a refusal — the rules said yes and the
     // transport did not work, which is a thing to retry. The distinction is
     // why `error` and `refusal_code` are separate columns.
-    await settle(db, touch.id, {
+    await settle(db, touch, {
       status: 'failed',
       refusalCode: null,
       recipient: facts.recipient,
       error: (err instanceof Error ? err.message : 'the provider failed').slice(0, 500),
-    })
+    }, now)
     await appendAudit(db, {
       orgId: touch.orgId,
       actor: 'system',
@@ -609,20 +611,42 @@ export async function dispatchTouch(
   return { touchId: touch.id, decision, sent: true }
 }
 
+/**
+ * Write where a message got to. Every terminal state `dispatchTouch` records
+ * goes through here.
+ *
+ * For an ANSWER to a reply that ends here without going — `failed` at the
+ * provider, or `refused` for good — the reply's own pause goes back on in
+ * the same transaction (`repauseForUnansweredReply`, review round 4): the
+ * draft resumed them, and a reply nobody answered is not a person every
+ * campaign may write to. Everything else is the one UPDATE it always was.
+ */
 async function settle(
   db: AgencyDb,
-  touchId: string,
+  touch: Pick<TouchRow, 'id' | 'orgId' | 'answersTouchId'>,
   state: { status: string; refusalCode: string | null; recipient?: string; error?: string },
+  now: Date,
 ): Promise<void> {
-  await db
-    .update(schema.touches)
-    .set({
-      status: state.status,
-      refusalCode: state.refusalCode,
-      ...(state.recipient !== undefined ? { recipient: recipientUnlessErased(state.recipient) } : {}),
-      ...(state.error !== undefined ? { error: state.error } : {}),
-    })
-    .where(eq(schema.touches.id, touchId))
+  const write = (d: AgencyDb) =>
+    d
+      .update(schema.touches)
+      .set({
+        status: state.status,
+        refusalCode: state.refusalCode,
+        ...(state.recipient !== undefined ? { recipient: recipientUnlessErased(state.recipient) } : {}),
+        ...(state.error !== undefined ? { error: state.error } : {}),
+      })
+      .where(eq(schema.touches.id, touch.id))
+  const ended = touch.answersTouchId ? answerEndedBy(state.status, state.refusalCode) : null
+  if (!ended) {
+    await write(db)
+    return
+  }
+  await db.transaction(async (transaction) => {
+    const tx = transaction as unknown as AgencyDb
+    await write(tx)
+    await repauseForUnansweredReply(tx, { orgId: touch.orgId, answer: touch, actor: 'system', because: ended, now })
+  })
 }
 
 /**
@@ -1434,7 +1458,7 @@ export async function approveDraft(
  * resolves, and the audit row names the code.
  *
  * Denying an ANSWER to a reply also puts back the pause the reply caused,
- * when drafting that answer is what lifted it (`repauseForDeniedAnswer`,
+ * when drafting that answer is what lifted it (`repauseForUnansweredReply`,
  * review round 3): the reply is unanswered again, and a person whose reply
  * nobody answered is not somebody every campaign may write to.
  */
@@ -1452,7 +1476,7 @@ export async function denyDraft(
   const now = args.now ?? new Date()
   const refusalCode = await denialCode(db, args.orgId, args.touchId, now)
   // One transaction (review round 3): the deny, and for an answer to a reply
-  // the pause it puts back (`repauseForDeniedAnswer`), land together or not
+  // the pause it puts back (`repauseForUnansweredReply`), land together or not
   // at all. The `draft.denied` row below stays outside it, caught as before:
   // a caught failure INSIDE a transaction would leave it aborted, and its
   // COMMIT would roll back the deny without a word.
@@ -1475,7 +1499,9 @@ export async function denyDraft(
       )
       .returning()
     const denied = updated[0]
-    if (denied?.answersTouchId) await repauseForDeniedAnswer(tx, args.orgId, denied, args.decidedBy, now)
+    if (denied?.answersTouchId) {
+      await repauseForUnansweredReply(tx, { orgId: args.orgId, answer: denied, actor: args.decidedBy, because: 'denied', now })
+    }
     return denied
   })
   if (!row) {
@@ -1500,35 +1526,124 @@ export async function denyDraft(
 }
 
 /**
- * Put back the pause a reply caused when the answer that lifted it is denied
- * (review round 3).
+ * How an answer to a reply ended without going, in the words its re-pause
+ * is recorded with. `denied` is a person's no on /approvals; `failed` the
+ * provider's; `refused` the send path's at the moment of sending; `bounced`
+ * a delivery report's cancel of everything still waiting for that address.
+ */
+export type AnswerEnded = 'denied' | 'failed' | 'refused' | 'bounced'
+
+/**
+ * Whether settling an answer in this state leaves its reply unanswered — and
+ * how — or null when it does not (review round 4).
+ *
+ * `failed` always: the provider did not take it, and nothing retries a
+ * failed row. `refused` for good, with two exceptions. A deferral the clock
+ * resolves (`REFUSALS_THE_CLOCK_RESOLVES`: quiet hours, the cap, a paused
+ * campaign) is not an ending — the sender's tick and the LinkedIn step put
+ * that row back `approved` with `scheduled_for`, and a pause written here
+ * would refuse it when it came round again. And `suppressed`: the person is
+ * on the list, which is the stronger statement, and the writer that put
+ * them there — an unsubscribe, a reply that said stop — pauses them itself
+ * with its own reason, after the suppression row. A `replied` pause landing
+ * between those two writes would be kept by that writer's idempotent pause,
+ * and an opt-out would read as a reply waiting for an answer.
+ */
+export function answerEndedBy(status: string, refusalCode: string | null): AnswerEnded | null {
+  if (status === 'failed') return 'failed'
+  if (status !== 'refused') return null
+  if (refusalCode !== null && REFUSALS_THE_CLOCK_RESOLVES.has(refusalCode)) return null
+  if (refusalCode === 'suppressed') return null
+  return 'refused'
+}
+
+/** What the re-pause's audit row says, by how the answer ended. Under 80 characters: /audit quotes it. */
+const UNANSWERED_AGAIN: Record<Exclude<AnswerEnded, 'denied'>, string> = {
+  failed: 'their reply is unanswered again: the answer to it failed to send',
+  refused: 'their reply is unanswered again: the answer to it was refused at sending',
+  bounced: 'their reply is unanswered again: the answer to it was cancelled by a bounce',
+}
+
+/**
+ * Put back the pause a reply caused when the answer that lifted it never
+ * goes (review rounds 3 and 4).
  *
  * The inbox resumes a person when an answer to their reply is DRAFTED
  * (`replyQueueDraft`, inbox.ts) — /approvals would otherwise refuse the
- * answer itself as `paused`. A deny leaves the reply unanswered, and before
- * this every campaign was live for them again: a cold opener in another
- * campaign read "nothing stops it" over a reply nobody had answered. So the
- * pause goes back on, with the reply's own `replied <instant>` reason — the
- * shape `recordInboundReply` writes and `pauseReasonClass` reads — when:
+ * answer itself as `paused`. An answer that is then denied, fails at the
+ * provider, is refused for good at sending, or is cancelled by a bounce
+ * leaves the reply unanswered, and before this every campaign was live for
+ * them again: a cold opener in another campaign read "nothing stops it"
+ * over a reply nobody had answered. Round 3 covered the deny alone; every
+ * writer that settles an answer `failed` or `refused` now calls this, in
+ * its own transaction, so the settle and the pause land together or not at
+ * all — `settle` for each of `dispatchTouch`'s, `denyDraft`, and the
+ * bounce's cancel (`outreachRecordBounce`). Exported for the writers
+ * outside this file that settle a row `failed`: the stuck-send recovery and
+ * the LinkedIn step's "I did not send it".
+ *
+ * The pause goes back on, with the reply's own `replied <instant>` reason —
+ * the shape `recordInboundReply` writes and `pauseReasonClass` reads — when:
  *
  *  - this answer is what resumed them (`reply.answer_drafted` says
  *    `resumed: true`);
  *  - nobody has resumed them since (no later `contact.resumed` row,
  *    compared in SQL by id: a `Date` holds milliseconds and the column
  *    microseconds, and the inbox's own resume row shares the draft's
- *    instant) — a person's own Resume on /contacts stands;
+ *    instant) — a person's own Resume on /contacts stands. That row is
+ *    written in the resume's own transaction (`contactResumeByHand`, round
+ *    4), and the contact is LOCKED before the log is read, so a resume in
+ *    flight is waited for and then seen;
  *  - no other answer of theirs is still on its way, which will answer them.
  *
- * `pauseContact` keeps any pause they have now, a teammate's included.
+ * The contact is the REPLY's — the person drafting the answer resumed — not
+ * whatever the answer row names now. `pauseContact` keeps any pause they
+ * have now: a teammate's hold, an unsubscribe's, an unrecorded opt-out's or
+ * an unfinished erasure's is never replaced by `replied`.
+ *
+ * Returns whether it paused them. Never `.catch`-ed by a caller: a pause
+ * nobody can see in the log is one nobody can explain, and a fault here
+ * rolls back the settle beside it rather than leaving a settled answer and
+ * a resumed person with no record of why.
  */
-async function repauseForDeniedAnswer(
+export async function repauseForUnansweredReply(
   db: AgencyDb,
-  orgId: string,
-  answer: TouchRow,
-  decidedBy: string,
-  now: Date,
-): Promise<void> {
-  if (!answer.answersTouchId || !answer.contactId) return
+  args: {
+    readonly orgId: string
+    readonly answer: Pick<TouchRow, 'id' | 'answersTouchId'>
+    /** A user id for a deny; `system` for everything the send path settles. */
+    readonly actor: string
+    readonly because: AnswerEnded
+    readonly now: Date
+  },
+): Promise<boolean> {
+  const { orgId, answer } = args
+  if (!answer.answersTouchId) return false
+  const [reply] = await db
+    .select({ contactId: schema.touches.contactId, sentAt: schema.touches.sentAt, createdAt: schema.touches.createdAt })
+    .from(schema.touches)
+    .where(
+      and(
+        eq(schema.touches.id, answer.answersTouchId),
+        eq(schema.touches.orgId, orgId),
+        eq(schema.touches.direction, 'in'),
+      ),
+    )
+    .limit(1)
+  const contactId = reply?.contactId
+  if (!reply || !contactId) return false
+
+  // Locked first (review round 4): a /contacts resume in flight holds this
+  // row until its audit row commits beside it, and the reads below then see
+  // that row. Already paused, there is nothing to put back.
+  const [contact] = await db
+    .select({ pausedAt: schema.contacts.pausedAt })
+    .from(schema.contacts)
+    .where(and(eq(schema.contacts.id, contactId), eq(schema.contacts.orgId, orgId)))
+    .limit(1)
+    .for('update')
+  if (!contact || contact.pausedAt) return false
+
   const [drafted] = await db
     .select({ id: schema.auditLog.id })
     .from(schema.auditLog)
@@ -1541,7 +1656,7 @@ async function repauseForDeniedAnswer(
       ),
     )
     .limit(1)
-  if (!drafted) return
+  if (!drafted) return false
 
   const resumedSince = await db
     .select({ id: schema.auditLog.id })
@@ -1551,12 +1666,12 @@ async function repauseForDeniedAnswer(
         eq(schema.auditLog.orgId, orgId),
         eq(schema.auditLog.action, 'contact.resumed'),
         eq(schema.auditLog.subjectType, 'contact'),
-        eq(schema.auditLog.subjectId, answer.contactId),
+        eq(schema.auditLog.subjectId, contactId),
         sql`${schema.auditLog.createdAt} > (SELECT a.created_at FROM audit_log a WHERE a.id = ${drafted.id})`,
       ),
     )
     .limit(1)
-  if (resumedSince.length > 0) return
+  if (resumedSince.length > 0) return false
 
   const otherAnswer = await db
     .select({ id: schema.touches.id })
@@ -1564,7 +1679,7 @@ async function repauseForDeniedAnswer(
     .where(
       and(
         eq(schema.touches.orgId, orgId),
-        eq(schema.touches.contactId, answer.contactId),
+        eq(schema.touches.contactId, contactId),
         eq(schema.touches.direction, 'out'),
         isNotNull(schema.touches.answersTouchId),
         inArray(schema.touches.status, ['queued', 'awaiting_approval', 'approved', 'sending']),
@@ -1572,37 +1687,30 @@ async function repauseForDeniedAnswer(
       ),
     )
     .limit(1)
-  if (otherAnswer.length > 0) return
+  if (otherAnswer.length > 0) return false
 
-  const [reply] = await db
-    .select({ sentAt: schema.touches.sentAt, createdAt: schema.touches.createdAt })
-    .from(schema.touches)
-    .where(
-      and(
-        eq(schema.touches.id, answer.answersTouchId),
-        eq(schema.touches.orgId, orgId),
-        eq(schema.touches.direction, 'in'),
-      ),
-    )
-    .limit(1)
-  if (!reply) return
-
-  const paused = await pauseContact(db, orgId, answer.contactId, `replied ${(reply.sentAt ?? reply.createdAt).toISOString()}`, now)
-  if (!paused) return
-  // Uncaught, inside the deny's transaction: a pause nobody can see in the
-  // log is one nobody can explain.
+  const paused = await pauseContact(db, orgId, contactId, `replied ${(reply.sentAt ?? reply.createdAt).toISOString()}`, args.now)
+  if (!paused) return false
+  // Uncaught, inside the settle's transaction. A deny keeps the shape /audit
+  // words as "the answer to their reply was denied"; every other ending is
+  // quoted from its own `reason`, and names the answer rather than the reply
+  // — that sentence keys on `inboundTouchId` and would call a failure a deny.
   await appendAudit(db, {
     orgId,
-    actor: decidedBy,
+    actor: args.actor,
     action: 'contact.paused',
     subjectType: 'contact',
-    subjectId: answer.contactId,
-    detail: {
-      reason: 'their reply is unanswered again: the answer to it was denied',
-      alreadyPaused: false,
-      inboundTouchId: answer.answersTouchId,
-    },
+    subjectId: contactId,
+    detail:
+      args.because === 'denied'
+        ? {
+            reason: 'their reply is unanswered again: the answer to it was denied',
+            alreadyPaused: false,
+            inboundTouchId: answer.answersTouchId,
+          }
+        : { reason: UNANSWERED_AGAIN[args.because], alreadyPaused: false, answerTouchId: answer.id, answerEnded: args.because },
   })
+  return true
 }
 
 /**
@@ -1773,6 +1881,10 @@ export async function pauseContactOverriding(
  * written between the inbox's read and its resume was wiped. Under READ
  * COMMITTED a concurrent writer that commits first makes the UPDATE
  * re-evaluate the row and match nothing, and the caller is told `false`.
+ * With it, the row must also still BE paused (review round 4): null matched
+ * a contact who was not paused at all, so a Resume on a stale tab answered
+ * "resumed" and wrote a `contact.resumed` row for a resume that never
+ * happened — a row `repauseForUnansweredReply` reads as a person's decision.
  * Omitted, the resume is unconditional, as it always was.
  */
 export async function resumeContact(
@@ -1788,6 +1900,7 @@ export async function resumeContact(
       and(
         eq(schema.contacts.orgId, orgId),
         eq(schema.contacts.id, contactId),
+        opts.expectedReason === undefined ? undefined : isNotNull(schema.contacts.pausedAt),
         opts.expectedReason === undefined
           ? undefined
           : opts.expectedReason === null
@@ -2223,7 +2336,9 @@ export interface InboundBounce {
  * Only EMAIL touches are cancelled: the address that failed is the email
  * one, and the person may still be reachable on LinkedIn. `sending` rows
  * are left alone, as a reply leaves them — the worker owns those, and the
- * last look before the wire in `dispatchTouch` refuses them.
+ * last look before the wire in `dispatchTouch` refuses them. A cancelled
+ * ANSWER to their reply puts that reply's pause back, in this transaction
+ * (`repauseForUnansweredReply`).
  *
  * `address`, when given, must still be the contact's email for the mark to
  * land: a report about the address somebody corrected an hour ago is about
@@ -2280,7 +2395,16 @@ export async function outreachRecordBounce(
           inArray(schema.touches.status, ['queued', 'awaiting_approval', 'approved']),
         ),
       )
-      .returning({ id: schema.touches.id })
+      .returning({ id: schema.touches.id, answersTouchId: schema.touches.answersTouchId })
+    // An answer to their reply among them leaves that reply unanswered: its
+    // pause goes back on, here, with the cancel (review round 4). A bounce
+    // pauses nobody itself, so there is no stronger reason to keep.
+    for (const answer of cancelled) {
+      if (!answer.answersTouchId) continue
+      await repauseForUnansweredReply(tx as unknown as AgencyDb, {
+        orgId: args.orgId, answer, actor: 'system', because: 'bounced', now,
+      })
+    }
     return { marked: true, cancelled: cancelled.length }
   })
 
