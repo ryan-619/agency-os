@@ -122,10 +122,15 @@ export function answerIsLive(status: string): boolean {
 }
 
 /**
- * The sentences at the top of the page when this deployment cannot keep the
- * page's promise: nothing reading replies at all, or a webhook with no worker
- * — where a reply can only be placed by its address, because this deployment
- * has sent nothing whose Message-ID it could answer.
+ * The sentences at the top of the page when this deployment's configuration
+ * cannot keep the page's promise: nothing configured to read replies at all,
+ * or a webhook with no worker configured.
+ *
+ * Configuration only, worded as such: a worker on Fly can be sending against
+ * this database while this web half holds no AGENT_URL, and the webhook then
+ * matches its Message-IDs in the shared database (`handleInboundEmail` reads
+ * `provider_id`). "Nothing has been sent from this deployment, so there is no
+ * Message-ID to match" was false in exactly that shape. Round 3, [20].
  */
 export function inboxDeploymentNotes(d: Deployment): string[] {
   const notes: string[] = []
@@ -133,9 +138,9 @@ export function inboxDeploymentNotes(d: Deployment): string[] {
   if (none) notes.push(none)
   if (!d.worker && d.inbound === 'webhook') {
     notes.push(
-      'Replies reach this deployment through a webhook and no worker is connected, so only replies from an ' +
-        'address on exactly one contact can be matched here — nothing has been sent from this deployment, so ' +
-        'there is no Message-ID to match.',
+      'Replies reach this deployment through a webhook, and no worker is configured here. A reply is matched ' +
+        'first by the Message-ID of a message a worker sent, then by an address on exactly one contact — so if ' +
+        'no worker sends against this database, only the address can place a reply.',
     )
   }
   return notes

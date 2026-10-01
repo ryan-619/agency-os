@@ -142,11 +142,26 @@ export interface DeploymentFact {
 /** Every flag this deployment has, as a sentence — "why does nothing send?" as a page. */
 export function deploymentFacts(i: DeploymentFactInput): readonly DeploymentFact[] {
   const f = i.flags
-  const replyWays = [
-    f.worker ? 'the worker’s mailbox reader' : null,
+  const webhooks = [
     i.inboundJson ? 'the inbound webhook (/api/inbound/email)' : null,
     i.inboundResend ? 'Resend’s inbound webhook (/api/inbound/resend)' : null,
   ].filter((w): w is string => w !== null)
+  // Configuration only, like Sending: a worker on Fly reads its mailbox
+  // against this database whether or not this web half holds its URL, so the
+  // worker's part is the heartbeat's to say. Review round 3, finding [20].
+  const workerPart = f.worker
+    ? 'whether it reads a mailbox is the heartbeat’s question.'
+    : null
+  let replies: string
+  if (webhooks.length > 0) {
+    replies = `Accepted by ${webhooks.join(' and ')}.${workerPart ? ` A worker is configured too; ${workerPart}` : ''}`
+  } else if (workerPart) {
+    replies = `No inbound webhook is configured. This deployment is configured to reach a worker; ${workerPart}`
+  } else {
+    replies =
+      'No inbound webhook is configured, and this deployment is not configured to reach a worker. Unless the ' +
+      'heartbeat shows one reading a mailbox against this database, no reply is read.'
+  }
 
   let cron: string
   if (!f.cron) cron = 'Not run: every /api/cron route answers 503 without the secret, so nothing rescans or sends a digest on a schedule.'
@@ -180,12 +195,9 @@ export function deploymentFacts(i: DeploymentFactInput): readonly DeploymentFact
     },
     {
       area: 'Replies',
-      on: replyWays.length > 0,
-      sentence:
-        replyWays.length > 0
-          ? `Read by ${replyWays.join(' and ')}.`
-          : 'Not read on this deployment: no worker reads a mailbox and no inbound webhook is configured, so a reply cannot pause a sequence here.',
-      vars: ['INBOUND_WEBHOOK_SECRET', 'RESEND_WEBHOOK_SECRET', 'RESEND_API_KEY'],
+      on: webhooks.length > 0 || f.worker,
+      sentence: replies,
+      vars: ['AGENT_URL', 'AGENT_INTERNAL_TOKEN', 'INBOUND_WEBHOOK_SECRET', 'RESEND_WEBHOOK_SECRET', 'RESEND_API_KEY'],
     },
     {
       // The web app's SMTP carries sign-in links only. Outreach goes through

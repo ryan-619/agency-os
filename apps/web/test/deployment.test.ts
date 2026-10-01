@@ -107,8 +107,21 @@ describe('nothingWillSendNote', () => {
 
   it('says so without one, whatever else is configured', () => {
     expect(nothingWillSendNote(facts({ inbound: 'webhook', cron: true, slack: true, unsubscribe: true }))).toMatch(
-      /No agent worker is connected to this deployment/,
+      /No agent worker is configured on this deployment/,
     )
+  })
+
+  /**
+   * `worker` is CONFIGURATION: a worker on Fly sends against this database
+   * whether or not this web half holds AGENT_URL — the documented production
+   * shape. So the sentence says what is not configured here and where the
+   * observation is, never that nothing will be sent. Round 3, finding [20].
+   */
+  it('says what is configured, never that nothing will be sent or no reply read', () => {
+    const note = nothingWillSendNote(facts({}))!
+    expect(note).not.toMatch(/No agent worker is connected|nothing queued here will be sent|no replies are being read/)
+    expect(note).toContain('unless one runs against this database elsewhere')
+    expect(note).toContain('/settings/deployment')
   })
 })
 
@@ -121,9 +134,14 @@ describe('noRepliesReadNote', () => {
     expect(noRepliesReadNote(facts({ inbound: 'webhook' }))).toBeNull()
   })
 
-  it('says so with neither', () => {
+  it('says so with neither — as configuration, pointing at the observation', () => {
     expect(noRepliesReadNote(facts({}))).toBe(
-      'No worker is reading a mailbox and no inbound webhook is configured on this deployment, so nothing here can learn that somebody replied. The queue is honest — it is just not being read.',
+      'No worker is configured on this deployment and no inbound webhook is set up, so nothing here reads replies. ' +
+        'Only a worker running against this database elsewhere could — /settings/deployment shows whether one is.',
     )
+  })
+
+  it('no longer states as fact that no worker reads a mailbox (round 3, finding [20])', () => {
+    expect(noRepliesReadNote(facts({}))).not.toMatch(/No worker is reading a mailbox|nothing here can learn/)
   })
 })
