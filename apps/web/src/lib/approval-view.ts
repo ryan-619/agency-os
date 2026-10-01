@@ -35,6 +35,14 @@ export interface CandidateDecision {
   readonly humanCanResolve: boolean
   /** The rule's own sentence, from `decideSend` — null when nothing stops it. */
   readonly reason: string | null
+  /**
+   * A `stale_evidence` refusal because a newer successful scan SUPERSEDED
+   * the one the words quote, not because it aged (r4, `decideGathered`).
+   * Present only when true. The re-scan has happened, so the fix is a new
+   * draft from the latest scan, and `approveBlock` says that instead of
+   * "re-scan".
+   */
+  readonly evidenceSuperseded?: true
 }
 
 /**
@@ -47,10 +55,23 @@ export type PreviewDecision =
 
 const SEND_NOW_WORDS = 'nothing stops it right now'
 
+/**
+ * How `decideGathered` (packages/db, outreach.ts) opens the sentence of a
+ * `stale_evidence` refusal whose scan was superseded rather than aged. The
+ * page hands this file `previewSend`'s decision and nothing else, and the
+ * facts beside it cannot tell aged-and-superseded (worded as the deadline)
+ * from superseded alone — so the sentence the card already shows is what
+ * says which, and the block above it cannot contradict it.
+ * `test/approval-view.test.ts` runs the real `decideGathered`, so a
+ * rewording there fails that test rather than going quiet here.
+ */
+const SUPERSEDED_REASON = /^A newer scan of this company has reached the site since the scan these words quote\b/
+
 /** A `previewSend` decision in the words the card shows. */
 export function decisionView(d: PreviewDecision): CandidateDecision {
   if (d.allowed) return { code: 'send_now', words: SEND_NOW_WORDS, humanCanResolve: true, reason: null }
-  return { code: d.code, words: refusalWords(d.code), humanCanResolve: d.humanCanResolve, reason: d.reason }
+  const view = { code: d.code, words: refusalWords(d.code), humanCanResolve: d.humanCanResolve, reason: d.reason }
+  return d.code === 'stale_evidence' && SUPERSEDED_REASON.test(d.reason) ? { ...view, evidenceSuperseded: true } : view
 }
 
 /**
@@ -98,6 +119,10 @@ export function candidateLine(decision: CandidateDecision | null): string {
  * fix for it: every person at the company gets the same words, and the
  * words are what aged. Denying such a draft records it as `stale_evidence`
  * (`denyDraft`), which a re-scan resolves, so enrolment can draft them again.
+ * Words whose scan a newer one SUPERSEDED (`evidenceSuperseded`) get a
+ * sentence of their own: the scan may be days old, so "past its deadline"
+ * would be false, and the re-scan is what already happened — the fix is a
+ * new draft from the latest scan.
  *
  * A pause has its own too, because "deny the draft" is the wrong advice for
  * it: a pause is lifted by a person (the rule's own sentence says how, by
@@ -107,6 +132,13 @@ export function candidateLine(decision: CandidateDecision | null): string {
  */
 export function approveBlock(decision: CandidateDecision | null): string | null {
   if (decision === null || decision.humanCanResolve) return null
+  if (decision.code === 'stale_evidence' && decision.evidenceSuperseded) {
+    return (
+      `Approving is pointless: ${decision.words} — a newer scan of the company has run since the one it was ` +
+      'written from, and only the latest scan is quoted in anything outbound, so nobody may approve past that. ' +
+      'Deny it, then draft it again from the latest scan.'
+    )
+  }
   if (decision.code === 'stale_evidence') {
     return (
       `Approving is pointless: ${decision.words} — the scan it was written from is past its re-verification ` +
@@ -529,6 +561,24 @@ export const LINKEDIN_APPROVED =
 const isLinkedIn = (channel: string): boolean => channel === 'linkedin'
 
 /**
+ * An SMS goes through DoveSoft, and only where the WORKER holds
+ * DOVESOFT_API_KEY and DOVESOFT_ENTITY_ID — its host, which this web half
+ * cannot see. A worker with SMS off reports the row unserved and leaves it
+ * alone, so "the worker will send it" was a promise nothing here could
+ * keep. The worker writes whether SMS is on into its heartbeat, and the
+ * dashboard's worker line reads it; that is where to look.
+ */
+const SMS_APPROVED =
+  'Approved. An SMS goes only through DoveSoft, and only if SMS is switched on where the worker runs ' +
+  '(DOVESOFT_API_KEY and DOVESOFT_ENTITY_ID on its host, which this page cannot see) — the dashboard’s worker ' +
+  'line says whether it is. Every rule is checked again at sending, the registered template included.'
+
+const SMS_APPROVED_NO_WORKER =
+  'Approved, and queued. No worker is configured on this deployment, so it goes only if one runs against this ' +
+  'database elsewhere with SMS switched on — through DoveSoft, with DOVESOFT_API_KEY and DOVESOFT_ENTITY_ID on its ' +
+  'host — and every rule is checked at that moment, not now, the registered template included.'
+
+/**
  * The line beside Approve. With no worker configured, "the worker re-checks"
  * describes something this deployment does not know is there, so the line
  * says what it does know; the queue shows `nothingWillSendNote()` once, above
@@ -543,6 +593,7 @@ export function approveFootnote(noSenderNote: string | null, channel = 'email'):
 /** What the card says once a draft is approved. */
 export function approvedMessage(channel: string, noSenderNote: string | null): string {
   if (isLinkedIn(channel)) return LINKEDIN_APPROVED
+  if (channel === 'sms') return noSenderNote === null ? SMS_APPROVED : SMS_APPROVED_NO_WORKER
   return noSenderNote === null
     ? 'Approved. The worker will send it on its next pass — after checking the suppression list, ' +
         'consent, quiet hours and the daily cap again. If it lands in quiet hours it waits for morning.'

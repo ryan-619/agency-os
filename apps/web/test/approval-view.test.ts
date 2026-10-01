@@ -9,7 +9,8 @@
  * never one keypress: `a` arms, Enter on the same card approves, anything
  * else disarms (§2.4 — a stray key must never be an outbound message).
  */
-import type { SendRefusalCode } from '@agency/core'
+import type { SendFacts, SendRefusalCode } from '@agency/core'
+import { decideGathered } from '@agency/db/queries'
 import { describe, expect, it } from 'vitest'
 import {
   ANSWER_EVIDENCE_NOTE, APPROVE_DOES_NOT_SEND, DEFERRED_CODES, EVIDENCE_LINES_SHOWN, MISSING_EVIDENCE_NOTE,
@@ -156,6 +157,75 @@ describe('approveBlock', () => {
 
   it('leaves Approve enabled when nothing stops the message', () => {
     expect(approveBlock(decisionView({ allowed: true, code: 'send_now' }))).toBeNull()
+  })
+})
+
+/**
+ * Round 4 refuses words whose scan a newer SUCCESSFUL scan has superseded,
+ * with the same `stale_evidence` code and its own sentence
+ * (`decideGathered`). The block above that sentence said "past its
+ * re-verification deadline … re-scan the company" — false about a scan
+ * three days old, and the re-scan is exactly what already happened. The
+ * page hands this file the decision and nothing else, so the reason
+ * `decideGathered` wrote is what tells the two apart; these run the real
+ * function, so a rewording there fails here rather than on the page.
+ */
+describe('a draft whose scan a newer one superseded', () => {
+  const FACTS: SendFacts = {
+    channel: 'email',
+    recipient: 'priya@rentman.io',
+    suppressed: false,
+    consent: null,
+    paused: false,
+    evidenceStale: true,
+    template: null,
+    recipientTimeZone: 'Europe/London',
+    quietStart: '21:00',
+    quietEnd: '08:00',
+    sentToday: 0,
+    dailyCap: 25,
+    campaignStatus: 'active',
+    autoSend: false,
+    approvedByHuman: true,
+    now: new Date('2026-09-30T12:00:00Z'),
+  }
+  const view = (aged: boolean, superseded: boolean): CandidateDecision => {
+    const d = decideGathered({ facts: FACTS, evidenceAged: aged, evidenceSuperseded: superseded })
+    if (d.allowed) throw new Error('the facts above must be refused')
+    expect(d.code).toBe('stale_evidence')
+    return decisionView(d)
+  }
+
+  it('says the re-scan happened: deny it and draft it again from the latest scan', () => {
+    const d = view(false, true)
+    expect(d.evidenceSuperseded).toBe(true)
+    expect(d.humanCanResolve).toBe(false)
+    const block = approveBlock(d)
+    expect(block).toBe(
+      'Approving is pointless: the evidence it quotes is stale — a newer scan of the company has run since the one ' +
+        'it was written from, and only the latest scan is quoted in anything outbound, so nobody may approve past ' +
+        'that. Deny it, then draft it again from the latest scan.',
+    )
+    expect(block).not.toMatch(/re-verification deadline|re-scan/)
+    expect(candidateLine(d)).toBe('the evidence it quotes is stale — nobody may approve past this')
+  })
+
+  it('keeps the deadline and the re-scan for aged words, superseded as well or not — the reason beside it says the same', () => {
+    for (const superseded of [false, true]) {
+      const d = view(true, superseded)
+      expect(d.evidenceSuperseded).toBeUndefined()
+      expect(d.reason).not.toMatch(/^A newer scan/)
+      expect(approveBlock(d)).toContain('past its re-verification deadline')
+      expect(approveBlock(d)).toContain('Deny it, re-scan the company, then draft it again.')
+    }
+  })
+
+  it('reads the superseded sentence only on a stale-evidence refusal', () => {
+    const reason = view(false, true).reason!
+    const other = decisionView({ allowed: false, code: 'paused', reason, humanCanResolve: false })
+    expect(other.evidenceSuperseded).toBeUndefined()
+    expect(approveBlock(other)).toContain('nobody may approve past a pause')
+    expect(decisionView({ allowed: true, code: 'send_now' })).not.toHaveProperty('evidenceSuperseded')
   })
 })
 
@@ -574,5 +644,41 @@ describe('an SMS draft’s card', () => {
     const block = approveBlock({ code: 'template_mismatch', words: 'not its registered template', reason: 'x', humanCanResolve: false })
     expect(block).toContain('the operator would not deliver it')
     expect(block).toContain('draft it again from an active registered template')
+  })
+})
+
+/**
+ * An approved SMS goes only through DoveSoft, and only where the WORKER
+ * holds DOVESOFT_API_KEY and DOVESOFT_ENTITY_ID — a host this page cannot
+ * see. "The worker will send it on its next pass" promised a send that a
+ * worker with SMS off leaves alone for ever (it reports the row unserved).
+ * So the SMS words say where it goes, what decides whether it does, where
+ * that is shown, and that the registered template is checked again.
+ */
+describe('what approving an SMS says', () => {
+  const note = 'No agent worker is configured.'
+
+  it('says it goes through DoveSoft only if SMS is switched on where the worker runs, and where that is shown', () => {
+    const said = approvedMessage('sms', null)
+    expect(said).toBe(
+      'Approved. An SMS goes only through DoveSoft, and only if SMS is switched on where the worker runs ' +
+        '(DOVESOFT_API_KEY and DOVESOFT_ENTITY_ID on its host, which this page cannot see) — the dashboard’s worker ' +
+        'line says whether it is. Every rule is checked again at sending, the registered template included.',
+    )
+    expect(said).not.toContain('The worker will send it on its next pass')
+  })
+
+  it('says what is configured without a worker, never that nothing will send', () => {
+    const said = approvedMessage('sms', note)
+    expect(said).toContain('No worker is configured on this deployment')
+    expect(said).toContain('DoveSoft')
+    expect(said).toContain('the registered template included')
+    expect(said).not.toMatch(/nothing (on this deployment )?will (send|until)/i)
+  })
+
+  it('leaves the email and LinkedIn words as they were', () => {
+    expect(approvedMessage('email', null)).toContain('The worker will send it on its next pass')
+    expect(approvedMessage('email', null)).not.toContain('DoveSoft')
+    expect(approvedMessage('linkedin', null)).toBe(LINKEDIN_APPROVED)
   })
 })
