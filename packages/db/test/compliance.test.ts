@@ -252,6 +252,11 @@ describe('the compliance counts', () => {
           template: { active: true, matches: false, category: 'service_implicit' },
         },
         unknown_timezone: { recipientTimeZone: null },
+        // Review round 5: a promotional SMS to an Indian number read in Denver, whose band never opens.
+        band_never_opens: {
+          channel: 'sms', recipient: '+919876543210', consent: { granted: true, source: 'form' },
+          template: { active: true, matches: true, category: 'promotional' }, recipientTimeZone: 'America/Denver',
+        },
         quiet_hours: { now: new Date('2026-09-15T23:00:00.000Z') },
         daily_cap: { sentToday: 25 },
         campaign_inactive: { campaignStatus: 'paused' },

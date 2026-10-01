@@ -13,9 +13,9 @@
  */
 import { describe, it, expect } from 'vitest'
 import {
-  COLD_CHANNELS, OPT_IN_ONLY_CHANNELS, classifyReply, decideSend, isQuiet, localMinutes, pauseReasonClass,
-  suppressionKeysFor,
-  type Channel, type PauseReasonClass, type SendFacts,
+  COLD_CHANNELS, DEFER_FALLBACK_MS, DEFER_MAX_MS, DEFER_SLOW_MS, OPT_IN_ONLY_CHANNELS, REFUSALS_THE_CLOCK_RESOLVES,
+  classifyReply, decideSend, deferUntil, isQuiet, localMinutes, pauseReasonClass, suppressionKeysFor,
+  type Channel, type PauseReasonClass, type SendDecision, type SendFacts,
 } from '../src/index.js'
 
 /** Midday UTC on a Tuesday, which is midday in London and 08:00 in New York. */
@@ -856,7 +856,9 @@ describe('the ORDER the rules fire in', () => {
   /**
    * 0019. On SMS the two template steps sit after the bounce and before the
    * clock, and a promotional SMS outside TRAI's band is the clock — deferred
-   * as `quiet_hours`, after the campaign's own quiet hours. A recorded
+   * as `quiet_hours`, after the campaign's own quiet hours — unless the band
+   * never opens at all, `band_never_opens`, which comes before the campaign's
+   * quiet hours because they would only defer it (review round 5). A recorded
    * refusal of SMS is `cold_channel_forbidden` (step 0 needs a GRANTED
    * opt-in), so `consent_revoked` has no row here.
    */
@@ -885,6 +887,7 @@ describe('the ORDER the rules fire in', () => {
       [{ template: null }, 'no_template'],
       [{ template: { active: true, matches: false, category: 'promotional' } }, 'template_mismatch'],
       [{ recipientTimeZone: null }, 'unknown_timezone'],
+      [{ recipientTimeZone: 'America/Denver', template: promo }, 'band_never_opens', /never overlap/],
       [{ now: ELEVEN_PM_IST, template: promo }, 'quiet_hours', /^It is currently quiet hours/],
       [{ now: NINE_AM_IST, template: promo }, 'quiet_hours', /TRAI/],
       [{ sentToday: 99 }, 'daily_cap'],
@@ -1039,9 +1042,10 @@ describe('the registered template (0019)', () => {
     /**
      * An Indian number read in a zone whose 10:00–21:00 never meets IST's band at today's clocks
      * has no moment it may go. Deferring it as quiet hours promised the clock would resolve it, and
-     * the clock never will — so it is refused, as the zone the send path could not use, with a
-     * sentence naming the fix. A person can resolve it (the contact's zone, or a service template),
-     * so it is not a refusal nobody may approve past.
+     * the clock never will — so it is refused, with a sentence naming the fix. A person can resolve
+     * it (the contact's zone, or a service template), so it is not a refusal nobody may approve past.
+     * Review round 5, finding [2]: it was stored as `unknown_timezone`, which every screen calls "no
+     * timezone on the contact" — false of a contact whose zone is Denver. It has its own code.
      */
     it('refuses an Indian number whose zone never meets IST’s band, rather than deferring it for ever', () => {
       for (const [zone, at] of [
@@ -1053,10 +1057,12 @@ describe('the registered template (0019)', () => {
         const d = decideSend(sms({ template: promo, recipientTimeZone: zone, now: new Date(at) }))
         expect(d.allowed, zone).toBe(false)
         if (d.allowed) continue
-        expect(d.code, zone).toBe('unknown_timezone')
+        expect(d.code, zone).toBe('band_never_opens')
         expect(d.humanCanResolve).toBe(true)
+        expect(d).not.toHaveProperty('retryAt')
         expect(d.reason).toContain(zone)
         expect(d.reason).toMatch(/never overlap/)
+        expect(d.reason).not.toMatch(/no timezone/i)
         expect(d.reason).toContain('Asia/Kolkata')
         expect(d.reason).not.toMatch(/goes when/)
         expect(d.reason).not.toContain('+919876543210')
@@ -1069,7 +1075,42 @@ describe('the registered template (0019)', () => {
         sms({ template: promo, recipientTimeZone: 'America/Denver', now: new Date('2026-09-16T05:00:00.000Z'), sentToday: 99, autoSend: false }),
       )
       expect(d.allowed).toBe(false)
-      if (!d.allowed) expect(d.code).toBe('unknown_timezone')
+      if (!d.allowed) expect(d.code).toBe('band_never_opens')
+    })
+
+    /**
+     * The same dead end, reached through the campaign: the band opens, but only inside the
+     * campaign's own quiet hours, so no minute of the day is open on both. Deferred, it was tried
+     * again every hour for ever; now it is refused as the band that never opens for this campaign,
+     * and the sentence names the quiet hours as one of the things to change.
+     */
+    it('refuses a band that opens only inside the campaign’s quiet hours, naming them', () => {
+      // Los Angeles in January: the band is 20:30–21:00 there, and this campaign is quiet from 18:00.
+      for (const at of ['2026-01-16T04:45:00.000Z', '2026-01-15T19:00:00.000Z']) {
+        const d = decideSend(
+          sms({ template: promo, recipientTimeZone: 'America/Los_Angeles', quietStart: '18:00', quietEnd: '09:00', now: new Date(at) }),
+        )
+        expect(d.allowed, at).toBe(false)
+        if (d.allowed) continue
+        expect(d.code, at).toBe('band_never_opens')
+        expect(d.humanCanResolve).toBe(true)
+        expect(d.reason).toContain('18:00–09:00')
+        expect(d.reason).toContain('quiet hours')
+        expect(d.reason).not.toMatch(/goes when/)
+        expect(d.reason).not.toContain('+919876543210')
+      }
+      // With the campaign's default 21:00–08:00 the half hour is open, and it goes inside it.
+      expect(
+        decideSend(sms({ template: promo, recipientTimeZone: 'America/Los_Angeles', now: new Date('2026-01-16T04:45:00.000Z') })),
+      ).toEqual({ allowed: true, code: 'send_now' })
+    })
+
+    it('leaves a campaign whose quiet hours cannot be read deferred, as every channel is, rather than blaming the band', () => {
+      const d = decideSend(sms({ template: promo, quietStart: 'nine', quietEnd: 'five' }))
+      expect(d.allowed).toBe(false)
+      if (d.allowed) return
+      expect(d.code).toBe('quiet_hours')
+      expect(d).not.toHaveProperty('retryAt')
     })
 
     it('never refuses a service SMS to an Indian number in Los Angeles for the band', () => {
@@ -1086,6 +1127,157 @@ describe('the registered template (0019)', () => {
         )
         expect(d, category).toEqual({ allowed: true, code: 'send_now' })
       }
+    })
+  })
+})
+
+/**
+ * Review round 5, findings [1] and [3]. The tick put every quiet-hours deferral back an hour later.
+ * Round 4's band leaves some windows 30 minutes wide — an Indian number read in New York in winter,
+ * Chicago in summer or Los Angeles in winter — and an hourly retry whose phase falls outside that
+ * half hour drifts only by the tick's lag, so the reviewer's probe held such a message for up to
+ * ten days. A deferral now carries the first minute the clock lets it go, and `deferUntil` is
+ * what the tick and LinkedIn's Start both put in `scheduled_for`.
+ */
+describe('when a deferred message is tried again', () => {
+  const HOUR = 60 * 60 * 1000
+  const promo = { active: true, matches: true, category: 'promotional' as const }
+  const sms = (over: Partial<SendFacts> = {}): SendFacts =>
+    facts({
+      channel: 'sms',
+      recipient: '+919812345678',
+      consent: { granted: true, source: 'form' },
+      template: promo,
+      autoSend: false,
+      approvedByHuman: true,
+      dailyCap: 50,
+      ...over,
+    })
+
+  it('puts a plain quiet-hours deferral at the end of the window, where the recipient is', () => {
+    // 23:30 in London (BST): the window ends at 08:00 there, which is 07:00 UTC.
+    const now = new Date('2026-09-15T22:30:00.000Z')
+    const d = decideSend(facts({ now }))
+    expect(d).toMatchObject({ allowed: false, code: 'quiet_hours', retryAt: new Date('2026-09-16T07:00:00.000Z') })
+    expect(deferUntil(d, now)).toEqual(new Date('2026-09-16T07:00:00.000Z'))
+    // At that minute it goes.
+    expect(decideSend(facts({ now: new Date('2026-09-16T07:00:00.000Z') })).allowed).toBe(true)
+    // And 07:59:59 there is still the window, by one second.
+    expect(decideSend(facts({ now: new Date('2026-09-16T06:59:59.000Z') })).allowed).toBe(false)
+  })
+
+  it('reads the end of the window in a half-hour zone, and on a window that does not wrap', () => {
+    // 23:00 in India; the window ends at 08:00 there, 02:30 UTC.
+    const india = decideSend(facts({ recipientTimeZone: 'Asia/Kolkata', now: new Date('2026-09-15T17:30:00.000Z') }))
+    expect(india).toMatchObject({ code: 'quiet_hours', retryAt: new Date('2026-09-16T02:30:00.000Z') })
+    // 01:00–06:00 in London, at 03:15 BST: 06:00 BST is 05:00 UTC.
+    const early = decideSend(facts({ quietStart: '01:00', quietEnd: '06:00', now: new Date('2026-09-15T02:15:00.000Z') }))
+    expect(early).toMatchObject({ code: 'quiet_hours', retryAt: new Date('2026-09-15T05:00:00.000Z') })
+  })
+
+  it('names a whole minute after now, never now itself', () => {
+    const now = new Date('2026-09-15T22:30:42.123Z')
+    const d = decideSend(facts({ now }))
+    if (d.allowed || d.retryAt === undefined) throw new Error('expected a deferral with a retryAt')
+    expect(d.retryAt.getTime()).toBeGreaterThan(now.getTime())
+    expect(d.retryAt.getTime() % 60_000).toBe(0)
+  })
+
+  it('holds a promotional SMS until the later of the campaign’s window and the band', () => {
+    // 23:00 in India: the campaign's window ends at 08:00, but TRAI's band opens at 10:00 (04:30 UTC).
+    const d = decideSend(sms({ recipientTimeZone: 'Asia/Kolkata', now: new Date('2026-09-15T17:30:00.000Z') }))
+    expect(d).toMatchObject({ code: 'quiet_hours', retryAt: new Date('2026-09-16T04:30:00.000Z') })
+    // 09:00 there: the campaign is open, the band is not — the same 10:00.
+    const band = decideSend(sms({ recipientTimeZone: 'Asia/Kolkata', now: new Date('2026-09-16T03:30:00.000Z') }))
+    expect(band).toMatchObject({ code: 'quiet_hours', retryAt: new Date('2026-09-16T04:30:00.000Z') })
+    if (!band.allowed) expect(band.reason).toMatch(/TRAI/)
+  })
+
+  it('sends the probe’s 30-minute bands within a day, whatever minute the first try fell on', () => {
+    for (const [zone, start, opens] of [
+      // 20:30–21:00 in Los Angeles in December; 10:00–10:30 in Chicago in July and New York in December.
+      ['America/Los_Angeles', '2026-12-01T00:00:00Z', '04:30'],
+      ['America/Chicago', '2026-07-01T00:00:00Z', '15:00'],
+      ['America/New_York', '2026-12-01T00:00:00Z', '15:00'],
+    ] as const) {
+      for (let first = 0; first < 24 * 60; first += 5) {
+        const from = Date.parse(start) + first * 60_000
+        let t = new Date(from)
+        let tries = 0
+        for (;;) {
+          const d = decideSend(sms({ recipientTimeZone: zone, now: t }))
+          if (d.allowed) break
+          expect(d.code, `${zone} +${first}m`).toBe('quiet_hours')
+          // The tick puts it back for `deferUntil`, and picks it up within one tick (take 7.5 s).
+          t = new Date(deferUntil(d, t)!.getTime() + 7_500)
+          tries += 1
+          if (tries > 3) break
+        }
+        expect(tries, `${zone} +${first}m`).toBeLessThanOrEqual(1)
+        expect(t.getTime() - from, `${zone} +${first}m`).toBeLessThanOrEqual(24 * HOUR)
+        if (tries === 1) expect(t.toISOString().slice(11, 16), `${zone} +${first}m`).toBe(opens)
+      }
+    }
+  })
+
+  it('carries a retryAt on a quiet-hours deferral only', () => {
+    for (const f of [
+      facts({ suppressed: true, now: new Date('2026-09-15T22:30:00.000Z') }),
+      facts({ recipientTimeZone: null }),
+      facts({ sentToday: 99 }),
+      facts({ campaignStatus: 'paused' }),
+      facts({ autoSend: false }),
+    ]) {
+      const d = decideSend(f)
+      expect(d.allowed).toBe(false)
+      expect(d).not.toHaveProperty('retryAt')
+    }
+    expect(decideSend(facts())).toEqual({ allowed: true, code: 'send_now' })
+  })
+
+  describe('deferUntil', () => {
+    const now = new Date('2026-09-15T12:00:00.000Z')
+    const held = (retryAt?: Date): SendDecision => ({
+      allowed: false, code: 'quiet_hours', reason: 'Quiet.', humanCanResolve: true, ...(retryAt ? { retryAt } : {}),
+    })
+
+    it('waits for the retryAt of a quiet-hours deferral', () => {
+      const at = new Date(now.getTime() + 30 * 60_000)
+      expect(deferUntil(held(at), now)).toEqual(at)
+    })
+
+    it('waits an hour when a quiet-hours deferral names no minute, or one that is not ahead', () => {
+      expect(DEFER_FALLBACK_MS).toBe(HOUR)
+      expect(deferUntil(held(), now)).toEqual(new Date(now.getTime() + HOUR))
+      expect(deferUntil(held(now), now)).toEqual(new Date(now.getTime() + HOUR))
+      expect(deferUntil(held(new Date(now.getTime() - 60_000)), now)).toEqual(new Date(now.getTime() + HOUR))
+      expect(deferUntil(held(new Date(Number.NaN)), now)).toEqual(new Date(now.getTime() + HOUR))
+    })
+
+    it('never waits more than a day', () => {
+      expect(DEFER_MAX_MS).toBe(24 * HOUR)
+      expect(deferUntil(held(new Date(now.getTime() + 30 * HOUR)), now)).toEqual(new Date(now.getTime() + 24 * HOUR))
+    })
+
+    it('waits six hours on the cap and on a paused campaign, as before', () => {
+      expect(DEFER_SLOW_MS).toBe(6 * HOUR)
+      for (const code of ['daily_cap', 'campaign_inactive'] as const) {
+        const d: SendDecision = { allowed: false, code, reason: 'Later.', humanCanResolve: true }
+        expect(deferUntil(d, now)).toEqual(new Date(now.getTime() + 6 * HOUR))
+      }
+    })
+
+    it('defers exactly the refusals the clock resolves, and nothing that is allowed or terminal', () => {
+      expect(deferUntil({ allowed: true, code: 'send_now' }, now)).toBeNull()
+      const deferred: string[] = []
+      for (const code of [
+        'unparseable_recipient', 'suppressed', 'bounced', 'cold_channel_forbidden', 'no_consent', 'consent_revoked',
+        'paused', 'stale_evidence', 'no_template', 'template_mismatch', 'quiet_hours', 'unknown_timezone',
+        'band_never_opens', 'daily_cap', 'campaign_inactive', 'needs_approval',
+      ] as const) {
+        if (deferUntil({ allowed: false, code, reason: 'R.', humanCanResolve: true }, now) !== null) deferred.push(code)
+      }
+      expect(deferred.sort()).toEqual([...REFUSALS_THE_CLOCK_RESOLVES].sort())
     })
   })
 })
@@ -1112,6 +1304,10 @@ describe('what a refusal says', () => {
       facts({
         channel: 'sms', recipient: '+14155550100', consent: { granted: true, source: 'form' },
         template: { active: true, matches: false, category: 'service_implicit' },
+      }),
+      facts({
+        channel: 'sms', recipient: '+919876543210', consent: { granted: true, source: 'form' },
+        template: { active: true, matches: true, category: 'promotional' }, recipientTimeZone: 'America/Denver',
       }),
     ]
     for (const f of cases) {

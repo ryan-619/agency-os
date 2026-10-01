@@ -315,12 +315,38 @@ describe('TRAI’s promotional band', () => {
   })
 
   it.each([
-    ['2026-09-15T04:29:59.000Z', false], // 09:59 IST
-    ['2026-09-15T04:30:00.000Z', true], //  10:00 IST
-    ['2026-09-15T15:29:00.000Z', true], //  20:59 IST
-    ['2026-09-15T15:30:00.000Z', false], // 21:00 IST — the end is exclusive
-  ])('at %s is open for an Indian number in India: %s', (at, open) => {
-    expect(promotionalBand(new Date(at), 'Asia/Kolkata', INDIAN)).toEqual({ open, india: true, opensToday: true })
+    ['2026-09-15T04:29:59.000Z', false, '2026-09-15T04:30:00.000Z'], // 09:59 IST; it opens at 10:00
+    ['2026-09-15T04:30:00.000Z', true, '2026-09-15T04:31:00.000Z'], //  10:00 IST
+    ['2026-09-15T15:29:00.000Z', true, '2026-09-16T04:30:00.000Z'], //  20:59 IST; 21:00 is shut, so tomorrow
+    ['2026-09-15T15:30:00.000Z', false, '2026-09-16T04:30:00.000Z'], // 21:00 IST — the end is exclusive
+  ])('at %s is open for an Indian number in India: %s', (at, open, next) => {
+    expect(promotionalBand(new Date(at), 'Asia/Kolkata', INDIAN)).toEqual({
+      open, india: true, opensToday: true, nextOpen: new Date(next),
+    })
+  })
+
+  /**
+   * Review round 5, findings [1] and [3]: the band's next opening is a minute the send path can
+   * name, so a sender waits for it rather than coming back an hour later and stepping over a band
+   * half an hour wide.
+   */
+  it('names the next whole minute the band is open, after the current one', () => {
+    // 09:59:59.999 IST: the minute after the current one is 10:00:00 sharp.
+    expect(promotionalBand(new Date('2026-09-15T04:29:59.999Z'), 'Asia/Kolkata', INDIAN)?.nextOpen).toEqual(
+      new Date('2026-09-15T04:30:00.000Z'),
+    )
+    // 23:00 in New York in December: the half hour is 10:00–10:30 there, 15:00 UTC tomorrow.
+    expect(promotionalBand(new Date('2026-12-01T04:00:00.000Z'), 'America/New_York', INDIAN)?.nextOpen).toEqual(
+      new Date('2026-12-01T15:00:00.000Z'),
+    )
+    // Los Angeles in January: 20:30 there, 04:30 UTC.
+    expect(promotionalBand(new Date('2026-01-15T18:00:00.000Z'), 'America/Los_Angeles', INDIAN)?.nextOpen).toEqual(
+      new Date('2026-01-16T04:30:00.000Z'),
+    )
+    // An American number in Los Angeles at 05:00 there waits for 10:00 there, not for India.
+    expect(promotionalBand(new Date('2026-09-15T12:00:00.000Z'), 'America/Los_Angeles', AMERICAN)?.nextOpen).toEqual(
+      new Date('2026-09-15T17:00:00.000Z'),
+    )
   })
 
   it('is closed for an Indian number when it is open in India but not where the recipient is', () => {
@@ -345,7 +371,7 @@ describe('TRAI’s promotional band', () => {
   it('opens for an American number inside its own 10:00–21:00, whatever the time in India', () => {
     // 11:00 in Los Angeles is 23:30 in India.
     expect(promotionalBand(new Date('2026-09-15T18:00:00.000Z'), 'America/Los_Angeles', AMERICAN)).toEqual({
-      open: true, india: false, opensToday: true,
+      open: true, india: false, opensToday: true, nextOpen: new Date('2026-09-15T18:01:00.000Z'),
     })
     // 09:59 and 21:00 there are outside it.
     expect(promotionalBand(new Date('2026-09-15T16:59:00.000Z'), 'America/Los_Angeles', AMERICAN)?.open).toBe(false)
@@ -367,13 +393,13 @@ describe('TRAI’s promotional band', () => {
   it('says when the two bands never meet at today’s clocks, and when they do', () => {
     // Los Angeles on Pacific Daylight Time, and Denver all year: 10:00–21:00 there misses IST’s band.
     expect(promotionalBand(new Date('2026-09-15T18:00:00.000Z'), 'America/Los_Angeles', INDIAN)).toEqual({
-      open: false, india: true, opensToday: false,
+      open: false, india: true, opensToday: false, nextOpen: null,
     })
     expect(promotionalBand(new Date('2026-01-15T18:00:00.000Z'), 'America/Denver', INDIAN)?.opensToday).toBe(false)
     // On Pacific Standard Time there is half an hour: 20:30–21:00 in Los Angeles is 10:00–10:30 in India.
     expect(promotionalBand(new Date('2026-01-15T18:00:00.000Z'), 'America/Los_Angeles', INDIAN)?.opensToday).toBe(true)
     expect(promotionalBand(new Date('2026-01-16T04:45:00.000Z'), 'America/Los_Angeles', INDIAN)).toEqual({
-      open: true, india: true, opensToday: true,
+      open: true, india: true, opensToday: true, nextOpen: new Date('2026-01-16T04:46:00.000Z'),
     })
     // New York overlaps, and an American number in Denver always has its own hours.
     expect(promotionalBand(new Date('2026-09-15T18:00:00.000Z'), 'America/New_York', INDIAN)?.opensToday).toBe(true)
@@ -455,6 +481,62 @@ describe('the SMS opt-out reader', () => {
       expect(smsOptOut(text)).toBe(true)
     },
   )
+
+  /**
+   * Review round 5, finding [7]: politeness was read only BEFORE the words, so a "please" after
+   * them — and "msg" for "message" — lost the opt-out to both readers. Each of these was stored as
+   * an ordinary reply: paused, never suppressed, and resumable from /contacts.
+   */
+  it.each([
+    'Stop texting me please',
+    'stop messaging me please',
+    'Stop texting me, please.',
+    'Stop texting me. Thanks',
+    'stop sending me msgs pls',
+    'stop msging me',
+    'unsubscribe me please',
+    'Unsubscribe me, thanks!',
+    'no more messages please',
+    'no more msgs pls',
+    'No more SMS plz 🙏',
+    'no more txts thx',
+    'Dont msg me',
+    'dont msg me again please',
+    'Don’t text me again, thank you',
+    'do not msg me',
+    'Remove me from your list',
+    'please remove me from the list, thanks',
+    'Remove me please',
+    'Opt me out please',
+    'Leave me alone please',
+    'Take me off your list please',
+    'stop please',
+    'Please stop, thanks',
+  ])('reads %j as an opt-out — politeness after the words, and "msg" for "message"', (text) => {
+    expect(smsOptOut(text)).toBe(true)
+  })
+
+  it.each([
+    'Don’t stop texting me please',
+    'do not stop messaging me, thanks',
+    'stop by tomorrow please',
+    'stop by tomorrow, thanks',
+    'no more questions, thanks',
+    'text me please',
+    'msg me please',
+    'please send me more msgs',
+    'remove me from the meeting please',
+    'remove me from the invite thanks',
+    'Please cancel 🙏',
+    'cancel please',
+    'end please',
+    'quit please',
+    'stop all the calls please',
+    'thanks',
+    'please',
+  ])('does not read %j as an opt-out — a "please" does not make a sentence one', (text) => {
+    expect(smsOptOut(text)).toBe(false)
+  })
 
   it.each([
     'Cancel tomorrow’s call please',

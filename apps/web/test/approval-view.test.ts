@@ -38,6 +38,7 @@ const SEND_CODES = {
   paused: false,
   quiet_hours: true,
   unknown_timezone: true,
+  band_never_opens: true,
   daily_cap: true,
   campaign_inactive: true,
   needs_approval: true,
@@ -83,6 +84,11 @@ describe('the per-candidate decision', () => {
     expect([...DEFERRED_CODES].sort()).toEqual(['campaign_inactive', 'daily_cap', 'quiet_hours'])
     for (const code of DEFERRED_CODES) expect(candidateLine(refusal(code, true))).toContain('hold it')
     expect(candidateLine(refusal('unknown_timezone', true))).toContain('the worker will refuse it')
+    // A band that never opens is terminal at the tick, not held (review round 5).
+    expect(DEFERRED_CODES.has('band_never_opens')).toBe(false)
+    expect(candidateLine(refusal('band_never_opens', true))).toBe(
+      'promotional band never opens for them — fix this first, or the worker will refuse it',
+    )
     expect(candidateLine(refusal('unparseable_recipient', true))).toContain('the worker will refuse it')
   })
 
