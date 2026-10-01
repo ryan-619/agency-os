@@ -550,29 +550,17 @@ export async function dispatchTouch(
   // it took the loud no-recipient path, and a supervised re-enrolment
   // drafted the same opener again. Found by review. The recovery's
   // sentence ("re-approve to send it again") is cleared with it: on a row
-  // that went, it is an instruction to send a duplicate.
-  const recovered = and(
-    eq(schema.touches.status, 'failed'),
-    isNull(schema.touches.sentAt),
-    isNull(schema.touches.refusalCode),
-  )
-  const recorded = await db
+  // that went, it is an instruction to send a duplicate — and for an answer
+  // to a reply, the pause the recovery put back is lifted with it
+  // (`recordRecoveredSend`, review round 5).
+  const inFlight = await db
     .update(schema.touches)
-    .set({
-      status: 'sent',
-      sentAt: now,
-      providerId,
-      recipient: recipientUnlessErased(facts.recipient),
-      error: sql`CASE WHEN ${schema.touches.status} = 'failed' THEN NULL ELSE ${schema.touches.error} END`,
-    })
-    .where(
-      and(
-        eq(schema.touches.id, touch.id),
-        or(inArray(schema.touches.status, ['sending', touch.status]), recovered),
-      ),
-    )
+    .set({ status: 'sent', sentAt: now, providerId, recipient: recipientUnlessErased(facts.recipient) })
+    .where(and(eq(schema.touches.id, touch.id), inArray(schema.touches.status, ['sending', touch.status])))
     .returning({ id: schema.touches.id })
-  if (recorded.length === 0) {
+  const recorded =
+    inFlight.length === 1 || (await recordRecoveredSend(db, touch, { now, providerId, recipient: facts.recipient }))
+  if (!recorded) {
     // The provider took it; the row had already been settled by someone
     // else, in a state the provider's acceptance does not correct. The
     // audit row below still says it went, which is the truth.
@@ -612,6 +600,147 @@ export async function dispatchTouch(
 }
 
 /**
+ * Record as sent a row a stuck-send recovery gave up on while the provider
+ * had it — `failed`, never sent, no refusal — and, for an ANSWER to a reply,
+ * lift the pause that recovery put back (review round 5, [12]).
+ *
+ * `recoverStuckSends` re-pauses the person when the answer it gives up on
+ * resumed them (`repauseForUnansweredReply`): it cannot know whether the
+ * answer went, and a reply possibly unanswered must not leave them live. The
+ * provider's acceptance answers that. Left on, the pause held a person whose
+ * reply WAS answered, under an audit row saying the answer failed to send —
+ * and answering the same reply again from /inbox resumed them, so a second
+ * answer could follow the first. Lifted only while it is still that pause:
+ * `liftRecoveryPause` says exactly when.
+ *
+ * Contact before touch, the order every writer that holds both takes
+ * (review round 5, [13]: the reply, the bounce and the reclassify cancels
+ * lock the contact and then that person's touches). Deadlock-free against
+ * the recovery itself, which locks the touch first: this runs only after
+ * the in-flight UPDATE matched nothing, and that UPDATE waited for whoever
+ * held the row — the recovery — to commit.
+ */
+async function recordRecoveredSend(
+  db: AgencyDb,
+  touch: Pick<TouchRow, 'id' | 'orgId' | 'answersTouchId'>,
+  sent: { readonly now: Date; readonly providerId: string; readonly recipient: string },
+): Promise<boolean> {
+  return db.transaction(async (transaction) => {
+    const tx = transaction as unknown as AgencyDb
+    const contactId = touch.answersTouchId ? await lockReplyContact(tx, touch.orgId, touch.answersTouchId) : null
+    const rows = await tx
+      .update(schema.touches)
+      .set({
+        status: 'sent',
+        sentAt: sent.now,
+        providerId: sent.providerId,
+        recipient: recipientUnlessErased(sent.recipient),
+        error: null,
+      })
+      .where(
+        and(
+          eq(schema.touches.id, touch.id),
+          eq(schema.touches.status, 'failed'),
+          isNull(schema.touches.sentAt),
+          isNull(schema.touches.refusalCode),
+        ),
+      )
+      .returning({ id: schema.touches.id })
+    if (rows.length === 0) return false
+    if (contactId && touch.answersTouchId) {
+      await liftRecoveryPause(tx, { orgId: touch.orgId, answer: { id: touch.id, answersTouchId: touch.answersTouchId }, contactId })
+    }
+    return true
+  })
+}
+
+/**
+ * Lift the pause a stuck-send recovery put back over an answer that went
+ * after all — only while it is still that pause:
+ *
+ *  - the recovery wrote it: a `contact.paused` row naming this answer, ended
+ *    `failed` (`repauseForUnansweredReply`'s shape);
+ *  - nothing has been recorded about the person since — a later reply, a
+ *    teammate's hold, an unsubscribe, a resume — compared in SQL against
+ *    that row's stored `created_at`, never a `Date` read back. A reply that
+ *    arrived meanwhile kept the recovery's reason (`pauseContact` keeps the
+ *    first), and is unanswered;
+ *  - the stored reason is still exactly the reply's `replied <instant>`
+ *    (`resumeContact`'s `expectedReason`, in the UPDATE's own predicate).
+ *
+ * Then they are resumed, and `contact.resumed` names the answer — actor
+ * `system`, the CLASS of the pause, never its text. Uncaught, inside the
+ * caller's transaction, as the re-pause is. The contact must already be
+ * locked by the caller.
+ */
+async function liftRecoveryPause(
+  db: AgencyDb,
+  args: {
+    readonly orgId: string
+    readonly answer: { readonly id: string; readonly answersTouchId: string }
+    readonly contactId: string
+  },
+): Promise<boolean> {
+  const { orgId, answer, contactId } = args
+  const [reply] = await db
+    .select({ sentAt: schema.touches.sentAt, createdAt: schema.touches.createdAt })
+    .from(schema.touches)
+    .where(
+      and(
+        eq(schema.touches.id, answer.answersTouchId),
+        eq(schema.touches.orgId, orgId),
+        eq(schema.touches.direction, 'in'),
+      ),
+    )
+    .limit(1)
+  if (!reply) return false
+
+  const [repaused] = await db
+    .select({ id: schema.auditLog.id })
+    .from(schema.auditLog)
+    .where(
+      and(
+        eq(schema.auditLog.orgId, orgId),
+        eq(schema.auditLog.action, 'contact.paused'),
+        eq(schema.auditLog.subjectType, 'contact'),
+        eq(schema.auditLog.subjectId, contactId),
+        sql`${schema.auditLog.detail}->>'answerTouchId' = ${answer.id}`,
+        sql`${schema.auditLog.detail}->>'answerEnded' = 'failed'`,
+      ),
+    )
+    .orderBy(desc(schema.auditLog.createdAt))
+    .limit(1)
+  if (!repaused) return false
+
+  const since = await db
+    .select({ id: schema.auditLog.id })
+    .from(schema.auditLog)
+    .where(
+      and(
+        eq(schema.auditLog.orgId, orgId),
+        eq(schema.auditLog.subjectType, 'contact'),
+        eq(schema.auditLog.subjectId, contactId),
+        sql`${schema.auditLog.id} <> ${repaused.id}`,
+        sql`${schema.auditLog.createdAt} >= (SELECT a.created_at FROM audit_log a WHERE a.id = ${repaused.id})`,
+      ),
+    )
+    .limit(1)
+  if (since.length > 0) return false
+
+  const reason = replyPauseReason(reply)
+  if (!(await resumeContact(db, orgId, contactId, { expectedReason: reason }))) return false
+  await appendAudit(db, {
+    orgId,
+    actor: 'system',
+    action: 'contact.resumed',
+    subjectType: 'contact',
+    subjectId: contactId,
+    detail: { reason: 'the answer to their reply went after all', pausedFor: pauseReasonClass(reason), answerTouchId: answer.id },
+  })
+  return true
+}
+
+/**
  * Write where a message got to. Every terminal state `dispatchTouch` records
  * goes through here.
  *
@@ -627,6 +756,13 @@ async function settle(
   state: { status: string; refusalCode: string | null; recipient?: string; error?: string },
   now: Date,
 ): Promise<void> {
+  // A row a stuck-send recovery marked `failed` meanwhile (never sent, no
+  // refusal) carries its "may or may not have gone … re-approve to send it
+  // again". Settled here, this dispatch never reached the provider, so that
+  // sentence is false of it and an instruction nobody can follow on a
+  // refused row: it goes, unless this state brings an error of its own
+  // (review round 5, [12]). Judged on the row as it stands, in the UPDATE.
+  const recoveryError = sql`CASE WHEN ${schema.touches.status} = 'failed' AND ${schema.touches.sentAt} IS NULL AND ${schema.touches.refusalCode} IS NULL THEN NULL ELSE ${schema.touches.error} END`
   const write = (d: AgencyDb) =>
     d
       .update(schema.touches)
@@ -634,7 +770,7 @@ async function settle(
         status: state.status,
         refusalCode: state.refusalCode,
         ...(state.recipient !== undefined ? { recipient: recipientUnlessErased(state.recipient) } : {}),
-        ...(state.error !== undefined ? { error: state.error } : {}),
+        error: state.error !== undefined ? state.error : recoveryError,
       })
       .where(eq(schema.touches.id, touch.id))
   const ended = touch.answersTouchId ? answerEndedBy(state.status, state.refusalCode) : null
@@ -1482,6 +1618,19 @@ export async function denyDraft(
   // COMMIT would roll back the deny without a word.
   const row = await db.transaction(async (transaction) => {
     const tx = transaction as unknown as AgencyDb
+    // Contact before touch (review round 5, [13]). A reply, a bounce and a
+    // reclassify lock the person and then cancel their waiting messages —
+    // this answer among them; the deny locked the answer and then, to put
+    // the pause back, the person, and the two could deadlock on a real
+    // Postgres. So an answer's deny takes the reply's contact first, the
+    // lock `repauseForUnansweredReply` then re-takes. A read, not a lock, of
+    // the answer row: it is locked by the UPDATE below, after the person.
+    const [draft] = await tx
+      .select({ answersTouchId: schema.touches.answersTouchId })
+      .from(schema.touches)
+      .where(and(eq(schema.touches.id, args.touchId), eq(schema.touches.orgId, args.orgId)))
+      .limit(1)
+    if (draft?.answersTouchId) await lockReplyContact(tx, args.orgId, draft.answersTouchId)
     const updated = await tx
       .update(schema.touches)
       .set({
@@ -1565,6 +1714,45 @@ const UNANSWERED_AGAIN: Record<Exclude<AnswerEnded, 'denied'>, string> = {
 }
 
 /**
+ * The reason a reply's own pause carries, `replied <instant>` — the shape
+ * `pauseReasonClass` reads as `replied`. One spelling, for the re-pause that
+ * puts it back and the lift that takes the re-pause off again.
+ */
+function replyPauseReason(reply: { readonly sentAt: Date | null; readonly createdAt: Date }): string {
+  return `replied ${(reply.sentAt ?? reply.createdAt).toISOString()}`
+}
+
+/**
+ * Lock the contact a reply came from, `FOR UPDATE`, and return its id — or
+ * null when the reply or the contact is gone. Taken FIRST by every writer
+ * here that settles an answer and then pauses or resumes its person (review
+ * round 5, [13]): contact before touch, the order a reply, a bounce, a
+ * reclassify and an erasure take, so no two of them can each hold the
+ * lock the other waits for.
+ */
+async function lockReplyContact(db: AgencyDb, orgId: string, replyTouchId: string): Promise<string | null> {
+  const [reply] = await db
+    .select({ contactId: schema.touches.contactId })
+    .from(schema.touches)
+    .where(
+      and(
+        eq(schema.touches.id, replyTouchId),
+        eq(schema.touches.orgId, orgId),
+        eq(schema.touches.direction, 'in'),
+      ),
+    )
+    .limit(1)
+  if (!reply?.contactId) return null
+  const [contact] = await db
+    .select({ id: schema.contacts.id })
+    .from(schema.contacts)
+    .where(and(eq(schema.contacts.id, reply.contactId), eq(schema.contacts.orgId, orgId)))
+    .limit(1)
+    .for('update')
+  return contact?.id ?? null
+}
+
+/**
  * Put back the pause a reply caused when the answer that lifted it never
  * goes (review rounds 3 and 4).
  *
@@ -1578,9 +1766,13 @@ const UNANSWERED_AGAIN: Record<Exclude<AnswerEnded, 'denied'>, string> = {
  * writer that settles an answer `failed` or `refused` now calls this, in
  * its own transaction, so the settle and the pause land together or not at
  * all — `settle` for each of `dispatchTouch`'s, `denyDraft`, and the
- * bounce's cancel (`outreachRecordBounce`). Exported for the writers
- * outside this file that settle a row `failed`: the stuck-send recovery and
- * the LinkedIn step's "I did not send it".
+ * bounce's cancel (`outreachRecordBounce`). Exported for the one writer
+ * outside this file that settles an answer `failed`: the stuck-send
+ * recovery (`recoverStuckSends`). The LinkedIn step's "I did not send it"
+ * never calls it, and needs not: an answer is only ever email — no inbound
+ * LinkedIn path exists, and the inbox refuses SMS and WhatsApp. When the
+ * recovery guessed wrong and the provider had taken the answer after all,
+ * `dispatchTouch` lifts the pause put back here (`liftRecoveryPause`).
  *
  * The pause goes back on, with the reply's own `replied <instant>` reason —
  * the shape `recordInboundReply` writes and `pauseReasonClass` reads — when:
@@ -1689,7 +1881,7 @@ export async function repauseForUnansweredReply(
     .limit(1)
   if (otherAnswer.length > 0) return false
 
-  const paused = await pauseContact(db, orgId, contactId, `replied ${(reply.sentAt ?? reply.createdAt).toISOString()}`, args.now)
+  const paused = await pauseContact(db, orgId, contactId, replyPauseReason(reply), args.now)
   if (!paused) return false
   // Uncaught, inside the settle's transaction. A deny keeps the shape /audit
   // words as "the answer to their reply was denied"; every other ending is

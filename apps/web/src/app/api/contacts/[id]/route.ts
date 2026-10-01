@@ -92,9 +92,11 @@ export async function PATCH(
   }
 
   if (action === 'resume') {
-    // The pause the page showed, sent back by the button. Absent — a page
-    // from before this rule — there is no pause to name, and lifting the
-    // one read here is what this replaced.
+    // The pause the page showed, sent back by the button: its reason's text,
+    // or null for a pause with no reason. Absent — a page from before this
+    // rule — is refused, 400, with nothing changed: there is no pause to
+    // name, and lifting whatever pause this route reads instead is exactly
+    // what the rule replaced. There is no fallback.
     if (pausedReason !== null && typeof pausedReason !== 'string') {
       return NextResponse.json(
         { error: 'Resume names the pause it lifts. Reload the page and try again. Nothing was changed.' },

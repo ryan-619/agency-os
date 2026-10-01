@@ -535,12 +535,19 @@ const SENTENCES: Readonly<Record<string, Template>> = {
       word(c.d, 'replacedPauseFor') === 'replied' ? ', replacing the pause their reply caused' : ''
     }`
   },
-  // Two writers: the contacts route (a person pressing Resume) and the inbox,
-  // which resumes only the pause a reply caused and records its CLASS.
+  // Three writers: the contacts route (a person pressing Resume), the inbox,
+  // which resumes only the pause a reply caused and records its CLASS, and
+  // `dispatchTouch`, lifting the reply's pause a stuck-send recovery put
+  // back over an answer the provider had taken after all (`answerTouchId`,
+  // review round 5).
   'contact.resumed': (c) => {
     const why = own(PAUSED_FOR, word(c.d, 'pausedFor'))
     return `resumed a contact at ${c.co}${why ? ` who had been paused ${why}` : ''}${
-      has(c.d, 'inboundTouchId') ? ', to answer their reply' : ''
+      has(c.d, 'inboundTouchId')
+        ? ', to answer their reply'
+        : has(c.d, 'answerTouchId')
+          ? ', because the answer to it went after all'
+          : ''
     }`
   },
   'contact.timezone_set': (c) => {

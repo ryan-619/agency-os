@@ -335,6 +335,22 @@ describe('sentenceFor', () => {
   })
 
   /**
+   * Review round 5, [12]. A stuck-send recovery puts a reply's pause back
+   * over an answer it could not tell went — "the answer to it failed to
+   * send" — and `dispatchTouch` lifts that pause when the provider had taken
+   * the answer after all. The lift says why, beside the recovery's row it
+   * corrects, and never quotes the reason's text.
+   */
+  it('says a reply’s pause was lifted because the answer to it went after all', () => {
+    const detail = { reason: 'the answer to their reply went after all', pausedFor: 'replied', answerTouchId: SUBJECT }
+    expect(sentenceFor(line('contact.resumed', detail, { actor: 'system' }), lookups)).toBe(
+      'resumed a contact at rentman.io who had been paused by their reply, because the answer to it went after all',
+    )
+    const outreach = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../packages/db/src/outreach.ts'), 'utf8')
+    expect(outreach).toContain("detail: { reason: 'the answer to their reply went after all', pausedFor: pauseReasonClass(reason), answerTouchId: answer.id }")
+  })
+
+  /**
    * `denyDraft` records `stale_evidence` for words that quoted an AGED scan
    * and for words a newer scan SUPERSEDED, and its detail does not say
    * which. "A re-scan lets it be drafted again" is false of the second —
