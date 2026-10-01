@@ -55,7 +55,7 @@ const line = (action: string, detail: unknown = {}, over: Partial<AuditLine> = {
   ...over,
 })
 
-/** What `denyDraft` writes when it puts back the pause a reply caused (`repauseForDeniedAnswer`). */
+/** What `denyDraft` writes when it puts back the pause a reply caused (`repauseForUnansweredReply`). */
 const DENIED_ANSWER_PAUSE: Record<string, unknown> = {
   reason: 'their reply is unanswered again: the answer to it was denied',
   alreadyPaused: false,

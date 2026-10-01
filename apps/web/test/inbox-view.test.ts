@@ -196,8 +196,9 @@ describe('personName', () => {
 
 /**
  * The composer's line under an answer said "If the draft is then denied,
- * pause them again here." Since round 4 a deny does that itself
- * (`repauseForDeniedAnswer` in packages/db/src/outreach.ts): the reply's
+ * pause them again here." Since round 3 a deny does that itself, and since
+ * round 4 so does an answer that fails or is refused when it would be sent
+ * (`repauseForUnansweredReply` in packages/db/src/outreach.ts): the reply's
  * pause goes back on when this answer is what resumed them, nobody has
  * resumed them since, and no other answer to them is still on its way. The
  * line is JSX text in a client component, so it is read from the source,
@@ -210,14 +211,16 @@ describe('what the answer composer says about a deny', () => {
   it('says the pause their reply caused goes back on, and when it does not', () => {
     expect(src).not.toContain('pause them again here')
     expect(src).toContain(
-      'If the draft is denied, the pause their reply caused goes back on — unless somebody resumes them ' +
-        'before then, or another answer to them is still waiting.',
+      'If the draft is denied, or the answer fails or is refused when it would be sent, the pause their reply ' +
+        'caused goes back on — unless somebody resumes them before then, or another answer to them is still waiting.',
     )
   })
 
-  it('names the deny as the writer of that pause', () => {
+  it('names the deny, a failure and a refusal at sending as writers of that pause', () => {
     const outreach = readFileSync(fileURLToPath(new URL('../../../packages/db/src/outreach.ts', import.meta.url)), 'utf8')
-    expect(outreach).toContain('async function repauseForDeniedAnswer(')
+    expect(outreach).toContain('export async function repauseForUnansweredReply(')
     expect(outreach).toContain("reason: 'their reply is unanswered again: the answer to it was denied'")
+    expect(outreach).toContain("failed: 'their reply is unanswered again: the answer to it failed to send'")
+    expect(outreach).toContain("refused: 'their reply is unanswered again: the answer to it was refused at sending'")
   })
 })

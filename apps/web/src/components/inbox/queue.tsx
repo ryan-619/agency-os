@@ -309,9 +309,9 @@ export function InboxQueue({
                         </label>
                         <p className="hint" style={{ marginTop: 10 }}>
                           Drafting resumes {row.contact?.name ?? 'them'}: their reply paused them in every campaign, and an
-                          approved answer to a paused person is refused. If the draft is denied, the pause their reply
-                          caused goes back on — unless somebody resumes them before then, or another answer to them is
-                          still waiting.
+                          approved answer to a paused person is refused. If the draft is denied, or the answer fails or
+                          is refused when it would be sent, the pause their reply caused goes back on — unless somebody
+                          resumes them before then, or another answer to them is still waiting.
                         </p>
                         <div className="inbox-actions" style={{ marginTop: 10 }}>
                           <button
