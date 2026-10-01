@@ -1,6 +1,6 @@
 import { notFound, redirect } from 'next/navigation'
 import { and, eq } from 'drizzle-orm'
-import { type TranscriptEntry } from '@agency/core'
+import type { TranscriptEntry } from '@agency/core'
 import { readCall, schema, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'

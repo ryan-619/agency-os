@@ -18,14 +18,6 @@ export interface ShellUser {
  * adds the page and not a line here. The settings pages — team, credentials,
  * the ICP, spend, mail, deployment — all light the one Settings link, since
  * they are one area with a landing page rather than six entries.
- *
- * The subtitle under "Agency OS" is the organisation's own name, read here
- * from `orgs.name` and never handed in by a page. It used to be a prop, and
- * most pages filled it with the active ICP's label — the name of a scoring
- * profile — while the dashboard and the settings area filled it with the
- * org's, so the sidebar named a different thing depending on the page. An
- * async server component may read the database; `orgIdentity` is
- * `server-only`, so this can never be pulled into a client bundle either.
  */
 export type ShellCurrent =
   | 'dashboard'
@@ -55,6 +47,15 @@ const SETTINGS_PAGES: ReadonlySet<ShellCurrent> = new Set<ShellCurrent>([
   'settings', 'team', 'credentials', 'icp', 'spend', 'mail', 'deployment',
 ])
 
+/**
+ * The subtitle under "Agency OS" is the organisation's own name, read here
+ * from `orgs.name` and never handed in by a page. It used to be a prop, and
+ * most pages filled it with the active ICP's label — the name of a scoring
+ * profile — while the dashboard and the settings area filled it with the
+ * org's, so the sidebar named a different thing depending on the page. An
+ * async server component may read the database; `orgIdentity` is
+ * `server-only`, so Shell can never be pulled into a client bundle either.
+ */
 export async function Shell({
   user, current, children, signOut, pendingApprovals = 0,
 }: {
