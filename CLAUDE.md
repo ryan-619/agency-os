@@ -1546,8 +1546,13 @@ worker with DoveSoft and no mailbox pauses no email campaign.
 write a DSN, so a report is believed only when it names one of our
 Message-IDs AND the address that message went to — in practice the
 recipient, or somebody they forwarded our mail to. The effect is bounded:
-email to that one address stops until corrected; it suppresses nobody,
-pauses nobody, and touches no other contact.
+email to that one address stops until corrected; it suppresses nobody and
+touches no other contact. It pauses nobody but in one case: when the
+messages it cancels include an answer to that contact's reply still waiting
+to go, it puts that reply's own `replied <instant>` pause back
+(`repauseForUnansweredReply`, under its guard), because an answer that will
+not go leaves the reply unanswered — the conservative direction, and a pause
+a person lifts by answering again (review round 5).
 
 **A click IS the opt-out** — the fourth way a suppression row is written,
 after the suppressions page, a reply (an email, or since 0019 a text through
