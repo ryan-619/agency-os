@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation'
-import { can, parseIcpDefinition } from '@agency/core'
+import { can } from '@agency/core'
 import { eq } from 'drizzle-orm'
 import {
   auditResolveActors, auditSubjectsToCompanies, listAudit, schema, type AgencyDb, type AuditRow,
@@ -13,7 +13,6 @@ import {
 } from '@/lib/audit-copy'
 import { getDb } from '@/lib/db'
 import { deployment } from '@/lib/deployment'
-import { icpForOrg } from '@/lib/queries'
 
 /**
  * The audit log (PROMPT.md §2.4, §4).
@@ -64,15 +63,6 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
   const principal = { id: user.id, orgId: user.orgId, role: user.role }
 
   const db = getDb() as unknown as AgencyDb
-  const icpRow = await icpForOrg(user.orgId)
-  let orgLabel = 'Agency'
-  if (icpRow) {
-    try {
-      orgLabel = parseIcpDefinition(icpRow.definition).label
-    } catch {
-      orgLabel = 'Agency'
-    }
-  }
   const signOutAction = async () => {
     'use server'
     await signOut({ redirectTo: '/signin' })
@@ -80,7 +70,7 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
 
   if (!can(principal, 'audit:read')) {
     return (
-      <Shell user={user} orgName={orgLabel} current="audit" signOut={signOutAction}>
+      <Shell user={user} current="audit" signOut={signOutAction}>
         <h1>Audit log</h1>
         <div className="note note-warn">Your role cannot read the audit log.</div>
       </Shell>
@@ -168,7 +158,7 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
   const worker = deployment().worker
 
   return (
-    <Shell user={user} orgName={orgLabel} current="audit" signOut={signOutAction}>
+    <Shell user={user} current="audit" signOut={signOutAction}>
       <h1>Audit log</h1>
       <p className="lede">
         Everything that writes to this system writes a line here. It is append-only; nothing here can be

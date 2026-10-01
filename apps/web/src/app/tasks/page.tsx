@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation'
-import { can, parseIcpDefinition } from '@agency/core'
+import { can } from '@agency/core'
 import {
   linkedinStepsDue, tasksAssignableUsers, tasksIsOverdue, tasksList,
   type AgencyDb, type LinkedinStep, type TaskListRow,
@@ -9,7 +9,6 @@ import { Shell } from '@/components/shell'
 import { LinkedinSteps, type LinkedinStepItem } from '@/components/tasks/linkedin-steps'
 import { NewTaskForm, TaskList, type TaskItem } from '@/components/tasks/list'
 import { getDb } from '@/lib/db'
-import { icpForOrg } from '@/lib/queries'
 import { refusalWords } from '@/lib/refusal-words'
 
 /**
@@ -56,21 +55,11 @@ export default async function TasksPage({ searchParams }: { searchParams: Promis
   // The steps first: reading them materialises their tasks, and the counts
   // below should not be one read behind them.
   const steps = await linkedinStepsDue(db, user.orgId, now)
-  const [open, done, team, icpRow] = await Promise.all([
+  const [open, done, team] = await Promise.all([
     tasksList(db, user.orgId, { open: true, limit: OPEN_LIMIT }),
     view === 'done' ? tasksList(db, user.orgId, { open: false, limit: 100 }) : Promise.resolve([] as TaskListRow[]),
     tasksAssignableUsers(db, user.orgId),
-    icpForOrg(user.orgId),
   ])
-
-  let orgLabel = 'Agency'
-  if (icpRow) {
-    try {
-      orgLabel = parseIcpDefinition(icpRow.definition).label
-    } catch {
-      orgLabel = 'Agency'
-    }
-  }
 
   const work = open.filter((t) => t.kind !== 'linkedin_send')
   const lists: Readonly<Record<View, TaskListRow[]>> = {
@@ -107,7 +96,7 @@ export default async function TasksPage({ searchParams }: { searchParams: Promis
   }
 
   return (
-    <Shell user={user} orgName={orgLabel} current="tasks" signOut={signOutAction}>
+    <Shell user={user} current="tasks" signOut={signOutAction}>
       <h1>Tasks</h1>
       <p className="lede">
         A task is a reminder to a person. The kickoff and renewal sets are created from a company page when

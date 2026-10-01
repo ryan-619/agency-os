@@ -6,7 +6,6 @@ import {
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { getDb } from '@/lib/db'
-import { orgIdentity } from '../org'
 
 /**
  * Settings → Spend: what the model has actually cost, from the rows.
@@ -36,7 +35,6 @@ export default async function SpendPage() {
   const session = await auth()
   if (!session?.user) redirect('/signin')
   const user = session.user
-  const org = await orgIdentity(user.orgId)
 
   const signOutAction = async () => {
     'use server'
@@ -45,7 +43,7 @@ export default async function SpendPage() {
 
   if (!can({ id: user.id, orgId: user.orgId, role: user.role }, 'audit:read')) {
     return (
-      <Shell user={user} orgName={org.name} current="spend" signOut={signOutAction}>
+      <Shell user={user} current="spend" signOut={signOutAction}>
         <h1>Spend</h1>
         <div className="note">Your role cannot read what the model has cost.</div>
       </Shell>
@@ -61,7 +59,7 @@ export default async function SpendPage() {
   ])
 
   return (
-    <Shell user={user} orgName={org.name} current="spend" signOut={signOutAction}>
+    <Shell user={user} current="spend" signOut={signOutAction}>
       <p className="crumb"><a href="/settings">Settings</a> /</p>
       <h1>Spend</h1>
       <p className="lede">

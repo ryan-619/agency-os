@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation'
-import { can, parseIcpDefinition } from '@agency/core'
+import { can } from '@agency/core'
 import {
   inboxKindFilter, inboxTouches, inboxUnhandledCount, listCampaigns, type AgencyDb,
 } from '@agency/db/queries'
@@ -12,7 +12,6 @@ import { inZone } from '@/lib/format'
 import {
   INBOX_GROUP_LABELS, INBOX_GROUP_ORDER, INBOX_LEDE, groupInbox, inboxDeploymentNotes, inboxGroupOf, personName,
 } from '@/lib/inbox-view'
-import { icpForOrg } from '@/lib/queries'
 
 /**
  * The inbox (PROMPT.md §8.4): every reply, its kind, and what a person did.
@@ -95,16 +94,6 @@ export default async function InboxPage({
     }
   })
 
-  const icpRow = await icpForOrg(user.orgId)
-  let orgLabel = 'Agency'
-  if (icpRow) {
-    try {
-      orgLabel = parseIcpDefinition(icpRow.definition).label
-    } catch {
-      orgLabel = 'Agency'
-    }
-  }
-
   const signOutAction = async () => {
     'use server'
     await signOut({ redirectTo: '/signin' })
@@ -121,7 +110,7 @@ export default async function InboxPage({
   const on = { fontWeight: 600, textDecoration: 'none' } as const
 
   return (
-    <Shell user={user} orgName={orgLabel} current="inbox" signOut={signOutAction}>
+    <Shell user={user} current="inbox" signOut={signOutAction}>
       <h1>Inbox</h1>
       <p className="lede">{INBOX_LEDE}</p>
 

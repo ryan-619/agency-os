@@ -112,12 +112,6 @@ export default async function Dashboard() {
   const now = new Date()
   const live = deployment()
 
-  const [org] = await getDb()
-    .select({ name: schema.orgs.name })
-    .from(schema.orgs)
-    .where(sql`${schema.orgs.id} = ${user.orgId}`)
-    .limit(1)
-
   const [icp] = await getDb()
     .select({ name: schema.icpProfiles.name, definition: schema.icpProfiles.definition })
     .from(schema.icpProfiles)
@@ -191,7 +185,6 @@ export default async function Dashboard() {
   return (
     <Shell
       user={user}
-      orgName={org?.name ?? 'Agency'}
       current="dashboard"
       signOut={signOutAction}
       pendingApprovals={c.approvals}

@@ -8,10 +8,10 @@ import { agentConfigured } from '@/lib/agent'
 import { getDb } from '@/lib/db'
 import { deployment } from '@/lib/deployment'
 import { env } from '@/lib/env'
+import { orgIdentity } from '@/lib/org-identity'
 import { icpForOrg } from '@/lib/queries'
 import { workerStatus, type WorkerStatus } from '@/lib/worker-status'
 import { deploymentFacts, workerLine } from './facts'
-import { orgIdentity } from './org'
 
 /**
  * Settings: the landing page for everything that configures the product.
@@ -92,7 +92,7 @@ export default async function SettingsPage() {
   }
 
   return (
-    <Shell user={user} orgName={org.name} current="settings" signOut={signOutAction}>
+    <Shell user={user} current="settings" signOut={signOutAction}>
       <h1>Settings</h1>
       <p className="lede">
         Who this organisation is, what this deployment can and cannot do, and where each setting lives.

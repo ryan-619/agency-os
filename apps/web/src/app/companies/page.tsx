@@ -91,7 +91,6 @@ export default async function Companies({
   return (
     <Shell
       user={user}
-      orgName={icp?.label ?? 'Agency'}
       current="companies"
       signOut={async () => {
         'use server'

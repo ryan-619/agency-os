@@ -5,7 +5,6 @@ import { Shell } from '@/components/shell'
 import { When } from '@/components/when'
 import { getDb } from '@/lib/db'
 import { activeProfilesNote, icpView, type IcpView } from '@/lib/icp-view'
-import { orgIdentity } from '../org'
 
 /**
  * Settings → ICP: the profile every score is computed against, READ ONLY
@@ -31,7 +30,6 @@ export default async function IcpPage() {
   if (!session?.user) redirect('/signin')
   const user = session.user
 
-  const org = await orgIdentity(user.orgId)
   const rows = await icpProfilesList(getDb() as unknown as AgencyDb, user.orgId)
   const warning = activeProfilesNote(rows)
 
@@ -41,7 +39,7 @@ export default async function IcpPage() {
   }
 
   return (
-    <Shell user={user} orgName={org.name} current="icp" signOut={signOutAction}>
+    <Shell user={user} current="icp" signOut={signOutAction}>
       <p className="crumb"><a href="/settings">Settings</a> /</p>
       <h1>Ideal customer profile</h1>
       <p className="lede">

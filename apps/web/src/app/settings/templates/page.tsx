@@ -5,7 +5,6 @@ import { Shell } from '@/components/shell'
 import { getDb } from '@/lib/db'
 import { dovesoft } from '@/lib/deployment'
 import { mayReadTemplates, mayWriteTemplates, templateView } from '../../api/templates/rules'
-import { orgIdentity } from '../org'
 import { TemplatesPanel, type TemplateRowView } from './panel'
 import { TEMPLATES_LEDE } from './words'
 
@@ -34,10 +33,7 @@ export default async function TemplatesPage() {
   const principal = { id: user.id, orgId: user.orgId, role: user.role }
   if (!mayReadTemplates(principal)) redirect('/settings')
 
-  const [org, rows] = await Promise.all([
-    orgIdentity(user.orgId),
-    templatesList(getDb() as unknown as AgencyDb, user.orgId),
-  ])
+  const rows = await templatesList(getDb() as unknown as AgencyDb, user.orgId)
   const views: TemplateRowView[] = rows.map(templateView).map((t) => ({
     id: t.id,
     channel: t.channel === 'whatsapp' || t.channel === 'voice' ? t.channel : 'sms',
@@ -59,7 +55,7 @@ export default async function TemplatesPage() {
   }
 
   return (
-    <Shell user={user} orgName={org.name} current="settings" signOut={signOutAction}>
+    <Shell user={user} current="settings" signOut={signOutAction}>
       <p className="crumb"><a href="/settings">Settings</a> /</p>
       <h1>Templates</h1>
       <p className="lede">{TEMPLATES_LEDE}</p>

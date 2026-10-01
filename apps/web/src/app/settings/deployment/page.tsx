@@ -13,7 +13,6 @@ import { deployment, dovesoft } from '@/lib/deployment'
 import { env } from '@/lib/env'
 import { workerStatus, type WorkerStatus } from '@/lib/worker-status'
 import { deploymentFacts, schemaSentence, sendingAnswer, workerLine, workerModes } from '../facts'
-import { orgIdentity } from '../org'
 
 /**
  * Settings → Deployment: "why does nothing send?" as a page.
@@ -74,7 +73,6 @@ export default async function DeploymentPage() {
   const session = await auth()
   if (!session?.user) redirect('/signin')
   const user = session.user
-  const org = await orgIdentity(user.orgId)
 
   const e = env()
   const flags = deployment()
@@ -127,7 +125,7 @@ export default async function DeploymentPage() {
   const tone = (t: 'ok' | 'warn' | 'plain') => (t === 'warn' ? 'note note-warn' : 'note')
 
   return (
-    <Shell user={user} orgName={org.name} current="deployment" signOut={signOutAction}>
+    <Shell user={user} current="deployment" signOut={signOutAction}>
       <p className="crumb"><a href="/settings">Settings</a> /</p>
       <h1>Deployment</h1>
       <p className="lede">
