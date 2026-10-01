@@ -21,7 +21,7 @@ import {
 } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
-import { sendFactsFor, type EvidenceAsOf } from './outreach.js'
+import { channelMismatch, sendFactsFor, type EvidenceAsOf } from './outreach.js'
 
 export interface SendPreviewInput {
   readonly orgId: string
@@ -38,6 +38,9 @@ export interface SendPreviewInput {
    * the microsecond, which a `Date` cannot carry. A `Date`: words written at
    * that instant and stored nowhere. Null: an answer to a reply, which
    * quotes no scan.
+   *
+   * A stored draft is also asked about on ITS OWN channel, as the sender
+   * sends it (r4); every other form takes the campaign's.
    */
   readonly writtenAt?: EvidenceAsOf
 }
@@ -142,6 +145,10 @@ export async function previewSend(db: AgencyDb, input: SendPreviewInput): Promis
 
   const { facts, recipient, zoneFrom, paused, pausedReason, consentRecorded } = gathered
   const decision = decideSend(facts)
+  // r4: a stored message whose campaign now sends on another channel — what
+  // the sender refuses it as, in its words (`channelMismatch`).
+  const mismatch = channelMismatch(gathered, decision)
+  if (mismatch !== null) return { ok: false, reason: 'missing', message: mismatch }
   return {
     ok: true,
     decision,

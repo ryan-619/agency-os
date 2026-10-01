@@ -596,14 +596,56 @@ async function gatherFacts(
   if (!touch.contactId) {
     return { missing: 'This message has no recipient. Nothing was sent.' }
   }
-  return sendFactsFor(db, {
+  const gathered = await sendFactsFor(db, {
     orgId: touch.orgId,
     campaignId: touch.campaignId,
     contactId: touch.contactId,
+    // r4: the ROW's channel — the one the provider is picked by — never the
+    // campaign's. Review round 3, finding 2.
+    channel: touch.channel as Channel,
     approvedByHuman: touch.status === 'approved' && touch.approvedBy !== null,
     evidenceAsOf: evidenceAsOfFor(touch),
     now,
   })
+  if ('missing' in gathered) return gathered
+  // r4: a message whose campaign no longer sends on its channel is refused
+  // here, as a message with no campaign is — unless a refusal nobody may
+  // approve past outranks it (`channelMismatch`).
+  const mismatch = channelMismatch(gathered, decideSend(gathered.facts))
+  return mismatch === null ? gathered : { missing: mismatch }
+}
+
+/**
+ * The refusal for words written for one channel under a campaign that now
+ * sends on another — or null.
+ *
+ * The campaign is where a message's cap, quiet hours and status live, and a
+ * campaign on the other channel holds none of them for these words: it is a
+ * message with no campaign of its own, refused the way `gatherFacts` refuses
+ * one with none (`unparseable_recipient`, with this sentence on the row).
+ * Terminal: the words were written for a medium, and the fix is a new draft
+ * under a campaign on it. Review round 3, finding 2 — a campaign switched
+ * from LinkedIn to email while it held approved messages used to address
+ * them by the campaign's channel.
+ *
+ * A refusal nobody may approve past — a suppression, a recorded refusal, a
+ * pause, stale evidence, a cold channel — is judged on the words' OWN
+ * channel and outranks this, so the reason recorded for somebody who opted
+ * out is the opt-out. Exported for `previewSend`, which must say what the
+ * sender will.
+ */
+export function channelMismatch(
+  gathered: { readonly facts: SendFacts; readonly campaignChannel: Channel },
+  decision: SendDecision,
+): string | null {
+  const channel = gathered.facts.channel
+  if (channel === gathered.campaignChannel) return null
+  if (!decision.allowed && !decision.humanCanResolve) return null
+  const name = (c: Channel) => (c === 'linkedin' ? 'LinkedIn' : c === 'sms' ? 'SMS' : c === 'whatsapp' ? 'WhatsApp' : c)
+  return (
+    `This message was written for ${name(channel)}, and its campaign now sends ${name(gathered.campaignChannel)}, ` +
+    `so it has no campaign on its own channel. Nothing was sent; draft it again under a ${name(channel)} campaign.`
+  )
 }
 
 /**
@@ -688,6 +730,17 @@ export async function sendFactsFor(
      * were written before it; a new draft does.
      */
     readonly evidenceAsOf: EvidenceAsOf
+    /**
+     * The channel the WORDS were written for — a stored row's own
+     * `touches.channel`, which is what the provider is picked by. Omitted:
+     * the stored message `evidenceAsOf` names, when it names one, and the
+     * campaign's channel only for words nobody has stored. Review round 3,
+     * finding 2: the campaign's channel decided the recipient, the
+     * suppression keys, consent and the bounce for every message, so a
+     * campaign switched from LinkedIn to email checked a LinkedIn message
+     * against the email keys.
+     */
+    readonly channel?: Channel
     readonly now: Date
   },
 ): Promise<
@@ -700,6 +753,11 @@ export async function sendFactsFor(
       pausedReason: string | null
       /** The consent row for this channel AS STORED — the same value as `facts.consent`. */
       consentRecorded: { granted: boolean; source: string } | null
+      /**
+       * The campaign's channel. Differs from `facts.channel` only for words
+       * written for another one — `channelMismatch` says what that means.
+       */
+      campaignChannel: Channel
     }
   | { missing: string }
 > {
@@ -723,7 +781,13 @@ export async function sendFactsFor(
   const row = rows[0]
   if (!row) return { missing: 'That campaign or contact no longer exists. Nothing was sent.' }
 
-  const channel = row.campaign.channel as Channel
+  // r4 (review round 3, finding 2): the WORDS' channel. A stored message is
+  // addressed, suppression-checked and consent-checked on its own channel,
+  // the one `dispatchTouch` picks the provider by; only words nobody has
+  // stored take the campaign's. A mismatch is not resolved here — the
+  // facts are about the words — and `channelMismatch` refuses it.
+  const campaignChannel = row.campaign.channel as Channel
+  const channel = args.channel ?? (await storedChannel(db, orgId, args.evidenceAsOf)) ?? campaignChannel
   const recipient = recipientFor(channel, row.contact)
   // The contact's zone, or their company's. Never the sender's, and never
   // derived from a country (§2.1; see 0010).
@@ -792,6 +856,7 @@ export async function sendFactsFor(
     paused,
     pausedReason,
     consentRecorded,
+    campaignChannel,
     facts: {
       channel,
       recipient,
@@ -872,6 +937,22 @@ async function evidenceIsStale(
 
 async function staleAfterDays(db: AgencyDb, orgId: string): Promise<number> {
   return staleAfterDaysOf((await activeIcpProfile(db, orgId))?.definition)
+}
+
+/**
+ * The channel of the stored message `evidenceAsOf` names (r4), or null for
+ * words nobody has stored — a `Date`, an answer to a reply (`null`), or a
+ * row that is gone (another org's id included). So a screen previewing a
+ * stored draft asks about the channel the sender will send it on.
+ */
+async function storedChannel(db: AgencyDb, orgId: string, evidenceAsOf: EvidenceAsOf): Promise<Channel | null> {
+  if (evidenceAsOf === null || evidenceAsOf instanceof Date) return null
+  const [row] = await db
+    .select({ channel: schema.touches.channel })
+    .from(schema.touches)
+    .where(and(eq(schema.touches.id, evidenceAsOf.touchId), eq(schema.touches.orgId, orgId)))
+    .limit(1)
+  return (row?.channel as Channel | undefined) ?? null
 }
 
 /** Where a message on this channel is addressed. */
