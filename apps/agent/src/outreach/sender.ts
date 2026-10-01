@@ -34,14 +34,16 @@
  *
  * ## A campaign that bounces pauses itself
  *
- * Before each pass, every active email campaign that has written to at least
- * twenty people in the last thirty days is checked: if more than
- * `OUTREACH_BOUNCE_PAUSE_PCT` of their addresses have bounced since, the
- * campaign is set `paused` — once, audited, and said in one log line. There
- * is no new stop mechanism: `campaign_inactive` already defers everything in
- * a paused campaign, and a person sets it active again after fixing the
- * list. A mailbox that keeps writing to dead addresses stops being one that
- * reaches anybody, and that is the whole agency's outreach, not one list's.
+ * Before each pass that sends email, every active email campaign that has
+ * written to at least twenty people in the last thirty days is checked: if
+ * more than `OUTREACH_BOUNCE_PAUSE_PCT` of their addresses have bounced
+ * since, the campaign is set `paused` — once, audited, and said in one log
+ * line. A tick carrying SMS alone skips it: a bounce is about an address,
+ * and that tick writes to none. There is no new stop mechanism:
+ * `campaign_inactive` already defers everything in a paused campaign, and a
+ * person sets it active again after fixing the list. A mailbox that keeps
+ * writing to dead addresses stops being one that reaches anybody, and that
+ * is the whole agency's outreach, not one list's.
  *
  * BEFORE, not after: the bounces that cross the threshold arrive between
  * ticks (the IMAP listener records them), and `dispatchTouch` re-reads the
@@ -206,10 +208,13 @@ export async function pauseBouncingCampaigns(
  * the first simply wins, because a tick never throws.
  */
 export function providersByChannel(provider: SenderDeps['provider']): ReadonlyMap<Channel, MessageProvider> {
-  const list: readonly MessageProvider[] = 'send' in provider ? [provider] : provider
   const byChannel = new Map<Channel, MessageProvider>()
-  for (const p of list) for (const c of p.channels) if (!byChannel.has(c)) byChannel.set(c, p)
+  for (const p of providerList(provider)) for (const c of p.channels) if (!byChannel.has(c)) byChannel.set(c, p)
   return byChannel
+}
+
+function providerList(provider: SenderDeps['provider']): readonly MessageProvider[] {
+  return 'send' in provider ? [provider] : provider
 }
 
 /**
@@ -371,8 +376,7 @@ export async function runSenderTick(deps: SenderDeps, memo?: SenderMemo): Promis
  * order somebody wrote them in.
  */
 export function startSender(deps: SenderDeps & { readonly intervalMs: number }): () => Promise<void> {
-  const list: readonly MessageProvider[] = 'send' in deps.provider ? [deps.provider] : deps.provider
-  const named = list.flatMap((p) => p.channels)
+  const named = providerList(deps.provider).flatMap((p) => p.channels)
   const twice = named.filter((c, i) => named.indexOf(c) !== i)
   if (twice.length > 0) {
     throw new Error(`Two providers carry ${[...new Set(twice)].join(', ')}; the sender needs one per channel.`)
