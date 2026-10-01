@@ -492,6 +492,26 @@ export const touches = pgTable(
      * foreign key (SET NULL: deleting the reply must not delete the answer).
      */
     answersTouchId: uuid('answers_touch_id'),
+    // --- a registered template, and what the operator said (0019) ---------
+    /**
+     * The template an SMS or WhatsApp message was rendered from. The key is
+     * the composite (template_id, org_id, channel) → message_templates, owned
+     * by the migration as `scanId`'s is: a message can only name a template
+     * of its own org AND its own channel. RESTRICT: the registration a sent
+     * message was checked against outlives it. Required, by CHECK, on an
+     * outbound sms/whatsapp row in any state that can still go out.
+     */
+    templateId: uuid('template_id'),
+    /**
+     * What the operator's delivery report said, BESIDE `status` — which
+     * stays the send path's word ('sent' = the provider took it). 'pending'
+     * | 'delivered' | 'failed'; outbound only. `deliveredAt` is set exactly
+     * when delivered, `deliveryError` (the report's reason, bounded) exactly
+     * when failed. A failure is evidence about a number, never an opt-out.
+     */
+    deliveryStatus: text('delivery_status'),
+    deliveredAt: timestamp('delivered_at', { withTimezone: true }),
+    deliveryError: text('delivery_error'),
     ...timestamps,
   },
   (t) => [
@@ -504,6 +524,9 @@ export const touches = pgTable(
     index('touches_due_idx').on(t.status, t.scheduledFor),
     index('touches_org_inbox_idx').on(t.orgId, t.createdAt.desc()),
     index('touches_answers_idx').on(t.answersTouchId),
+    index('touches_template_idx').on(t.templateId),
+    /** Partial in the migration: inbound SMS rows with a provider id only. */
+    uniqueIndex('touches_inbound_sms_provider_id_key').on(t.providerId),
   ],
 )
 
@@ -815,6 +838,49 @@ export const proposalShares = pgTable(
   ],
 )
 
+/**
+ * A message template registered with the regulator or the platform (0019).
+ *
+ * Under TRAI's TCCCPR 2018 every commercial SMS to an Indian number must be a
+ * template registered on DLT — the header and template id a registered pair,
+ * the text the registered body with each `{#var#}` filled — or the operator
+ * scrubs it. A row is that registration, copied in by a person or from the
+ * DLT portal's CSV export; `packages/core/src/dlt.ts` reads its body.
+ */
+export const messageTemplates = pgTable(
+  'message_templates',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    /** 'sms' | 'whatsapp' | 'voice' */
+    channel: text('channel').notNull(),
+    /** 'dovesoft' */
+    provider: text('provider').notNull().default('dovesoft'),
+    /** The DLT content-template id (SMS, voice) or Meta's template name (WhatsApp). */
+    externalId: text('external_id').notNull(),
+    /** The DLT header (SMS: six characters, upper-case), the WABA number, or the calling line. */
+    senderId: text('sender_id').notNull(),
+    /** SMS/voice: 'promotional' | 'transactional' | 'service_implicit' |
+     *  'service_explicit'. WhatsApp: 'marketing' | 'utility' | 'authentication'.
+     *  Per channel, by CHECK. */
+    category: text('category').notNull(),
+    /** The registered text, with its `{#var#}` slots. */
+    body: text('body').notNull(),
+    name: text('name'),
+    language: text('language').notNull().default('en'),
+    active: boolean('active').notNull().default(true),
+    /** SET NULL (created_by); same-org composite FK to users (id, org_id),
+     *  owned by the migration. */
+    createdBy: uuid('created_by'),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('message_templates_org_channel_external_key').on(t.orgId, t.channel, t.externalId),
+    uniqueIndex('message_templates_id_org_channel_key').on(t.id, t.orgId, t.channel),
+    index('message_templates_org_active_idx').on(t.orgId, t.channel, t.active),
+  ],
+)
+
 // ---------------------------------------------------------------------------
 // System tables (0018)
 // ---------------------------------------------------------------------------
@@ -891,3 +957,4 @@ export type Note = typeof notes.$inferSelect
 export type Task = typeof tasks.$inferSelect
 export type ProposalShare = typeof proposalShares.$inferSelect
 export type WorkerHeartbeat = typeof workerHeartbeats.$inferSelect
+export type MessageTemplate = typeof messageTemplates.$inferSelect
