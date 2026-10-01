@@ -17,7 +17,7 @@ import { drizzle } from 'drizzle-orm/pglite'
 import { and, eq } from 'drizzle-orm'
 import {
   dispatchTouch, linkedinFinishStep, linkedinHumanProvider, linkedinPerformStep, linkedinProfileUrl,
-  linkedinStepsDue, LINKEDIN_HANDOVER_HOURS, LINKEDIN_STEP_STUCK_ERROR, LINKEDIN_STEP_STUCK_MINUTES, schema,
+  linkedinStepsDue, linkedinThreadWithheld, LINKEDIN_HANDOVER_HOURS, LINKEDIN_STEP_STUCK_ERROR, LINKEDIN_STEP_STUCK_MINUTES, schema,
   type AgencyDb, type MessageProvider,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
@@ -522,6 +522,146 @@ describe('the LinkedIn step', () => {
       expect(await finish(refused.id, 'dismissed')).toEqual({ ok: true, alreadyDone: false })
       expect(await openTasks(refused.id)).toHaveLength(0)
       expect((await audit()).some((a) => a.action === 'linkedin.dismissed')).toBe(true)
+    })
+
+    /**
+     * Review round 3: the task's completion committed on its own, before the
+     * row was marked failed. A fault between the two left a message the
+     * person said never went recorded as `sent` — counted by the cap, read by
+     * enrolment as already contacted — and the retry found no open task and
+     * answered `alreadyDone` without touching it. Now the two writes and
+     * their audit rows are one transaction: a fault leaves nothing done, and
+     * the retry does all of it.
+     */
+    describe('a fault part-way through', () => {
+      /** `db`, but the next UPDATE of `touches` (or INSERT into the audit log) throws — a connection blip. */
+      const failingOnce = (inner: AgencyDb, table: unknown, method: 'update' | 'insert'): { db: AgencyDb; fired: () => boolean } => {
+        let armed = true
+        const wrap = (d: AgencyDb): AgencyDb =>
+          new Proxy(d as object, {
+            get(target, prop, receiver) {
+              if (prop === 'transaction') {
+                return (fn: (tx: AgencyDb) => Promise<unknown>) =>
+                  (target as AgencyDb).transaction((tx) => fn(wrap(tx as unknown as AgencyDb)) as never)
+              }
+              if (prop === method) {
+                return (t: unknown) => {
+                  if (armed && t === table) {
+                    armed = false
+                    throw new Error('Connection terminated unexpectedly')
+                  }
+                  return (target as AgencyDb)[method](t as never)
+                }
+              }
+              const v = Reflect.get(target, prop, receiver)
+              return typeof v === 'function' ? v.bind(target) : v
+            },
+          }) as AgencyDb
+        return { db: wrap(inner), fired: () => !armed }
+      }
+
+      it('a fault marking the row failed leaves the task open, and the retry finishes it', async () => {
+        const t = await approved()
+        await start(t.id)
+        const faulty = failingOnce(db, schema.touches, 'update')
+        await expect(
+          linkedinFinishStep(faulty.db, { orgId, touchId: t.id, userId, outcome: 'not_sent', now: NOON }),
+        ).rejects.toThrow(/Connection terminated/)
+        expect(faulty.fired()).toBe(true)
+        // Nothing half-done: the step is still open and the row still says
+        // what it said.
+        expect(await openTasks(t.id)).toHaveLength(1)
+        expect((await reread(t.id)).status).toBe('sent')
+        expect((await audit()).filter((a) => a.action === 'task.completed')).toEqual([])
+
+        expect(await finish(t.id, 'not_sent')).toEqual({ ok: true, alreadyDone: false })
+        expect(await reread(t.id)).toMatchObject({ status: 'failed', sentAt: null })
+        expect(await openTasks(t.id)).toHaveLength(0)
+        const actions = (await audit()).map((a) => a.action)
+        expect(actions.filter((a) => a === 'task.completed')).toHaveLength(1)
+        expect(actions.filter((a) => a === 'linkedin.not_sent')).toHaveLength(1)
+      })
+
+      it('a fault writing the step’s audit row leaves nothing done either', async () => {
+        const t = await approved()
+        await start(t.id)
+        // The first audit insert after Start is the task's own `task.completed`.
+        const faulty = failingOnce(db, schema.auditLog, 'insert')
+        await expect(
+          linkedinFinishStep(faulty.db, { orgId, touchId: t.id, userId, outcome: 'not_sent', now: NOON }),
+        ).rejects.toThrow(/Connection terminated/)
+        expect(await openTasks(t.id)).toHaveLength(1)
+        expect((await reread(t.id)).status).toBe('sent')
+
+        expect(await finish(t.id, 'not_sent')).toEqual({ ok: true, alreadyDone: false })
+        expect((await reread(t.id)).status).toBe('failed')
+      })
+    })
+  })
+
+  /**
+   * Review round 3: /tasks withholds a LinkedIn step's words before Start and
+   * again once the rules refuse, and the company page's Conversation panel
+   * printed every touch's body whatever its status — the withheld words one
+   * click away. `linkedinThreadWithheld` is the panel's reading, and it is
+   * the /tasks rule: a LinkedIn message's words are shown once Start handed
+   * them over, and while the step is still open only if the re-check still
+   * lets them be shown.
+   */
+  describe('the company page’s thread', () => {
+    const HOUR = 3_600_000
+    const thread = async () =>
+      db.select().from(schema.touches).where(and(eq(schema.touches.orgId, orgId), eq(schema.touches.companyId, companyId)))
+
+    it('withholds a message nobody has started, and one the rules stopped or that did not go', async () => {
+      const ready = await approved()
+      const draft = await approved({ status: 'awaiting_approval', approvedBy: null, approvedAt: null })
+      const refused = await approved({ status: 'refused', refusalCode: 'suppressed' })
+      const notSent = await approved()
+      await start(notSent.id)
+      await finish(notSent.id, 'not_sent')
+      const held = await linkedinThreadWithheld(db, orgId, await thread(), NOON)
+      expect(held.get(ready.id)).toBe('not_handed')
+      expect(held.get(draft.id)).toBe('not_handed')
+      expect(held.get(refused.id)).toBe('not_handed')
+      expect(held.get(notSent.id)).toBe('not_handed')
+    })
+
+    it('shows a handed message the rules still allow, and withholds it once /tasks would', async () => {
+      const t = await approved()
+      await start(t.id)
+      const later = new Date(NOON.getTime() + HOUR)
+      expect((await linkedinThreadWithheld(db, orgId, await thread(), later)).has(t.id)).toBe(false)
+
+      await db.insert(schema.suppressions).values({ orgId, kind: 'linkedin', value: 'in/jane-doe', reason: 'asked' })
+      expect((await linkedinThreadWithheld(db, orgId, await thread(), later)).get(t.id)).toBe('refused')
+      // The same answer /tasks gives, from the same rule.
+      const [step] = await linkedinStepsDue(db, orgId, later)
+      expect(step!.withheld).toBe('refused')
+    })
+
+    it('withholds a handed message a day on, as /tasks does, until the person says it went', async () => {
+      const t = await approved()
+      await start(t.id)
+      const nextDay = new Date(NOON.getTime() + (LINKEDIN_HANDOVER_HOURS + 1) * HOUR)
+      expect((await linkedinThreadWithheld(db, orgId, await thread(), nextDay)).get(t.id)).toBe('expired')
+      expect(await finish(t.id, 'sent')).toEqual({ ok: true, alreadyDone: false })
+      // The step is closed and the message went: it is history now.
+      expect((await linkedinThreadWithheld(db, orgId, await thread(), nextDay)).has(t.id)).toBe(false)
+    })
+
+    it('never holds back an email, or anybody’s reply', async () => {
+      const [mail] = await db
+        .insert(schema.touches)
+        .values({ orgId, campaignId, contactId, companyId, channel: 'email', direction: 'out', status: 'approved', body: BODY })
+        .returning({ id: schema.touches.id })
+      const [theirs] = await db
+        .insert(schema.touches)
+        .values({ orgId, contactId, companyId, channel: 'linkedin', direction: 'in', status: 'replied', body: 'Thanks!' })
+        .returning({ id: schema.touches.id })
+      const held = await linkedinThreadWithheld(db, orgId, await thread(), NOON)
+      expect(held.has(mail!.id)).toBe(false)
+      expect(held.has(theirs!.id)).toBe(false)
     })
   })
 
