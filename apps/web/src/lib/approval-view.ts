@@ -193,6 +193,54 @@ export const OTHER_CAMPAIGN_NOTE =
   'campaign on this channel; quiet hours, the daily cap and the status may not be — the worker checks those at sending.'
 
 // ---------------------------------------------------------------------------
+// The registration an SMS or WhatsApp draft names (0019)
+// ---------------------------------------------------------------------------
+
+/** The template a draft was rendered from, as the card shows it: the registration's ids, never its body. */
+export interface DraftTemplate {
+  /** The DLT template id (or a WhatsApp template's name). */
+  readonly externalId: string
+  /** The DLT header the template is registered with. */
+  readonly senderId: string
+  readonly category: string
+  readonly active: boolean
+}
+
+/** The card's title for a draft with no subject of its own — an SMS has none. */
+export function draftTitle(subject: string | null, template: DraftTemplate | null | undefined): string {
+  if (subject) return subject
+  return template ? `From template ${template.externalId}` : '(no subject)'
+}
+
+/**
+ * The line under an SMS draft's words: what the operator will check them
+ * against. A template switched off since is said to be, because the send
+ * path refuses a draft from it (`no_template`) — the card's own block says
+ * what to do about that.
+ */
+export function templateLine(t: DraftTemplate): string {
+  return (
+    `Rendered from DLT template ${t.externalId}, header ${t.senderId}, ${t.category.replace(/_/g, ' ')}` +
+    (t.active ? '. The operator delivers it only as these exact words.' : ' — switched off since this was drafted.')
+  )
+}
+
+/**
+ * The people an SMS draft can be approved to: the one it was rendered for.
+ * Its `{#var#}` slots were filled for that person — their name, their
+ * company — so the same words to somebody else would be the right template
+ * with the wrong values. An email draft keeps everyone at its company.
+ */
+export function smsCandidates<T extends { readonly id: string }>(
+  channel: string,
+  contactId: string | null,
+  people: readonly T[],
+): readonly T[] {
+  if (channel !== 'sms' || !contactId) return people
+  return people.filter((p) => p.id === contactId)
+}
+
+// ---------------------------------------------------------------------------
 // Who addressed it
 // ---------------------------------------------------------------------------
 
