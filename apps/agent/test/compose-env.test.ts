@@ -139,6 +139,7 @@ describe('compose names every optional variable an app reads', () => {
     ['web', 'SECRETS_KEY'],
     ['agent', 'UNSUBSCRIBE_SECRET'], ['agent', 'WEB_PUBLIC_URL'], ['agent', 'OUTREACH_BOUNCE_PAUSE_PCT'],
     ['agent', 'SLACK_WEBHOOK_URL'],
+    ['agent', 'DOVESOFT_API_KEY'], ['agent', 'DOVESOFT_ENTITY_ID'], ['agent', 'DOVESOFT_BASE_URL'],
     ['voice', 'LLM_PROVIDER'], ['voice', 'LLM_MODEL'], ['voice', 'OLLAMA_BASE_URL'], ['voice', 'OLLAMA_IS_LOCAL'],
     ['voice', 'LLM_ALLOW_REMOTE_LEAD_DATA'], ['voice', 'OPENAI_API_KEY'], ['voice', 'ANTHROPIC_API_KEY'],
     ['voice', 'VOICE_HANDOFF_USER_EMAIL'],
@@ -203,6 +204,10 @@ describe('every service boots on what compose hands it', () => {
       expect(env.SLACK_WEBHOOK_URL).toBeUndefined()
       // A blank threshold is the default, never 0 — which would pause a campaign on its first bounce.
       expect(env.OUTREACH_BOUNCE_PAUSE_PCT).toBe(5)
+      // SMS off, and DoveSoft's own API: the production rule passes on the default.
+      expect(env.DOVESOFT_API_KEY).toBeUndefined()
+      expect(env.DOVESOFT_ENTITY_ID).toBeUndefined()
+      expect(env.DOVESOFT_BASE_URL).toBe('https://api.dovesoft.io')
     })
 
     it('boots the voice service, with the summary model off and lead data kept local', () => {
@@ -245,6 +250,18 @@ describe('every service boots on what compose hands it', () => {
     expect(web['SLACK_WEBHOOK_URL']).toBe(slack)
     expect(web['UNSUBSCRIBE_SECRET']).toBe(secret)
     expect(web['CRON_SECRET']).toBe('c'.repeat(40))
+  })
+
+  /** SMS, configured in .env, reaches the worker — the only process that sends. */
+  it('delivers the DoveSoft configuration to the worker', () => {
+    const dotenv = {
+      ...MINIMAL_DOTENV, DOVESOFT_API_KEY: 'dsk-0123456789', DOVESOFT_ENTITY_ID: '1101234567890123456',
+      DOVESOFT_BASE_URL: 'https://gateway.dovesoft.example.com',
+    }
+    const agent = loadAgentEnv(containerEnv('agent', dotenv) as NodeJS.ProcessEnv)
+    expect(agent.DOVESOFT_API_KEY).toBe('dsk-0123456789')
+    expect(agent.DOVESOFT_ENTITY_ID).toBe('1101234567890123456')
+    expect(agent.DOVESOFT_BASE_URL).toBe('https://gateway.dovesoft.example.com')
   })
 
   /** The summary model, configured once in .env, reaches the voice container — and the worker's triage, which reads the same names. */
