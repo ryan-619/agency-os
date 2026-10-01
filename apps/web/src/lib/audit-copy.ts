@@ -913,6 +913,28 @@ const SENTENCES: Readonly<Record<string, Template>> = {
         : ''
     }`
   },
+  // The two DoveSoft pushes this deployment could not read (/api/inbound/dovesoft/*).
+  // Which field was missing, by name — never a value, a number or the words.
+  'sms.dlr_unreadable': (c) =>
+    `could not read a delivery report DoveSoft sent${unreadableWhy(c.d)}; it was refused so DoveSoft retries, and nothing was changed`,
+  'sms.inbound_unreadable': (c) =>
+    `could not read a text DoveSoft passed on${unreadableWhy(c.d)}, so nothing was recorded — it may have asked to stop; ` +
+    'it was refused so DoveSoft retries, and the field names it did carry are in the error log',
+}
+
+/** " (no message id or status)", " (the body was not a form or a JSON object)", or nothing. */
+function unreadableWhy(d: unknown): string {
+  if (word(d, 'why') === 'unreadable_body') return ' (the body was not a form or a JSON object)'
+  const missing = (words(d, 'missing') ?? []).map((m) => own(UNREADABLE_FIELD, m)).filter((m): m is string => Boolean(m))
+  return missing.length ? ` (no ${missing.join(' or ')})` : ''
+}
+
+/** The fields an unreadable DoveSoft push lacked, in words. */
+const UNREADABLE_FIELD: Readonly<Record<string, string>> = {
+  messageid: 'message id',
+  status: 'status',
+  from: 'sender number',
+  text: 'text',
 }
 
 /** "an SMS", "a WhatsApp", "a voice" — a channel's name with its article, for a template. */
@@ -932,8 +954,9 @@ const SMS_UNMATCHED: Readonly<Record<string, string>> = {
 export const AUDIT_ACTIONS: readonly string[] = Object.freeze(Object.keys(SENTENCES).sort())
 
 /**
- * Rows a person must not scroll past: an opt-out that was not stored, and a
- * call with no AI disclosure — §2.1's failures, highlighted rather than
+ * Rows a person must not scroll past: an opt-out that was not stored (or a
+ * text that could not be read, which may have been one), and a call with no
+ * AI disclosure — §2.1's failures, highlighted rather than
  * rendered like every other line. And one operational failure nobody else
  * will report: the worker went silent and the daily alert reached nobody,
  * either because Slack refused it or because there is no Slack. The worker
@@ -944,6 +967,8 @@ export function isAlarm(row: AuditLine): boolean {
     case 'contact.opt_out_not_recorded':
     case 'unsubscribe.not_recorded':
     case 'contact.erasure_failed':
+    // A text nobody could read may have been a STOP that is recorded nowhere.
+    case 'sms.inbound_unreadable':
       return true
     case 'call.opted_out':
       return flag(row.detail, 'suppressed') === false

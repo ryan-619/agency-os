@@ -229,6 +229,8 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'sms.drafted': { contactId: SUBJECT, campaignId: SUBJECT, templateId: SUBJECT },
   'sms.delivery_unmatched': { why: 'unknown_id', status: 'delivered' },
   'sms.inbound_unmatched': { why: 'ambiguous', optOut: true, contacts: 2, suppressed: true },
+  'sms.dlr_unreadable': { why: 'missing_fields', missing: ['messageid'] },
+  'sms.inbound_unreadable': { why: 'missing_fields', missing: ['from', 'text'] },
   'contact.bounced': { code: '5.1.1', cancelledQueued: 1, touchId: SUBJECT },
   'contact.bounce_transient': { code: '4.2.2', touchId: SUBJECT },
   'contact.bounce_cleared': { code: '5.1.1' },
@@ -344,6 +346,29 @@ describe('sentenceFor', () => {
     )
     expect(say('sms.inbound_unmatched', { why: 'no_contact', optOut: true, suppressed: false })).toContain('NOT on the suppression list')
     expect(say('sms.delivery_unmatched')).toBe('received a delivery report for an SMS this system did not send; nothing was changed')
+  })
+
+  /**
+   * DoveSoft's two pushes, when they could not be read: which field was
+   * missing, by name — a text nobody could read may have been a STOP, so
+   * that row is an alarm.
+   */
+  it('says what an unreadable DoveSoft push lacked, and never more (0019)', () => {
+    const say = (a: string, d: unknown = WRITTEN[a]) => sentenceFor(line(a, d, { actor: 'system' }), lookups)
+    expect(say('sms.dlr_unreadable')).toBe(
+      'could not read a delivery report DoveSoft sent (no message id); it was refused so DoveSoft retries, and nothing was changed',
+    )
+    expect(say('sms.inbound_unreadable')).toBe(
+      'could not read a text DoveSoft passed on (no sender number or text), so nothing was recorded — it may have asked to stop; ' +
+        'it was refused so DoveSoft retries, and the field names it did carry are in the error log',
+    )
+    expect(say('sms.inbound_unreadable', { why: 'unreadable_body' })).toContain('(the body was not a form or a JSON object)')
+    // An unknown field name is dropped, not echoed.
+    expect(say('sms.dlr_unreadable', { why: 'missing_fields', missing: ['secret_thing'] })).toBe(
+      'could not read a delivery report DoveSoft sent; it was refused so DoveSoft retries, and nothing was changed',
+    )
+    expect(isAlarm(line('sms.inbound_unreadable', WRITTEN['sms.inbound_unreadable']))).toBe(true)
+    expect(isAlarm(line('sms.dlr_unreadable', WRITTEN['sms.dlr_unreadable']))).toBe(false)
   })
 
   it('says what happened in the words the page leads with', () => {
