@@ -116,9 +116,11 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'contact.opt_out_not_recorded': { touchId: SUBJECT, channel: 'email', why: 'unparseable' },
   'contact.created': { companyId: SUBJECT, source: 'manual', hasTimeZone: true },
   // The contacts route's shape, over a reply's own pause. `denyDraft` writes
-  // `{ reason, alreadyPaused, inboundTouchId }` (DENIED_ANSWER_PAUSE below).
+  // `{ reason, alreadyPaused, inboundTouchId }` (DENIED_ANSWER_PAUSE below),
+  // and an answer that failed, was refused at sending or was cancelled by a
+  // bounce `{ reason, alreadyPaused, answerTouchId, answerEnded }`.
   'contact.paused': { reason: 'asked for Q1', alreadyPaused: false, replacedPauseFor: 'replied' },
-  // The inbox's shape; the contacts route writes `{ pausedFor }` alone.
+  // The inbox's shape; `contactResumeByHand` writes `{ pausedFor }` alone.
   'contact.resumed': { reason: 'answering their reply from the inbox', inboundTouchId: SUBJECT, pausedFor: 'replied' },
   'contact.timezone_set': { timeZone: 'Europe/Amsterdam' },
   'consent.granted': { channel: 'sms', source: 'said yes on the call, 12 Sep' },
@@ -312,6 +314,8 @@ describe('sentenceFor', () => {
    * this log is append-only. Both writers record the reason's CLASS, and the
    * sentence reads only that — the free-text `hadReason` the contacts route
    * wrote before is never rendered, and that route no longer writes it.
+   * The /contacts resume's row is written by `contactResumeByHand`, in the
+   * resume's own transaction (review round 4), so the pin follows it there.
    */
   it('says what paused a resumed contact by its class, and never reads the reason text', () => {
     expect(sentenceFor(line('contact.resumed', WRITTEN['contact.resumed']), lookups)).toBe(
@@ -320,9 +324,14 @@ describe('sentenceFor', () => {
     const free = sentenceFor(line('contact.resumed', { hadReason: 'Jane said stop calling (by sam@agency.test)' }), lookups)
     expect(free).toBe('resumed a contact at rentman.io')
     expect(sentenceFor(line('contact.resumed', { pausedFor: 'constructor' }), lookups)).toBe('resumed a contact at rentman.io')
-    const route = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/app/api/contacts/[id]/route.ts'), 'utf8')
-    expect(route).toContain('pausedFor: pauseReasonClass(contact.pausedReason)')
+    const here = dirname(fileURLToPath(import.meta.url))
+    const route = readFileSync(resolve(here, '../src/app/api/contacts/[id]/route.ts'), 'utf8')
     expect(route).not.toContain('hadReason')
+    expect(route).not.toContain("action: 'contact.resumed'")
+    const inbox = readFileSync(resolve(here, '../../../packages/db/src/inbox.ts'), 'utf8')
+    const byHand = inbox.slice(inbox.indexOf('export async function contactResumeByHand('))
+    expect(byHand.slice(0, byHand.indexOf('\n}\n'))).toContain('detail: { pausedFor: pauseReasonClass(contact.pausedReason) }')
+    expect(inbox).not.toContain('hadReason')
   })
 
   /**
@@ -367,6 +376,25 @@ describe('sentenceFor', () => {
     const outreach = readFileSync(resolve(here, '../../../packages/db/src/outreach.ts'), 'utf8')
     expect(outreach).toContain(`reason: '${String(DENIED_ANSWER_PAUSE.reason)}'`)
     expect(outreach).toContain('inboundTouchId: answer.answersTouchId')
+  })
+
+  /**
+   * Review round 4, [0]: an answer that never goes puts the reply's pause
+   * back, and the row says how it ended — never the deny's sentence, which
+   * `inboundTouchId` selects, so these rows name the ANSWER instead.
+   */
+  it('says why a reply’s pause came back when the answer to it failed, was refused or was cancelled', () => {
+    const outreach = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../packages/db/src/outreach.ts'), 'utf8')
+    for (const [ended, reason] of [
+      ['failed', 'their reply is unanswered again: the answer to it failed to send'],
+      ['refused', 'their reply is unanswered again: the answer to it was refused at sending'],
+      ['bounced', 'their reply is unanswered again: the answer to it was cancelled by a bounce'],
+    ] as const) {
+      expect(outreach).toContain(`${ended}: '${reason}'`)
+      expect(reason.length).toBeLessThanOrEqual(80)
+      const detail = { reason, alreadyPaused: false, answerTouchId: SUBJECT, answerEnded: ended }
+      expect(sentenceFor(line('contact.paused', detail), lookups)).toBe(`paused a contact at rentman.io: “${reason}”`)
+    }
   })
 
   it('says when a reclassification paused somebody and cancelled what was queued', () => {

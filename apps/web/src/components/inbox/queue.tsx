@@ -136,7 +136,9 @@ export function InboxQueue({
 
   const resume = async (row: InboxRowView) => {
     if (!row.contact) return
-    if (await send(row.id, `/api/contacts/${row.contact.id}`, 'PATCH', { action: 'resume' })) router.refresh()
+    // The pause this row showed: the route lifts that one and no other.
+    const body = { action: 'resume', pausedReason: row.contact.pausedReason }
+    if (await send(row.id, `/api/contacts/${row.contact.id}`, 'PATCH', body)) router.refresh()
   }
 
   const formFor = (row: InboxRowView) =>

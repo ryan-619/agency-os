@@ -24,10 +24,11 @@ import { fileURLToPath } from 'node:url'
 import { drizzle } from 'drizzle-orm/pglite'
 import { and, eq } from 'drizzle-orm'
 import {
-  appendAudit, contactPauseByHand, contactResumeByHand, denyDraft, handleInboundEmail, pauseContact,
+  contactPauseByHand, contactResumeByHand, denyDraft, handleInboundEmail, pauseContact,
   pauseContactOverriding, pauseReasonClass, previewSend, replyQueueDraft, resumeContact, schema, type AgencyDb,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
+import { failOnce } from './fault-db.js'
 
 /** Midday UTC on a Tuesday: 13:00 in London. */
 const NOON = new Date('2026-09-15T12:00:00.000Z')
@@ -113,6 +114,9 @@ describe('pausing and resuming by hand', () => {
     db.select().from(schema.touches).where(eq(schema.touches.answersTouchId, inboundId))
   const auditRows = async (action: string) =>
     db.select().from(schema.auditLog).where(and(eq(schema.auditLog.orgId, orgId), eq(schema.auditLog.action, action)))
+  /** Resume the way the route does: on the pause the page SHOWED (`shown`), as the user who pressed it. */
+  const resumeShown = async (shown: { readonly pausedReason: string | null }) =>
+    contactResumeByHand(db, { orgId, contact: { id: contactId }, expectedReason: shown.pausedReason, actor: userId })
 
   // -------------------------------------------------------------------------
   // [0] Resume refuses a pause nobody may lift
@@ -121,7 +125,7 @@ describe('pausing and resuming by hand', () => {
   describe('Resume', () => {
     it('refuses the pause an opt-out nobody could record left, and changes nothing', async () => {
       await setPause(NOT_RECORDED)
-      const r = await contactResumeByHand(db, { orgId, contact: await contactRow() })
+      const r = await resumeShown(await contactRow())
       expect(r).toMatchObject({ ok: false, reason: 'opt_out_not_recorded' })
       if (r.ok) return
       expect(r.message).toMatch(/\/suppressions/)
@@ -132,7 +136,7 @@ describe('pausing and resuming by hand', () => {
     it('still refuses it once the opt-out has been recorded by hand: an opt-out is not something to resume', async () => {
       await setPause(NOT_RECORDED)
       await db.insert(schema.suppressions).values({ orgId, kind: 'email', value: 'priya@rentman.io', reason: 'by hand' })
-      expect(await contactResumeByHand(db, { orgId, contact: await contactRow() })).toMatchObject({
+      expect(await resumeShown(await contactRow())).toMatchObject({
         ok: false, reason: 'opt_out_not_recorded',
       })
       expect((await contactRow()).pausedReason).toBe(NOT_RECORDED)
@@ -140,7 +144,7 @@ describe('pausing and resuming by hand', () => {
 
     it('refuses the pause an unfinished erasure left, and points at finishing it', async () => {
       await setPause(ERASURE)
-      const r = await contactResumeByHand(db, { orgId, contact: await contactRow() })
+      const r = await resumeShown(await contactRow())
       expect(r).toMatchObject({ ok: false, reason: 'erasure' })
       if (r.ok) return
       expect(r.message).toMatch(/Erase/)
@@ -168,7 +172,7 @@ describe('pausing and resuming by hand', () => {
         })
         const before = await contactRow()
         expect(pauseReasonClass(before.pausedReason)).toBe('replied')
-        expect(await contactResumeByHand(db, { orgId, contact: before })).toMatchObject({
+        expect(await resumeShown(before)).toMatchObject({
           ok: false, reason: 'opt_out_not_recorded',
         })
         expect((await contactRow()).pausedReason).toBe(before.pausedReason)
@@ -176,7 +180,7 @@ describe('pausing and resuming by hand', () => {
         // Recorded by hand since: the suppression row enforces it, and the
         // reply's pause is a person's to lift again.
         await db.insert(schema.suppressions).values({ orgId, kind: 'email', value: 'priya@rentman.io', reason: 'by hand' })
-        expect(await contactResumeByHand(db, { orgId, contact: await contactRow() })).toEqual({ ok: true })
+        expect(await resumeShown(await contactRow())).toEqual({ ok: true })
         expect((await contactRow()).pausedAt).toBeNull()
       })
     }
@@ -187,18 +191,18 @@ describe('pausing and resuming by hand', () => {
         recipient: 'priya@rentman.io', replyKind: 'opted_out', sentAt: NOON,
       })
       await reply()
-      expect(await contactResumeByHand(db, { orgId, contact: await contactRow() })).toMatchObject({
+      expect(await resumeShown(await contactRow())).toMatchObject({
         ok: false, reason: 'opt_out_not_recorded',
       })
     })
 
     it('lifts a teammate’s pause and a reply’s pause, as before', async () => {
       await setPause(TEAMMATE)
-      expect(await contactResumeByHand(db, { orgId, contact: await contactRow() })).toEqual({ ok: true })
+      expect(await resumeShown(await contactRow())).toEqual({ ok: true })
       expect(await contactRow()).toMatchObject({ pausedAt: null, pausedReason: null })
 
       await reply()
-      expect(await contactResumeByHand(db, { orgId, contact: await contactRow() })).toEqual({ ok: true })
+      expect(await resumeShown(await contactRow())).toEqual({ ok: true })
       expect((await contactRow()).pausedAt).toBeNull()
     })
 
@@ -208,9 +212,103 @@ describe('pausing and resuming by hand', () => {
       // An unsubscribe that could not be recorded lands between the page's
       // read and the click.
       await pauseContactOverriding(db, orgId, contactId, NOT_RECORDED, NOON)
-      const r = await contactResumeByHand(db, { orgId, contact: read })
+      const r = await resumeShown(read)
       expect(r).toMatchObject({ ok: false, reason: 'changed_meanwhile' })
       expect((await contactRow()).pausedReason).toBe(NOT_RECORDED)
+    })
+
+    /**
+     * Review round 4, [20]. The route used to judge and lift the pause IT
+     * read after the click, so this guard covered only the milliseconds
+     * between its own read and its UPDATE. Alice's page shows the reply's
+     * pause; Bob holds them since, which replaces it; Alice's Resume names
+     * the pause her page showed, and Bob's hold stands.
+     */
+    it('lifts the pause the page SHOWED: a teammate’s hold written since the page loaded is refused, and stands', async () => {
+      await reply()
+      const shown = await contactRow()
+      expect(pauseReasonClass(shown.pausedReason)).toBe('replied')
+      expect(await contactPauseByHand(db, { orgId, contactId, reason: TEAMMATE, now: LATER })).toEqual({
+        ok: true, replaced: 'replied',
+      })
+
+      const r = await resumeShown(shown)
+      expect(r).toMatchObject({ ok: false, reason: 'changed_meanwhile' })
+      if (r.ok) return
+      expect(r.message).toMatch(/changed since this page loaded/)
+      expect(r.message).toMatch(/Reload the page/)
+      expect(r.message).toMatch(/Nothing was changed/)
+      expect((await contactRow()).pausedReason).toBe(TEAMMATE)
+      expect(await auditRows('contact.resumed')).toEqual([])
+
+      // Reloaded, the page shows Bob's hold, and lifting THAT is a person's call.
+      expect(await resumeShown(await contactRow())).toEqual({ ok: true })
+      expect((await contactRow()).pausedAt).toBeNull()
+    })
+
+    it('a second Resume from the same page, after the first lifted it, is refused as changed — one resume, one row', async () => {
+      await setPause(TEAMMATE)
+      const shown = await contactRow()
+      expect(await resumeShown(shown)).toEqual({ ok: true })
+      expect(await resumeShown(shown)).toMatchObject({ ok: false, reason: 'changed_meanwhile' })
+      expect(await auditRows('contact.resumed')).toHaveLength(1)
+    })
+
+    /**
+     * Review round 4, [12], the reverse case: `resumeContact`'s guard matched
+     * `paused_reason IS NULL` on a contact who was not paused at all, so the
+     * route answered "resumed" and wrote a `contact.resumed` row for a resume
+     * that never happened — a row the re-pause guard reads as a person's
+     * decision.
+     */
+    it('resumes nobody who is not paused, and writes no row for it', async () => {
+      const r = await resumeShown({ pausedReason: null })
+      expect(r).toMatchObject({ ok: false, reason: 'not_paused' })
+      if (r.ok) return
+      expect(r.message).toMatch(/not paused/)
+      expect(await auditRows('contact.resumed')).toEqual([])
+      expect(await resumeContact(db, orgId, contactId, { expectedReason: null })).toBe(false)
+    })
+
+    it('does not answer "resumed" for a contact that is not there', async () => {
+      expect(
+        await contactResumeByHand(db, {
+          orgId, contact: { id: '00000000-0000-4000-8000-000000000000' }, expectedReason: TEAMMATE, actor: userId,
+        }),
+      ).toMatchObject({ ok: false, reason: 'not_found' })
+    })
+
+    /**
+     * Review round 4, [12]. The route wrote `contact.resumed` after the
+     * resume had committed, behind `.catch(() => {})`; the re-pause guard
+     * reads that row, so a resume with no row was a resume the guard could
+     * not see. Now the row is the resume's own, and is written or the resume
+     * is not.
+     */
+    it('writes its own `contact.resumed` row — the pause’s class, never its text — as the person who pressed it', async () => {
+      await setPause(TEAMMATE)
+      expect(await resumeShown(await contactRow())).toEqual({ ok: true })
+      const rows = await auditRows('contact.resumed')
+      expect(rows).toHaveLength(1)
+      expect(rows[0]).toMatchObject({ actor: userId, subjectType: 'contact', subjectId: contactId })
+      expect(rows[0]!.detail).toEqual({ pausedFor: 'manual' })
+      expect(JSON.stringify(rows[0]!.detail)).not.toContain('sam@agency.test')
+    })
+
+    it('a resume whose audit row cannot be written did not happen: the pause stands, and a retry runs clean', async () => {
+      await setPause(TEAMMATE)
+      const fault = await failOnce(test.pg, { table: 'audit_log', event: 'INSERT', when: "NEW.action = 'contact.resumed'" })
+      const thrown = await resumeShown(await contactRow()).then(() => null, (err: unknown) => err)
+      let cause = thrown as { message?: string; cause?: unknown } | null
+      while (cause?.cause) cause = cause.cause as typeof cause
+      expect(cause?.message).toBe(fault)
+      expect(await contactRow()).toMatchObject({ pausedReason: TEAMMATE })
+      expect((await contactRow()).pausedAt).not.toBeNull()
+      expect(await auditRows('contact.resumed')).toEqual([])
+
+      expect(await resumeShown(await contactRow())).toEqual({ ok: true })
+      expect((await contactRow()).pausedAt).toBeNull()
+      expect(await auditRows('contact.resumed')).toHaveLength(1)
     })
   })
 
@@ -406,15 +504,12 @@ describe('pausing and resuming by hand', () => {
       const id = await reply()
       const drafted = await answer(id)
       if (!drafted.ok) throw new Error('unreachable')
-      // A teammate paused them, and somebody resumed them on /contacts — the
-      // route's audit row is what says so.
+      // A teammate paused them, and somebody resumed them on /contacts. The
+      // resume writes its own `contact.resumed` row, in its own transaction
+      // (review round 4, [12] — probe R): nothing here writes it by hand,
+      // which is the case where the route's post-commit row never landed.
       await contactPauseByHand(db, { orgId, contactId, reason: TEAMMATE, now: LATER })
-      const read = await contactRow()
-      expect(await contactResumeByHand(db, { orgId, contact: read })).toEqual({ ok: true })
-      await appendAudit(db, {
-        orgId, actor: userId, action: 'contact.resumed', subjectType: 'contact', subjectId: contactId,
-        detail: { pausedFor: pauseReasonClass(read.pausedReason) },
-      })
+      expect(await resumeShown(await contactRow())).toEqual({ ok: true })
       await denyDraft(db, { orgId, touchId: drafted.touchId, decidedBy: userId, now: LATER })
       expect((await contactRow()).pausedAt).toBeNull()
     })
