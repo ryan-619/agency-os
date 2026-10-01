@@ -27,9 +27,19 @@ export const TEMPLATE_CATEGORY_OPTIONS: Readonly<Record<TemplateChannelName, rea
 /** A category as a person reads it: `service_explicit` is "service explicit". */
 export const categoryWords = (c: string): string => c.replace(/_/g, ' ')
 
-/** What each category means for sending, in one line, where it changes anything. */
+/**
+ * What each category means for sending, in one line, where it changes anything.
+ *
+ * The promotional band is the send path's (`promotionalBand` in core):
+ * 10:00–21:00 where the recipient is, for every number, and TRAI's band in
+ * India as well for an Indian one. It said "India time" alone until review
+ * round 5, which is the rule for neither an American number nor an Indian
+ * one read in another zone.
+ */
 export const CATEGORY_HINT: Readonly<Record<string, string>> = {
-  promotional: 'Held outside 10:00–21:00 India time, and the operator drops it to a DND number.',
+  promotional:
+    'Held outside 10:00–21:00 where the recipient is — and outside 10:00–21:00 India time as well for an Indian ' +
+    '(+91) number — and the operator drops it to a DND number.',
   transactional: 'Reserved by the operators for banks’ OTPs and alerts.',
   service_implicit: 'A message an existing relationship implies.',
   service_explicit: 'Needs the person’s explicit consent — here, their recorded SMS opt-in.',

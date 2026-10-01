@@ -233,6 +233,8 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   // DoveSoft (0019).
   'send.no_template': { campaignId: SUBJECT, channel: 'sms', code: 'no_template' },
   'send.template_mismatch': { campaignId: SUBJECT, channel: 'sms', code: 'template_mismatch' },
+  // Review round 5: a promotional SMS whose band never opens, stored as unknown_timezone before.
+  'send.band_never_opens': { campaignId: SUBJECT, channel: 'sms', code: 'band_never_opens' },
   'template.created': { channel: 'sms', category: 'service_explicit', externalId: '1107160000000012345' },
   'template.activated': { channel: 'sms', externalId: '1107160000000012345' },
   'template.deactivated': { channel: 'sms', externalId: '1107160000000012345' },
@@ -552,6 +554,10 @@ describe('sentenceFor', () => {
     )
     // A pause is not the person's no, and the log does not call it one.
     expect(say('send.paused')).toBe('refused an email to a contact at rentman.io: contact paused; nothing was sent')
+    // Review round 5: refused, never "held … retried later", and never a missing timezone.
+    expect(say('send.band_never_opens')).toBe(
+      'refused an SMS to a contact at rentman.io: promotional band never opens for them; nothing was sent',
+    )
     expect(say('campaign.auto_paused')).toBe(
       'paused a campaign automatically: 12% of the addresses it wrote to bounced (3 of 25; the limit is 5%); a person re-activates it',
     )
