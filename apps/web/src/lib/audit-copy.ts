@@ -496,12 +496,25 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     ])}`
   },
   // Two writers: a reply filed under a contact (`recordInboundReply`, the
-  // contact as subject), and an SMS STOP nobody could place — a number no
-  // single contact holds, or a text whose recording failed (`sms.ts`'s
-  // `optOutLost`, the DoveSoft route) — with no subject and no contact at
-  // all. That one names no contact, because there is none to look for.
+  // contact as subject), and an SMS STOP with no subject and no contact at
+  // all. That one comes two ways. `sms.ts`'s `optOutLost` LOOKED: a number
+  // no single contact holds, or one that could not be read — there is no
+  // contact to name. The DoveSoft route's `record_failed` did not: the
+  // recording THREW, most often inside the one matched contact's
+  // `recordInboundReply`, which rolled back, so whose number it was is not
+  // known and the contact who holds it is to be looked for (review round 5,
+  // [14]; it read "a number no single contact holds", and the person
+  // following up recorded a bare suppression and never paused them).
   'contact.opt_out_not_recorded': (c) => {
     if (c.row.subjectType !== 'contact' && !has(c.d, 'contactId') && !has(c.d, 'touchId')) {
+      if (word(c.d, 'why') === 'record_failed') {
+        return (
+          'could not record an opt-out texted in: recording the text failed before anything was written, so whose number ' +
+          'it was is not known — it is NOT on the suppression list and nobody was paused; it was refused so DoveSoft ' +
+          "retries, but until a retry is recorded, read the number from the provider's inbound log, put it on " +
+          '/suppressions and pause whichever contact holds it'
+        )
+      }
       const why = own(UNPLACED_OPT_OUT_WHY, word(c.d, 'why'))
       return `could not record an opt-out texted from a number no single contact holds${
         why ? ` (${why})` : ''
@@ -977,13 +990,13 @@ const SMS_UNMATCHED: Readonly<Record<string, string>> = {
 }
 
 /**
- * Why an SMS STOP nobody could place was not recorded: `sms.ts`'s reasons
- * and the DoveSoft route's. Anything else is an error's class name, which
- * says nothing a person can act on, and is left out.
+ * Why an SMS STOP nobody could place was not recorded: `sms.ts`'s reasons.
+ * Anything else is an error's class name, which says nothing a person can
+ * act on, and is left out. The DoveSoft route's `record_failed` has a
+ * sentence of its own: that writer never learned whose number it was.
  */
 const UNPLACED_OPT_OUT_WHY: Readonly<Record<string, string>> = {
   unparseable_number: 'the number could not be read',
-  record_failed: 'recording the text failed',
 }
 
 /** Every action this page has a sentence for. The test iterates it. */
