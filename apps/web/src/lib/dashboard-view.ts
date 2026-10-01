@@ -57,10 +57,22 @@ export interface WorkerStatusLike {
    */
   readonly retired: boolean
   readonly lastSeenAt: Date | null
-  /** `/readyz`'s vocabulary: disabled | send-only | send-and-receive | receive-only. */
+  /**
+   * `/readyz`'s vocabulary: disabled | send-only | send-and-receive |
+   * receive-only. The MAILBOX only: a worker with no SMTP and DoveSoft on is
+   * `disabled` here and sends texts all the same.
+   */
   readonly outreach: string | null
   /** enabled | disabled. Never which credential (§2.3). */
   readonly chat: string | null
+  /**
+   * SMS through DoveSoft (0019), from the row's `detail.sms`
+   * (`heartbeatSms`): `on`, `off`, or null for a row that does not say — a
+   * worker from before 0019, which sent no texts, so nothing is said about
+   * SMS for it. Optional so that a status built without it is still one;
+   * absent reads as null.
+   */
+  readonly sms?: 'on' | 'off' | null
 }
 
 /**
@@ -111,9 +123,38 @@ const OUTREACH_WORDS: Readonly<Record<string, string>> = {
   disabled: 'outreach switched off',
 }
 
-/** The worker is running and said it sends. */
-export function workerSends(w: WorkerStatusLike): boolean {
+/**
+ * The same, beside "texts through DoveSoft": `outreach` is the mailbox, and
+ * "sending" or "switched off" alone would read as covering the texts too.
+ */
+const MAIL_WORDS_BESIDE_SMS: Readonly<Record<string, string>> = {
+  'send-and-receive': 'sending and receiving email',
+  'send-only': 'sending email, not reading replies',
+  'receive-only': 'reading replies, not sending email',
+  disabled: 'email outreach switched off',
+}
+
+/** What the worker said about SMS; absent (a status built before 0019) is null. */
+const smsOf = (w: WorkerStatusLike): 'on' | 'off' | null => w.sms ?? null
+
+/** The worker is running and said it sends email through its mailbox. */
+function workerSendsMail(w: WorkerStatusLike): boolean {
   return w.status === 'live' && (w.outreach === 'send-and-receive' || w.outreach === 'send-only')
+}
+
+/** The worker is running and said it sends SMS through DoveSoft. */
+export function workerSendsSms(w: WorkerStatusLike): boolean {
+  return w.status === 'live' && smsOf(w) === 'on'
+}
+
+/**
+ * The worker is running and said it sends — email through its mailbox, SMS
+ * through DoveSoft, or both. Either one is the send path running, checking
+ * every rule and recording what it refused, so a worker with its mailbox off
+ * and DoveSoft on is not "not sending".
+ */
+export function workerSends(w: WorkerStatusLike): boolean {
+  return workerSendsMail(w) || workerSendsSms(w)
 }
 
 /** The worker is running and said it reads a mailbox. */
@@ -162,7 +203,7 @@ function notReadingBecause(w: WorkerStatusLike): string | null {
   if (workerReceives(w)) return null
   if (w.status === 'live') {
     return w.outreach === 'disabled'
-      ? 'the worker is running with outreach switched off'
+      ? `the worker is running with ${smsOf(w) === 'on' ? 'email ' : ''}outreach switched off`
       : 'the worker is not reading a mailbox'
   }
   return notSendingBecause(w)
@@ -195,7 +236,9 @@ export interface WorkerLine {
 /**
  * The one line under the dashboard's heading. Five shapes, one per word:
  *
- *   * live — "Worker last seen 2 minutes ago · sending and receiving · chat on"
+ *   * live — "Worker last seen 2 minutes ago · sending and receiving · chat on",
+ *     or with DoveSoft on, "… · sending and receiving email · texts through
+ *     DoveSoft · chat on"
  *   * silent — "Worker silent since <when> · 3 hours without a heartbeat · …"
  *   * retired — "Worker retired — last seen <when> · no worker is configured, …"
  *   * never — "No worker has ever reported in · …"
@@ -207,7 +250,16 @@ export interface WorkerLine {
  */
 export function workerLine(w: WorkerStatusLike, now: Date): WorkerLine {
   const age = secondsSince(w.lastSeenAt, now)
-  const doing = own(OUTREACH_WORDS, w.outreach)
+  const sms = smsOf(w)
+  const doing = own(sms === 'on' ? MAIL_WORDS_BESIDE_SMS : OUTREACH_WORDS, w.outreach)
+  // "SMS off" only where the mailbox words could be read as covering texts:
+  // "outreach switched off" and "not sending" already say no text goes.
+  const texts =
+    sms === 'on'
+      ? 'texts through DoveSoft'
+      : sms === 'off' && w.outreach !== 'disabled' && w.outreach !== 'receive-only'
+        ? 'SMS off'
+        : null
   switch (workerWord(w)) {
     case 'live': {
       const chat = !w.configured
@@ -221,7 +273,7 @@ export function workerLine(w: WorkerStatusLike, now: Date): WorkerLine {
         tone: 'ok',
         lead: age === null ? 'Worker reporting in' : `Worker last seen ${elapsed(age)} ago`,
         at: null,
-        tail: join([doing ?? null, chat]),
+        tail: join([doing ?? null, texts, chat]),
       }
     }
     case 'silent':
@@ -353,11 +405,14 @@ export function honestyBullets(d: Deployment, w: WorkerStatusLike, facts: Dashbo
     })
   }
 
+  // A text DOES have a code path since 0019 — the worker's, through
+  // DoveSoft — so this bullet says where it is rather than that there is none.
   out.push({
-    id: 'no-calls-or-texts',
-    lead: 'Nothing here can place a call or send a text.',
+    id: 'no-calls',
+    lead: 'Nothing here can place a call.',
     rest:
-      'There is no code path for either — not a disabled one, none. Voice is an inbound line, and the service that answers it is a separate process this page cannot see.',
+      'There is no code path for one — not a disabled one, none. Voice is an inbound line, and the service that answers it is a separate process this page cannot see. ' +
+      'A text is sent only by the worker, through DoveSoft, from a registered template, once a person has approved it on /approvals — never from this page.',
   })
 
   out.push({
@@ -415,16 +470,7 @@ function workerBullet(d: Deployment, w: WorkerStatusLike, now: Date): HonestyBul
           'this database, it has stopped. Drafts can be written and approved and will sit in the queue; nothing will send them.',
       }
     case 'live': {
-      const doing =
-        w.outreach === 'send-and-receive'
-          ? 'It sends approved messages through the one send path, checking every rule again at the moment of sending, and reads the mailbox for replies.'
-          : w.outreach === 'send-only'
-            ? 'It sends approved messages through the one send path, checking every rule again at the moment of sending. It is not reading a mailbox.'
-            : w.outreach === 'receive-only'
-              ? 'It reads the mailbox for replies and is not sending: approved messages wait in the queue.'
-              : w.outreach === 'disabled'
-                ? 'Its outreach is switched off: nothing is sent and no mailbox is read.'
-                : 'It has not said whether it sends or reads a mailbox.'
+      const doing = liveWorkerDoing(w)
       const chat = !d.worker
         ? ' This deployment is not configured to reach it, so chat is not available here.'
         : w.chat === 'enabled'
@@ -434,6 +480,44 @@ function workerBullet(d: Deployment, w: WorkerStatusLike, now: Date): HonestyBul
             : ''
       return { id: 'worker-live', lead: 'A worker is running.', rest: `${doing}${chat}` }
     }
+  }
+}
+
+const RECHECKED = 'checking every rule again at the moment of sending'
+
+/**
+ * What a live worker said it is doing, in sentences: the mailbox from
+ * `outreach`, and SMS from `sms`. A worker that sends texts is never "not
+ * sending", whatever its mailbox says; a row that does not say (`sms` null,
+ * a worker from before 0019) gets the mailbox's sentence alone.
+ */
+function liveWorkerDoing(w: WorkerStatusLike): string {
+  if (smsOf(w) === 'on') {
+    switch (w.outreach) {
+      case 'send-and-receive':
+        return `It sends approved messages through the one send path — email, and texts through DoveSoft — ${RECHECKED}, and reads the mailbox for replies.`
+      case 'send-only':
+        return `It sends approved messages through the one send path — email, and texts through DoveSoft — ${RECHECKED}. It is not reading a mailbox.`
+      case 'receive-only':
+        return `It sends approved SMS through DoveSoft, ${RECHECKED}, and reads the mailbox for replies. It is not sending email: approved emails wait in the queue.`
+      case 'disabled':
+        return `It sends approved SMS through DoveSoft, ${RECHECKED}. Its email outreach is switched off: no email is sent and no mailbox is read.`
+      default:
+        return `It sends approved SMS through DoveSoft, ${RECHECKED}. It has not said whether it sends email or reads a mailbox.`
+    }
+  }
+  const smsOff = smsOf(w) === 'off' ? ' SMS is switched off in it, so an approved text waits in the queue.' : ''
+  switch (w.outreach) {
+    case 'send-and-receive':
+      return `It sends approved messages through the one send path, ${RECHECKED}, and reads the mailbox for replies.${smsOff}`
+    case 'send-only':
+      return `It sends approved messages through the one send path, ${RECHECKED}. It is not reading a mailbox.${smsOff}`
+    case 'receive-only':
+      return 'It reads the mailbox for replies and is not sending: approved messages wait in the queue.'
+    case 'disabled':
+      return 'Its outreach is switched off: nothing is sent and no mailbox is read.'
+    default:
+      return `It has not said whether it sends or reads a mailbox.${smsOff}`
   }
 }
 
