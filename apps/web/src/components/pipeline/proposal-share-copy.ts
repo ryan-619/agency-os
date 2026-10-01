@@ -22,13 +22,23 @@ export const SHARE_SHOWN_ONCE =
 export const SHARE_VIEWS_NOTE =
   'A view is one load of the page — the buyer’s, yours, or a link preview a mail client fetched. It says the link was opened, not that a person read it. No address or browser is recorded.'
 
-/** Why the Create button is not offered, in the order the route would refuse. */
+/**
+ * Why the Create button is not offered, in the order the route would refuse
+ * — with one exception. A DRAFT whose scan a newer one has superseded is
+ * told to regenerate before it is told to mark itself sent: `shareMint`
+ * refuses a sent proposal over a superseded scan, and nothing makes a scan
+ * current again, so "mark it sent first" was advice that could only end in
+ * a second refusal over a proposal now marked sent.
+ */
 export function shareCreateBlocked(input: {
   readonly status: string
   readonly evidenceStale: boolean
   /** A newer successful scan of the company exists, so this proposal's is no longer the one quoted. */
   readonly evidenceSuperseded?: boolean
 }): string | null {
+  if (input.status === 'draft' && input.evidenceSuperseded) {
+    return 'A newer scan exists — regenerate the proposal. This draft quotes an older scan, so it could not be linked even once marked sent: generate a fresh proposal from the latest scan, mark that one sent, and link it.'
+  }
   if (input.status === 'draft') {
     return 'Mark the proposal as sent first. A link is a copy of what you sent, not the send.'
   }
