@@ -279,10 +279,9 @@ and under **Schema facts**:
 ```
   findings.scored: boolean, nullable=NO   <- 0018 is applied
   0018 tables: notes, proposal_shares, tasks, worker_heartbeats
+  touches.template_id: uuid, nullable=YES   <- 0019 is applied
+  0019 table: message_templates
 ```
-
-The script has no schema line of its own for 0019, so the `[x] 0019` line is
-the check here — and `/api/health` in Step 4e.
 
 ### Step 4b **YOU** — the new variables, only the ones you want
 

@@ -79,8 +79,8 @@ export interface ConnectorPreset {
 
 /** The measured caveat every stdio preset carries (connectors-and-agents-settings §7.3). */
 const STDIO_CAVEAT =
-  'A stdio server is a process on the worker host: the CLI’s own environment reaches the child, ' +
-  'and the whole mcpServers JSON rides on the claude argv.'
+  'A stdio server is a process on the worker host. It is launched with the model credentials removed ' +
+  'from its environment, and the rest of the CLI’s environment still reaches it.'
 
 const bearer = (label = 'API key'): ConnectorPreset['auth'] => ({
   cls: 'bearer',

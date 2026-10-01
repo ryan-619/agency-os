@@ -2460,7 +2460,7 @@ npm run smoke:agent -- --connector deepwiki   # the Phase 3 gate (§6's "no rest
 # production operations, all prompt-based so no connection string touches a
 # file, an argument list or shell history (§2.3)
 ./tools/remote-setup.sh       # migrate + seed a remote database
-./tools/remote-status.sh      # read-only schema facts, safe to paste — the migration list ("[x] 0019_messaging_templates_and_sms") and "0018 is applied"; it has no 0019 schema line of its own
+./tools/remote-status.sh      # read-only schema facts, safe to paste — the migration list ("[x] 0019_messaging_templates_and_sms"), "0018 is applied" and "0019 is applied"
 ./tools/run-worker.sh         # run the worker here, against production, nothing exposed
 ./tools/add-teammate.sh       # grant somebody access — or Settings → Team, in the browser
 ./tools/spend.sh              # what the API has actually cost: per day, per person, run rate

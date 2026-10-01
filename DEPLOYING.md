@@ -723,10 +723,9 @@ runbook:
    its own transaction. `./tools/remote-status.sh` then lists
    `[x] 0018_evidence_consent_records_and_operations` and
    `[x] 0019_messaging_templates_and_sms` above `up to date`, and prints
-   `findings.scored: boolean, nullable=NO   <- 0018 is applied`. It has no
-   schema line of its own for 0019 (its "0018 tables" line does not list
-   `message_templates`), so the migration list is the check — or
-   `/api/health` in step 5.
+   `findings.scored: boolean, nullable=NO   <- 0018 is applied`, then
+   `touches.template_id: uuid, nullable=YES   <- 0019 is applied` and
+   `0019 table: message_templates`.
 2. **Set only the new variables you want** — every one optional and failing
    closed: `CRON_SECRET` and `RESCAN_BATCH_SIZE` (the crons), `SLACK_WEBHOOK_URL`
    (Vercel, and Fly for the worker's IMAP opt-out alarm),

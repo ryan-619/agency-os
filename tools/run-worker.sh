@@ -78,9 +78,10 @@ TOKEN="$(openssl rand -base64 32)"
 # ── Sending and reply detection ────────────────────────────────────────────
 #
 # These prompts exist because the worker treats every one of these variables as
-# OPTIONAL and boots cleanly without them. apps/agent/src/index.ts gates the
-# sender on `SMTP_HOST && MAIL_FROM` and the inbox on
-# `IMAP_HOST && IMAP_USER && IMAP_PASSWORD`; unset, neither is started,
+# OPTIONAL and boots cleanly without them. apps/agent/src/worker.ts gives the
+# sender a mail provider on `SMTP_HOST && MAIL_FROM` and an SMS provider on
+# `DOVESOFT_API_KEY && DOVESOFT_ENTITY_ID` (0019), and starts the inbox on
+# `IMAP_HOST && IMAP_USER && IMAP_PASSWORD`; unset, none is started,
 # `outreachModeFrom` returns 'disabled', and the worker runs happily doing only
 # the recovery jobs.
 #
@@ -126,6 +127,25 @@ case "$ANSWER" in
     ;;
 esac
 
+SMS="no"
+printf 'Configure SMS through DoveSoft now? Without it, approved texts wait in the queue. [y/N]: ' >&3
+read -r ANSWER <&3
+case "$ANSWER" in
+  [yY]*)
+    # The key is a credential: read hidden, exported, never echoed (§2.3).
+    printf '  DoveSoft API key (hidden): ' >&3;               read -r -s V_DOVESOFT_KEY <&3; printf '\n' >&3
+    printf '  DLT principal entity id (PE ID, digits): ' >&3; read -r V_DOVESOFT_ENTITY <&3
+    if [ -n "${V_DOVESOFT_KEY:-}" ] && [ -n "${V_DOVESOFT_ENTITY:-}" ]; then
+      export DOVESOFT_API_KEY="$V_DOVESOFT_KEY"
+      export DOVESOFT_ENTITY_ID="$V_DOVESOFT_ENTITY"
+      SMS="yes"
+    else
+      echo "  The key and the entity id are both required; leaving SMS off." >&2
+    fi
+    unset V_DOVESOFT_KEY
+    ;;
+esac
+
 printf 'Configure REPLY DETECTION now? Without it, nobody is marked as having replied. [y/N]: ' >&3
 read -r ANSWER <&3
 case "$ANSWER" in
@@ -158,6 +178,12 @@ else
   echo "  sending:  OFF — approved mail WAITS in the queue. Nothing is lost,"
   echo "            and every §2.1 rule is re-checked when it does send."
 fi
+if [ "$SMS" = "yes" ]; then
+  echo "  sms:      ON  — approved texts go through DoveSoft, each from a"
+  echo "            registered DLT template, to a contact who opted in"
+else
+  echo "  sms:      OFF — approved texts WAIT in the queue."
+fi
 if [ "$RECEIVING" = "yes" ]; then
   echo "  replies:  ON  — polling $IMAP_USER over IMAP"
 else
@@ -168,7 +194,8 @@ echo "  chat:     OFF — no model credential and no inbound route. The site"
 echo "            says 'no worker connected' on the chat panel, which is true"
 echo "            and better than a spinner that never resolves."
 echo
-echo "  The worker also logs its own verdict as 'outreach: <mode>' at boot."
+echo "  The worker also logs its own verdict as 'outreach: <mode>' and"
+echo "  'sms: dovesoft on|off' at boot."
 echo "  If that says 'disabled' while this says ON, trust the worker."
 echo
 echo "  Nothing on this machine is exposed. Closing this tab stops the worker;"

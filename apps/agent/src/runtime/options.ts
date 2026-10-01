@@ -238,7 +238,7 @@ export function buildQueryOptions(input: BuildOptionsInput): Options {
  * out of the OS keychain — this process never reads it, never holds it, and
  * never puts it in an environment. It exists so Phase 2 and Phase 3's
  * Definitions of Done can be proved on a machine with no API key, and
- * `index.ts` REFUSES TO BOOT with it when NODE_ENV is production: a personal
+ * `loadEnv` REFUSES TO BOOT with it when NODE_ENV is production: a personal
  * credential standing behind a shared service is what §2.3 is about.
  */
 export type AgentCredential =
