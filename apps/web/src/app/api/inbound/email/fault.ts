@@ -140,3 +140,28 @@ export async function inboundEmailNotRecorded(
   deps.log.error('inbound email could not be recorded; answering 500 so it is retried', { error })
   return { status: 500, body: { error: 'the message could not be recorded', retry: true } }
 }
+
+/**
+ * The same loud path for a recorder another route calls — `POST
+ * /api/inbound/resend`, whose reader (`receiveResendWebhook`) already
+ * answers 500 on a fault so Resend retries, but raised no alarm and wrote no
+ * row for a stop whose recording threw. This wraps the recorder: it hands
+ * the recorder a log that keeps the rolled-back line, and on a throw takes
+ * `inboundEmailNotRecorded`'s path (the row, the awaited alarm, the error
+ * line naming the fault's class) before rethrowing, so the reader's own 500
+ * is unchanged.
+ */
+export function raisingOnFault<M extends { readonly text?: string | null; readonly log?: InboundLog }, O>(
+  record: (mail: M) => Promise<O>,
+  deps: InboundEmailFaultDeps & { readonly forward: InboundLog },
+): (mail: M) => Promise<O> {
+  return async (mail) => {
+    const recorder = keepingRolledBackOptOut(deps.forward)
+    try {
+      return await record({ ...mail, log: recorder })
+    } catch (err) {
+      await inboundEmailNotRecorded(err, { text: mail.text ?? null, rolledBack: recorder.rolledBack() }, deps)
+      throw err
+    }
+  }
+}

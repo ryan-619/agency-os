@@ -74,6 +74,20 @@ describe('slackOptOutNotRecordedPayload', () => {
     expect(bare).not.toContain('touch ')
   })
 
+  /**
+   * An email stop matched to a contact by address alone names no message of
+   * ours, but the contact's record holds the address — so the alarm points
+   * at the Suppressions page, and never says nothing in the app holds it.
+   */
+  it('for a contact with no message on file, links to /suppressions and never says nothing holds it', () => {
+    const placed: SlackOptOutNotRecordedEvent = { ...EVENT, touchId: null, contactId: 'c-1' }
+    const text = slackOptOutNotRecordedPayload(placed, 'https://app.test/').text
+    expect(text).toContain('no message on file · contact c-1')
+    expect(text).toContain('https://app.test/suppressions')
+    expect(text).not.toContain('Nothing in the app holds')
+    expect(slackOptOutNotRecordedPayload(placed, null).text).toContain('Record it on the Suppressions page in the app.')
+  })
+
   /** The builder names its fields; a row with more on it never reaches the channel. */
   it('drops decoy lead data handed to it through a cast', () => {
     const decoy = {

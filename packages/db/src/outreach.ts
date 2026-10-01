@@ -551,7 +551,8 @@ export async function dispatchTouch(
   // not be tied to this message by its Message-ID, an unsubscribe click on
   // it took the loud no-recipient path, and a supervised re-enrolment
   // drafted the same opener again. Found by review. The recovery's
-  // sentence ("re-approve to send it again") is cleared with it: on a row
+  // sentence ("may or may not have gone; check … before drafting it again")
+  // is cleared with it: on a row
   // that went, it is an instruction to send a duplicate — and for an answer
   // to a reply, the pause the recovery put back is lifted with it
   // (`recordRecoveredSend`, review round 5).
@@ -759,8 +760,8 @@ async function settle(
   now: Date,
 ): Promise<void> {
   // A row a stuck-send recovery marked `failed` meanwhile (never sent, no
-  // refusal) carries its "may or may not have gone … re-approve to send it
-  // again". Settled here, this dispatch never reached the provider, so that
+  // refusal) carries its "may or may not have gone; check … before drafting
+  // it again". Settled here, this dispatch never reached the provider, so that
   // sentence is false of it and an instruction nobody can follow on a
   // refused row: it goes, unless this state brings an error of its own
   // (review round 5, [12]). Judged on the row as it stands, in the UPDATE.

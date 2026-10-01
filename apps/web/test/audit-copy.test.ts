@@ -241,7 +241,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'template.imported': { channel: 'sms', imported: 2, alreadyPresent: 0, skipped: 2, refused: 5 },
   'sms.drafted': { contactId: SUBJECT, campaignId: SUBJECT, templateId: SUBJECT },
   'sms.delivery_unmatched': { why: 'unknown_id', status: 'delivered' },
-  'sms.inbound_unmatched': { why: 'ambiguous', optOut: true, contacts: 2, suppressed: true },
+  'sms.inbound_unmatched': { why: 'ambiguous', optOut: true, contacts: 2, suppressed: true, paused: 2, cancelledQueued: 1 },
   'sms.dlr_unreadable': { why: 'missing_fields', missing: ['messageid'] },
   'sms.inbound_unreadable': { why: 'missing_fields', missing: ['from', 'text'] },
   'contact.bounced': { code: '5.1.1', cancelledQueued: 1, touchId: SUBJECT },
@@ -441,7 +441,10 @@ describe('sentenceFor', () => {
       'refused an SMS to a contact at rentman.io: not its registered template; nothing was sent',
     )
     expect(say('sms.inbound_unmatched')).toBe(
-      'received a text from a number more than one contact has, so it was filed under nobody; it asked to stop, and the number was put on the suppression list',
+      'received a text from a number more than one contact has, so it was filed under nobody; 2 contacts holding the number were paused and 1 queued message cancelled; it asked to stop, and the number was put on the suppression list',
+    )
+    expect(say('sms.inbound_unmatched', { why: 'ambiguous', paused: 1, cancelledQueued: 0 })).toBe(
+      'received a text from a number more than one contact has, so it was filed under nobody; the contact holding the number was paused',
     )
     expect(say('sms.inbound_unmatched', { why: 'no_contact', optOut: true, suppressed: false })).toContain('NOT on the suppression list')
     expect(say('sms.delivery_unmatched')).toBe('received a delivery report for an SMS this system did not send; nothing was changed')

@@ -78,6 +78,14 @@ export function slackOptOutNotRecordedPayload(event: SlackOptOutNotRecordedEvent
   const lines = [
     `OPT-OUT NOT RECORDED. Somebody asked to be left alone through ${way} and no suppression row could be written. A person has to record it now.`,
   ]
+  if (event.touchId === null && event.contactId !== null) {
+    // A reply matched to a contact by its sender's address alone (no
+    // message of ours named): the contact's record holds the address, so the
+    // person records it from there — "nothing in the app holds it" is false.
+    lines.push(`no message on file · contact ${event.contactId}`)
+    lines.push(slackLink(origin, '/suppressions') ?? 'Record it on the Suppressions page in the app.')
+    return slackPayloadOf(lines)
+  }
   if (event.touchId === null) {
     lines.push(
       `no message on file · contact ${event.contactId ?? 'unknown'}`,

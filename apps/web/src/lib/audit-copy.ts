@@ -950,7 +950,17 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   'sms.inbound_unmatched': (c) => {
     const why = own(SMS_UNMATCHED, word(c.d, 'why')) ?? 'that could not be placed'
     const optOut = flag(c.d, 'optOut') === true
-    return `received a text from a number ${why}, so it was filed under nobody${
+    // An ambiguous text pauses every contact it could be from and cancels
+    // what was queued for them (review round 5): said, with its counts.
+    const paused = num(c.d, 'paused')
+    const cancelled = num(c.d, 'cancelledQueued')
+    const held =
+      paused !== null && paused > 0
+        ? `; ${paused === 1 ? 'the contact' : `${paused} contacts`} holding the number ${paused === 1 ? 'was' : 'were'} paused${
+            cancelled !== null && cancelled > 0 ? ` and ${cancelled} queued message${cancelled === 1 ? '' : 's'} cancelled` : ''
+          }`
+        : ''
+    return `received a text from a number ${why}, so it was filed under nobody${held}${
       optOut
         ? flag(c.d, 'suppressed') === true
           ? '; it asked to stop, and the number was put on the suppression list'

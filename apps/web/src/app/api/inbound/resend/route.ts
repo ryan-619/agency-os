@@ -1,10 +1,11 @@
 import { NextResponse, after } from 'next/server'
-import { handleInboundEmail, type AgencyDb } from '@agency/db/queries'
+import { appendAudit, handleInboundEmail, type AgencyDb } from '@agency/db/queries'
 import { getDb } from '@/lib/db'
 import { env } from '@/lib/env'
 import { log } from '@/lib/logger'
 import { receiveResendWebhook } from '@/lib/resend-inbound'
 import { notify } from '@/lib/slack'
+import { raisingOnFault } from '../email/fault'
 import { optOutNotRecordedNotification, replyNotification } from '../email/notification'
 
 /**
@@ -44,7 +45,14 @@ export async function POST(request: Request): Promise<NextResponse> {
     secret: e.RESEND_WEBHOOK_SECRET,
     apiKey: e.RESEND_API_KEY,
     now: new Date(),
-    handle: (mail) => handleInboundEmail(getDb() as unknown as AgencyDb, mail),
+    // A stop whose recording threw is audited and alarmed here, before the
+    // reader answers its 500 — the generic route's path (`../email/fault`).
+    handle: raisingOnFault((mail) => handleInboundEmail(getDb() as unknown as AgencyDb, mail), {
+      forward: log,
+      audit: (entry) => appendAudit(getDb() as unknown as AgencyDb, entry),
+      alarm: (event) => notify(event),
+      log,
+    }),
   })
 
   // The opt-out that could not be recorded is AWAITED, in place of the
