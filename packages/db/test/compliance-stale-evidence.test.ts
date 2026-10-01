@@ -137,6 +137,37 @@ describe('stale or missing evidence, split by what the send path does at sending
     }
   })
 
+  /**
+   * `queue_touch` writes a draft ABOUT a company, to nobody: `contact_id` is
+   * NULL until a person approves it to somebody there, and `approveDraft`
+   * refuses anyone at another company. So the sender always judges these
+   * words by the touch's company — and the count found the scan through the
+   * contact's, which a contact-less row has none of: every agent draft read
+   * "no scan behind the words", never refused. Review round 3, finding [5].
+   */
+  it('judges a draft written to nobody by the company it is about, as the sender will', async () => {
+    // (a) Written 19 days ago from a 20-day-old scan; re-scanned yesterday.
+    const rescanned = await companyWith('agent-rescanned.test', [20, 1])
+    const a = await draft({ companyId: rescanned.companyId, contactId: null as unknown as string }, 19, 'awaiting_approval')
+    // (b) The same, with no re-scan.
+    const stale = await companyWith('agent-stale.test', [20])
+    const b = await draft({ companyId: stale.companyId, contactId: null as unknown as string }, 19, 'awaiting_approval')
+
+    const out = await complianceDraftsOnStaleEvidence(db, orgId, STALE_DAYS, NOW)
+    const byId = new Map(out.rows.map((x) => [x.touchId, x]))
+    expect([byId.get(a.id)?.why, byId.get(a.id)?.refusedAtSending]).toEqual(['rescanned_since', true])
+    expect(byId.get(a.id)?.writtenFromScanAt?.toISOString()).toBe(ago(20).toISOString())
+    expect([byId.get(b.id)?.why, byId.get(b.id)?.refusedAtSending]).toEqual(['stale', true])
+    expect(out.refusedAtSending).toBe(2)
+
+    // What /approvals shows for the person it would be approved to, from the sender's own dry run.
+    for (const [t, at] of [[a, rescanned], [b, stale]] as const) {
+      const preview = await previewSend(db, { orgId, campaignId, contactId: at.contactId, writtenAt: evidenceAsOfFor(t), now: NOW })
+      if (!preview.ok) throw new Error(preview.message)
+      expect(preview.facts.evidenceStale, t.id).toBe(true)
+    }
+  })
+
   it('the summary the page, the dashboard and the tool read carries the split', async () => {
     const r = await companyWith('rescanned.test', [20, 1])
     await draft(r, 19, 'queued')

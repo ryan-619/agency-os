@@ -91,24 +91,32 @@ export function flagsFrom(
 }
 
 /**
- * The sentence to put under anything that queues a message, or null when
- * there is a worker and the normal copy is true.
+ * The sentence to put under anything that queues a message, or null when a
+ * worker is configured and the normal copy is true.
+ *
+ * Worded as CONFIGURATION, because that is all `d` is. A worker on Fly sends
+ * against this database whether or not this web half holds AGENT_URL — the
+ * documented production shape — so "nothing queued here will be sent" was a
+ * claim this function cannot know. It says what is not configured here and
+ * where the observation is; a page that has read the heartbeat says what it
+ * saw instead (/compliance, /settings, the dashboard). Round 3, finding [20].
  */
 export function nothingWillSendNote(d: Deployment): string | null {
   return d.worker
     ? null
-    : 'No agent worker is connected to this deployment, so nothing queued here will be sent and no replies are being read. The queue is honest — it is just not being drained.'
+    : 'No agent worker is configured on this deployment. The worker is what sends and reads a mailbox, so unless one runs against this database elsewhere — /settings/deployment shows its heartbeat — what is queued here waits.'
 }
 
 /**
  * The sentence to put under anything that promises to notice a reply, or
- * null when something on this deployment actually can: a worker reading the
- * mailbox, or a provider webhook a reply can arrive through.
+ * null when this deployment is configured with something that can: a worker,
+ * or a provider webhook a reply can arrive through. Configuration, worded as
+ * such, for the reason `nothingWillSendNote` gives.
  */
 export function noRepliesReadNote(d: Deployment): string | null {
   return d.worker || d.inbound === 'webhook'
     ? null
-    : 'No worker is reading a mailbox and no inbound webhook is configured on this deployment, so nothing here can learn that somebody replied. The queue is honest — it is just not being read.'
+    : 'No worker is configured on this deployment and no inbound webhook is set up, so nothing here reads replies. Only a worker running against this database elsewhere could — /settings/deployment shows whether one is.'
 }
 
 /**

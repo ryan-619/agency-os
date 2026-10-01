@@ -1,12 +1,14 @@
 import { NextResponse } from 'next/server'
 import { and, eq } from 'drizzle-orm'
 import { assertCan, isStale, type Proposal } from '@agency/core'
-import { appendAudit, readProposal, schema, type AgencyDb } from '@agency/db/queries'
+import { appendAudit, readProposal, schema, shareEvidenceSuperseded, type AgencyDb } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { readIcp } from '@/lib/company-list'
 import { getDb } from '@/lib/db'
 import { log } from '@/lib/logger'
-import { proposalMarkdownFilename, proposalToMarkdown, staleDraftRefusal } from '@/lib/proposal-markdown'
+import {
+  proposalMarkdownFilename, proposalToMarkdown, staleDraftRefusal, supersededDraftRefusal,
+} from '@/lib/proposal-markdown'
 import { icpForOrg } from '@/lib/queries'
 
 /**
@@ -16,10 +18,13 @@ import { icpForOrg } from '@/lib/queries'
  * file goes wherever a person takes it; this route hands it over and sends
  * nothing (§8.4). Sending is a person's act, from their own mail.
  *
- * §2.2 decides one case. A DRAFT whose evidence has aged out is refused with
+ * §2.2 decides two cases. A DRAFT whose evidence has aged out is refused with
  * 409 `{ reason: 'stale' }`: a draft is the thing about to be sent, and stale
- * findings are re-verified before they appear in anything outbound. The page
- * says so before the link is pressed. A proposal past draft is a record of
+ * findings are re-verified before they appear in anything outbound. A DRAFT
+ * whose scan has been superseded by a newer successful one is refused with
+ * 409 `{ reason: 'superseded' }`, because only the latest scan is quoted and
+ * the newer one may show a priced gap closed (round 3, finding [6]). The page
+ * says both before the link is pressed. A proposal past draft is a record of
  * what was sent, so it is exported — with the stale banner in the file.
  * Freshness is derived from the scan's `ran_at` here, as on the page; the
  * stored document cannot know how old it has become.
@@ -79,6 +84,12 @@ export async function GET(
   const evidenceStale = isStale(scan?.ranAt, readIcp(icpRow?.definition).staleAfterDays)
   if (row.status === 'draft' && evidenceStale) {
     return NextResponse.json({ error: staleDraftRefusal(company.domain), reason: 'stale' }, { status: 409 })
+  }
+  // Compared in SQL against the stored ran_at (`shareEvidenceSuperseded`),
+  // as the share link compares it; an unreachable newer scan supersedes nothing.
+  const evidenceSuperseded = row.status === 'draft' ? await shareEvidenceSuperseded(db, user.orgId, row.id) : false
+  if (row.status === 'draft' && evidenceSuperseded) {
+    return NextResponse.json({ error: supersededDraftRefusal(company.domain), reason: 'superseded' }, { status: 409 })
   }
 
   const doc = row.document as Proposal

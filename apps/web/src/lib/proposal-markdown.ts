@@ -55,6 +55,38 @@ export function staleDraftRefusal(domain: string): string {
 export const STALE_DRAFT_EXPORT_NOTE =
   'Not downloadable while the evidence under this draft is stale: re-verify before it appears in anything outbound. Re-scan the company and generate a fresh proposal.'
 
+/*
+ * SUPERSEDED: the company has a successful scan newer than the one the
+ * proposal was generated from (`shareEvidenceSuperseded`). Only the latest
+ * successful scan is quoted in anything outbound (§2.2), and the newer one
+ * may show a priced gap closed — so a superseded draft is refused like a
+ * stale one, and every place that hands a proposal on says so. Review
+ * round 3, finding [6].
+ */
+
+/** The 409 the markdown route answers for a draft whose scan has been superseded. */
+export function supersededDraftRefusal(domain: string): string {
+  return (
+    `A newer scan of ${domain} exists, so this draft quotes evidence that is no longer the latest: ` +
+    're-verify before it appears in anything outbound (§2.2) — generate a fresh proposal from the newer scan; ' +
+    'this one is not exported.'
+  )
+}
+
+/** What the proposal page says instead of a download link that would only 409. */
+export const SUPERSEDED_DRAFT_EXPORT_NOTE =
+  'Not downloadable while a newer scan of the company exists: this draft quotes evidence that is no longer the latest. Generate a fresh proposal from the newer scan.'
+
+/** The warning a superseded proposal carries on the page and on paper. */
+export function supersededBannerText(domain: string): { lead: string; rest: string } {
+  return {
+    lead: `A newer scan of ${domain} exists — this proposal quotes evidence that is no longer the latest.`,
+    rest:
+      'The newer scan may show a gap closed, or a new one. Generate a fresh proposal from it rather than sending ' +
+      'this copy; a buyer link to this one reads “being re-verified”.',
+  }
+}
+
 /**
  * Where the evidence came from. Posture review from the outside, in the words
  * every piece of the product's copy must use (CLAUDE.md §1, the scanner).

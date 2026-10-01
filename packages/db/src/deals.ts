@@ -12,7 +12,7 @@
  * nobody has done anything about, which is a true and useful state; a deal in
  * `new` for every imported row would make the pipeline a copy of the CRM.
  */
-import { and, asc, desc, eq, isNotNull, isNull, lte, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, getTableColumns, inArray, isNotNull, isNull, lte, sql } from 'drizzle-orm'
 import { alias } from 'drizzle-orm/pg-core'
 import * as schema from './schema.js'
 import { appendAudit } from './approvals.js'
@@ -118,16 +118,47 @@ export async function advanceDeal(
     return { deal: existing, outcome: 'unchanged' }
   }
 
+  // The read above decided only that a move is worth trying. Under READ
+  // COMMITTED another session can commit between it and this write — a
+  // booking taking the deal to meeting, a person closing it lost — so both
+  // rules are in the statement itself: the row is locked only while it is
+  // still open and still behind `to`, and `before_stage` is the stage the
+  // UPDATE actually replaced, read under that lock rather than remembered
+  // from the read. Review round 3, finding [11].
+  const behind = DEAL_STAGES.filter((s) => RANK[s] < RANK[args.to])
+  const stillBehind = and(
+    eq(schema.deals.orgId, args.orgId),
+    isNull(schema.deals.closedAt),
+    inArray(schema.deals.stage, behind),
+  )
+  const prior = db.$with('prior').as(
+    db
+      .select({ id: schema.deals.id, beforeStage: sql<string>`${schema.deals.stage}`.as('before_stage') })
+      .from(schema.deals)
+      .where(and(eq(schema.deals.id, existing.id), stillBehind))
+      .for('update'),
+  )
   const rows = await db
+    .with(prior)
     .update(schema.deals)
     .set({
       stage: args.to,
       ...(args.nextAction !== undefined ? { nextAction: args.nextAction } : {}),
     })
-    .where(eq(schema.deals.id, existing.id))
-    .returning()
-  const deal = rows[0] ?? existing
-  await recordMove(db, args.actor, 'deal.advanced', deal, existing.stage)
+    .from(prior)
+    .where(and(eq(schema.deals.id, prior.id), stillBehind))
+    .returning({ ...getTableColumns(schema.deals), beforeStage: prior.beforeStage })
+  const moved = rows[0]
+  if (!moved) {
+    // Somebody else moved it first. Ask again from the top: a deal now at or
+    // past `to` is `unchanged`, and one closed meanwhile is no longer this
+    // company's open deal — the event opens a new one, exactly what the two
+    // would have done one after the other. Nothing is audited for a move
+    // that did not happen.
+    return advanceDeal(db, args)
+  }
+  const { beforeStage, ...deal } = moved
+  await recordMove(db, args.actor, 'deal.advanced', deal, beforeStage)
   return { deal, outcome: 'advanced' }
 }
 

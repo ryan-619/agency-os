@@ -17,7 +17,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { HEARTBEAT_RETIRED_AFTER_DAYS, heartbeatReport, heartbeatReportedStatus } from '@agency/db/queries'
-import { sendingAnswer, workerLine, workerModes } from '../src/app/settings/facts'
+import { deploymentFacts, sendingAnswer, workerLine, workerModes, type DeploymentFactInput } from '../src/app/settings/facts'
 import { RETIRED_WORKER_WORDS } from '../src/lib/dashboard-view'
 
 const NOW = new Date('2026-09-30T12:00:00Z')
@@ -118,5 +118,52 @@ describe('the clause is the digest’s', () => {
   it('keeps facts.ts free of value imports, so this test can load it', () => {
     const src = readFileSync(fileURLToPath(new URL('../src/app/settings/facts.ts', import.meta.url)), 'utf8')
     for (const line of src.split('\n').filter((l) => l.startsWith('import '))) expect(line).toMatch(/^import type /)
+  })
+})
+
+/**
+ * The Replies line is CONFIGURATION, like the Sending line beside it: a
+ * worker on Fly reads its mailbox against this database whether or not this
+ * web half holds AGENT_URL, so "Not read on this deployment: no worker reads
+ * a mailbox" sat beside "Worker last seen 2 minutes ago · sending and
+ * reading a mailbox". Review round 3, finding [20].
+ */
+describe('the Replies fact', () => {
+  const input = (over: Partial<DeploymentFactInput['flags']> = {}, i: Partial<DeploymentFactInput> = {}): DeploymentFactInput => ({
+    flags: { worker: false, mailIsLocalSink: false, inbound: 'none', cron: false, slack: false, unsubscribe: false, ...over },
+    agent: false,
+    secretsKey: 'unset',
+    vercelEnv: undefined,
+    inboundJson: false,
+    inboundResend: false,
+    rescanBatchSize: 25,
+    ...i,
+  })
+  const replies = (i: DeploymentFactInput) => deploymentFacts(i).find((f) => f.area === 'Replies')!
+
+  it('never states that no worker reads a mailbox', () => {
+    for (const i of [input(), input({ worker: true }), input({ inbound: 'webhook' }, { inboundJson: true })]) {
+      expect(replies(i).sentence).not.toMatch(/no worker reads a mailbox|the worker’s mailbox reader/)
+    }
+  })
+
+  it('with nothing configured, points at the heartbeat as the Sending line does', () => {
+    expect(replies(input()).sentence).toBe(
+      'No inbound webhook is configured, and this deployment is not configured to reach a worker. Unless the heartbeat ' +
+        'shows one reading a mailbox against this database, no reply is read.',
+    )
+  })
+
+  it('names the webhooks it has, and a configured worker as configuration', () => {
+    expect(replies(input({ inbound: 'webhook', worker: true }, { inboundJson: true })).sentence).toBe(
+      'Accepted by the inbound webhook (/api/inbound/email). A worker is configured too; whether it reads a mailbox is the heartbeat’s question.',
+    )
+    expect(replies(input({ worker: true })).sentence).toBe(
+      'No inbound webhook is configured. This deployment is configured to reach a worker; whether it reads a mailbox is the heartbeat’s question.',
+    )
+  })
+
+  it('names the variables the line is read from, the worker’s included', () => {
+    expect(replies(input()).vars).toEqual(['AGENT_URL', 'AGENT_INTERNAL_TOKEN', 'INBOUND_WEBHOOK_SECRET', 'RESEND_WEBHOOK_SECRET', 'RESEND_API_KEY'])
   })
 })

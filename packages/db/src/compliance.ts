@@ -502,9 +502,10 @@ export interface ComplianceDraftOnStaleEvidence {
   /** The company's latest successful scan. */
   readonly lastOkScanAt: Date | null
   /**
-   * The latest successful scan of the contact's company at or before the
-   * moment the words were written — the scan the send path judges them by.
-   * Null for an answer to a reply, which it does not judge by a scan.
+   * The latest successful scan of the contact's company (the touch's own,
+   * for a draft written to nobody) at or before the moment the words were
+   * written — the scan the send path judges them by. Null for an answer to a
+   * reply, which it does not judge by a scan.
    */
   readonly writtenFromScanAt: Date | null
   /**
@@ -572,11 +573,13 @@ export interface ComplianceDraftsOnStaleEvidence {
  * to be refused, or to be denied and drafted again after a re-scan. Each row
  * says whether it is one of those (`refusedAtSending`), judged exactly as
  * `sendFactsFor` judges it: the latest successful scan of the CONTACT's
- * company at or before the row's `created_at`, compared in SQL against the
- * stored values, and none for an answer to a reply. The rest — no successful
- * scan behind the words, or an answer — go as written unless another rule
- * stops them, and the approved, queued and sending ones among them go with
- * nobody looking again. This is the reporting half; refusing is the send
+ * company — the touch's own for a contact-less agent draft, which can only
+ * be approved to somebody there — at or before the row's `created_at`,
+ * compared in SQL against the stored values, and none for an answer to a
+ * reply. The rest — no successful scan behind the words, or an answer — go
+ * as written unless another rule stops them, and the approved, queued and
+ * sending ones among them go with nobody looking again. This is the
+ * reporting half; refusing is the send
  * path's.
  */
 export async function complianceDraftsOnStaleEvidence(
@@ -587,11 +590,17 @@ export async function complianceDraftsOnStaleEvidence(
 ): Promise<ComplianceDraftsOnStaleEvidence> {
   const companyId = sql<string | null>`coalesce(${schema.touches.companyId}, ${schema.contacts.companyId})`
   // The scan the send path judges the words by (`sendFactsFor`): the latest
-  // successful scan of the contact's company at or before the moment they
+  // successful scan of the recipient's company at or before the moment they
   // were written. In SQL, against the stored microseconds, never a Date.
+  // The contact's company when there is a contact — what the sender reads —
+  // and the touch's own when there is none: a `queue_touch` draft is written
+  // to nobody, and `approveDraft` lets it go only to somebody at that
+  // company. Through the contact alone, every agent draft read "no scan
+  // behind the words". Review round 3, finding [5].
   const writtenFrom = sql<Date | null>`(
     SELECT max(s.ran_at) FROM scans s
-     WHERE s.org_id = ${orgId}::uuid AND s.company_id = ${schema.contacts.companyId}
+     WHERE s.org_id = ${orgId}::uuid
+       AND s.company_id = coalesce(${schema.contacts.companyId}, ${schema.touches.companyId})
        AND s.ok AND s.ran_at <= ${schema.touches.createdAt}
   )`.mapWith(schema.scans.ranAt)
   const drafts = await db

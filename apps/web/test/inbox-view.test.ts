@@ -149,17 +149,27 @@ describe('an answer', () => {
 })
 
 describe('what the deployment can honestly promise', () => {
-  it('says nothing can read a reply when neither a worker nor a webhook exists', () => {
+  it('says nothing here reads a reply when neither a worker nor a webhook is configured', () => {
     const notes = inboxDeploymentNotes(BARE)
     expect(notes).toHaveLength(1)
-    expect(notes[0]).toContain('nothing here can learn that somebody replied')
+    expect(notes[0]).toContain('so nothing here reads replies')
   })
 
-  it('says only address matches are possible with a webhook and no worker', () => {
+  /**
+   * `worker` is configuration. A worker on Fly sending against this
+   * database leaves Message-IDs the webhook matches (`handleInboundEmail`
+   * reads `provider_id` from the shared database), so "nothing has been sent
+   * from this deployment, so there is no Message-ID to match" was false in
+   * the documented production shape. Round 3, finding [20].
+   */
+  it('with a webhook and no worker configured, says how a reply is matched without claiming nothing was sent', () => {
     const notes = inboxDeploymentNotes({ ...BARE, inbound: 'webhook' })
     expect(notes).toHaveLength(1)
-    expect(notes[0]).toContain('only replies from an address on exactly one contact can be matched here')
-    expect(notes[0]).toContain('there is no Message-ID to match')
+    expect(notes[0]).not.toContain('nothing has been sent from this deployment')
+    expect(notes[0]).not.toContain('there is no Message-ID to match')
+    expect(notes[0]).toContain('no worker is configured here')
+    expect(notes[0]).toContain('by the Message-ID of a message a worker sent')
+    expect(notes[0]).toContain('then by an address on exactly one contact')
   })
 
   it('says nothing when a worker is reading the mailbox', () => {

@@ -1,7 +1,7 @@
 import { notFound, redirect } from 'next/navigation'
 import { and, eq } from 'drizzle-orm'
 import { can, isStale, type Proposal } from '@agency/core'
-import { readProposal, schema, type AgencyDb } from '@agency/db/queries'
+import { readProposal, schema, shareEvidenceSuperseded, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { ProposalDocument } from '@/components/pipeline/proposal-document'
@@ -12,6 +12,7 @@ import { ProposalStatus } from '@/components/pipeline/proposal-status'
 import { When } from '@/components/when'
 import { readIcp } from '@/lib/company-list'
 import { getDb } from '@/lib/db'
+import { supersededBannerText } from '@/lib/proposal-markdown'
 import { icpForOrg } from '@/lib/queries'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -64,6 +65,12 @@ export default async function ProposalPage({ params }: { params: Promise<{ id: s
     .where(and(eq(schema.scans.orgId, user.orgId), eq(schema.scans.id, row.scanId)))
     .limit(1)
   const evidenceStale = isStale(scan?.ranAt, staleAfter)
+  // A newer successful scan supersedes this one: only the latest is quoted
+  // outbound (§2.2), and the share link already reads it as "being
+  // re-verified". Said here, before anybody marks it sent or downloads it,
+  // rather than after. Review round 3, finding [6].
+  const evidenceSuperseded = await shareEvidenceSuperseded(db, user.orgId, row.id)
+  const superseded = supersededBannerText(company.domain)
   const signOutAction = async () => {
     'use server'
     await signOut({ redirectTo: '/signin' })
@@ -90,8 +97,14 @@ export default async function ProposalPage({ params }: { params: Promise<{ id: s
           <code>{company.domain}</code> and generate a fresh proposal rather than sending this one.
         </div>
       ) : null}
+      {evidenceSuperseded ? (
+        <div className="note note-warn">
+          <strong>{superseded.lead}</strong> {superseded.rest}
+          {row.status === 'draft' ? ' Regenerate it before marking it sent.' : null}
+        </div>
+      ) : null}
       <ProposalStatus id={row.id} status={row.status} canWrite={canWrite} />
-      <ProposalLinksSlot {...slot} />
+      <ProposalLinksSlot {...slot} evidenceSuperseded={evidenceSuperseded} />
       <ProposalShareSlot {...slot} />
 
       <ProposalDocument

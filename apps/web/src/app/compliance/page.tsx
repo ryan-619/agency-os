@@ -11,6 +11,8 @@ import { getDb } from '@/lib/db'
 import { deployment, type Deployment } from '@/lib/deployment'
 import { icpForOrg } from '@/lib/queries'
 import { refusalWords } from '@/lib/refusal-words'
+import { workerStatus, type WorkerStatus } from '@/lib/worker-status'
+import { recorders, workerBanner, type Absent } from './recorders'
 
 /**
  * Compliance (§2.1, §2.2): the questions an auditor asks, as numbers
@@ -26,8 +28,10 @@ import { refusalWords } from '@/lib/refusal-words'
  *
  * §2.2 applied to the auditor's own numbers: a zero only means something if
  * something on this deployment could have recorded a row. So each block
- * names its recorder, reads `deployment()`, and says when that recorder is
- * absent — "none recorded", never "none happened".
+ * names its recorder and says when that recorder is absent — "none
+ * recorded", never "none happened". Whether a worker records is read from
+ * its heartbeat, not from `deployment()` (`./recorders.ts`): a worker on Fly
+ * sends against this database whether or not this web half holds its URL.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -98,8 +102,19 @@ export default async function CompliancePage() {
 
   const db = getDb() as unknown as AgencyDb
   const live = deployment()
-  const s = await complianceSummary(db, user.orgId, { staleDays, now: new Date() })
-  const absent = recorders(live)
+  const now = new Date()
+  const s = await complianceSummary(db, user.orgId, { staleDays, now })
+  // The observation. Null when it cannot be read — most often because 0018,
+  // which creates the table, is not applied — and the sentences then fall
+  // back to what is configured, worded as configuration.
+  let worker: WorkerStatus | null = null
+  try {
+    worker = await workerStatus(db, now)
+  } catch {
+    worker = null
+  }
+  const absent = recorders(live, worker)
+  const banner = workerBanner(live, worker)
 
   return (
     <Shell user={user} orgName={orgLabel} current="compliance" signOut={signOutAction}>
@@ -116,14 +131,11 @@ export default async function CompliancePage() {
         </div>
       ) : null}
 
-      {live.worker ? null : (
+      {banner ? (
         <div className="note note-warn" style={{ marginBottom: 8 }}>
-          <strong>No agent worker is connected to this deployment.</strong> The send path, the mailbox
-          reader and the agent all run in it, so the counts that only the worker writes — messages sent,
-          most refusals, the agent&apos;s approvals — are counts of what was recorded here, which may be
-          nothing.
+          <strong>{banner.lead}</strong> {banner.rest}
         </div>
-      )}
+      ) : null}
 
       <Disclosure s={s} absent={absent} />
       <OptOuts s={s} absent={absent} />
@@ -155,41 +167,7 @@ export default async function CompliancePage() {
   )
 }
 
-// ---------------------------------------------------------------------------
-// Who records what, on THIS deployment
-// ---------------------------------------------------------------------------
-
-interface Absent {
-  /** Nothing here sends: every "went out" count is of what was recorded here. */
-  readonly sending: string | null
-  /** Nothing here can learn that somebody replied. */
-  readonly replies: string | null
-  /** The one-click link cannot be verified here. */
-  readonly unsubscribe: string | null
-  /** The voice service is a separate process this page cannot see. */
-  readonly voice: string
-  /** The agent raises approvals, and it runs in the worker. */
-  readonly agent: string | null
-}
-
-/**
- * The sentence for each recorder that is missing. Built from `deployment()`
- * — configuration, not health — so it can say "no worker is connected" and
- * never "the worker is fine".
- */
-function recorders(live: Deployment): Absent {
-  return {
-    sending: live.worker ? null : 'No worker is connected, so nothing on this deployment sends.',
-    replies:
-      live.worker || live.inbound === 'webhook'
-        ? null
-        : 'No worker reads a mailbox and no inbound webhook is configured, so no reply can arrive here.',
-    unsubscribe: live.unsubscribe ? null : 'UNSUBSCRIBE_SECRET is not set, so the one-click link is not offered here.',
-    voice:
-      'Calls are written by the voice service, a separate process this page cannot see — and it should not be switched on until A2P 10DLC registration has cleared.',
-    agent: live.worker ? null : 'No worker is connected, so the agent raises no approvals here.',
-  }
-}
+// Who records what, on THIS deployment: `./recorders.ts`, from the heartbeat.
 
 // ---------------------------------------------------------------------------
 // Pieces

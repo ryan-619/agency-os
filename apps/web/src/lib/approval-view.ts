@@ -502,17 +502,61 @@ export function evidenceHeading(evidence: DraftEvidence): string {
 
 export const APPROVE_DOES_NOT_SEND = 'Approving does not send. The worker re-checks every rule at the moment of sending.'
 
+/**
+ * Configuration, never observation (`deployment()` says what this web half
+ * is set up to reach): a worker on Fly can be sending against this database
+ * while this deployment holds no AGENT_URL, so "nothing will send" is not
+ * something this line knows. Review round 3, finding [20].
+ */
 export const NO_WORKER_FOOTNOTE =
-  'Approving does not send, and nothing on this deployment will until a worker is connected — ' +
-  'every rule is checked again at that moment, not now.'
+  'Approving does not send. No worker is configured on this deployment — if one runs against this database ' +
+  'elsewhere, it checks every rule again at the moment of sending, not now.'
 
 /**
- * The line beside Approve. With no worker, "the worker re-checks" describes
- * something that is not there, so the line says what is: the queue shows
- * `nothingWillSendNote()` once, above the cards, and each card says this.
+ * LinkedIn is never sent by the worker: its only provider sends email, so an
+ * approved LinkedIn row waits for a PERSON, as a step on /tasks — Start
+ * checks every rule at that moment and hands them the words, and they send
+ * from their own account. With or without a worker. Review round 3, [19].
  */
-export function approveFootnote(noSenderNote: string | null): string {
+export const LINKEDIN_APPROVE_FOOTNOTE =
+  'Approving does not send. A LinkedIn message becomes a step on /tasks for a person to send from their own ' +
+  'account — every rule is checked again when they press Start.'
+
+export const LINKEDIN_APPROVED =
+  'Approved. It is now a LinkedIn step on /tasks: a person presses Start there, every rule is checked again at ' +
+  'that moment, and they send it from their own LinkedIn account. Nothing was sent, and no worker sends LinkedIn.'
+
+const isLinkedIn = (channel: string): boolean => channel === 'linkedin'
+
+/**
+ * The line beside Approve. With no worker configured, "the worker re-checks"
+ * describes something this deployment does not know is there, so the line
+ * says what it does know; the queue shows `nothingWillSendNote()` once, above
+ * the cards. A LinkedIn draft is a person's to send whatever the worker is
+ * doing, so neither sentence is about it.
+ */
+export function approveFootnote(noSenderNote: string | null, channel = 'email'): string {
+  if (isLinkedIn(channel)) return LINKEDIN_APPROVE_FOOTNOTE
   return noSenderNote ? NO_WORKER_FOOTNOTE : APPROVE_DOES_NOT_SEND
+}
+
+/** What the card says once a draft is approved. */
+export function approvedMessage(channel: string, noSenderNote: string | null): string {
+  if (isLinkedIn(channel)) return LINKEDIN_APPROVED
+  return noSenderNote === null
+    ? 'Approved. The worker will send it on its next pass — after checking the suppression list, ' +
+        'consent, quiet hours and the daily cap again. If it lands in quiet hours it waits for morning.'
+    : 'Approved, and queued. No worker is configured on this deployment, so it goes only if one runs against ' +
+        'this database elsewhere — and every rule is checked at that moment, not now.'
+}
+
+/**
+ * `nothingWillSendNote()` above the queue — only while a draft on it is one
+ * a worker would send. A queue of LinkedIn drafts waits for a person on
+ * /tasks, so a sentence about the worker is about none of them.
+ */
+export function queueNoSenderNote(channels: readonly string[], noSenderNote: string | null): string | null {
+  return channels.some((c) => !isLinkedIn(c)) ? noSenderNote : null
 }
 
 // ---------------------------------------------------------------------------
