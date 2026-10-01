@@ -337,6 +337,22 @@ describe('sentenceFor', () => {
   })
 
   /**
+   * Review round 5, [12]. A stuck-send recovery puts a reply's pause back
+   * over an answer it could not tell went — "the answer to it failed to
+   * send" — and `dispatchTouch` lifts that pause when the provider had taken
+   * the answer after all. The lift says why, beside the recovery's row it
+   * corrects, and never quotes the reason's text.
+   */
+  it('says a reply’s pause was lifted because the answer to it went after all', () => {
+    const detail = { reason: 'the answer to their reply went after all', pausedFor: 'replied', answerTouchId: SUBJECT }
+    expect(sentenceFor(line('contact.resumed', detail, { actor: 'system' }), lookups)).toBe(
+      'resumed a contact at rentman.io who had been paused by their reply, because the answer to it went after all',
+    )
+    const outreach = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../packages/db/src/outreach.ts'), 'utf8')
+    expect(outreach).toContain("detail: { reason: 'the answer to their reply went after all', pausedFor: pauseReasonClass(reason), answerTouchId: answer.id }")
+  })
+
+  /**
    * `denyDraft` records `stale_evidence` for words that quoted an AGED scan
    * and for words a newer scan SUPERSEDED, and its detail does not say
    * which. "A re-scan lets it be drafted again" is false of the second —
@@ -466,7 +482,6 @@ describe('sentenceFor', () => {
       'could not record an opt-out texted from a number no single contact holds (the number could not be read) — ' +
         "it is NOT on the suppression list; read the number from the provider's inbound log and record it by hand",
     )
-    expect(unplaced({ channel: 'sms', why: 'record_failed' })).toContain('(recording the text failed)')
     // An error's class name says nothing a person can act on.
     expect(unplaced({ channel: 'sms', why: 'DrizzleQueryError' })).toBe(
       'could not record an opt-out texted from a number no single contact holds — ' +
@@ -483,6 +498,37 @@ describe('sentenceFor', () => {
     expect(sentenceFor(line('contact.opt_out_not_recorded', WRITTEN['contact.opt_out_not_recorded']), lookups)).toContain(
       'from a contact at rentman.io',
     )
+  })
+
+  /**
+   * Review round 5, [14]. The DoveSoft route writes `{ channel: 'sms', why:
+   * 'record_failed' }` whenever recording a STOP THREW — most often inside
+   * the one matched contact's `recordInboundReply`, which rolled back. The
+   * writer never learned whose number it was, and /audit said it came "from
+   * a number no single contact holds", so the person following up recorded
+   * a bare suppression and never looked for the contact, who stayed neither
+   * paused nor suppressed. It says what is known now: nothing was written,
+   * whose number it was is not known, and the contact who holds it is to be
+   * paused as well.
+   */
+  it('words a STOP whose recording failed as not known to be anybody’s, and says to look for the contact', () => {
+    const failed = sentenceFor(line('contact.opt_out_not_recorded', { channel: 'sms', why: 'record_failed' }, { actor: 'system' }), {})
+    expect(failed).toBe(
+      'could not record an opt-out texted in: recording the text failed before anything was written, so whose number it was ' +
+        'is not known — it is NOT on the suppression list and nobody was paused; it was refused so DoveSoft retries, but until ' +
+        "a retry is recorded, read the number from the provider's inbound log, put it on /suppressions and pause whichever " +
+        'contact holds it',
+    )
+    expect(failed).not.toContain('no single contact holds')
+    expect(failed).not.toContain('a contact at')
+    expect(isAlarm(line('contact.opt_out_not_recorded', { channel: 'sms', why: 'record_failed' }, { actor: 'system' }))).toBe(true)
+    // The other subject-less reasons keep their words: those writers did
+    // look, and found no single contact holding a readable number.
+    for (const why of ['unparseable_number', 'DrizzleQueryError']) {
+      expect(sentenceFor(line('contact.opt_out_not_recorded', { channel: 'sms', why }, { actor: 'system' }), {})).toContain(
+        'from a number no single contact holds',
+      )
+    }
   })
 
   /**

@@ -79,6 +79,33 @@ describe('a configured worker the heartbeat says is not doing the job', () => {
     expect(sendOnly.replies).toContain('does not read a mailbox')
   })
 
+  /**
+   * Review round 5, [15]. A worker with its mailbox off and DoveSoft on IS
+   * sending — `workerSends` counts SMS, so `sending` is null and no banner
+   * goes up — and the replies recorder said it was "running with outreach
+   * switched off", the clause the dashboard had already stopped using for
+   * the same heartbeat. Its OUTREACH is on; its EMAIL outreach is off.
+   */
+  it('words a worker that texts with its mailbox off as email outreach off, as the dashboard does', () => {
+    const texting = W({ configured: true, outreach: 'disabled', sms: 'on' })
+    const a = recorders(D({ worker: true }), texting)
+    expect(a.sending).toBeNull()
+    expect(workerBanner(D({ worker: true }), texting)).toBeNull()
+    expect(a.replies).toBe(
+      'The worker is running with email outreach switched off and no inbound webhook is configured, so no reply is arriving now.',
+    )
+    expect(recorders(D({ worker: true, smsInbound: true }), texting).replies).toBe(
+      'The worker is running with email outreach switched off and no inbound email webhook is configured, so no email reply ' +
+        'is arriving now; texts a contact sends back, a STOP included, still arrive through DoveSoft’s webhook.',
+    )
+    // Off, or a row from before 0019 that does not say: the old words, which are true of it.
+    for (const sms of ['off', null] as const) {
+      expect(recorders(D({ worker: true }), W({ configured: true, outreach: 'disabled', sms })).replies).toBe(
+        'The worker is running with outreach switched off and no inbound webhook is configured, so no reply is arriving now.',
+      )
+    }
+  })
+
   it('a webhook is a reply recorder whatever the worker is doing', () => {
     expect(recorders(D({ inbound: 'webhook' }), W({ status: 'silent' })).replies).toBeNull()
   })
