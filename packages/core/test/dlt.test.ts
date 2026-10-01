@@ -456,6 +456,62 @@ describe('the SMS opt-out reader', () => {
     },
   )
 
+  /**
+   * Review round 5, finding [7]: politeness was read only BEFORE the words, so a "please" after
+   * them — and "msg" for "message" — lost the opt-out to both readers. Each of these was stored as
+   * an ordinary reply: paused, never suppressed, and resumable from /contacts.
+   */
+  it.each([
+    'Stop texting me please',
+    'stop messaging me please',
+    'Stop texting me, please.',
+    'Stop texting me. Thanks',
+    'stop sending me msgs pls',
+    'stop msging me',
+    'unsubscribe me please',
+    'Unsubscribe me, thanks!',
+    'no more messages please',
+    'no more msgs pls',
+    'No more SMS plz 🙏',
+    'no more txts thx',
+    'Dont msg me',
+    'dont msg me again please',
+    'Don’t text me again, thank you',
+    'do not msg me',
+    'Remove me from your list',
+    'please remove me from the list, thanks',
+    'Remove me please',
+    'Opt me out please',
+    'Leave me alone please',
+    'Take me off your list please',
+    'stop please',
+    'Please stop, thanks',
+  ])('reads %j as an opt-out — politeness after the words, and "msg" for "message"', (text) => {
+    expect(smsOptOut(text)).toBe(true)
+  })
+
+  it.each([
+    'Don’t stop texting me please',
+    'do not stop messaging me, thanks',
+    'stop by tomorrow please',
+    'stop by tomorrow, thanks',
+    'no more questions, thanks',
+    'text me please',
+    'msg me please',
+    'please send me more msgs',
+    'remove me from the meeting please',
+    'remove me from the invite thanks',
+    'Please cancel 🙏',
+    'cancel please',
+    'end please',
+    'quit please',
+    'stop all the calls please',
+    'thanks',
+    'please',
+  ])('does not read %j as an opt-out — a "please" does not make a sentence one', (text) => {
+    expect(smsOptOut(text)).toBe(false)
+  })
+
   it.each([
     'Cancel tomorrow’s call please',
     'end of day works',

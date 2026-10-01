@@ -645,21 +645,36 @@ const SMS_STOP_TOKEN_TAIL = /^[\s,:;-]+(?:all[\s,:;-]+)?[\p{L}\p{N}]{1,20}$/u
  * not strip ("Remove me 🙏", "Please stop :)") does not lose an opt-out both
  * readers would otherwise have read. The apostrophe may be the typewriter one
  * or the curly one a phone's keyboard puts in by default.
+ *
+ * Politeness is read at BOTH ends: "please" before the words, and one
+ * "please", "pls", "plz", "thanks", "thank you" or "thx" after them, set off
+ * by a space, a comma or a full stop ("Stop texting me, please.",
+ * "Unsubscribe me. Thanks"). Review round 5 found it read only as a prefix,
+ * so "stop messaging me please" and "no more messages please" were an
+ * ordinary reply to both readers — paused, never suppressed, and resumable.
+ * And a phone's shorthand is read where the word is: "msg" and "msgs" beside
+ * "message", "txt" beside "text", "sms" beside both ("Dont msg me", "no more
+ * msgs pls"). The trailing word is anchored like everything else here — it
+ * follows a whole stop sentence and ends the message — so "stop by tomorrow
+ * please" and "don't stop texting me please" are still not opt-outs, and
+ * CANCEL, END and QUIT are still opt-outs only alone.
  */
+const SMS_MESSAGES = '(?:messages?|msgs?|texts?|txts?|sms)'
+const SMS_TO_MESSAGE = '(?:text|txt|message|msg|sms|contact|email)'
 const SMS_STOP_PROSE = new RegExp(
   '^(?:(?:please|pls|plz|kindly)\\s+)?(?:' +
     [
-      'stop\\s+(?:texting|messaging|sms(?:ing)?|sending\\s+(?:me\\s+)?(?:texts|messages|sms))(?:\\s+me)?',
-      "(?:do\\s+not|don['’]?t)\\s+(?:text|message|sms|contact|email)\\s+me(?:\\s+again)?",
-      'no\\s+more\\s+(?:texts|messages|sms|emails?)',
+      `stop\\s+(?:texting|txting|messaging|msging|msg|sms(?:ing)?|sending\\s+(?:me\\s+)?${SMS_MESSAGES})(?:\\s+me)?`,
+      `(?:do\\s+not|don['’]?t)\\s+${SMS_TO_MESSAGE}\\s+me(?:\\s+again)?`,
+      `no\\s+more\\s+(?:${SMS_MESSAGES}|emails?)`,
       'stop',
       'unsubscribe(?:\\s+me)?',
-      'remove\\s+me',
+      'remove\\s+me(?:\\s+from\\s+(?:your|the|this)\\s+(?:(?:mailing|sms|text(?:ing)?|contact)\\s+)?list)?',
       'opt(?:\\s+me)?[\\s-]?out',
       'take\\s+me\\s+off\\s+(?:your|the)\\s+list',
       'leave\\s+me\\s+alone',
     ].join('|') +
-    ')$',
+    ')(?:[\\s,.!]+(?:please|pls|plz|thanks|thank\\s+you|thx))?$',
   'u',
 )
 
@@ -682,7 +697,8 @@ const SMS_DECORATION_ENDS = new RegExp(`^${SMS_DECORATION}|${SMS_DECORATION}$`, 
  * short code or a brand keyword), with an optional `all` before it; any of
  * them after "reply", "sms", "text" or "send" (somebody repeating the footer
  * back); and a few SMS-shaped sentences ("stop texting me", "don't text me
- * again", "please stop"). Whitespace, punctuation, symbols and emoji at
+ * again", "please stop", "no more msgs pls"), with one "please" or "thanks"
+ * before or after them. Whitespace, punctuation, symbols and emoji at
  * either end are ignored — `STOP)`, `¡STOP!`, `STOP 👍`, `"STOP"` — and the
  * text is NFKC-folded so full-width letters read as letters.
  *
