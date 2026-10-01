@@ -49,12 +49,38 @@ export interface WorkerStatusLike {
   /** This web deployment is configured to reach a worker (`deployment().worker`). */
   readonly configured: boolean
   readonly status: 'not_configured' | 'never' | 'live' | 'silent'
+  /**
+   * A `silent` row older than `HEARTBEAT_RETIRED_AFTER_DAYS` where no worker
+   * is configured — what a session somebody ran by hand and closed leaves.
+   * The digest and /api/health call it `retired`, and so does every
+   * sentence here.
+   */
+  readonly retired: boolean
   readonly lastSeenAt: Date | null
   /** `/readyz`'s vocabulary: disabled | send-only | send-and-receive | receive-only. */
   readonly outreach: string | null
   /** enabled | disabled. Never which credential (§2.3). */
   readonly chat: string | null
 }
+
+/**
+ * What the worker is called: its status, or `retired` — `heartbeatReportedStatus`
+ * in packages/db, restated for the same reason as the interface above, and
+ * held to it by `dashboard-view.test.ts` over every status the report can
+ * have. The digest's "Worker:" line and /api/health say the same word.
+ */
+export type WorkerWord = WorkerStatusLike['status'] | 'retired'
+
+export function workerWord(w: Pick<WorkerStatusLike, 'status' | 'retired'>): WorkerWord {
+  return w.retired ? 'retired' : w.status
+}
+
+/**
+ * Why nothing sends where a retired row is the newest — the digest's own
+ * words (`workerWords` in `slack-message.ts`), so the channel and the page
+ * read alike.
+ */
+export const RETIRED_WORKER_WORDS = 'no worker is configured, so nothing is sending or reading replies'
 
 /** Whole units, floored, for "2 minutes" — never negative, never "0 minutes". */
 export function elapsed(seconds: number): string {
@@ -114,13 +140,15 @@ function repliesArrive(d: Deployment, w: WorkerStatusLike): boolean {
  * configured worker that has never reported in is not sending anything.
  */
 function notSendingBecause(w: WorkerStatusLike): string | null {
-  switch (w.status) {
+  switch (workerWord(w)) {
     case 'not_configured':
       return 'no worker is connected'
     case 'never':
       return 'no worker has ever reported in'
     case 'silent':
       return 'the worker has gone quiet'
+    case 'retired':
+      return 'the last worker to report in has retired'
     case 'live':
       if (workerSends(w)) return null
       if (w.outreach === 'disabled') return 'the worker is running with outreach switched off'
@@ -165,17 +193,22 @@ export interface WorkerLine {
 }
 
 /**
- * The one line under the dashboard's heading. Four shapes, one per status:
+ * The one line under the dashboard's heading. Five shapes, one per word:
  *
  *   * live — "Worker last seen 2 minutes ago · sending and receiving · chat on"
  *   * silent — "Worker silent since <when> · 3 hours without a heartbeat · …"
+ *   * retired — "Worker retired — last seen <when> · no worker is configured, …"
  *   * never — "No worker has ever reported in · …"
  *   * not_configured — "No worker configured · …"
+ *
+ * A retired row is quiet, not a warning, for the digest's reason: nobody is
+ * alerted about it, and a line that reads as an alarm every day teaches a
+ * person to stop reading it.
  */
 export function workerLine(w: WorkerStatusLike, now: Date): WorkerLine {
   const age = secondsSince(w.lastSeenAt, now)
   const doing = own(OUTREACH_WORDS, w.outreach)
-  switch (w.status) {
+  switch (workerWord(w)) {
     case 'live': {
       const chat = !w.configured
         ? 'chat is not reachable from this deployment'
@@ -201,6 +234,8 @@ export function workerLine(w: WorkerStatusLike, now: Date): WorkerLine {
           'approved messages wait and no mailbox is read until it is back',
         ]),
       }
+    case 'retired':
+      return { tone: 'quiet', lead: 'Worker retired — last seen', at: w.lastSeenAt, tail: RETIRED_WORKER_WORDS }
     case 'never':
       return {
         tone: 'warn',
@@ -346,7 +381,7 @@ export function honestyBullets(d: Deployment, w: WorkerStatusLike, facts: Dashbo
 
 function workerBullet(d: Deployment, w: WorkerStatusLike, now: Date): HonestyBullet {
   const age = secondsSince(w.lastSeenAt, now)
-  switch (w.status) {
+  switch (workerWord(w)) {
     case 'not_configured':
       return {
         id: 'worker-none',
@@ -368,6 +403,16 @@ function workerBullet(d: Deployment, w: WorkerStatusLike, now: Date): HonestyBul
         rest:
           `Nothing has reported in for ${age === null ? 'a while' : elapsed(age)}. ` +
           'Approved messages wait in the queue and no mailbox is read until it is back.',
+      }
+    case 'retired':
+      return {
+        id: 'worker-retired',
+        lead: 'The last worker to report in has retired.',
+        rest:
+          `It was last seen ${age === null ? 'over a week ago' : `${elapsed(age)} ago`} and ${RETIRED_WORKER_WORDS}. ` +
+          'With none configured, a week without a heartbeat counts as retired — what a worker run by hand and then ' +
+          'closed leaves behind — and nobody is alerted about it; if one is meant to be running elsewhere against ' +
+          'this database, it has stopped. Drafts can be written and approved and will sit in the queue; nothing will send them.',
       }
     case 'live': {
       const doing =
@@ -450,6 +495,23 @@ function cronBullet(d: Deployment, facts: DashboardFacts): HonestyBullet {
  * hour of jitter a Hobby plan allows either side, and room for one slow run.
  */
 export const RESCAN_OVERDUE_HOURS = 36
+
+// ---------------------------------------------------------------------------
+// The Active ICP table
+// ---------------------------------------------------------------------------
+
+/**
+ * Under the Active ICP table, which shows the profile's `outreach.channels`
+ * and `max_per_day` beside its qualify-at score. The score is operative —
+ * `scoreCompany` qualifies against it — and the other two are not: the send
+ * path applies each campaign's own channel, daily cap and quiet hours and
+ * reads neither (/settings/icp says the same of the whole outreach block).
+ * Shown under bare "Channels" and "Daily cap" headings they read as the
+ * limits in force, which is the claim this module exists to stop.
+ */
+export const ICP_OUTREACH_NOTE =
+  'The channels and daily cap are what this profile describes, not what the send path enforces: each campaign ' +
+  'applies its own channel, daily cap and quiet hours.'
 
 // ---------------------------------------------------------------------------
 // "Needs a look"

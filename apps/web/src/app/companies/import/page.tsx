@@ -11,6 +11,7 @@ import { deployment } from '@/lib/deployment'
 import { log } from '@/lib/logger'
 
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 /** Cap the paste box so a mis-paste cannot try to import a novel. */
 const MAX_ROWS = 5000

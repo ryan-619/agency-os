@@ -8,9 +8,10 @@
  * Each block is a way one of these pages or routes answered 500 — or could
  * be moved to the wrong runtime — without anything looking broken:
  *
- *   * eleven pages exported `dynamic` and not `runtime`, so a segment layout
- *     that ever set `runtime = 'edge'` would move pages that use `pg` and
- *     `node:` modules onto it silently;
+ *   * twenty-eight pages exported `dynamic` and not `runtime` — eleven the
+ *     0018 release added, then seventeen older ones a list of the eleven
+ *     never saw — so a segment layout that ever set `runtime = 'edge'` would
+ *     move pages that use `pg` and `node:` modules onto it silently;
  *   * `/contacts?q=a&q=b` reached `.trim()` with an ARRAY — Next hands a
  *     repeated key over as `string[]`, whatever the page's type says;
  *   * `/contacts/import` parsed the ICP bare, for a sidebar label;
@@ -20,7 +21,8 @@
  *     `/^[0-9a-f-]{36}$/`, which lets 36 dashes through to Postgres as a
  *     22P02 and a 500 instead of the house 404.
  */
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { isStale } from '@agency/core'
@@ -33,13 +35,40 @@ const code = (src: string): string => src.replace(/\/\*[\s\S]*?\*\//g, '').repla
 
 const APP = '../src/app/'
 
-describe('every page the 0018 release added runs on the Node runtime, said out loud', () => {
-  const PAGES = [
-    'audit', 'chat/[sessionId]', 'compliance', 'contacts', 'contacts/import', 'inbox', 'pipeline/analytics',
-    'proposals/[id]/print', 'settings/credentials', 'settings/team', 'tasks',
-  ]
-  it.each(PAGES)('%s exports dynamic and runtime', (page) => {
-    const src = read(`${APP}${page}/page.tsx`)
+/**
+ * Every `page.tsx` under `src/app`, found by walking the tree rather than
+ * kept as a list. A list is how this went wrong twice: the 0018 release
+ * fixed the eleven pages it had added and left seventeen older ones
+ * exporting `dynamic` with no `runtime`, and a page added next year would
+ * be on no list at all.
+ */
+function pagesUnder(dir: string, prefix = ''): string[] {
+  const out: string[] = []
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory()) out.push(...pagesUnder(join(dir, entry.name), `${prefix}${entry.name}/`))
+    else if (entry.name === 'page.tsx') out.push(`${prefix}page.tsx`)
+  }
+  return out.sort()
+}
+
+describe('every page that exports dynamic runs on the Node runtime, said out loud', () => {
+  const PAGES = pagesUnder(fileURLToPath(new URL(APP, import.meta.url)))
+  const DYNAMIC = PAGES.filter((p) => /^export const dynamic = /m.test(read(`${APP}${p}`)))
+
+  it('finds the pages by walking the tree, so the check cannot pass on an empty list', () => {
+    // The dashboard, a page with a dynamic segment, a nested settings page,
+    // and the seventeen that once exported `dynamic` alone.
+    for (const p of [
+      'page.tsx', 'companies/[domain]/page.tsx', 'settings/agents/page.tsx', 'signin/check-email/page.tsx',
+      'approvals/page.tsx', 'book/[slug]/page.tsx', 'suppressions/page.tsx',
+    ]) {
+      expect(DYNAMIC).toContain(p)
+    }
+    expect(DYNAMIC.length).toBeGreaterThanOrEqual(36)
+  })
+
+  it.each(DYNAMIC)('%s exports dynamic and runtime', (page) => {
+    const src = read(`${APP}${page}`)
     expect(src).toMatch(/^export const dynamic = 'force-dynamic'$/m)
     expect(src).toMatch(/^export const runtime = 'nodejs'$/m)
   })

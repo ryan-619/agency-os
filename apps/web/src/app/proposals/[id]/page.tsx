@@ -25,6 +25,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
  * on (print, download, a buyer's link).
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export default async function ProposalPage({ params }: { params: Promise<{ id: string }> }) {
   const session = await auth()

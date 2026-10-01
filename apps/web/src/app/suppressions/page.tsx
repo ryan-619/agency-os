@@ -24,6 +24,7 @@ import { icpForOrg } from '@/lib/queries'
  * and a sentence rather than the vocabulary module.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export default async function SuppressionsPage() {
   const session = await auth()

@@ -13,8 +13,8 @@ import { Shell } from '@/components/shell'
 import { When } from '@/components/when'
 import { readIcp } from '@/lib/company-list'
 import {
-  complianceChecksFailing, dealsNeedingALook, feedLines, feedPersonIds, honestyBullets, honestyHeadline, needsALook,
-  quietFeedNote, splitLook, workerLine,
+  ICP_OUTREACH_NOTE, complianceChecksFailing, dealsNeedingALook, feedLines, feedPersonIds, honestyBullets,
+  honestyHeadline, needsALook, quietFeedNote, splitLook, workerLine,
 } from '@/lib/dashboard-view'
 import { getDb, schema } from '@/lib/db'
 import { deployment } from '@/lib/deployment'
@@ -125,9 +125,10 @@ export default async function Dashboard() {
     .limit(1)
 
   // Read from the stored definition rather than repeating §11's numbers as
-  // literals. The ICP is editable (Phase 1 puts it in the UI), and a dashboard
-  // that displays a threshold the engine is not using is the same class of
-  // mistake as a finding nobody observed.
+  // literals: a dashboard that displays a threshold the engine is not using
+  // is the same class of mistake as a finding nobody observed. For the same
+  // reason the channels and cap are headed as the profile's DESCRIPTION — the
+  // send path applies each campaign's own, and reads neither of these.
   const def = icp?.definition as
     | { scoring?: { qualify_at?: number }; outreach?: { channels?: string[]; max_per_day?: number } }
     | undefined
@@ -272,7 +273,7 @@ export default async function Dashboard() {
 
         <h2>Active ICP</h2>
         <table>
-          <thead><tr><th>Profile</th><th>Qualify at</th><th>Channels</th><th>Daily cap</th></tr></thead>
+          <thead><tr><th>Profile</th><th>Qualify at</th><th>Channels it describes</th><th>Daily cap it describes</th></tr></thead>
           <tbody>
             <tr>
               <td>{icp?.name ?? '— none seeded —'}</td>
@@ -282,6 +283,10 @@ export default async function Dashboard() {
             </tr>
           </tbody>
         </table>
+        <p className="muted" style={{ fontSize: 12.5, margin: '8px 0 0' }}>
+          {ICP_OUTREACH_NOTE} <a href="/campaigns">The caps in force are on Campaigns →</a>{' '}
+          <a href="/settings/icp">The whole profile →</a>
+        </p>
 
         <h2>What this instance can and cannot do</h2>
         <div className={headline.tone === 'ok' ? 'note' : 'note note-warn'}>

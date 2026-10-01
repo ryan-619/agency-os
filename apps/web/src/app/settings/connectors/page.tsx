@@ -31,6 +31,7 @@ import { icpForOrg } from '@/lib/queries'
  * already made on this side.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export default async function ConnectorsPage() {
   const session = await auth()

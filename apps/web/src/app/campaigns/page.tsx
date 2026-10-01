@@ -25,6 +25,7 @@ import { icpForOrg } from '@/lib/queries'
  * why it stopped and what to do.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export default async function CampaignsPage() {
   const session = await auth()

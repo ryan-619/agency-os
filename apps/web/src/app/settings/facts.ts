@@ -30,6 +30,15 @@ export function ago(seconds: number): string {
   return unit(Math.floor(s / 86_400), 'day')
 }
 
+/**
+ * Why nothing sends where the newest heartbeat is a retired row: the
+ * digest's words (`workerWords` in `lib/slack-message.ts`) and the
+ * dashboard's (`RETIRED_WORKER_WORDS` in `lib/dashboard-view.ts`), restated
+ * so that this module keeps its type-only imports; `settings-facts.test.ts`
+ * holds the three to one sentence.
+ */
+const RETIRED_WORKER_WORDS = 'no worker is configured, so nothing is sending or reading replies'
+
 export interface WorkerLine {
   readonly tone: Tone
   readonly text: string
@@ -41,6 +50,11 @@ export interface WorkerLine {
  * The worker's heartbeat as one line. `report` is null when it could not be
  * read — most often because migration 0018, which creates the table, is not
  * applied — and `errorName` is the error's class, never its message.
+ *
+ * A retired row (`report.retired`: silent for over a week where no worker is
+ * configured) is called retired, as the digest and /api/health call it —
+ * its `status` stays `silent`, so switching on that alone called the same
+ * row "silent" here and "retired" in the channel.
  */
 export function workerLine(report: HeartbeatReport | null, errorName?: string): WorkerLine {
   if (report === null) {
@@ -51,6 +65,13 @@ export function workerLine(report: HeartbeatReport | null, errorName?: string): 
     }
   }
   const age = report.ageSeconds === null ? '' : ago(report.ageSeconds)
+  if (report.retired) {
+    return {
+      tone: 'plain',
+      text: `Worker retired — last seen ${age || 'over a week ago'}; ${RETIRED_WORKER_WORDS}.`,
+      lastSeenAt: report.lastSeenAt,
+    }
+  }
   switch (report.status) {
     case 'live':
       return {
@@ -218,6 +239,18 @@ export function deploymentFacts(i: DeploymentFactInput): readonly DeploymentFact
 export function sendingAnswer(report: HeartbeatReport | null): { tone: Tone; text: string } {
   if (report === null) {
     return { tone: 'warn', text: 'The heartbeat could not be read, so whether a worker is sending is not known from here.' }
+  }
+  if (report.retired) {
+    // Not "check Fly": nothing is configured to be running, so nothing was scaled away.
+    return {
+      tone: 'warn',
+      text:
+        `Nothing sends: ${RETIRED_WORKER_WORDS}. The last worker to report in was last seen ` +
+        `${report.ageSeconds === null ? 'over a week ago' : ago(report.ageSeconds)}; with none configured, a week without a ` +
+        'heartbeat counts as retired — what a worker run by hand and then closed leaves behind — and nobody is alerted ' +
+        'about it. If one is meant to be running elsewhere against this database, it has stopped. The CRM half works ' +
+        'without one; sending, reply detection and chat need the worker (DEPLOYING.md).',
+    }
   }
   switch (report.status) {
     case 'not_configured':

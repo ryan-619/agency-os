@@ -17,6 +17,7 @@ import { icpForOrg } from '@/lib/queries'
  * failure that is invisible from everywhere else.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 const OUTCOME_TONE: Readonly<Record<string, string>> = {
   qualified: ' on',
