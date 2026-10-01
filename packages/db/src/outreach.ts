@@ -2134,8 +2134,9 @@ export async function recordInboundReply(
     })
   } catch (err) {
     // Rolled back: nothing about this reply was stored. A webhook's provider
-    // retries it; the worker's IMAP path marks the message seen and does
-    // not. For a "stop" that is §2.1's obligation unmet, so it is said out
+    // retries it; the worker's IMAP path leaves the message unseen and
+    // retries it, a bounded number of times (`drainUnseen`). Until a retry
+    // records it, a "stop" is §2.1's obligation unmet, so it is said out
     // loud — ids and a reason class, never the address or the words.
     if (optedOut) {
       log.error('OPT-OUT NOT RECORDED — the reply was rolled back; a provider retry records it, otherwise follow up by hand', {
