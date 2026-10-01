@@ -38,6 +38,35 @@ describe('a reply’s channel, in words', () => {
     expect(answerElsewhere('whatsapp')).toContain('sending WhatsApp is not available yet')
     expect(contactsLinkFor('Priya Sharma')).toBe('/contacts?q=Priya%20Sharma')
   })
+
+  /**
+   * Review round 4. Every SMS reply pauses the person, and Draft SMS — the
+   * sender's own dry run — refuses a paused person; it resumes nobody. The
+   * hint sent people to Draft SMS alone, which then said "answer the reply
+   * from /inbox", which offers no Answer on SMS: a loop whose only way out,
+   * Resume on /contacts, was named last. So a paused person's hint names the
+   * resume FIRST — and only a reply's own pause is called theirs to lift.
+   */
+  it('says to resume a person their text paused before Draft SMS, and never to lift somebody else’s pause', () => {
+    const replied = answerElsewhere('sms', { paused: true, pausedReason: 'replied 2026-09-15T12:00:00.000Z' })
+    expect(replied).toContain('Resume them on /contacts first (their reply paused them), then Draft SMS')
+    expect(replied.indexOf('Resume them')).toBeLessThan(replied.indexOf('then Draft SMS'))
+
+    for (const pausedReason of ['legal hold (by sam@agency.test)', 'unsubscribed 2026-09-15T12:00:00.000Z', 'opt-out not recorded: x', null]) {
+      const other = answerElsewhere('sms', { paused: true, pausedReason })
+      expect(other, String(pausedReason)).toContain('Draft SMS refuses a paused person')
+      expect(other, String(pausedReason)).not.toContain('Resume them')
+      expect(other, String(pausedReason)).not.toContain('their reply paused them')
+    }
+
+    // Not paused (an auto-reply, or resumed since): Draft SMS is the whole answer.
+    expect(answerElsewhere('sms', { paused: false, pausedReason: null })).toBe(answerElsewhere('sms'))
+    expect(answerElsewhere('sms')).not.toContain('Resume')
+    // WhatsApp cannot be sent at all, paused or not.
+    expect(answerElsewhere('whatsapp', { paused: true, pausedReason: 'replied 2026-09-15T12:00:00.000Z' })).toBe(
+      answerElsewhere('whatsapp'),
+    )
+  })
 })
 
 describe('the inbox queue', () => {
@@ -47,6 +76,10 @@ describe('the inbox queue', () => {
     const at = src.indexOf('answersByTemplate(row.channel) ? (')
     expect(at).toBeGreaterThan(-1)
     expect(at).toBeLessThan(src.indexOf('onClick={() => setOpen(row.id)}'))
+  })
+
+  it('words the SMS hint by the person’s pause, which is what Draft SMS refuses', () => {
+    expect(src).toContain('{answerElsewhere(row.channel, row.contact)}')
   })
 
   it('labels the channel beside the reply’s kind', () => {

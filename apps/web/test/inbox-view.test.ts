@@ -129,7 +129,12 @@ describe('an answer', () => {
       'This is a draft. A person approves it on /approvals and the worker sends it after re-checking every ' +
         'rule; it threads under their reply.',
     )
-    expect(INBOX_LEDE).toContain('answering resumes them, and the answer is a draft a person approves')
+    // Review round 4: only an EMAIL reply has an Answer here, so only that
+    // answer resumes them. A text is answered with Draft SMS, which refuses a
+    // paused person and resumes nobody — the lede says to resume them first.
+    expect(INBOX_LEDE).toContain('answering an email reply here resumes them, and the answer is a draft a person approves')
+    expect(INBOX_LEDE).not.toContain('answering resumes them')
+    expect(INBOX_LEDE).toContain('A text is answered with Draft SMS on /contacts, after resuming them there.')
   })
 
   it('prefixes Re: once, however many the thread collected', () => {

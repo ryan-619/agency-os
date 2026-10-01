@@ -24,7 +24,9 @@ import {
  *    (their reply paused them everywhere), and the worker sends it only after
  *    a person approves it and every rule passes again at that moment. Not
  *    on SMS or WhatsApp (0019): an answer there is a registered template, so
- *    the row points at Draft SMS on /contacts instead of offering free text.
+ *    the row points at Draft SMS on /contacts instead of offering free text
+ *    — and, since Draft SMS refuses a paused person and resumes nobody, says
+ *    to resume them there first when their reply paused them.
  *
  * The reply's body is shown whole. Somebody deciding what to do about a
  * message has to be able to read all of it.
@@ -375,7 +377,7 @@ export function InboxQueue({
 
                     {canAnswer && row.contact && !optedOut && !row.suppressed && !live && answersByTemplate(row.channel) ? (
                       <span className="hint" style={{ maxWidth: 190, textAlign: 'right' }}>
-                        {answerElsewhere(row.channel)}
+                        {answerElsewhere(row.channel, row.contact)}
                         {row.channel === 'sms' ? (
                           <>
                             {' '}
