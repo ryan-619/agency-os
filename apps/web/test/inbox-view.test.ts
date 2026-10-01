@@ -6,6 +6,8 @@
  * predicate (`packages/db/test/inbox.test.ts`); this pins the route's half,
  * the zod enum, and the copy that tells a person why the choice is missing.
  */
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { REPLY_KINDS } from '@agency/core'
 import type { Deployment } from '../src/lib/deployment-facts'
@@ -184,5 +186,33 @@ describe('personName', () => {
     expect(personName({ firstName: null, lastName: null, email: 'p@x.io' })).toBe('p@x.io')
     expect(personName({ firstName: null, lastName: null, email: null })).toBe('an unnamed contact')
     expect(personName(null)).toBe('a contact no longer in the CRM')
+  })
+})
+
+/**
+ * The composer's line under an answer said "If the draft is then denied,
+ * pause them again here." Since round 4 a deny does that itself
+ * (`repauseForDeniedAnswer` in packages/db/src/outreach.ts): the reply's
+ * pause goes back on when this answer is what resumed them, nobody has
+ * resumed them since, and no other answer to them is still on its way. The
+ * line is JSX text in a client component, so it is read from the source,
+ * whitespace collapsed.
+ */
+describe('what the answer composer says about a deny', () => {
+  const src = readFileSync(fileURLToPath(new URL('../src/components/inbox/queue.tsx', import.meta.url)), 'utf8')
+    .replace(/\s+/g, ' ')
+
+  it('says the pause their reply caused goes back on, and when it does not', () => {
+    expect(src).not.toContain('pause them again here')
+    expect(src).toContain(
+      'If the draft is denied, the pause their reply caused goes back on — unless somebody resumes them ' +
+        'before then, or another answer to them is still waiting.',
+    )
+  })
+
+  it('names the deny as the writer of that pause', () => {
+    const outreach = readFileSync(fileURLToPath(new URL('../../../packages/db/src/outreach.ts', import.meta.url)), 'utf8')
+    expect(outreach).toContain('async function repauseForDeniedAnswer(')
+    expect(outreach).toContain("reason: 'their reply is unanswered again: the answer to it was denied'")
   })
 })
