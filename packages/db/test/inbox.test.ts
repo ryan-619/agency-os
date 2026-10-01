@@ -22,6 +22,7 @@ import {
   replyQueueDraft, replyReclassify, schema, type AgencyDb, type MessageProvider, type ReplyHumanKind,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
+import { throughTransactions } from './fault-db.js'
 
 /** Counts, never sends, and keeps the headers each send carried. */
 function countingProvider(): MessageProvider & {
@@ -739,7 +740,9 @@ describe('the inbox', () => {
        * resumed them and drafted an answer.
        */
       it('refuses an answer to a later reply when an earlier opt-out and its audit row both failed to write', async () => {
-        const faulty = new Proxy(db as object, {
+        // Through every transaction: the reply's writes are one, with the
+        // suppression and the audit rows in savepoints inside it.
+        const faulty = throughTransactions(db, {
           get(target, prop, receiver) {
             if (prop === 'insert') {
               return (table: unknown) => {
@@ -749,7 +752,7 @@ describe('the inbox', () => {
             }
             return Reflect.get(target, prop, receiver)
           },
-        }) as AgencyDb
+        })
         const stop = await handleInboundEmail(faulty, {
           from: 'priya@rentman.io', subject: 'Re: A gap on your security page', text: 'Unsubscribe',
           messageId: '<stop@rentman.io>', references: [OUR_MESSAGE_ID], now: NOON, log: { error: () => {} },

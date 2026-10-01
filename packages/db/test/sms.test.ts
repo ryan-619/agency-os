@@ -20,6 +20,7 @@ import {
   type AgencyDb, type InboundLog, type MessageProvider, type MessageTemplateRegistration,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
+import { throughTransactions } from './fault-db.js'
 
 function smsProvider(): MessageProvider & {
   sent: { to: string; body: string }[]
@@ -422,7 +423,10 @@ describe('SMS (0019)', () => {
     })
 
     it('takes the loud path when the suppression write throws', async () => {
-      const flaky = new Proxy(db as object, {
+      // Through every transaction: the reply is one transaction and the
+      // suppression a savepoint inside it, which a Proxy over `db` alone
+      // never reaches.
+      const flaky = throughTransactions(db, {
         get(target, prop, receiver) {
           if (prop === 'insert') {
             return (table: unknown) => {
@@ -432,7 +436,7 @@ describe('SMS (0019)', () => {
           }
           return Reflect.get(target, prop, receiver)
         },
-      }) as AgencyDb
+      })
       const l = log()
       const r = await recordInboundSms(flaky, { from: PHONE, text: 'STOP', providerMessageId: 'mo-9', receivedAt: NOON_IST, log: l })
       expect(r).toMatchObject({ matched: 'contact', suppressed: false, optOutNotRecorded: true, replyKind: 'opted_out' })

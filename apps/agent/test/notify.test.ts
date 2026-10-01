@@ -17,6 +17,7 @@ import { drizzle } from 'drizzle-orm/pglite'
 import { slackOptOutNotRecordedPayload } from '@agency/core'
 import { schema, type AgencyDb, type InboundOutcome } from '@agency/db'
 import { migratedDb, type TestDb } from '../../../packages/db/test/helpers.js'
+import { throughTransactions } from '../../../packages/db/test/fault-db.js'
 import { handleInboundMessage } from '../src/outreach/inbox.js'
 import {
   optOutAlarmFrom,
@@ -227,9 +228,13 @@ In-Reply-To: <sent-1@agency.test>`,
       body,
     )
 
-  /** The database, except that writing a suppression row fails — the fault §2.1's obligation is about. */
+  /**
+   * The database, except that writing a suppression row fails — the fault
+   * §2.1's obligation is about. Through every transaction: the reply's
+   * writes are one, with the suppression in a savepoint inside it.
+   */
   const failingSuppression = (): AgencyDb =>
-    new Proxy(db as object, {
+    throughTransactions(db, {
       get(target, prop, receiver) {
         if (prop === 'insert') {
           return (table: unknown) => {
@@ -239,7 +244,7 @@ In-Reply-To: <sent-1@agency.test>`,
         }
         return Reflect.get(target, prop, receiver)
       },
-    }) as AgencyDb
+    })
 
   beforeEach(async () => {
     test = await migratedDb()

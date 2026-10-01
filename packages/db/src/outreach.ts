@@ -1506,6 +1506,10 @@ export function looksLikeOptOut(body: string | null | undefined): boolean {
  * if the reply is an opt-out in so many words, the address goes on the
  * suppression list — the reply IS the opt-out, and recording it anywhere
  * weaker is a promise the send path does not keep.
+ *
+ * All of it is one transaction, so a fault leaves either the reply with
+ * every consequence or nothing at all — and nothing is what a provider's
+ * retry can complete (see the comment at the transaction).
  */
 export async function recordInboundReply(
   db: AgencyDb,
@@ -1552,35 +1556,7 @@ export async function recordInboundReply(
   companyDomain: string | null
 }> {
   const now = args.now ?? new Date()
-
-  const contactRows = await db
-    .select({ companyId: schema.contacts.companyId, companyDomain: schema.companies.domain })
-    .from(schema.contacts)
-    .leftJoin(schema.companies, eq(schema.companies.id, schema.contacts.companyId))
-    .where(and(eq(schema.contacts.orgId, args.orgId), eq(schema.contacts.id, args.contactId)))
-    .limit(1)
-  const companyId = contactRows[0]?.companyId ?? null
-  const companyDomain = contactRows[0]?.companyDomain ?? null
-
-  const inserted = await db
-    .insert(schema.touches)
-    .values({
-      orgId: args.orgId,
-      contactId: args.contactId,
-      companyId,
-      channel: args.channel,
-      direction: 'in',
-      status: 'replied',
-      subject: args.subject,
-      body: args.body,
-      recipient: args.from,
-      providerId: args.providerId ?? null,
-      inReplyTo: args.inReplyTo ?? null,
-      sentAt: now,
-    })
-    .returning({ id: schema.touches.id })
-  const touchId = inserted[0]?.id
-  if (!touchId) throw new Error('inbound touch insert returned no row')
+  const log = args.log ?? stderrLog
 
   /**
    * Classified from the SAME opt-out reading that decides the suppression
@@ -1604,10 +1580,10 @@ export async function recordInboundReply(
    * advanced, as every inbound was before headers were read. It never
    * writes a suppression: that is still the narrow reader's alone.
    *
-   * The deterministic kind is always stored. A model may improve on it
-   * afterwards (§5.5) and can only ever move it AMONG the non-opt-out
-   * kinds — `opted_out` is settled here, by a pure function, before any
-   * model is consulted (§2.1).
+   * The deterministic kind is always stored, on the row's own INSERT. A
+   * model may improve on it afterwards (§5.5) and can only ever move it
+   * AMONG the non-opt-out kinds — `opted_out` is settled here, by a pure
+   * function, before any model is consulted (§2.1).
    */
   // 0019: an SMS or WhatsApp reply is also read by the keyword reader its
   // footer taught (`smsOptOut`: STOP, STOP 56161, CANCEL alone, …); the
@@ -1616,129 +1592,232 @@ export async function recordInboundReply(
     looksLikeOptOut(args.body) || ((args.channel === 'sms' || args.channel === 'whatsapp') && smsOptOut(args.body))
   const automatic = !optedOut && args.autoReply === true && !mentionsRemovalOrDeparture(args.body)
   const replyKind: ReplyKind = automatic ? 'auto_reply' : classifyReply(args.body, optedOut)
-  await db
-    .update(schema.touches)
-    .set({ replyKind })
-    .where(eq(schema.touches.id, touchId))
 
-  let paused = automatic
-    ? false
-    : await pauseContact(db, args.orgId, args.contactId, `replied ${now.toISOString()}`, now)
+  /**
+   * The reply and every consequence of it are ONE transaction: the row, the
+   * pause, the cancel, the suppression attempt, the deal and the audit row.
+   *
+   * They were separate statements, the row committed first, and that is the
+   * bug review round 3 found. A fault after the insert answered 500, the
+   * provider retried — and the retry met `handleInboundEmail`'s Message-ID
+   * dedupe, which answered `duplicate` and wrote nothing. A "Stop" was left
+   * unclassified, unpaused and unsuppressed, its approved follow-up went on
+   * the next tick, and no audit row or alarm said so. Now a fault rolls the
+   * reply back with everything else, so the retry is not a duplicate and
+   * records it all; and a stored row is one whose consequences were stored
+   * with it, so a redelivery has nothing to finish.
+   *
+   * Three writes may fail on their OWN, as before — the suppression (whose
+   * failure is the loud path below), the deal move and the audit rows — and
+   * each runs in a savepoint (`tx.transaction`). That is not tidiness. A
+   * statement the engine refuses ABORTS the transaction, and a COMMIT sent
+   * to an aborted transaction is answered ROLLBACK with no error, which
+   * drizzle resolves (measured on PGlite): a swallowed failure without a
+   * savepoint would discard the whole reply while this function returned
+   * its id. `inbound-atomic.test.ts` raises each fault in the engine.
+   *
+   * Everything inside uses `tx`, never `db`: on a pool of one connection
+   * (Vercel's) a statement on `db` would wait for the connection this
+   * transaction holds.
+   */
+  // Lines said once the outcome is COMMITTED: a line about a write that then
+  // rolled back would be a claim about nothing.
+  const said: { readonly message: string; readonly fields: Readonly<Record<string, unknown>> }[] = []
+  let recorded: Awaited<ReturnType<typeof recordInboundReply>>
+  try {
+    recorded = await db.transaction(async (transaction) => {
+      const tx = transaction as unknown as AgencyDb
 
-  // Anything already queued for them is now wrong. Marked refused rather than
-  // deleted: the record that it was ABOUT to go, and did not, is the useful
-  // one.
-  const cancelled = automatic
-    ? []
-    : await db
-        .update(schema.touches)
-        .set({ status: 'refused', refusalCode: 'consent_revoked' })
-        .where(
-          and(
-            eq(schema.touches.orgId, args.orgId),
-            eq(schema.touches.contactId, args.contactId),
-            eq(schema.touches.direction, 'out'),
-            inArray(schema.touches.status, ['queued', 'awaiting_approval', 'approved']),
-          ),
-        )
-        .returning({ id: schema.touches.id })
+      const contactRows = await tx
+        .select({ companyId: schema.contacts.companyId, companyDomain: schema.companies.domain })
+        .from(schema.contacts)
+        .leftJoin(schema.companies, eq(schema.companies.id, schema.contacts.companyId))
+        .where(and(eq(schema.contacts.orgId, args.orgId), eq(schema.contacts.id, args.contactId)))
+        .limit(1)
+      const companyId = contactRows[0]?.companyId ?? null
+      const companyDomain = contactRows[0]?.companyDomain ?? null
 
-  let suppressed = false
-  let optOutNotRecorded = false
-  // The key the reply came from: the address for email, the number for SMS
-  // and WhatsApp (0019). Any other channel records no suppression here.
-  const suppressionKind: SuppressionKind | null =
-    args.channel === 'email' ? 'email' : args.channel === 'sms' || args.channel === 'whatsapp' ? 'phone' : null
-  if (suppressionKind !== null && optedOut) {
-    // A THROW is what a database fault actually does, and `{ ok: false }` is
-    // what an unreadable address does; both are the same failure to the
-    // person who asked to be left alone. (The same lesson recordOptOut in
-    // calls.ts learned.)
-    let added: Awaited<ReturnType<typeof addSuppression>>
-    let why: string
-    try {
-      added = await addSuppression(db, {
-        orgId: args.orgId,
-        kind: suppressionKind,
-        value: args.from,
-        reason: `replied asking to stop, ${now.toISOString().slice(0, 10)}`,
-        source: 'reply',
-      })
-      // `added.message` quotes the address back; the audit row and the log
-      // carry a reason CLASS instead (§2.3).
-      why = suppressionKind === 'phone' ? 'unparseable_number' : 'unparseable_address'
-    } catch (err) {
-      added = { ok: false, message: 'The suppression could not be written.' }
-      why = err instanceof Error ? err.name : 'UnknownError'
-    }
-    suppressed = added.ok
-    if (!added.ok) {
-      // §2.1's Phase 4 obligation: a suppression insert that fails is an
-      // opt-out that was never recorded — worse than any bug the constraint
-      // replaced. The row still says `opted_out`, so the state is queryable;
-      // the audit row is what the digest and the compliance page count; the
-      // log line is what a person sees today. Never silently.
-      optOutNotRecorded = true
-      // And the pause says so, over the `replied …` just written (or any
-      // earlier reason), as an unsubscribe's and an erasure's failure does.
-      // Left as `replied …`, answering a later reply from /inbox resumed a
-      // person whose opt-out was never recorded — and a fault that failed
-      // the suppression can fail the audit row below too, leaving the inbox
-      // nothing else to find. Found by review.
-      try {
-        const overridden = await pauseContactOverriding(
-          db, args.orgId, args.contactId, `opt-out not recorded: reply ${now.toISOString()} (${why})`, now,
-        )
-        paused = paused || overridden
-      } catch (err) {
-        ;(args.log ?? stderrLog).error('an opt-out that was not recorded could not pause the contact', {
-          touchId,
-          contactId: args.contactId,
+      const inserted = await tx
+        .insert(schema.touches)
+        .values({
           orgId: args.orgId,
-          error: err instanceof Error ? err.name : 'UnknownError',
+          contactId: args.contactId,
+          companyId,
+          channel: args.channel,
+          direction: 'in',
+          status: 'replied',
+          subject: args.subject,
+          body: args.body,
+          recipient: args.from,
+          providerId: args.providerId ?? null,
+          inReplyTo: args.inReplyTo ?? null,
+          replyKind,
+          sentAt: now,
         })
+        .returning({ id: schema.touches.id })
+      const touchId = inserted[0]?.id
+      if (!touchId) throw new Error('inbound touch insert returned no row')
+
+      let paused = automatic
+        ? false
+        : await pauseContact(tx, args.orgId, args.contactId, `replied ${now.toISOString()}`, now)
+
+      // Anything already queued for them is now wrong. Marked refused rather
+      // than deleted: the record that it was ABOUT to go, and did not, is the
+      // useful one.
+      const cancelled = automatic
+        ? []
+        : await tx
+            .update(schema.touches)
+            .set({ status: 'refused', refusalCode: 'consent_revoked' })
+            .where(
+              and(
+                eq(schema.touches.orgId, args.orgId),
+                eq(schema.touches.contactId, args.contactId),
+                eq(schema.touches.direction, 'out'),
+                inArray(schema.touches.status, ['queued', 'awaiting_approval', 'approved']),
+              ),
+            )
+            .returning({ id: schema.touches.id })
+
+      let suppressed = false
+      let optOutNotRecorded = false
+      // The key the reply came from: the address for email, the number for
+      // SMS and WhatsApp (0019). Any other channel records no suppression here.
+      const suppressionKind: SuppressionKind | null =
+        args.channel === 'email' ? 'email' : args.channel === 'sms' || args.channel === 'whatsapp' ? 'phone' : null
+      if (suppressionKind !== null && optedOut) {
+        // A THROW is what a database fault actually does, and `{ ok: false }`
+        // is what an unreadable address does; both are the same failure to
+        // the person who asked to be left alone. (The same lesson
+        // recordOptOut in calls.ts learned.) In a savepoint, so a fault here
+        // takes the loud path below rather than aborting the reply.
+        let added: Awaited<ReturnType<typeof addSuppression>>
+        let why: string
+        try {
+          added = await tx.transaction((sp) =>
+            addSuppression(sp as unknown as AgencyDb, {
+              orgId: args.orgId,
+              kind: suppressionKind,
+              value: args.from,
+              reason: `replied asking to stop, ${now.toISOString().slice(0, 10)}`,
+              source: 'reply',
+            }),
+          )
+          // `added.message` quotes the address back; the audit row and the log
+          // carry a reason CLASS instead (§2.3).
+          why = suppressionKind === 'phone' ? 'unparseable_number' : 'unparseable_address'
+        } catch (err) {
+          added = { ok: false, message: 'The suppression could not be written.' }
+          why = err instanceof Error ? err.name : 'UnknownError'
+        }
+        suppressed = added.ok
+        if (!added.ok) {
+          // §2.1's Phase 4 obligation: a suppression insert that fails is an
+          // opt-out that was never recorded — worse than any bug the constraint
+          // replaced. The row still says `opted_out`, so the state is queryable;
+          // the audit row is what the digest and the compliance page count; the
+          // log line is what a person sees today. Never silently.
+          optOutNotRecorded = true
+          // And the pause says so, over the `replied …` just written (or any
+          // earlier reason), as an unsubscribe's and an erasure's failure does.
+          // Left as `replied …`, answering a later reply from /inbox resumed a
+          // person whose opt-out was never recorded — and a fault that failed
+          // the suppression can fail the audit row below too, leaving the inbox
+          // nothing else to find. Found by review.
+          try {
+            const overridden = await tx.transaction((sp) =>
+              pauseContactOverriding(
+                sp as unknown as AgencyDb, args.orgId, args.contactId,
+                `opt-out not recorded: reply ${now.toISOString()} (${why})`, now,
+              ),
+            )
+            paused = paused || overridden
+          } catch (err) {
+            said.push({
+              message: 'an opt-out that was not recorded could not pause the contact',
+              fields: {
+                touchId,
+                contactId: args.contactId,
+                orgId: args.orgId,
+                error: err instanceof Error ? err.name : 'UnknownError',
+              },
+            })
+          }
+          await tx
+            .transaction((sp) =>
+              appendAudit(sp as unknown as AgencyDb, {
+                orgId: args.orgId,
+                actor: 'system',
+                action: 'contact.opt_out_not_recorded',
+                subjectType: 'contact',
+                subjectId: args.contactId,
+                detail: { touchId, channel: args.channel, why },
+              }),
+            )
+            .catch(() => {})
+          said.push({
+            message: 'OPT-OUT NOT RECORDED — follow up by hand',
+            fields: { touchId, contactId: args.contactId, orgId: args.orgId, why },
+          })
+        }
       }
-      await appendAudit(db, {
-        orgId: args.orgId,
-        actor: 'system',
-        action: 'contact.opt_out_not_recorded',
-        subjectType: 'contact',
-        subjectId: args.contactId,
-        detail: { touchId, channel: args.channel, why },
-      }).catch(() => {})
-      ;(args.log ?? stderrLog).error('OPT-OUT NOT RECORDED — follow up by hand', {
-        touchId,
+
+      let deal: string | null = null
+      if (companyId && !automatic) {
+        const moved = await tx
+          .transaction((sp) =>
+            advanceDeal(sp as unknown as AgencyDb, {
+              orgId: args.orgId,
+              companyId,
+              to: 'replied',
+              nextAction: 'Read the reply and answer it',
+            }),
+          )
+          .catch(() => null)
+        deal = moved ? `${moved.outcome}:${moved.deal.stage}` : null
+      }
+
+      await tx
+        .transaction((sp) =>
+          appendAudit(sp as unknown as AgencyDb, {
+            orgId: args.orgId,
+            actor: 'system',
+            action: 'contact.replied',
+            subjectType: 'contact',
+            subjectId: args.contactId,
+            // §2.3: the facts and the counts, never the reply's text.
+            detail: { channel: args.channel, paused, cancelledQueued: cancelled.length, suppressed, deal, replyKind },
+          }),
+        )
+        .catch(() => {})
+
+      // Last, a read that FAILS if a swallowed failure above left the
+      // transaction aborted after all, so the COMMIT that would quietly
+      // discard the reply is never sent: the fault surfaces, the caller
+      // answers 500, and the provider's retry records it.
+      await tx.execute(sql`SELECT 1`)
+
+      return {
+        touchId, paused, cancelled: cancelled.length, suppressed, optOutNotRecorded, deal, replyKind, companyId, companyDomain,
+      }
+    })
+  } catch (err) {
+    // Rolled back: nothing about this reply was stored. A webhook's provider
+    // retries it; the worker's IMAP path marks the message seen and does
+    // not. For a "stop" that is §2.1's obligation unmet, so it is said out
+    // loud — ids and a reason class, never the address or the words.
+    if (optedOut) {
+      log.error('OPT-OUT NOT RECORDED — the reply was rolled back; a provider retry records it, otherwise follow up by hand', {
         contactId: args.contactId,
         orgId: args.orgId,
-        why,
+        why: err instanceof Error ? err.name : 'UnknownError',
       })
     }
+    throw err
   }
-
-  let deal: string | null = null
-  if (companyId && !automatic) {
-    const moved = await advanceDeal(db, {
-      orgId: args.orgId,
-      companyId,
-      to: 'replied',
-      nextAction: 'Read the reply and answer it',
-    }).catch(() => null)
-    deal = moved ? `${moved.outcome}:${moved.deal.stage}` : null
-  }
-
-  await appendAudit(db, {
-    orgId: args.orgId,
-    actor: 'system',
-    action: 'contact.replied',
-    subjectType: 'contact',
-    subjectId: args.contactId,
-    // §2.3: the facts and the counts, never the reply's text.
-    detail: { channel: args.channel, paused, cancelledQueued: cancelled.length, suppressed, deal, replyKind },
-  }).catch(() => {})
-
-  return {
-    touchId, paused, cancelled: cancelled.length, suppressed, optOutNotRecorded, deal, replyKind, companyId, companyDomain,
-  }
+  for (const line of said) log.error(line.message, line.fields)
+  return recorded
 }
 
 export type InboundOutcome =
@@ -2114,6 +2193,14 @@ export async function handleInboundEmail(
   // 1. Seen before. A webhook provider retries on any non-2xx and sometimes
   //    on a slow 2xx, and an IMAP reconnect can re-present a message; the
   //    Message-ID is the same each time, so the reply is recorded once.
+  //    Answering `duplicate` and writing nothing is right only because
+  //    `recordInboundReply` stores the reply and its consequences in one
+  //    transaction: a stored row had its pause, cancel and opt-out stored
+  //    with it, and a delivery that failed left no row, so its retry does
+  //    not reach here. Re-applying them from the stored row instead was
+  //    rejected: a NULL kind does not mark a half-recorded reply (every
+  //    reply before 0017 has one), and re-pausing on a redelivery would
+  //    undo a teammate's resume and cancel the answer they drafted since.
   if (mail.messageId) {
     const dup = await db
       .select({
