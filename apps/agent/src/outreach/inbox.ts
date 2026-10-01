@@ -39,7 +39,7 @@
 import { ImapFlow } from 'imapflow'
 import { simpleParser, type HeaderValue, type SimpleParserOptions } from 'mailparser'
 import { handleInboundEmail, type AgencyDb } from '@agency/db'
-import { MAIL_SIGNAL_HEADERS, MAIL_SIGNAL_LIMITS, type LlmProvider } from '@agency/core'
+import { MAIL_SIGNAL_HEADERS, MAIL_SIGNAL_LIMITS, htmlToText, type LlmProvider } from '@agency/core'
 import { refineReplyKind } from './classify.js'
 import type { Logger } from '../logger.js'
 
@@ -165,15 +165,34 @@ export async function parseInbound(raw: Buffer | string): Promise<{
   return {
     from,
     subject: parsed.subject ?? null,
-    // The text part, or the HTML stripped to text if that is all there is. A
-    // reply that is only HTML must still be readable for the opt-out check.
-    text: parsed.text ?? (typeof parsed.html === 'string' ? parsed.html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() : null),
+    text: replyText(parsed.text, parsed.html),
     messageId: parsed.messageId ?? null,
     references: [...new Set(refs)],
     headers,
     dsn,
     originalMessageIds: [...new Set(originalMessageIds)],
   }
+}
+
+/**
+ * The words of a reply: its plain text, or its HTML converted to text when
+ * there is no plain text worth the name — the Resend mapping's rule.
+ *
+ * mailparser converts a ROOT `text/html` itself (html-to-text, which keeps
+ * the lines and opens a quote with `>`), and that `text` is kept. An HTML
+ * part BELOW the root — Outlook's multipart/related, the HTML beside its
+ * signature image; a multipart/alternative with no plain part — it leaves
+ * unconverted, and this used to strip its tags to ONE line, which turned
+ * `Stop<blockquote>On Mon … wrote:` into a line that is not an opt-out: the
+ * contact was paused and never suppressed. `htmlToText` from packages/core
+ * keeps the lines, and it is the converter the Resend path uses, so a
+ * "Stop" above a quote is read the same whichever way it arrived.
+ */
+function replyText(text: string | undefined, html: string | false | undefined): string | null {
+  if (typeof text === 'string' && text.trim()) return text
+  const converted = typeof html === 'string' && html.trim() ? htmlToText(html) : ''
+  if (converted) return converted
+  return typeof text === 'string' ? text : null
 }
 
 /** One header's first value as text. mailparser structures some of them. */

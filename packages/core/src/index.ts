@@ -39,3 +39,5 @@ export * from './rotting.js'
 export * from './analytics.js'
 export * from './kickoff.js'
 export * from './mail-signals.js'
+// Round 3: the inbound paths' one HTML-to-text converter.
+export * from './html-text.js'
