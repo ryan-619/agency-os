@@ -22,6 +22,9 @@
  * row and hands its body here.
  */
 
+// send.ts imports this module too (the template steps). The cycle is safe:
+// neither module reads the other at module scope, only inside functions, and
+// `localMinutes` is a hoisted function declaration.
 import { localMinutes } from './send.js'
 
 // ---------------------------------------------------------------------------
@@ -100,12 +103,19 @@ export function normaliseDltHeader(raw: string): string | null {
 
 /**
  * TRAI's band for promotional SMS: delivered between 10:00 and 21:00, Indian
- * time. TCCCPR 2018 sets 21:00–10:00 as a band in which commercial SMS is
- * "default OFF" whatever a subscriber's DND preferences, and the operators
- * implement it by holding promotional traffic outside 10:00–21:00 IST.
- * (Secondary source read for the figure:
+ * time — not the 09:00–21:00 of the 2010 regulations it replaced. TCCCPR
+ * 2018 divides the day into the time bands TRAI's preference page lists
+ * ("00:00 Hrs to 06:00 Hrs, 06:00 Hrs to 08:00 Hrs, 08:00 Hrs to 10:00 Hrs,
+ * … 21:00 Hrs to 24:00 Hrs": https://trai.gov.in/preference-registration),
+ * and makes the bands before 10:00 and after 21:00 "default OFF for all
+ * customers irrespective of the status of registration of customer
+ * preference(s)" (the regulation as published,
+ * https://www.trai.gov.in/sites/default/files/2024-09/RegulationUcc19072018.pdf
+ * — a scanned PDF, so that wording was read through a search index rather
+ * than out of the file). The operators implement it by holding promotional
+ * traffic outside 10:00–21:00 IST; one carrier-side summary:
  * https://c2sms.com/implementation-of-trai-regulation-tcccpr-2018-regarding-promotional-sms/
- * — "Promotional SMS will be delivered between 10 am – 9 pm IST".)
+ * ("Promotional SMS will be delivered between 10 am – 9 pm IST").
  *
  * The END is exclusive: 21:00 is outside.
  */
