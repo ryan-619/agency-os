@@ -13,8 +13,8 @@ import { tierLabel, type CompanyListClock } from './company-list'
  *
  *  - A UTF-8 byte-order mark. Names in this CRM are not ASCII ("José"), and
  *    without the BOM Excel on Windows reads the file in the locale's code page
- *    and mangles them. The importer's `trim()` strips it, so a companies
- *    export still round-trips through /companies/import.
+ *    and mangles them. The importer drops it, so a companies export still
+ *    round-trips through /companies/import.
  *  - A first line reading `# internal — never prospect-facing`. An export is
  *    lead data leaving the database (§2.3, §5.5); the file says what it is in
  *    the one place everybody who opens it will see. The importer skips `#`
@@ -25,7 +25,8 @@ import { tierLabel, type CompanyListClock } from './company-list'
  *    scanner details quote a stranger's HTTP headers, so a cell here can be
  *    written by anybody: `=HYPERLINK("https://evil.example", "Open")` becomes
  *    a live link in the agency's own spreadsheet. Such a cell is prefixed with
- *    an apostrophe, which spreadsheets read as "this is text".
+ *    an apostrophe, which spreadsheets read as "this is text". The importer
+ *    takes it back off a company name, so the name round-trips.
  *
  * And one rule the exports share with the pages: a blank is not false. An
  * unscanned company has an EMPTY score, not 0; an unobserved finding has an
@@ -119,10 +120,12 @@ export function isoOrBlank(at: Date | null | undefined): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Domain first, so the file re-imports through /companies/import. Know that
- * the importer reads everything after the first comma as the NAME: a
- * re-imported export gives a NEW domain a name like "Acme,72,A — call first".
- * Domains already present are left untouched.
+ * The file re-imports through /companies/import: `parseCompanySeeds`
+ * (packages/db, `csv.ts`) recognises this header — column names, `domain`
+ * and `name` among them, and more besides — reads the rows as RFC 4180 and
+ * takes those two columns, so a new domain comes back with its name and
+ * nothing else. Domains already present are left untouched.
+ * `apps/web/test/companies-round-trip.test.ts` runs the round trip.
  */
 export const COMPANIES_COLUMNS = [
   'domain', 'name', 'score', 'tier', 'qualified', 'disqualified_reason',
