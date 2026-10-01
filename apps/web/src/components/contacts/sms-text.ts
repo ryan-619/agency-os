@@ -7,8 +7,10 @@
  * the house rule keeps `@agency/core`'s runtime out of the browser bundle.
  * It is a PREVIEW. What is drafted is rendered on the server by core's
  * `renderTemplate`, which refuses anything the operator would scrub, and the
- * send path checks it again with `matchesTemplate`; `test/sms-text.test.ts`
- * holds the one rule restated here (30 characters a variable) to core's.
+ * send path checks it again with `matchesTemplate`. Two rules are restated
+ * here, and `test/sms-composer.test.ts` holds each to its source: 30
+ * characters a variable to core's, and the GSM-7 set to the DoveSoft
+ * provider's, over one table of strings.
  */
 
 /** DLT's limit on one filled `{#var#}` — `DLT_VAR_MAX_CHARS` in core, restated for the browser. */
@@ -69,18 +71,24 @@ export function renderPreview(parts: readonly ComposerPart[], values: readonly s
 // ---------------------------------------------------------------------------
 
 /**
- * GSM 03.38's default alphabet — one septet each — and its extension table,
- * whose characters take two (an escape and the character). A message
- * entirely within these two is sent as GSM-7; one character outside them
- * sends the whole message as UCS-2, which is why one emoji or one Hindi
- * letter more than halves what a segment holds.
+ * GSM 03.38's default alphabet — one septet each. A message entirely within
+ * it is sent as GSM-7; one character outside it sends the whole message as
+ * UCS-2, which is why one emoji or one Hindi letter more than halves what a
+ * segment holds.
+ *
+ * The extension table (`€ [ ] { } ~ ^ \\ |` and the form feed) is GSM-7 on
+ * paper, at two septets each, and counts as OUTSIDE here, because that is
+ * what DoveSoft is sent: the provider's `needsUnicode`
+ * (apps/agent/src/outreach/dovesoft.ts) puts `unicode=1` on any of it, since
+ * a gateway may not apply the escape and a mangled character is a DLT text
+ * the operator scrubs. A preview that counted them as GSM-7 promised one
+ * segment for a text billed as three. `test/sms-composer.test.ts` runs this
+ * and the provider's predicate over one table, so the two cannot drift.
  */
 const GSM_BASIC =
   '@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !"#¤%&\'()*+,-./0123456789:;<=>?' +
   '¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà'
-const GSM_EXTENDED = '\f^{}\\[~]|€'
 const BASIC = new Set(Array.from(GSM_BASIC))
-const EXTENDED = new Set(Array.from(GSM_EXTENDED))
 
 export interface SmsLength {
   readonly encoding: 'gsm7' | 'ucs2'
@@ -97,14 +105,14 @@ export interface SmsLength {
  * The message's length as an operator bills it. One segment holds 160
  * GSM-7 septets or 70 UCS-2 units; a longer message is split into segments
  * of 153 or 67, because each carries a header saying how to join them. A
- * character is never split across two segments — a two-septet extension
- * character or a surrogate pair moves whole to the next one — so the count
- * is a greedy packing rather than a division.
+ * character is never split across two segments — a surrogate pair moves
+ * whole to the next one — so the count is a greedy packing rather than a
+ * division.
  */
 export function smsLength(text: string): SmsLength {
   const chars = Array.from(text)
-  const gsm = chars.every((c) => BASIC.has(c) || EXTENDED.has(c))
-  const cost = (c: string): number => (gsm ? (EXTENDED.has(c) ? 2 : 1) : c.length)
+  const gsm = chars.every((c) => BASIC.has(c))
+  const cost = (c: string): number => (gsm ? 1 : c.length)
   const units = chars.reduce((sum, c) => sum + cost(c), 0)
   const single = gsm ? 160 : 70
   const multi = gsm ? 153 : 67
