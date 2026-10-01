@@ -56,23 +56,51 @@ const candidates = [
   ['Vercel POSTGRES_URL_NON_POOLING', pulled.POSTGRES_URL_NON_POOLING],
   ['Vercel DATABASE_URL', pulled.DATABASE_URL],
 ]
-const found = candidates.find(([, value]) => typeof value === 'string' && value.trim() !== '')
-if (!found) {
-  fail(
-    'No database URL: the PRODUCTION_DATABASE_URL secret is not set, and the Vercel project ' +
-      'returned no DATABASE_URL (a variable marked Sensitive is never returned by `vercel pull`). ' +
-      'Add the secret: Neon’s DIRECT connection string.',
-  )
+/**
+ * What a value looks like, for the log, without what it says: its length,
+ * its scheme when it has one, and the characters that would stop it parsing.
+ */
+function shape(value) {
+  const v = String(value)
+  const scheme = /^([a-z][a-z0-9+.-]{0,14}):\/\//i.exec(v.trim())?.[1]
+  const marks = [
+    scheme ? `scheme ${scheme}` : 'no scheme',
+    `${v.length} characters`,
+    /^\s|\s$/.test(v) ? 'leading or trailing space' : '',
+    /\s/.test(v.trim()) ? 'a space or line break inside' : '',
+    /^["']|["']$/.test(v.trim()) ? 'wrapped in quotes' : '',
+  ]
+  return marks.filter(Boolean).join(', ')
 }
 
-const [source, raw] = found
+let source = ''
+let raw = ''
 let url
-try {
-  url = new URL(raw.trim())
-} catch {
-  fail(`The database URL from ${source} could not be read as a URL.`)
+const skipped = []
+for (const [label, value] of candidates) {
+  if (typeof value !== 'string' || value.trim() === '') continue
+  try {
+    url = new URL(value.trim().replace(/^["']|["']$/g, ''))
+    if (!/^postgres(ql)?:$/.test(url.protocol)) throw new Error('not a postgres URL')
+    source = label
+    raw = value.trim().replace(/^["']|["']$/g, '')
+    break
+  } catch {
+    url = undefined
+    skipped.push(`${label} is not a postgres URL (${shape(value)})`)
+  }
 }
-mask(raw.trim())
+for (const line of skipped) process.stdout.write(`skipped: ${line}\n`)
+if (!url) {
+  fail(
+    skipped.length > 0
+      ? 'No usable database URL: every candidate above was set but none is a postgres:// URL. Add the PRODUCTION_DATABASE_URL secret: Neon’s DIRECT connection string.'
+      : 'No database URL: the PRODUCTION_DATABASE_URL secret is not set, and the Vercel project ' +
+          'returned no DATABASE_URL (a variable marked Sensitive is never returned by `vercel pull`). ' +
+          'Add the secret: Neon’s DIRECT connection string.',
+  )
+}
+mask(raw)
 if (url.password) {
   mask(url.password)
   mask(decodeURIComponent(url.password))
