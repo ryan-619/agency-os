@@ -13,7 +13,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import {
   HEARTBEAT_RETIRED_AFTER_DAYS, HEARTBEAT_SILENT_AFTER_SECONDS,
-  heartbeatAge, heartbeatReport, heartbeatReportedStatus, heartbeatSilentAfter, heartbeatStatus,
+  heartbeatAge, heartbeatReport, heartbeatReportedStatus, heartbeatSilentAfter, heartbeatSms, heartbeatStatus,
   isCheckViolation, readLatestHeartbeat, schema, writeHeartbeat,
   type AgencyDb, type HeartbeatWrite,
 } from '../src/index.js'
@@ -151,9 +151,24 @@ describe('writeHeartbeat and readLatestHeartbeat', () => {
       ageSeconds: 60,
       outreach: 'send-only',
       chat: 'enabled',
+      sms: null,
       status: 'live',
       retired: false,
     })
+  })
+
+  /**
+   * The worker writes `sms` into `detail` (0019), because `outreach` and its
+   * CHECK describe the mailbox. A worker with no SMTP and DoveSoft on is
+   * `outreach: 'disabled'` and sends texts; the report has to carry both.
+   */
+  it('carries what the worker said about SMS through the row it wrote', async () => {
+    await writeHeartbeat(db, beat({ outreach: 'disabled', detail: { halted: false, lockHeld: true, sms: 'on' } }))
+    expect(heartbeatReport(await readLatestHeartbeat(db), true, at(20))).toMatchObject({
+      status: 'live', outreach: 'disabled', sms: 'on',
+    })
+    await writeHeartbeat(db, beat({ lastTickAt: at(30), detail: { halted: false, lockHeld: true, sms: 'off' } }))
+    expect(heartbeatReport(await readLatestHeartbeat(db), true, at(40)).sms).toBe('off')
   })
 })
 
@@ -191,6 +206,17 @@ describe('the pure half', () => {
     expect(heartbeatSilentAfter({ detail: null })).toBe(HEARTBEAT_SILENT_AFTER_SECONDS)
   })
 
+  it('reads SMS as on or off from the row’s detail, and as unknown otherwise', () => {
+    expect(heartbeatSms({ detail: { sms: 'on' } })).toBe('on')
+    expect(heartbeatSms({ detail: { sms: 'off', intervalMs: 15_000 } })).toBe('off')
+    // A worker from before 0019 wrote nothing about SMS: unknown, never "off".
+    expect(heartbeatSms({ detail: { halted: false, lockHeld: true } })).toBeNull()
+    expect(heartbeatSms(null)).toBeNull()
+    expect(heartbeatSms({ detail: null })).toBeNull()
+    // Not a value the worker writes: not guessed at.
+    for (const sms of ['ON', 'yes', true, 1, '']) expect(heartbeatSms({ detail: { sms } }), String(sms)).toBeNull()
+  })
+
   describe('heartbeatReport', () => {
     const r = (seconds: number, detail: unknown = {}) => ({
       lastTickAt: at(seconds), outreach: 'send-only', chat: 'disabled', detail,
@@ -198,8 +224,8 @@ describe('the pure half', () => {
 
     it('says not_configured only when there is no row and no worker is configured', () => {
       expect(heartbeatReport(null, false, at(0))).toEqual({
-        configured: false, lastSeenAt: null, ageSeconds: null, outreach: null, chat: null, status: 'not_configured',
-        retired: false,
+        configured: false, lastSeenAt: null, ageSeconds: null, outreach: null, chat: null, sms: null,
+        status: 'not_configured', retired: false,
       })
       expect(heartbeatReport(null, true, at(0)).status).toBe('never')
     })

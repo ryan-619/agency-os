@@ -120,24 +120,30 @@ describe('workerSilent', () => {
    * reads RETIRED. `configured: false` with a row present is the case the
    * grid used to leave out, and the one that disagreed; a row past a week,
    * and a slow worker whose own threshold is longer than a week, are the
-   * ones the retirement rule added.
+   * ones the retirement rule added. What the row says about SMS (0019) and
+   * which mailbox mode it reports are the worker's DOING, never its
+   * liveness: a worker with its mailbox off and DoveSoft on is alerted on
+   * exactly when any other is, and the report carries its SMS as written.
    */
   it('agrees with the digest’s Worker line on every deployment', () => {
     const DAY = 86_400
     const week = HEARTBEAT_RETIRED_AFTER_DAYS * DAY
     for (const configured of [true, false]) {
       for (const intervalMs of [undefined, 15_000, 20 * 60_000, 3 * DAY * 1000]) {
-        for (const age of [null, 0, 599, 600, 601, 3599, 3600, 3601, 86_400, week - 1, week, week + 1, 9 * DAY + 1, 30 * DAY]) {
-          const row =
-            age === null
-              ? null
-              : { lastTickAt: secondsAgo(age), outreach: 'send-and-receive', chat: 'enabled', detail: intervalMs ? { intervalMs } : {} }
-          const report = heartbeatReport(row, configured, NOW)
-          const check = workerSilent({ configured, lastSeenAt: row?.lastTickAt ?? null }, NOW, heartbeatSilentAfter(row))
-          const cell = `configured ${String(configured)}, interval ${String(intervalMs)}, age ${String(age)}`
-          expect(check.silent, cell).toBe((report.status === 'silent' && !report.retired) || report.status === 'never')
-          expect(check.retired, cell).toBe(report.retired)
-          expect(check.ageSeconds).toBe(report.ageSeconds)
+        for (const sms of [undefined, 'on', 'off'] as const) {
+          for (const outreach of ['send-and-receive', 'disabled']) {
+            for (const age of [null, 0, 599, 600, 601, 3599, 3600, 3601, 86_400, week - 1, week, week + 1, 9 * DAY + 1, 30 * DAY]) {
+              const detail = { ...(intervalMs ? { intervalMs } : {}), ...(sms ? { sms } : {}) }
+              const row = age === null ? null : { lastTickAt: secondsAgo(age), outreach, chat: 'enabled', detail }
+              const report = heartbeatReport(row, configured, NOW)
+              const check = workerSilent({ configured, lastSeenAt: row?.lastTickAt ?? null }, NOW, heartbeatSilentAfter(row))
+              const cell = `configured ${String(configured)}, interval ${String(intervalMs)}, sms ${String(sms)}, mailbox ${outreach}, age ${String(age)}`
+              expect(check.silent, cell).toBe((report.status === 'silent' && !report.retired) || report.status === 'never')
+              expect(check.retired, cell).toBe(report.retired)
+              expect(check.ageSeconds).toBe(report.ageSeconds)
+              expect(report.sms, cell).toBe(row === null ? null : (sms ?? null))
+            }
+          }
         }
       }
     }
