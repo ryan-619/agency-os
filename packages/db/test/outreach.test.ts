@@ -23,7 +23,7 @@ import { decideSend } from '@agency/core'
 import {
   approveDraft, contactsUpdate, denyDraft, dispatchTouch, dueTouches, evidenceAsOfFor, handleInboundEmail, looksLikeOptOut,
   outreachRecordBounce, pauseContact, pauseReasonClass, pendingDrafts, recordInboundReply, resumeContact, schema, sendFactsFor, sendOne,
-  type AgencyDb, type InboundLog, type MessageProvider,
+  type AgencyDb, type EvidenceAsOf, type InboundLog, type MessageProvider,
 } from '../src/index.js'
 import { migratedDb,type TestDb } from './helpers.js'
 
@@ -975,7 +975,7 @@ describe('the send-path contract', () => {
         })
         .returning())[0]!
 
-    const factsAt = (evidenceAsOf: Date | null, now = NOON) =>
+    const factsAt = (evidenceAsOf: EvidenceAsOf, now = NOON) =>
       sendFactsFor(db, { orgId, campaignId, contactId, approvedByHuman: false, evidenceAsOf, now })
 
     it('refuses a queued auto-send row whose evidence aged past the window while it waited, and calls no provider', async () => {

@@ -21,7 +21,7 @@ import {
 } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
-import { sendFactsFor } from './outreach.js'
+import { sendFactsFor, type EvidenceAsOf } from './outreach.js'
 
 export interface SendPreviewInput {
   readonly orgId: string
@@ -32,12 +32,14 @@ export interface SendPreviewInput {
   /**
    * When the words being asked about were written, for the stale-evidence
    * step (§2.2). Omitted: a message written NOW — the question a screen asks
-   * about a person, before any draft exists. A Date: a STORED draft's
-   * `created_at`, so the preview asks what the sender will ask about those
-   * words (`evidenceAsOfFor(touch)` gives it). Null: an answer to a reply,
-   * which quotes no scan.
+   * about a person, before any draft exists. A STORED draft's row
+   * (`evidenceAsOfFor(touch)` gives it): the preview asks what the sender
+   * will ask about those words, against the row's stored `created_at` — to
+   * the microsecond, which a `Date` cannot carry. A `Date`: words written at
+   * that instant and stored nowhere. Null: an answer to a reply, which
+   * quotes no scan.
    */
-  readonly writtenAt?: Date | null
+  readonly writtenAt?: EvidenceAsOf
 }
 
 /** The sender's facts, plus how each one was arrived at, for a screen to show. */
@@ -103,8 +105,8 @@ export type SendPreview =
 /**
  * The dry run. Builds the SAME facts `dispatchTouch` builds (through
  * `sendFactsFor`), for a hypothetical human-approved touch whose words were
- * written at `writtenAt` (now, unless the caller names a stored draft's
- * moment), and calls `decideSend`. Writes nothing.
+ * written at `writtenAt` (now, unless the caller names a stored draft), and
+ * calls `decideSend`. Writes nothing.
  */
 export async function previewSend(db: AgencyDb, input: SendPreviewInput): Promise<SendPreview> {
   const now = input.now ?? new Date()
