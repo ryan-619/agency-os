@@ -491,7 +491,9 @@ Three options, in order of how well they work:
    even for the free allowance; roughly $3/month after that.
    `./tools/run-worker.sh` documents the secrets.
 2. **Your Mac** — free, works today, only live while the machine is awake.
-   `./tools/run-worker.sh` runs it against production with nothing exposed.
+   `./tools/run-worker.sh` runs it against production with nothing exposed,
+   and asks whether to switch on email sending, SMS through DoveSoft and
+   reply detection.
 3. **Any VPS** — `docker-compose.yml` defines the whole stack including the
    voice service.
 
@@ -519,10 +521,15 @@ enrols people into one. Calls and WhatsApp over DoveSoft are not built.
 3. **YOU — the worker's two secrets**, on whatever host the worker runs
    (Part 5): `DOVESOFT_API_KEY` and `DOVESOFT_ENTITY_ID` (the PE ID, digits
    only). Both, or SMS stays off. Leave `DOVESOFT_BASE_URL` unset. The boot
-   log says `sms: dovesoft on`.
+   log says `sms: dovesoft on`, and the dashboard's worker line then reads
+   "texts through DoveSoft". On your Mac, `./tools/run-worker.sh` asks for
+   both (the key at a hidden prompt).
 4. **YOU — Vercel**, Production, marked sensitive: `DOVESOFT_WEBHOOK_SECRET`
    (`openssl rand -base64 32`) and `DOVESOFT_ORG_ID` (the org's id —
    `SELECT id, name FROM orgs` in Neon's SQL editor). **ME** — redeploy.
+   Without `DOVESOFT_ORG_ID`, a STOP texted from a number no contact holds
+   that could not be recorded raises no Slack alarm — the alarm needs an org
+   to be filed under.
 5. **YOU — DoveSoft's account manager.** Register the two URLs
    **https://myagencyos.in/settings/deployment** prints:
    `https://myagencyos.in/api/inbound/dovesoft/dlr` (delivery reports) and
@@ -537,7 +544,9 @@ enrols people into one. Calls and WhatsApp over DoveSoft are not built.
    `messageid`. Tell me the answers and I check them against the code.
 7. **YOU — one test text to yourself.** An SMS campaign on `/campaigns`, set
    active; an SMS opt-in recorded on your own contact on `/contacts`; Draft
-   SMS; approve it on `/approvals`.
+   SMS; approve it on `/approvals`. Once DoveSoft reports, your company's
+   page shows "Delivered to the handset" (or why not) under the message, in
+   the Conversation panel.
 
 Until step 4, both webhook routes answer 503 — the correct failure: nothing
 can pause a contact or write a suppression through them. `DEPLOYING.md`,

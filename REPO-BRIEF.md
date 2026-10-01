@@ -4,7 +4,7 @@ A briefing for a session picking this up cold. Written 2026-09-27; updated
 2026-09-30 for the release that brings migration 0018, and 2026-10-01 for SMS
 through DoveSoft (migration 0019) and the fixes of four review rounds.
 
-Read this first, then `CLAUDE.md` (about 3,500 lines — decisions, deviations
+Read this first, then `CLAUDE.md` (about 3,800 lines — decisions, deviations
 and the bugs that have already been found the hard way) and `PROMPT.md` (the
 build spec). `DEPLOYING.md` is the deployment reference; `GO-LIVE.md` is the live
 runbook with the current state of the domain and mail.
@@ -155,7 +155,7 @@ nobody is deleted. `meetings.outcome` is held, no-show or rescheduled.
 |---|---|
 | Dashboard: the worker line, "needs a look" counters, the last ten audit lines, an honest "what this can and cannot do" panel | `/` |
 | Companies list — filter, sort, open-deal filter, a count line, CSV export of the view | `/companies` |
-| Company detail: findings with evidence, informational signals, score history, the findings diff, a timeline, notes, tasks, edit | `/companies/[domain]` |
+| Company detail: findings with evidence, informational signals, score history, the findings diff, a timeline, notes, tasks, the conversation (with each SMS's delivery report), edit | `/companies/[domain]` |
 | Company CSV / paste import | `/companies/import` |
 | Contacts: the consent ledger, a send-check per campaign, edit, record download, erasure (owners), Draft SMS from a registered template | `/contacts` |
 | Contacts CSV import — never writes a consent row | `/contacts/import` |
@@ -276,8 +276,10 @@ curl -s https://myagencyos.in/api/health
 disagrees — deliberately, because the container healthcheck would otherwise
 restart-loop the app. `?strict=1` turns a disagreement into a 503. `worker`
 reports the newest heartbeat — `live`, `silent`, `never`, `not_configured`
-or `retired` (no worker configured and a row over a week old), and its age
-in seconds — and never changes the status code.
+or `retired` (no worker configured and a row over a week old), its age
+in seconds, its mailbox mode (`outreach`) and whether it texts through
+DoveSoft (`sms`: `on`, `off`, or null for a worker from before 0019) — and
+never changes the status code.
 
 ### What does not work live, and why
 
@@ -320,7 +322,7 @@ compose.
 | Vercel, with `CRON_SECRET` | the rescan: never-scanned first, then the stalest, `RESCAN_BATCH_SIZE` per org. Each org is claimed first, so an overlapping delivery skips it rather than scanning the same companies twice | 03:17 UTC daily |
 | Vercel, with `CRON_SECRET` | the digest to Slack (recorded in `/audit` even with no Slack), a notice for each campaign that paused itself since the previous run's recorded mark (at most three; the digest counts the rest), and the worker-silent alert (not for a retired row: no worker configured, none heard from in a week) | 06:43 UTC daily |
 | the worker | the bounce auto-pause, then the send tick; the heartbeat and its 30-day prune | every `OUTREACH_TICK_MS` (15 s) |
-| the worker | IMAP reply detection | IDLE, as mail arrives |
+| the worker | IMAP reply detection; a message it could not record stays unseen and is retried, five times at most | IDLE, as mail arrives; every 10 minutes regardless; a retry from 60 s, doubling |
 | the worker | the restart reconciler (which also prunes expired sign-in links) and stuck-send recovery | at boot |
 | the worker | approval expiry | every `APPROVAL_SWEEP_MS` (60 s) |
 | `/tasks`, when read | one LinkedIn step per approved LinkedIn message; a claim left `sending` past 30 minutes is failed; a handed step is re-checked, and its words withheld when the send path now refuses it past approval, the contact is paused, or the hand-over is over 24 hours old | whenever somebody opens it |
@@ -339,7 +341,8 @@ npm run dev                                        # or next dev apps/web
 Claude Code login instead of burning API credits, and is **refused outright**
 when `NODE_ENV=production`. The worker logs `chat: enabled (local_login)` and
 `outreach: send-only|send-and-receive|disabled` at boot — that line is the
-authority on what it will actually do.
+authority on what it will actually do with the mailbox, and `sms: dovesoft
+on|off` beside it on texts.
 
 Worker ports: health on `AGENT_PORT` (3001), API on `AGENT_PORT + 1` (3002).
 `AGENT_URL` must point at the **API** port.
@@ -355,7 +358,7 @@ npx vitest run --maxWorkers=1   # 5243 tests in 190 files (1,590 s single-worker
 npm run db:migrate -- status    # what is applied
 npm run scan                    # the scanner CLI
 ./tools/remote-setup.sh         # migrate + seed a remote DB (hidden prompt)
-./tools/remote-status.sh        # read-only schema facts, safe to paste — the migration list shows 0019; its schema lines stop at 0018
+./tools/remote-status.sh        # read-only schema facts, safe to paste — the migration list shows 0019, then "0018 is applied" and "0019 is applied"
 ./tools/dev-login.sh            # a local sign-in link without a mailbox
 ./tools/run-worker.sh           # the worker against production
 ./tools/mail-dns.sh             # SPF/DKIM/DMARC for a sending domain

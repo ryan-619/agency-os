@@ -189,7 +189,7 @@ variable and never the value.
 | `RESEND_API_KEY` | the same route's fetch of each received message — a key that can READ received email | `/api/inbound/resend` answers 503 |
 | `SECRETS_KEY` | storing a connector's credential (Settings → Connectors) and re-entering one (Settings → Credentials). **The same value on the worker** | both refuse with 503; Settings → Deployment reads "not set", or "set, not a valid key" |
 | `DOVESOFT_WEBHOOK_SECRET` | DoveSoft's two pushes, a delivery report and a text a contact sends back (see "SMS through DoveSoft"). `openssl rand -base64 32`, at least 32 characters | `/api/inbound/dovesoft/dlr` and `/sms` answer 503: no report is recorded, and no text back — a STOP included — reaches this deployment |
-| `DOVESOFT_ORG_ID` | the org (a uuid) an unmatched report or a text from a number no contact holds is audited under, and where a STOP from such a number is suppressed | such a text is logged and filed under no org; a STOP from it is recorded only in an org where a contact holds the number |
+| `DOVESOFT_ORG_ID` | the org (a uuid) an unmatched report or a text from a number no contact holds is audited under, where a STOP from such a number is suppressed, and where the Slack alarm is filed when that STOP could not be recorded | such a text is logged and filed under no org; a STOP from it is recorded only in an org where a contact holds the number, and one that could not be recorded raises no Slack alarm — the error line says `alarm: 'not_raised_no_org'` |
 
 **`DATABASE_POOL_MAX=1` matters.** Each serverless instance keeps its own pool,
 and they do not share. At the default of 10, a few concurrent instances
@@ -453,17 +453,22 @@ worker against Neon with **nothing on the machine exposed** — no port open, no
 tunnel, no inbound route. The chat panel keeps saying no worker is connected,
 which is true.
 
-It then asks whether to configure **sending** (SMTP) and **reply detection**
-(IMAP), and this is not optional paperwork. The worker treats all of those
-variables as optional and boots cleanly without them, running only the
-recovery jobs: `apps/agent/src/worker.ts` gives the sender the mailbox on
-`SMTP_HOST && MAIL_FROM` (and DoveSoft on `DOVESOFT_API_KEY &&
-DOVESOFT_ENTITY_ID`, which the script does not ask for) and starts the inbox
-on `IMAP_HOST && IMAP_USER && IMAP_PASSWORD`. Skip both prompts and you get a
-worker that reports itself healthy while approved mail sits in the queue
-forever and no reply is ever read. The boot log's `outreach: <mode>` line is
-the authority for the mailbox — `disabled`, `send-only` or
-`send-and-receive` — and its `sms: dovesoft on|off` line for texts.
+It then asks whether to configure **sending** (SMTP), **SMS through
+DoveSoft** and **reply detection** (IMAP), and this is not optional
+paperwork. The worker treats all of those variables as optional and boots
+cleanly without them, running only the recovery jobs:
+`apps/agent/src/worker.ts` gives the sender the mailbox on `SMTP_HOST &&
+MAIL_FROM` and DoveSoft on `DOVESOFT_API_KEY && DOVESOFT_ENTITY_ID`, and
+starts the inbox on `IMAP_HOST && IMAP_USER && IMAP_PASSWORD`. The DoveSoft
+prompt reads the key at a hidden prompt (the PE ID is not a secret), exports
+both into the worker's environment, prints neither back, and leaves SMS off
+unless both are given. Skip the prompts
+and you get a worker that reports itself healthy while approved mail and
+texts sit in the queue forever and no reply is ever read; the script's
+closing summary says `sending`, `sms` and `replies` ON or OFF. The boot
+log's `outreach: <mode>` line is the authority for the mailbox — `disabled`,
+`send-only` or `send-and-receive` — and its `sms: dovesoft on|off` line for
+texts.
 
 Closing the tab stops it. Queued mail then waits for the next run rather than
 being lost — `touches` rows keep their status, and `recoverStuckSends` settles
@@ -552,7 +557,7 @@ Everything else turns a feature on, and the worker says which at boot.
 | `ANTHROPIC_API_KEY` | chat | `chat_disabled`; **everything else still runs** |
 | `SECRETS_KEY` | connectors with credentials | those connectors are skipped, with a reason |
 | `SMTP_HOST`, `MAIL_FROM`, `SMTP_*` | sending | `outreach: disabled` |
-| `IMAP_HOST`, `IMAP_USER`, `IMAP_PASSWORD` | reply detection | `outreach: send-only` — replies never pause a sequence |
+| `IMAP_HOST`, `IMAP_USER`, `IMAP_PASSWORD` | reply detection: new mail is read as it arrives, and the mailbox again every ten minutes. A message the worker could not record stays unread and is retried — five attempts over about a quarter of an hour — then marked read and logged `INBOUND MESSAGE ABANDONED — handle it by hand`, with only its UID: find it in the mailbox | `outreach: send-only` — replies never pause a sequence |
 | `UNSUBSCRIBE_SECRET` | the RFC 8058 one-click `List-Unsubscribe` header on every email. **The same value as Vercel's** | no header, and one warn line at boot — `unsubscribe: headers off`, naming the missing variable (logged only when SMTP is configured) |
 | `WEB_PUBLIC_URL` | where that header's link points: the web app's public https origin, e.g. `https://myagencyos.in`. In production the worker **refuses to boot** on a value that is not `https:` on a public multi-label host — RFC 8058 one-click needs an HTTPS URI, and mailbox providers ignore any other | as above — the header needs both |
 | `OUTREACH_BOUNCE_PAUSE_PCT` | the hard-bounce rate past which an email campaign pauses itself — over 30 days, once it has written to at least 20 people. `100` turns it off | `5`. The boot log says `bounce auto-pause: on` |
@@ -568,7 +573,10 @@ corrects it.
 **Each worker writes a heartbeat** — one `worker_heartbeats` row, keyed
 `hostname:pid`, upserted every `OUTREACH_TICK_MS`. A machine Fly has scaled to
 zero therefore shows up as a growing `worker.ageSeconds` in `/api/health`
-rather than as a queue somebody eventually notices has stopped moving.
+rather than as a queue somebody eventually notices has stopped moving. The
+same block carries `outreach` — the MAILBOX only — and `sms` (`on`, `off`,
+or null for a worker from before 0019): a worker with DoveSoft and no SMTP
+reports `"outreach": "disabled"` beside `"sms": "on"`, and it sends texts.
 
 **`DATABASE_URL` must be the DIRECT, non-pooled string.** The worker's
 single-instance lock is session-scoped and does not survive transaction-mode
@@ -649,7 +657,9 @@ It has two halves, set up in this order:
    Leave `DOVESOFT_BASE_URL` unset; unset is DoveSoft's own API, and in
    production the worker refuses to boot on anything that is not `https:` on
    a public host. The boot log then says `sms: dovesoft on`, and the
-   heartbeat carries `sms: 'on'`. With either secret missing it says
+   heartbeat carries `sms: 'on'` — so `/api/health`'s `worker` block reads
+   `"sms": "on"` and the dashboard's worker line says "texts through
+   DoveSoft", even with no SMTP set. With either secret missing it says
    `sms: dovesoft off` and names the missing variable, and approved texts
    wait in the queue — never claimed, never lost.
 4. **The web app, on Vercel** (Production, marked sensitive):
@@ -670,9 +680,12 @@ It has two halves, set up in this order:
    whatever DoveSoft keeps — where a header does not.
 6. **Send one to yourself.** Create an SMS campaign on `/campaigns` and set
    it active, record an SMS opt-in on your own contact on `/contacts`, use
-   Draft SMS, and approve it on `/approvals`. No screen shows the delivery
-   report yet: it is stored on the message's row (`touches.delivery_status`,
-   `delivered_at`, `delivery_error`), and a report naming no message this
+   Draft SMS, and approve it on `/approvals`. The delivery report shows on
+   the company page, in the Conversation panel under the message: "Delivered
+   to the handset" with the time, "The operator has it; no final delivery
+   report yet.", or "Not delivered" with the operator's reason (stored as
+   `touches.delivery_status`, `delivered_at`, `delivery_error`). Nothing
+   there means no report has arrived. A report naming no message this
    system sent leaves an `sms.delivery_unmatched` line in `/audit`.
 
 **Confirm three things with DoveSoft before the first real send**, because
@@ -692,7 +705,11 @@ the opt-out alarm when its STOP could not be written. A payload either route
 cannot read is 400 (413 when larger than 16 KB) — never 200, because an
 unread text might have been a STOP — with an `sms.*_unreadable` audit row and
 an error line, so DoveSoft retries. A STOP from a number no single contact
-holds whose suppression could not be written is 500, so it is retried too.
+holds whose suppression could not be written is 500, so it is retried too;
+that one, and a STOP from a number that cannot be read (400), also raise the
+Slack opt-out alarm before answering — with no message and no number in it,
+linking `/compliance` — filed under `DOVESOFT_ORG_ID`, and not raised
+without it.
 
 ## Every deploy after the first: migrate FIRST
 
