@@ -60,7 +60,8 @@
 import { and, asc, count, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm'
 import { alias } from 'drizzle-orm/pg-core'
 import {
-  REPLY_KINDS, pauseReasonClass, suppressionKeysFor, type Channel, type ReplyKind, type SendRefusalCode,
+  REPLY_KINDS, pauseReasonClass, suppressionKeysFor, type Channel, type PauseReasonClass, type ReplyKind,
+  type SendRefusalCode,
 } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
@@ -702,11 +703,14 @@ export async function replyQueueDraft(
         reply.contactId ??
         refuse('no_contact', 'This reply is not attached to a contact, so there is nobody to address an answer to.')
 
+      // Locked, like the reply: every check below is about this row, and the
+      // resume at the end lifts only the pause read here (review round 3).
       const contacts = await tx
         .select()
         .from(schema.contacts)
         .where(and(eq(schema.contacts.id, contactId), eq(schema.contacts.orgId, args.orgId)))
         .limit(1)
+        .for('update')
       const contact = contacts[0] ?? refuse('no_contact', 'The contact this reply came from is no longer in the CRM.')
 
       // The campaign: the one the message they answered went out under, unless
@@ -815,9 +819,15 @@ export async function replyQueueDraft(
       // chose to. The pause's CLASS, never its text: a reason can carry a
       // teammate's address and the contact's words, and this log is
       // append-only and outlives an erasure.
+      //
+      // The resume names the reason it read (review round 3). Unconditional,
+      // it cleared whatever pause the row held when the UPDATE ran — an
+      // "opt-out not recorded" pause that replaced the reply's in between
+      // included. Matching nothing, it refuses, and the draft rolls back.
       let resumed = false
       if (contact.pausedAt) {
-        resumed = await resumeContact(tx, args.orgId, contact.id)
+        resumed = await resumeContact(tx, args.orgId, contact.id, { expectedReason: contact.pausedReason })
+        if (!resumed) refuse('paused_for_another_reason', PAUSED_ELSEWHERE)
         await appendAudit(tx, {
           orgId: args.orgId,
           actor: args.actor,
@@ -943,4 +953,174 @@ async function anySuppressed(
     )
     .limit(1)
   return hits.length > 0
+}
+
+// ---------------------------------------------------------------------------
+// Pausing and resuming by hand (/contacts)
+// ---------------------------------------------------------------------------
+//
+// Here, beside the answer path, because the rules are the same rules and
+// must not drift: a pause is ended only by the person whose decision it is,
+// and an opt-out nobody could record is never resumed — it is recorded. The
+// contacts route (PATCH /api/contacts/[id]) calls these two and writes the
+// audit rows; review round 3 found it lifting any pause and "pausing"
+// somebody whose reply's pause it then left in place.
+
+export type ContactResumeOutcome =
+  | { readonly ok: true }
+  | {
+      readonly ok: false
+      readonly reason: 'opt_out_not_recorded' | 'erasure' | 'changed_meanwhile'
+      readonly message: string
+    }
+
+const RESUME_NOT_RECORDED =
+  'This person asked to stop, and the opt-out could not be recorded when they did — this pause is what stands in ' +
+  'for it. Record it by hand on /suppressions if it is not there yet. An opt-out is not something to resume, so the ' +
+  'pause stays. Nothing was changed.'
+
+const RESUME_ERASURE =
+  'This person asked to be erased, and the erasure did not complete — this pause is what holds them until it does. ' +
+  'An owner finishes it with Erase… on /contacts. Nothing was changed.'
+
+const RESUME_UNRECORDED_OPT_OUT =
+  'This person asked to stop — by unsubscribing, asking to be erased, or in a reply — and no suppression row matches ' +
+  'their addresses: the audit log says the opt-out could not be recorded, or a reply of theirs read as an opt-out ' +
+  'matches no suppression row. Record it by hand on /suppressions first. Nothing was changed.'
+
+const RESUME_CHANGED =
+  'This contact’s pause changed a moment ago. Reload the page and read why before resuming them. Nothing was changed.'
+
+/**
+ * Resume a person from /contacts — the pause the page READ, and only a pause
+ * a person may lift.
+ *
+ * Refused, with a sentence, and nothing written:
+ *
+ *  - a pause whose class is `opt_out_not_recorded` or `erasure`. Those are
+ *    what stands in for an opt-out that could not be recorded and an
+ *    erasure that did not finish; `pausedSentence`, the inbox and
+ *    `check_send` already say they are never resumed. The fix is to record
+ *    the opt-out or finish the erasure, so this refuses even once the
+ *    opt-out has been recorded by hand: an opt-out is not something to undo.
+ *  - any other pause while `optOutNotRecorded` — the inbox's own reading,
+ *    the audit row or an opted_out reply no suppression row matches — holds
+ *    for them AND no suppression row matches any of their addresses today.
+ *    Recorded by hand since, the suppression row enforces it, and the pause
+ *    is a person's to lift again.
+ *  - a pause that is no longer the one the caller read
+ *    (`resumeContact`'s `expectedReason`), so an opt-out's pause that
+ *    landed between the page and the click is never lifted by it.
+ */
+export async function contactResumeByHand(
+  db: AgencyDb,
+  args: {
+    readonly orgId: string
+    /** The row as the caller read it; its `pausedReason` is the pause being lifted. */
+    readonly contact: Pick<typeof schema.contacts.$inferSelect, 'id' | 'email' | 'phone' | 'linkedinUrl' | 'pausedReason'>
+  },
+): Promise<ContactResumeOutcome> {
+  const { contact } = args
+  const pausedFor = pauseReasonClass(contact.pausedReason)
+  if (pausedFor === 'opt_out_not_recorded') {
+    return { ok: false, reason: 'opt_out_not_recorded', message: RESUME_NOT_RECORDED }
+  }
+  if (pausedFor === 'erasure') return { ok: false, reason: 'erasure', message: RESUME_ERASURE }
+  if (
+    (await optOutNotRecorded(db, args.orgId, contact.id)) &&
+    !(await anySuppressed(db, args.orgId, everyKeyOf(contact)))
+  ) {
+    return { ok: false, reason: 'opt_out_not_recorded', message: RESUME_UNRECORDED_OPT_OUT }
+  }
+  const resumed = await resumeContact(db, args.orgId, contact.id, { expectedReason: contact.pausedReason })
+  return resumed ? { ok: true } : { ok: false, reason: 'changed_meanwhile', message: RESUME_CHANGED }
+}
+
+/** Every suppression key the contact's own addresses produce, on every channel. */
+function everyKeyOf(contact: {
+  readonly email: string | null
+  readonly phone: string | null
+  readonly linkedinUrl: string | null
+}): { readonly kind: string; readonly value: string }[] {
+  const keys: { kind: string; value: string }[] = []
+  for (const channel of CHANNELS) {
+    const address = addressFor(channel, contact)
+    if (address) keys.push(...(suppressionKeysFor(address, channel) ?? []))
+  }
+  return keys
+}
+
+export type ContactPauseOutcome =
+  /** `replaced` names the pause this one took the place of: only ever a reply's. */
+  | { readonly ok: true; readonly replaced: 'replied' | null }
+  | { readonly ok: false; readonly reason: 'not_found' | 'changed_meanwhile'; readonly message: string }
+  | {
+      readonly ok: false
+      readonly reason: 'already_paused'
+      readonly pausedFor: Exclude<PauseReasonClass, 'replied'>
+      readonly message: string
+    }
+
+const ALREADY_PAUSED: Record<Exclude<PauseReasonClass, 'replied'>, string> = {
+  manual:
+    'A teammate already paused this contact, and that pause stands — /contacts shows why. Resume them first if the ' +
+    'reason should change. Nothing was changed.',
+  unsubscribed: 'This contact unsubscribed and is already paused for it; that pause stands. Nothing was changed.',
+  opt_out_not_recorded:
+    'This contact is already paused because they asked to stop and the opt-out could not be recorded; that pause ' +
+    'stands. Record the opt-out on /suppressions. Nothing was changed.',
+  erasure:
+    'This contact is already paused because their erasure did not complete; that pause stands. Nothing was changed.',
+  other: 'This contact is already paused, and that pause stands — /contacts shows why. Nothing was changed.',
+}
+
+/**
+ * Pause a person from /contacts with a teammate's reason (`<why> (by <who>)`).
+ *
+ * Not paused: paused, with that reason. Paused by a REPLY: the teammate's
+ * reason replaces the reply's (review round 3). Kept — `pauseContact` keeps
+ * the first reason — the hold changed nothing while the route answered
+ * "paused", and answering the reply in /inbox, which ends only a reply's own
+ * pause, then resumed them over it. Replaced, the class is `manual`, and
+ * only a person on /contacts lifts it.
+ *
+ * Paused for anything else, the pause stands and is NOT replaced: a manual
+ * reason would turn an unrecorded opt-out's or an unfinished erasure's
+ * pause into one Resume lifts, and an unsubscribe's into a teammate's. The
+ * caller is told so in a sentence, and nothing is written.
+ *
+ * Each write names the state it read (`pauseContact`'s `replacing`, or no
+ * pause at all), so a pause landing in between is never overwritten: the row
+ * is read again, once, and judged as what it now is.
+ */
+export async function contactPauseByHand(
+  db: AgencyDb,
+  args: { readonly orgId: string; readonly contactId: string; readonly reason: string; readonly now?: Date },
+): Promise<ContactPauseOutcome> {
+  const now = args.now ?? new Date()
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const [contact] = await db
+      .select({ pausedAt: schema.contacts.pausedAt, pausedReason: schema.contacts.pausedReason })
+      .from(schema.contacts)
+      .where(and(eq(schema.contacts.orgId, args.orgId), eq(schema.contacts.id, args.contactId)))
+      .limit(1)
+    if (!contact) return { ok: false, reason: 'not_found', message: 'No such contact.' }
+    if (!contact.pausedAt) {
+      if (await pauseContact(db, args.orgId, args.contactId, args.reason, now)) return { ok: true, replaced: null }
+      continue
+    }
+    const pausedFor = pauseReasonClass(contact.pausedReason)
+    if (pausedFor !== 'replied') {
+      return { ok: false, reason: 'already_paused', pausedFor, message: ALREADY_PAUSED[pausedFor] }
+    }
+    const replacing = contact.pausedReason ?? ''
+    if (await pauseContact(db, args.orgId, args.contactId, args.reason, now, { replacing })) {
+      return { ok: true, replaced: 'replied' }
+    }
+  }
+  return {
+    ok: false,
+    reason: 'changed_meanwhile',
+    message: 'This contact’s pause changed while it was being set. Reload the page and try again. Nothing was changed.',
+  }
 }

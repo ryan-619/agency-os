@@ -1,6 +1,7 @@
 'use client'
 
 import { Fragment, useState } from 'react'
+import { pauseReasonClass } from '@agency/core'
 import { When } from '@/components/when'
 import { ContactEdit } from '@/components/contacts/edit'
 import { sendCheckSentence, type SendCheckView } from '@/lib/consent-view'
@@ -12,7 +13,16 @@ import { sendCheckSentence, type SendCheckView } from '@/lib/consent-view'
  * quiet hours are checked in; whether a reply has paused them.
  *
  * Every word on a row was chosen by `lib/consent-view.ts` on the server, so
- * this component renders and does not decide. The one thing it asks for
+ * this component renders and does not decide — with one reading of its own:
+ * which pause buttons a row gets, from the pause's CLASS, through
+ * `pauseReasonClass`, the one pure reader the route, the inbox and the send
+ * path share (review round 3). A pause an unrecorded opt-out or an
+ * unfinished erasure left gets no Resume and says what to do instead — the
+ * route refuses it anyway (409) — and a reply's pause gets Pause beside
+ * Resume, so a teammate can hold somebody whose reply someone may answer.
+ * The route also refuses a resume while an opt-out the audit log says was
+ * never recorded matches no suppression row; that needs the database, so
+ * the row shows the route's sentence when it happens. The one thing it asks for
  * itself is "Why can't I reach them?", which calls the sender's own dry run
  * (`/api/contacts/[id]/send-check`) and prints the answer in the words every
  * other screen uses. That call queues nothing; the page says so beside it.
@@ -140,6 +150,8 @@ export function ContactsLedger({
         {rows.map((r) => {
           const li = r.linkedinUrl ? linkedinHref(r.linkedinUrl) : null
           const panel = open?.id === r.id ? open.panel : null
+          // Null when they are not paused. Which buttons the row gets — see the header.
+          const pausedFor = r.pausedAt ? pauseReasonClass(r.pausedReason) : null
           return (
             <Fragment key={r.id}>
               <tr>
@@ -214,23 +226,42 @@ export function ContactsLedger({
                         <button type="button" className="linkish" onClick={() => toggle(r.id, 'edit')}>
                           Edit and consent
                         </button>
-                        {r.pausedAt ? (
+                        {pausedFor === 'opt_out_not_recorded' ? (
+                          <span className="muted" style={{ fontSize: 12 }}>
+                            No Resume: they asked to stop and it could not be recorded. Record the opt-out on{' '}
+                            <a href="/suppressions">/suppressions</a>; the pause stays.
+                          </span>
+                        ) : pausedFor === 'erasure' ? (
+                          <span className="muted" style={{ fontSize: 12 }}>
+                            No Resume: they asked to be erased and it did not complete. An owner finishes it with Erase….
+                          </span>
+                        ) : pausedFor ? (
                           <button type="button" className="linkish" disabled={busy === r.id} onClick={() => void patch(r.id, { action: 'resume' })}>
                             Resume
                           </button>
-                        ) : (
+                        ) : null}
+                        {!pausedFor || pausedFor === 'replied' ? (
                           <button
                             type="button"
                             className="linkish"
                             disabled={busy === r.id}
+                            title={
+                              pausedFor === 'replied'
+                                ? 'Replaces the pause their reply caused with yours, so answering the reply will not lift it.'
+                                : undefined
+                            }
                             onClick={() => {
-                              const reason = window.prompt('Why pause them? (kept with the pause)')
+                              const reason = window.prompt(
+                                pausedFor === 'replied'
+                                  ? 'Why hold them? This replaces the pause their reply caused, so answering the reply will not lift it. (Kept with the pause.)'
+                                  : 'Why pause them? (kept with the pause)',
+                              )
                               if (reason?.trim()) void patch(r.id, { action: 'pause', reason })
                             }}
                           >
-                            Pause
+                            {pausedFor === 'replied' ? 'Hold (pause)' : 'Pause'}
                           </button>
-                        )}
+                        ) : null}
                       </>
                     ) : null}
                     {isOwner ? (

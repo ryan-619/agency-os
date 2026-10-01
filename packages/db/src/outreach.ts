@@ -1071,24 +1071,35 @@ export async function denyDraft(
     readonly now?: Date
   },
 ): Promise<DraftDecision> {
-  const refusalCode = await denialCode(db, args.orgId, args.touchId, args.now ?? new Date())
-  const updated = await db
-    .update(schema.touches)
-    .set({
-      status: 'refused',
-      refusalCode,
-      decisionNote: args.note?.trim() || 'denied',
-    })
-    .where(
-      and(
-        eq(schema.touches.id, args.touchId),
-        eq(schema.touches.orgId, args.orgId),
-        eq(schema.touches.status, 'awaiting_approval'),
-        sql`EXISTS (SELECT 1 FROM users u WHERE u.id = ${args.decidedBy} AND u.org_id = ${args.orgId})`,
-      ),
-    )
-    .returning()
-  const row = updated[0]
+  const now = args.now ?? new Date()
+  const refusalCode = await denialCode(db, args.orgId, args.touchId, now)
+  // One transaction (review round 3): the deny, and for an answer to a reply
+  // the pause it puts back (`repauseForDeniedAnswer`), land together or not
+  // at all. The `draft.denied` row below stays outside it, caught as before:
+  // a caught failure INSIDE a transaction would leave it aborted, and its
+  // COMMIT would roll back the deny without a word.
+  const row = await db.transaction(async (transaction) => {
+    const tx = transaction as unknown as AgencyDb
+    const updated = await tx
+      .update(schema.touches)
+      .set({
+        status: 'refused',
+        refusalCode,
+        decisionNote: args.note?.trim() || 'denied',
+      })
+      .where(
+        and(
+          eq(schema.touches.id, args.touchId),
+          eq(schema.touches.orgId, args.orgId),
+          eq(schema.touches.status, 'awaiting_approval'),
+          sql`EXISTS (SELECT 1 FROM users u WHERE u.id = ${args.decidedBy} AND u.org_id = ${args.orgId})`,
+        ),
+      )
+      .returning()
+    const denied = updated[0]
+    if (denied?.answersTouchId) await repauseForDeniedAnswer(tx, args.orgId, denied, args.decidedBy, now)
+    return denied
+  })
   if (!row) {
     const current = await db
       .select({ status: schema.touches.status })
@@ -1108,6 +1119,112 @@ export async function denyDraft(
     detail: { note: row.decisionNote, refusalCode: row.refusalCode },
   }).catch(() => {})
   return { ok: true, touch: row }
+}
+
+/**
+ * Put back the pause a reply caused when the answer that lifted it is denied
+ * (review round 3).
+ *
+ * The inbox resumes a person when an answer to their reply is DRAFTED
+ * (`replyQueueDraft`, inbox.ts) — /approvals would otherwise refuse the
+ * answer itself as `paused`. A deny leaves the reply unanswered, and before
+ * this every campaign was live for them again: a cold opener in another
+ * campaign read "nothing stops it" over a reply nobody had answered. So the
+ * pause goes back on, with the reply's own `replied <instant>` reason — the
+ * shape `recordInboundReply` writes and `pauseReasonClass` reads — when:
+ *
+ *  - this answer is what resumed them (`reply.answer_drafted` says
+ *    `resumed: true`);
+ *  - nobody has resumed them since (no later `contact.resumed` row,
+ *    compared in SQL by id: a `Date` holds milliseconds and the column
+ *    microseconds, and the inbox's own resume row shares the draft's
+ *    instant) — a person's own Resume on /contacts stands;
+ *  - no other answer of theirs is still on its way, which will answer them.
+ *
+ * `pauseContact` keeps any pause they have now, a teammate's included.
+ */
+async function repauseForDeniedAnswer(
+  db: AgencyDb,
+  orgId: string,
+  answer: TouchRow,
+  decidedBy: string,
+  now: Date,
+): Promise<void> {
+  if (!answer.answersTouchId || !answer.contactId) return
+  const [drafted] = await db
+    .select({ id: schema.auditLog.id })
+    .from(schema.auditLog)
+    .where(
+      and(
+        eq(schema.auditLog.orgId, orgId),
+        eq(schema.auditLog.action, 'reply.answer_drafted'),
+        sql`${schema.auditLog.detail}->>'touchId' = ${answer.id}`,
+        sql`${schema.auditLog.detail}->>'resumed' = 'true'`,
+      ),
+    )
+    .limit(1)
+  if (!drafted) return
+
+  const resumedSince = await db
+    .select({ id: schema.auditLog.id })
+    .from(schema.auditLog)
+    .where(
+      and(
+        eq(schema.auditLog.orgId, orgId),
+        eq(schema.auditLog.action, 'contact.resumed'),
+        eq(schema.auditLog.subjectType, 'contact'),
+        eq(schema.auditLog.subjectId, answer.contactId),
+        sql`${schema.auditLog.createdAt} > (SELECT a.created_at FROM audit_log a WHERE a.id = ${drafted.id})`,
+      ),
+    )
+    .limit(1)
+  if (resumedSince.length > 0) return
+
+  const otherAnswer = await db
+    .select({ id: schema.touches.id })
+    .from(schema.touches)
+    .where(
+      and(
+        eq(schema.touches.orgId, orgId),
+        eq(schema.touches.contactId, answer.contactId),
+        eq(schema.touches.direction, 'out'),
+        isNotNull(schema.touches.answersTouchId),
+        inArray(schema.touches.status, ['queued', 'awaiting_approval', 'approved', 'sending']),
+        sql`${schema.touches.id} <> ${answer.id}`,
+      ),
+    )
+    .limit(1)
+  if (otherAnswer.length > 0) return
+
+  const [reply] = await db
+    .select({ sentAt: schema.touches.sentAt, createdAt: schema.touches.createdAt })
+    .from(schema.touches)
+    .where(
+      and(
+        eq(schema.touches.id, answer.answersTouchId),
+        eq(schema.touches.orgId, orgId),
+        eq(schema.touches.direction, 'in'),
+      ),
+    )
+    .limit(1)
+  if (!reply) return
+
+  const paused = await pauseContact(db, orgId, answer.contactId, `replied ${(reply.sentAt ?? reply.createdAt).toISOString()}`, now)
+  if (!paused) return
+  // Uncaught, inside the deny's transaction: a pause nobody can see in the
+  // log is one nobody can explain.
+  await appendAudit(db, {
+    orgId,
+    actor: decidedBy,
+    action: 'contact.paused',
+    subjectType: 'contact',
+    subjectId: answer.contactId,
+    detail: {
+      reason: 'their reply is unanswered again: the answer to it was denied',
+      alreadyPaused: false,
+      inboundTouchId: answer.answersTouchId,
+    },
+  })
 }
 
 /**
@@ -1203,6 +1320,13 @@ export async function dueTouches(
  *
  * Idempotent: a second reply must not overwrite the first reason with a later
  * one, because the first is the one that explains the pause.
+ *
+ * `replacing` (review round 3) is the one exception, and it names the reason
+ * it may replace EXACTLY: a teammate's Pause on somebody a reply paused
+ * (`contactPauseByHand`, inbox.ts). Kept, the reply's reason let answering
+ * that reply resume them over the teammate's hold. The reason is in the
+ * predicate, so a pause that changed since the caller read it — an opt-out
+ * nobody could record, say — is never the one replaced.
  */
 export async function pauseContact(
   db: AgencyDb,
@@ -1210,6 +1334,7 @@ export async function pauseContact(
   contactId: string,
   reason: string,
   now: Date = new Date(),
+  opts: { readonly replacing?: string } = {},
 ): Promise<boolean> {
   const rows = await db
     .update(schema.contacts)
@@ -1218,7 +1343,9 @@ export async function pauseContact(
       and(
         eq(schema.contacts.orgId, orgId),
         eq(schema.contacts.id, contactId),
-        sql`${schema.contacts.pausedAt} IS NULL`,
+        opts.replacing === undefined
+          ? sql`${schema.contacts.pausedAt} IS NULL`
+          : or(sql`${schema.contacts.pausedAt} IS NULL`, eq(schema.contacts.pausedReason, opts.replacing)),
       ),
     )
     .returning({ id: schema.contacts.id })
@@ -1255,12 +1382,38 @@ export async function pauseContactOverriding(
   return rows.length === 1
 }
 
-/** Let a paused contact be contacted again — deliberately, by a person. */
-export async function resumeContact(db: AgencyDb, orgId: string, contactId: string): Promise<boolean> {
+/**
+ * Let a paused contact be contacted again — deliberately, by a person.
+ *
+ * `expectedReason` (review round 3) is the pause the caller READ and decided
+ * to lift, in the UPDATE's own predicate: a string must still be the stored
+ * reason, null must still be no reason. Without it the statement cleared
+ * whatever the row held when it ran, so an "opt-out not recorded" pause
+ * written between the inbox's read and its resume was wiped. Under READ
+ * COMMITTED a concurrent writer that commits first makes the UPDATE
+ * re-evaluate the row and match nothing, and the caller is told `false`.
+ * Omitted, the resume is unconditional, as it always was.
+ */
+export async function resumeContact(
+  db: AgencyDb,
+  orgId: string,
+  contactId: string,
+  opts: { readonly expectedReason?: string | null } = {},
+): Promise<boolean> {
   const rows = await db
     .update(schema.contacts)
     .set({ pausedAt: null, pausedReason: null })
-    .where(and(eq(schema.contacts.orgId, orgId), eq(schema.contacts.id, contactId)))
+    .where(
+      and(
+        eq(schema.contacts.orgId, orgId),
+        eq(schema.contacts.id, contactId),
+        opts.expectedReason === undefined
+          ? undefined
+          : opts.expectedReason === null
+            ? isNull(schema.contacts.pausedReason)
+            : eq(schema.contacts.pausedReason, opts.expectedReason),
+      ),
+    )
     .returning({ id: schema.contacts.id })
   return rows.length === 1
 }

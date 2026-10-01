@@ -52,7 +52,9 @@ describe('PATCH /api/contacts/[id]', () => {
     const pause = branch('pause')
     expect(pause).toMatch(/contactPauseByHand\(db, \{/)
     expect(pause).not.toMatch(/\bpauseContact\(/)
-    expect(pause).toMatch(/status: 409/)
+    // A pause that stands is a 409 with its sentence; a missing contact a 404.
+    expect(pause).toMatch(/status: r\.reason === 'not_found' \? 404 : 409/)
+    expect(pause).toMatch(/error: r\.message/)
     expect(pause.indexOf('if (!r.ok)')).toBeGreaterThan(-1)
     expect(pause.indexOf('if (!r.ok)')).toBeLessThan(pause.indexOf("action: 'contact.paused'"))
     // `{ paused: true }` only after the refusal has been answered.
