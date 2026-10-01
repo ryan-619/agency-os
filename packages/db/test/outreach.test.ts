@@ -26,6 +26,7 @@ import {
   type AgencyDb, type EvidenceAsOf, type InboundLog, type MessageProvider,
 } from '../src/index.js'
 import { migratedDb,type TestDb } from './helpers.js'
+import { throughTransactions } from './fault-db.js'
 
 /** Counts, never sends. A test that could deliver is a test nobody dares run. */
 function countingProvider(): MessageProvider & {
@@ -1429,7 +1430,9 @@ describe('the send-path contract', () => {
 
     it('FAILS LOUDLY when the suppression write throws', async () => {
       const lines: string[] = []
-      const flaky = new Proxy(db as object, {
+      // Through every transaction: the suppression is written in a savepoint
+      // inside the reply's, which a Proxy over `db` alone never reaches.
+      const flaky = throughTransactions(db, {
         get(target, prop, receiver) {
           if (prop === 'insert') {
             return (table: unknown) => {
@@ -1439,7 +1442,7 @@ describe('the send-path contract', () => {
           }
           return Reflect.get(target, prop, receiver)
         },
-      }) as AgencyDb
+      })
       const r = await recordInboundReply(flaky, {
         orgId, contactId, channel: 'email', from: 'priya@rentman.io', subject: 'Re', body: 'please unsubscribe me', now: NOON,
         log: { error: (m) => lines.push(m) },
@@ -1602,8 +1605,10 @@ describe('the send-path contract', () => {
    * the routes did send read as handled.
    */
   describe('an opt-out that could not be recorded, as the inbound paths see it', () => {
+    // Through every transaction, as above: the suppression's savepoint is
+    // inside the reply's transaction.
     const failingSuppressions = (): AgencyDb =>
-      new Proxy(db as object, {
+      throughTransactions(db, {
         get(target, prop, receiver) {
           if (prop === 'insert') {
             return (table: unknown) => {
@@ -1613,7 +1618,7 @@ describe('the send-path contract', () => {
           }
           return Reflect.get(target, prop, receiver)
         },
-      }) as AgencyDb
+      })
 
     it('is reported by handleInboundEmail, and only on the first delivery', async () => {
       const log: InboundLog = { error: () => {} }
