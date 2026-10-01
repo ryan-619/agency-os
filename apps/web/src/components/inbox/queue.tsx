@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { When } from '@/components/when'
+import { answerElsewhere, answersByTemplate, channelLabel, contactsLinkFor, matchedByWords } from '@/components/inbox/channel'
 import {
   ANSWER_BODY_MAX, ANSWER_SUBJECT_MAX, HUMAN_REPLY_KINDS, INBOX_GROUP_LABELS, OPTED_OUT_NOTE,
   OPTED_OUT_NOT_SUPPRESSED_NOTE, RECLASSIFY_HINT, answerIsLive, answerStateWords, answerSubject,
@@ -21,7 +22,9 @@ import {
  *  - Pause / Resume — the contacts route, exactly as on the company page.
  *  - Answer — a DRAFT, parked on /approvals. Drafting resumes the person
  *    (their reply paused them everywhere), and the worker sends it only after
- *    a person approves it and every rule passes again at that moment.
+ *    a person approves it and every rule passes again at that moment. Not
+ *    on SMS or WhatsApp (0019): an answer there is a registered template, so
+ *    the row points at Draft SMS on /contacts instead of offering free text.
  *
  * The reply's body is shown whole. Somebody deciding what to do about a
  * message has to be able to read all of it.
@@ -179,6 +182,7 @@ export function InboxQueue({
                   <div style={{ minWidth: 0 }}>
                     <div className="touch-head">
                       <span className="inbox-kind">{INBOX_GROUP_LABELS[row.group]}</span>
+                      {channelLabel(row.channel) ? <span className="pill">{channelLabel(row.channel)}</span> : null}
                       <strong>{row.contact?.name ?? 'a contact no longer in the CRM'}</strong>
                       {row.from ? <span className="muted">&lt;{row.from}&gt;</span> : null}
                       {row.company ? (
@@ -217,13 +221,15 @@ export function InboxQueue({
                           ) : null}
                         </>
                       ) : (
-                        <>matched by address — not to a message this system sent</>
+                        <>{matchedByWords(row.channel)}</>
                       )}
                     </div>
 
-                    <div style={{ marginTop: 8, fontSize: 13.5 }}>
-                      <strong>{row.subject ?? '(no subject)'}</strong>
-                    </div>
+                    {answersByTemplate(row.channel) && !row.subject ? null : (
+                      <div style={{ marginTop: 8, fontSize: 13.5 }}>
+                        <strong>{row.subject ?? '(no subject)'}</strong>
+                      </div>
+                    )}
                     <pre className="touch-body" style={{ maxHeight: 'none' }}>{row.body ?? '(no text)'}</pre>
 
                     {optedOut ? (
@@ -365,7 +371,17 @@ export function InboxQueue({
                       )
                     ) : null}
 
-                    {canAnswer && row.contact && !optedOut && !row.suppressed && !live && open !== row.id ? (
+                    {canAnswer && row.contact && !optedOut && !row.suppressed && !live && answersByTemplate(row.channel) ? (
+                      <span className="hint" style={{ maxWidth: 190, textAlign: 'right' }}>
+                        {answerElsewhere(row.channel)}
+                        {row.channel === 'sms' ? (
+                          <>
+                            {' '}
+                            <a href={contactsLinkFor(row.contact.name)}>Open {row.contact.name}</a>
+                          </>
+                        ) : null}
+                      </span>
+                    ) : canAnswer && row.contact && !optedOut && !row.suppressed && !live && open !== row.id ? (
                       <button type="button" disabled={busy === row.id} onClick={() => setOpen(row.id)}>
                         Answer
                       </button>
