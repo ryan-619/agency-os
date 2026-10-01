@@ -219,6 +219,16 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'send.bounced': { campaignId: SUBJECT, channel: 'email', code: 'bounced' },
   'send.stale_evidence': { campaignId: SUBJECT, channel: 'email', code: 'stale_evidence' },
   'send.paused': { campaignId: SUBJECT, channel: 'email', code: 'paused' },
+  // DoveSoft (0019).
+  'send.no_template': { campaignId: SUBJECT, channel: 'sms', code: 'no_template' },
+  'send.template_mismatch': { campaignId: SUBJECT, channel: 'sms', code: 'template_mismatch' },
+  'template.created': { channel: 'sms', category: 'service_explicit', externalId: '1107160000000012345' },
+  'template.activated': { channel: 'sms', externalId: '1107160000000012345' },
+  'template.deactivated': { channel: 'sms', externalId: '1107160000000012345' },
+  'template.imported': { channel: 'sms', imported: 2, alreadyPresent: 0, skipped: 2, refused: 5 },
+  'sms.drafted': { contactId: SUBJECT, campaignId: SUBJECT, templateId: SUBJECT },
+  'sms.delivery_unmatched': { why: 'unknown_id', status: 'delivered' },
+  'sms.inbound_unmatched': { why: 'ambiguous', optOut: true, contacts: 2, suppressed: true },
   'contact.bounced': { code: '5.1.1', cancelledQueued: 1, touchId: SUBJECT },
   'contact.bounce_transient': { code: '4.2.2', touchId: SUBJECT },
   'contact.bounce_cleared': { code: '5.1.1' },
@@ -311,6 +321,29 @@ describe('sentenceFor', () => {
     expect(sentenceFor(line('reply.reclassified', { from: 'other', to: 'not_now', paused: false, cancelledQueued: 0 }), lookups)).toBe(
       'reclassified a reply from a contact at rentman.io from other to not now',
     )
+  })
+
+  it('says what a template and an SMS row did, by ids and counts alone (0019)', () => {
+    const say = (a: string, d: unknown = WRITTEN[a]) => sentenceFor(line(a, d), lookups)
+    expect(say('template.created')).toBe('recorded an SMS template (1107160000000012345), service explicit')
+    expect(say('template.deactivated')).toBe(
+      'switched off an SMS template (1107160000000012345); a draft written from it is refused at sending',
+    )
+    expect(say('template.activated', { channel: 'whatsapp', externalId: 'meeting_reminder' })).toBe(
+      'switched a WhatsApp template back on (meeting_reminder); messages can be drafted from it again',
+    )
+    expect(say('template.imported')).toBe('imported templates from a DLT export: 2 added; 2 skipped; 5 refused')
+    expect(say('sms.drafted')).toBe(
+      'drafted an SMS to a contact at rentman.io from a registered template; it waits for approval and nothing was sent',
+    )
+    expect(say('send.template_mismatch')).toBe(
+      'refused an SMS to a contact at rentman.io: not its registered template; nothing was sent',
+    )
+    expect(say('sms.inbound_unmatched')).toBe(
+      'received a text from a number more than one contact has, so it was filed under nobody; it asked to stop, and the number was put on the suppression list',
+    )
+    expect(say('sms.inbound_unmatched', { why: 'no_contact', optOut: true, suppressed: false })).toContain('NOT on the suppression list')
+    expect(say('sms.delivery_unmatched')).toBe('received a delivery report for an SMS this system did not send; nothing was changed')
   })
 
   it('says what happened in the words the page leads with', () => {
