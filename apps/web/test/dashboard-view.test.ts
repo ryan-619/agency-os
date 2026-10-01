@@ -205,6 +205,9 @@ describe('honestyBullets', () => {
       const b = bullet(BARE, RETIRED, 'worker-retired')
       expect(b.lead).toBe('The last worker to report in has retired.')
       expect(b.rest).toContain(`It was last seen 9 days ago and ${RETIRED_WORKER_WORDS}.`)
+      // A reading of the row, not knowledge of its history: a worker on another
+      // host that died a week ago reads the same.
+      expect(b.rest).toContain('if one is meant to be running elsewhere against this database, it has stopped')
       expect(text(b)).not.toMatch(/gone quiet|silent/i)
       expect(ids(BARE, RETIRED)).not.toContain('worker-silent')
     })

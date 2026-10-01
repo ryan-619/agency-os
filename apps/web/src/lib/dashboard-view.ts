@@ -409,8 +409,9 @@ function workerBullet(d: Deployment, w: WorkerStatusLike, now: Date): HonestyBul
         lead: 'The last worker to report in has retired.',
         rest:
           `It was last seen ${age === null ? 'over a week ago' : `${elapsed(age)} ago`} and ${RETIRED_WORKER_WORDS}. ` +
-          'Its row is what a worker run by hand and closed leaves behind, so nobody is alerted about it. ' +
-          'Drafts can be written and approved and will sit in the queue; nothing will send them.',
+          'With none configured, a week without a heartbeat counts as retired — what a worker run by hand and then ' +
+          'closed leaves behind — and nobody is alerted about it; if one is meant to be running elsewhere against ' +
+          'this database, it has stopped. Drafts can be written and approved and will sit in the queue; nothing will send them.',
       }
     case 'live': {
       const doing =

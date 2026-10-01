@@ -246,9 +246,10 @@ export function sendingAnswer(report: HeartbeatReport | null): { tone: Tone; tex
       tone: 'warn',
       text:
         `Nothing sends: ${RETIRED_WORKER_WORDS}. The last worker to report in was last seen ` +
-        `${report.ageSeconds === null ? 'over a week ago' : ago(report.ageSeconds)} and has retired — a session somebody ran ` +
-        'by hand and closed, so nobody is alerted about it. The CRM half works without one; sending, reply detection ' +
-        'and chat need the worker (DEPLOYING.md).',
+        `${report.ageSeconds === null ? 'over a week ago' : ago(report.ageSeconds)}; with none configured, a week without a ` +
+        'heartbeat counts as retired — what a worker run by hand and then closed leaves behind — and nobody is alerted ' +
+        'about it. If one is meant to be running elsewhere against this database, it has stopped. The CRM half works ' +
+        'without one; sending, reply detection and chat need the worker (DEPLOYING.md).',
     }
   }
   switch (report.status) {

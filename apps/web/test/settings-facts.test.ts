@@ -87,13 +87,20 @@ describe('a retired worker', () => {
     })
   })
 
-  it('answers "why would nothing send?" with the reason, and what a retired row is', () => {
+  /**
+   * Retired is a reading of the row, not knowledge of its history: on the
+   * documented production shape (Vercel with no AGENT_URL, the worker on
+   * Fly) a Fly worker dead for eight days reads the same, so the answer
+   * says what to conclude if one was meant to be running.
+   */
+  it('answers "why would nothing send?" with the reason, what retired means, and what it means if one was meant to run', () => {
     const a = sendingAnswer(retired)
     expect(a.tone).toBe('warn')
     expect(a.text).toBe(
-      `Nothing sends: ${RETIRED_WORKER_WORDS}. The last worker to report in was last seen 9 days ago and has retired — ` +
-        'a session somebody ran by hand and closed, so nobody is alerted about it. The CRM half works without one; ' +
-        'sending, reply detection and chat need the worker (DEPLOYING.md).',
+      `Nothing sends: ${RETIRED_WORKER_WORDS}. The last worker to report in was last seen 9 days ago; with none ` +
+        'configured, a week without a heartbeat counts as retired — what a worker run by hand and then closed leaves ' +
+        'behind — and nobody is alerted about it. If one is meant to be running elsewhere against this database, it ' +
+        'has stopped. The CRM half works without one; sending, reply detection and chat need the worker (DEPLOYING.md).',
     )
   })
 
