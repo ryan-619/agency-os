@@ -53,8 +53,8 @@ export interface WorkerLine {
  *
  * A retired row (`report.retired`: silent for over a week where no worker is
  * configured) is called retired, as the digest and /api/health call it —
- * its `status` stays `silent`, so switching on that alone called a closed
- * session "silent" here and "retired" in the channel.
+ * its `status` stays `silent`, so switching on that alone called the same
+ * row "silent" here and "retired" in the channel.
  */
 export function workerLine(report: HeartbeatReport | null, errorName?: string): WorkerLine {
   if (report === null) {

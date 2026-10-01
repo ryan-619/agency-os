@@ -51,8 +51,9 @@ export interface WorkerStatusLike {
   readonly status: 'not_configured' | 'never' | 'live' | 'silent'
   /**
    * A `silent` row older than `HEARTBEAT_RETIRED_AFTER_DAYS` where no worker
-   * is configured: a session somebody ran by hand and closed. The digest and
-   * /api/health call it `retired`, and so does every sentence here.
+   * is configured — what a session somebody ran by hand and closed leaves.
+   * The digest and /api/health call it `retired`, and so does every
+   * sentence here.
    */
   readonly retired: boolean
   readonly lastSeenAt: Date | null
