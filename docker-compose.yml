@@ -211,6 +211,16 @@ services:
       OLLAMA_IS_LOCAL: ${OLLAMA_IS_LOCAL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       LLM_ALLOW_REMOTE_LEAD_DATA: ${LLM_ALLOW_REMOTE_LEAD_DATA:-}
+      # SMS through DoveSoft (0019). On only with BOTH the key and the DLT
+      # entity id; either blank means no SMS provider, said once at boot by
+      # name, and approved texts wait in the queue. Every text is still a
+      # registered DLT template a person approved, to somebody who opted in.
+      # The key is a credential: it is sent as a header and logged nowhere.
+      # Blank base URL is DoveSoft's own API; in production it must be https
+      # on a public host, because the key is sent to it.
+      DOVESOFT_API_KEY: ${DOVESOFT_API_KEY:-}
+      DOVESOFT_ENTITY_ID: ${DOVESOFT_ENTITY_ID:-}
+      DOVESOFT_BASE_URL: ${DOVESOFT_BASE_URL:-}
       # Deliberately NOT passed: AGENT_USE_LOCAL_LOGIN (development only — the
       # worker refuses it under NODE_ENV=production), CLAUDE_CODE_PATH (a path
       # on a developer's machine, meaningless inside the image), and

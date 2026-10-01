@@ -37,6 +37,25 @@ const slackWebhookUrl = z
     'SLACK_WEBHOOK_URL must be an https://hooks.slack.com/… URL',
   )
 
+/**
+ * DoveSoft's API origin, with an optional path prefix and nothing else. The
+ * worker sends the API key to whatever this names, so a URL carrying
+ * userinfo, a query or a fragment is refused rather than half-honoured.
+ * Production additionally needs `https:` on a public host (`loadEnv`).
+ * Written out here so the schema entry stays on one line (see above).
+ */
+const doveSoftBaseUrl = z
+  .string()
+  .url()
+  .refine((v) => {
+    try {
+      const u = new URL(v)
+      return (u.protocol === 'https:' || u.protocol === 'http:') && !u.username && !u.password && !u.search && !u.hash
+    } catch {
+      return false
+    }
+  }, 'DOVESOFT_BASE_URL must be an http(s) origin, optionally with a path, and no credentials, query or fragment')
+
 /** Validated at startup, like the web app's (PROMPT.md §10). Never logged. */
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -282,6 +301,29 @@ const schema = z.object({
    * Unset → no alarm, said once at boot.
    */
   SLACK_WEBHOOK_URL: z.preprocess(blankIsUnset, slackWebhookUrl.optional()),
+
+  // --- SMS through DoveSoft (0019) ------------------------------------------
+  //
+  // All optional, and SMS sending is on only with BOTH the key and the entity
+  // id: either one unset means no SMS provider, said once at boot naming the
+  // missing variable and never a value, and approved SMS rows wait in the
+  // queue rather than being picked up by a tick that cannot carry them. The
+  // web app's DLR and inbound routes read their own variables; nothing here
+  // records a delivery report or an inbound text, so the org those are filed
+  // under is not declared here. Voice and WhatsApp over DoveSoft are not
+  // built: their APIs are not public (DOVESOFT.md).
+
+  /**
+   * The account's API key, sent as the `key` header and nowhere else — never
+   * in a log line, an error, an audit row or a URL (§2.3).
+   */
+  DOVESOFT_API_KEY: z.preprocess(blankIsUnset, z.string().min(8, 'DOVESOFT_API_KEY must be at least 8 characters').optional()),
+
+  /** The DLT principal entity id (PE ID) the account's templates are registered under: digits. */
+  DOVESOFT_ENTITY_ID: z.preprocess(blankIsUnset, z.string().regex(/^\d{1,32}$/, 'DOVESOFT_ENTITY_ID must be the DLT entity id, digits only').optional()),
+
+  /** Where the send API lives. https on a public host in production (checked in `loadEnv`). */
+  DOVESOFT_BASE_URL: z.preprocess(blankIsUnset, doveSoftBaseUrl.default('https://api.dovesoft.io')),
 })
 
 export type Env = z.infer<typeof schema>
@@ -353,6 +395,21 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
     )
   }
 
+  /**
+   * The SMS API key rides in a header to whatever DOVESOFT_BASE_URL names, so
+   * in production that must be https on a public host — the same test as the
+   * one-click origin above. A plain-http URL would put the key on the wire in
+   * the clear, and a loopback, an IP literal or an internal name would hand
+   * it to whatever answers there. Refused at boot, naming the variable and
+   * never its value; development may point at a local stand-in.
+   */
+  if (env.NODE_ENV === 'production' && !isRecipientReachable(env.DOVESOFT_BASE_URL)) {
+    throw new Error(
+      'DOVESOFT_BASE_URL must be an https:// URL on a public multi-label host in production: the ' +
+        'DoveSoft API key is sent to it. Unset it to use DoveSoft’s own API.',
+    )
+  }
+
   return env
 }
 
@@ -360,7 +417,8 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
  * `https:` on a public DNS name: at least one dot, no IP literal, no
  * `localhost`, no reserved or internal-use suffix — the scanner's own test
  * for a host out on the internet (`isScannableHost`), which is the same
- * question asked from the other side.
+ * question asked from the other side. Asked of the one-click origin and of
+ * the SMS API the DoveSoft key is sent to.
  */
 function isRecipientReachable(raw: string): boolean {
   let url: URL
