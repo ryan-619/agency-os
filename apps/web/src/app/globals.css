@@ -136,9 +136,21 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 table th { vertical-align: bottom; }
 table td { vertical-align: top; }
 
-dl.evidence { margin: 0; font-size: 12px; }
-dl.evidence > div { display: grid; grid-template-columns: 96px 1fr; gap: 8px; margin-bottom: 2px; }
-dl.evidence dt { color: var(--muted); }
+/*
+   One grid for the whole list, so every value starts in the same column and
+   the key column is as wide as the longest key up to 14em. A fixed 96px track
+   let a key like `cspFrameAncestors` run underneath its own value. A key
+   longer than the cap wraps rather than overlapping.
+*/
+dl.evidence {
+  margin: 0; font-size: 12px;
+  display: grid; grid-template-columns: fit-content(14em) minmax(0, 1fr);
+  column-gap: 8px; row-gap: 2px;
+}
+dl.evidence > div { display: contents; }
+dl.evidence dt { color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
+/* A list of bare lines (the proposal's evidence) has no key column. */
+dl.evidence > dd { grid-column: 1 / -1; }
 /*
    The full evidence value is always in the DOM — it is what a finding is
    judged on, and an operator has to be able to select and copy it before
