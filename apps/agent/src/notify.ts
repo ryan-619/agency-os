@@ -192,9 +192,9 @@ export function optOutAlarmFrom(
 
 /**
  * The same, read from the worker's own validated environment — for a caller
- * that did not hand one in. `index.ts` builds the inbox from named settings
- * and passes no alarm (it predates one), so the inbox derives it here rather
- * than staying silent. `loadEnv` already succeeded at boot over this same
+ * that did not hand one in. `startWorker` (`worker.ts`) builds the inbox from
+ * named settings and passes no alarm (it predates one), so the inbox derives
+ * it here rather than staying silent. `loadEnv` already succeeded at boot over this same
  * environment; should it ever throw here, the alarm is off and says why by
  * class — the inbox itself must still run.
  */

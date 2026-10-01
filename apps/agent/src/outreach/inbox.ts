@@ -84,8 +84,8 @@ export interface InboxDeps {
    * The Slack alarm for an opt-out that could not be recorded (`notify.ts`).
    * Null is no alarm. Left out, it is built from the worker's own
    * environment (`SLACK_WEBHOOK_URL`, `WEB_PUBLIC_URL`) when the inbox
-   * starts — `index.ts` names the inbox's settings one by one and passes
-   * none, so the alarm is on wherever the variable is set.
+   * starts — `startWorker` (`worker.ts`) names the inbox's settings one by
+   * one and passes none, so the alarm is on wherever the variable is set.
    */
   readonly optOutAlarm?: OptOutAlarm | null
   /** For tests: the IMAP client. Defaults to an `ImapFlow` on `config`. */
