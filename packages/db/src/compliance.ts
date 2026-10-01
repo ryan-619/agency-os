@@ -199,6 +199,10 @@ export const COMPLIANCE_REFUSAL_HUMAN_CAN_RESOLVE: Readonly<Record<SendRefusalCo
   template_mismatch: false,
   quiet_hours: true,
   unknown_timezone: true,
+  // Review round 5: a promotional SMS whose band never opens — a person
+  // changes the contact's zone or the campaign's quiet hours, or drafts it
+  // from a service template. It was stored as `unknown_timezone` before.
+  band_never_opens: true,
   daily_cap: true,
   campaign_inactive: true,
   needs_approval: true,

@@ -169,11 +169,18 @@ export interface EnrolPriorRow {
  * below as the recipient's own no, and a teammate's hold stopped every later
  * enrolment for good. Found by review. A reply's own cancel still writes
  * `consent_revoked`, and that still stops a new draft.
+ *
+ * `band_never_opens` is a promotional SMS whose band has no minute it may go
+ * at the contact's zone or under the campaign's quiet hours — a zone or a
+ * window to correct, like `unknown_timezone`, which it was stored as until
+ * review round 5. Enrolment drafts no SMS, so it meets one only on a row
+ * some other path wrote; it is listed so that row is read as what it is.
  */
 export const REFUSALS_A_CORRECTION_RESOLVES: ReadonlySet<string> = new Set([
   'bounced',
   'unparseable_recipient',
   'unknown_timezone',
+  'band_never_opens',
   'stale_evidence',
   'paused',
 ])

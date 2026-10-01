@@ -73,14 +73,26 @@
  * PROMOTIONAL SMS outside its band — 10:00–21:00 where the recipient is, and
  * TRAI's 10:00–21:00 IST as well for an Indian number — is the clock, not a
  * refusal: it is deferred as `quiet_hours`, right after the campaign's own
- * quiet hours. The one exception is an Indian number read in a zone whose
- * hours never meet TRAI's band at today's clocks: no clock resolves that,
- * so it is refused `unknown_timezone` (a person can resolve it — the
- * contact's zone, or a service template) before the campaign's quiet hours.
+ * quiet hours. The one exception is a band that never opens: an Indian
+ * number read in a zone whose hours never meet TRAI's band at today's
+ * clocks, or a band the campaign's own quiet hours cover minute for minute.
+ * No clock resolves that, so it is refused `band_never_opens` (a person can
+ * resolve it — the contact's zone, the campaign's quiet hours, or a service
+ * template) before the campaign's quiet hours.
+ *
+ * ## When a deferred message is tried again
+ *
+ * A `quiet_hours` refusal carries `retryAt`, the first whole minute the clock
+ * lets the message go — and `deferUntil` is what both copies of the
+ * deferral (the worker's tick and LinkedIn's Start) put in `scheduled_for`.
+ * They used to wait a flat hour, and a promotional band half an hour wide
+ * was stepped over for days (review round 5).
  */
 
 import { normalisePhone, suppressionKeysFor, type SuppressionKind } from './normalise.js'
-import { PROMOTIONAL_WINDOW, promotionalBand, type TemplateCategory } from './dlt.js'
+import {
+  PROMOTIONAL_WINDOW, insidePromotionalBand, nextOpenMinute, promotionalBand, type TemplateCategory,
+} from './dlt.js'
 
 export type Channel = 'email' | 'linkedin' | 'sms' | 'voice' | 'whatsapp'
 
@@ -136,6 +148,7 @@ export type SendRefusalCode =
   | 'template_mismatch'
   | 'quiet_hours'
   | 'unknown_timezone'
+  | 'band_never_opens'
   | 'daily_cap'
   | 'campaign_inactive'
   | 'needs_approval'
@@ -160,6 +173,17 @@ export interface SendRefusal {
    * a habit of clicking yes.
    */
   readonly humanCanResolve: boolean
+  /**
+   * On a `quiet_hours` deferral only: the first whole minute after `now`'s
+   * at which the clock lets this message go — the campaign's quiet hours
+   * over, and a promotional SMS's band open — read at the UTC offsets in
+   * force at `now`. Absent when the campaign's window cannot be read, which
+   * is always quiet. A hint for whoever waits, never a promise: the message
+   * is asked about again when it comes, and a daylight-saving change in
+   * between can only make it early, which defers it again. Read it through
+   * `deferUntil`, which bounds it.
+   */
+  readonly retryAt?: Date
 }
 
 export interface SendAllowed {
@@ -439,18 +463,20 @@ export function decideSend(facts: SendFacts): SendDecision {
     )
   }
 
-  // 3'. A promotional SMS whose bands never meet (dlt.ts). An Indian number
+  // 3'. A promotional SMS whose band never opens (dlt.ts). An Indian number
   //     read in a zone whose 10:00–21:00 misses TRAI's band entirely — Denver
   //     and Phoenix all year, Los Angeles on daylight time — has no moment it
   //     may go. Deferring it as quiet hours promised the clock would resolve
-  //     it, and re-queued it hourly for ever; so it is the zone the send path
-  //     cannot use, refused like a missing one, with the fix in the sentence.
-  //     Before the campaign's quiet hours, which would only defer it again.
+  //     it, and re-queued it hourly for ever; so it is refused, with the fix in
+  //     the sentence. Before the campaign's quiet hours, which would only
+  //     defer it again. It was `unknown_timezone` until review round 5, which
+  //     every screen calls "no timezone on the contact" — false of a contact
+  //     whose zone is Denver — so it has a code of its own.
   const promotional = TEMPLATE_CHANNELS.has(facts.channel) && facts.template?.category === 'promotional'
   const band = promotional ? promotionalBand(facts.now, facts.recipientTimeZone, facts.recipient) : null
   if (band !== null && !band.opensToday) {
     return refuse(
-      'unknown_timezone',
+      'band_never_opens',
       `This is a promotional SMS to an Indian number. TRAI's band for one is ${PROMOTIONAL_WINDOW.words}, and it ` +
         `must also be ${PROMOTIONAL_WINDOW.hours} in ${facts.recipientTimeZone}, the timezone this contact is read ` +
         'in — at today\'s clocks the two never overlap, so there is no moment it may go. Nothing was sent. If ' +
@@ -459,32 +485,74 @@ export function decideSend(facts: SendFacts): SendDecision {
     )
   }
 
-  if (isQuiet(local, facts.quietStart, facts.quietEnd)) {
-    return refuse(
-      'quiet_hours',
-      `It is currently quiet hours for this recipient (${facts.quietStart}–${facts.quietEnd} ` +
-        `in ${facts.recipientTimeZone}). Nothing was sent; schedule it for after ${facts.quietEnd}.`,
-      true,
-    )
-  }
+  // 3. and 3a. The clock: the campaign's quiet hours, then a promotional
+  //     SMS's band. Either DEFERS the message — the same code, which is what
+  //     the sender re-queues and /approvals shows as held — and the deferral
+  //     names the first minute both let it go (`retryAt`), so whoever waits
+  //     comes back then rather than an hour later.
+  const quiet = isQuiet(local, facts.quietStart, facts.quietEnd)
+  if (quiet || (band !== null && !band.open)) {
+    const zone = facts.recipientTimeZone
+    // An unreadable window is always quiet (`isQuiet`), so it has no minute
+    // to name: the waiter's fallback applies, as it always did.
+    const readable = quietWindowReadable(facts.quietStart, facts.quietEnd)
+    const retryAt = readable
+      ? nextOpenMinute(
+          facts.now,
+          zone,
+          (l, i) =>
+            !isQuiet(l, facts.quietStart, facts.quietEnd) && (band === null || insidePromotionalBand(l, i, band.india)),
+        )
+      : null
+    const at = retryAt === null ? {} : { retryAt }
 
-  // 3a. A promotional SMS outside its band (dlt.ts): TRAI's, in India, for
-  //     an Indian number, and 10:00–21:00 where the recipient is, for every
-  //     number. The clock, so it is DEFERRED like quiet hours — the same
-  //     code, which is what the sender re-queues and what /approvals shows
-  //     as held — never refused. 3' has already refused a band that never
-  //     opens, so "it goes when" is true here.
-  if (band !== null && !band.open) {
-    return refuse(
-      'quiet_hours',
-      band.india
-        ? `This is a promotional SMS to an Indian number, and TRAI's band for one is ${PROMOTIONAL_WINDOW.words} — ` +
-            `checked in India and in ${facts.recipientTimeZone}. Nothing was sent; it goes when both are open.`
-        : `This is a promotional SMS, and one goes only inside ${PROMOTIONAL_WINDOW.hours} in ` +
-            `${facts.recipientTimeZone}, where the recipient is. (TRAI's band governs Indian numbers, and this is ` +
-            'not one.) Nothing was sent; it goes when the band opens there.',
-      true,
-    )
+    // 3''. The band opens, but only inside the campaign's own quiet hours, so
+    //     no minute of the day is open on both: the dead end of 3', reached
+    //     through the campaign. A readable window always leaves a minute of
+    //     its own, so only a band can close the last one.
+    if (band !== null && readable && retryAt === null) {
+      return refuse(
+        'band_never_opens',
+        `This is a promotional SMS, and one goes only inside ${PROMOTIONAL_WINDOW.hours} in ${zone}, where the ` +
+          `recipient is${band.india ? ` — and inside TRAI's band, ${PROMOTIONAL_WINDOW.words}, for an Indian number` : ''}. ` +
+          `This campaign's quiet hours (${facts.quietStart}–${facts.quietEnd} in ${zone}) cover every minute of that, ` +
+          'so at today\'s clocks there is no moment it may go. Nothing was sent. Narrow the campaign\'s quiet hours' +
+          (band.india ? `, set ${PROMOTIONAL_WINDOW.zone} on the contact if they are in India,` : '') +
+          ' or draft it again from a service template.',
+        true,
+      )
+    }
+
+    if (quiet || band === null) {
+      return {
+        ...refuse(
+          'quiet_hours',
+          `It is currently quiet hours for this recipient (${facts.quietStart}–${facts.quietEnd} ` +
+            `in ${zone}). Nothing was sent; schedule it for after ${facts.quietEnd}.`,
+          true,
+        ),
+        ...at,
+      }
+    }
+
+    // 3a. A promotional SMS outside its band (dlt.ts): TRAI's, in India, for
+    //     an Indian number, and 10:00–21:00 where the recipient is, for every
+    //     number. The clock, so it is DEFERRED like quiet hours — never
+    //     refused. 3' and 3'' have already refused a band that never opens,
+    //     so "it goes when" is true here.
+    return {
+      ...refuse(
+        'quiet_hours',
+        band.india
+          ? `This is a promotional SMS to an Indian number, and TRAI's band for one is ${PROMOTIONAL_WINDOW.words} — ` +
+              `checked in India and in ${zone}. Nothing was sent; it goes when both are open.`
+          : `This is a promotional SMS, and one goes only inside ${PROMOTIONAL_WINDOW.hours} in ` +
+              `${zone}, where the recipient is. (TRAI's band governs Indian numbers, and this is ` +
+              'not one.) Nothing was sent; it goes when the band opens there.',
+        true,
+      ),
+      ...at,
+    }
   }
 
   // 4. The daily cap.
@@ -527,6 +595,54 @@ export function decideSend(facts: SendFacts): SendDecision {
   }
 
   return { allowed: true, code: 'send_now' }
+}
+
+/** How long a quiet-hours deferral waits when it names no minute of its own: an hour, as it always did. */
+export const DEFER_FALLBACK_MS = 60 * 60 * 1000
+/** The longest any deferral waits before the rules are asked again. */
+export const DEFER_MAX_MS = 24 * 60 * 60 * 1000
+/** The cap and a paused campaign: six hours, as they always did. Neither has a minute to name. */
+export const DEFER_SLOW_MS = 6 * 60 * 60 * 1000
+
+/**
+ * When a message the clock or the campaign held is tried again, or null when
+ * this decision is not a deferral at all.
+ *
+ * The deferrals are `quiet_hours`, `daily_cap` and `campaign_inactive` —
+ * enrolment's `REFUSALS_THE_CLOCK_RESOLVES`, which the test holds equal to
+ * this switch. Everything else is terminal, including any code added later.
+ *
+ * Quiet hours wait for the minute the decision names (`retryAt`): the end of
+ * the campaign's window, or a promotional SMS's band opening, whichever the
+ * clock reaches last. Before review round 5 every quiet-hours deferral waited
+ * a flat hour, and a band half an hour wide — an Indian number read in New
+ * York in winter — was missed by every retry whose minute past the hour fell
+ * outside it, for up to ten days. A minute that is missing, not ahead of
+ * `now` or not a time at all waits the hour; one more than a day ahead waits
+ * a day. Neither bound is a promise either way: whoever waits asks every rule
+ * again when the time comes, and a message still early is deferred again.
+ *
+ * Shared by the two copies of the deferral — the worker's tick
+ * (apps/agent/src/outreach/sender.ts) and LinkedIn's Start
+ * (packages/db/src/linkedin-step.ts) — so they cannot land in different
+ * places.
+ */
+export function deferUntil(decision: SendDecision, now: Date): Date | null {
+  if (decision.allowed) return null
+  const from = now.getTime()
+  switch (decision.code) {
+    case 'quiet_hours': {
+      const at = decision.retryAt?.getTime()
+      return at !== undefined && Number.isFinite(at) && at > from
+        ? new Date(Math.min(at, from + DEFER_MAX_MS))
+        : new Date(from + DEFER_FALLBACK_MS)
+    }
+    case 'daily_cap':
+    case 'campaign_inactive':
+      return new Date(from + DEFER_SLOW_MS)
+    default:
+      return null
+  }
 }
 
 /**
@@ -649,6 +765,14 @@ export function isQuiet(local: number, quietStart: string, quietEnd: string): bo
   return start < end
     ? local >= start && local < end // Does not wrap: e.g. 01:00–06:00.
     : local >= start || local < end // Wraps midnight: e.g. 21:00–08:00.
+}
+
+/**
+ * Whether a quiet window can be read at all. `isQuiet` reads one that cannot
+ * as always quiet, so it has no minute at which it ends.
+ */
+function quietWindowReadable(quietStart: string, quietEnd: string): boolean {
+  return parseClock(quietStart) !== null && parseClock(quietEnd) !== null
 }
 
 /** `HH:MM` or `HH:MM:SS` (Postgres `time` renders the latter) to minutes. */

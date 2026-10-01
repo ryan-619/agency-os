@@ -258,7 +258,7 @@ describe('an earlier row for the same person and campaign', () => {
       expect(enrolPriorSkip([refused(code)], false), code).toBeNull()
     }
     expect([...REFUSALS_A_CORRECTION_RESOLVES].sort()).toEqual(
-      ['bounced', 'paused', 'stale_evidence', 'unknown_timezone', 'unparseable_recipient'],
+      ['band_never_opens', 'bounced', 'paused', 'stale_evidence', 'unknown_timezone', 'unparseable_recipient'],
     )
     expect([...REFUSALS_THE_CLOCK_RESOLVES].sort()).toEqual(['campaign_inactive', 'daily_cap', 'quiet_hours'])
     expect([...ENROL_IGNORED_REFUSALS].sort()).toEqual(
@@ -288,6 +288,7 @@ describe('an earlier row for the same person and campaign', () => {
       paused: 'does not',
       stale_evidence: 'does not',
       unknown_timezone: 'does not',
+      band_never_opens: 'does not',
       quiet_hours: 'does not',
       daily_cap: 'does not',
       campaign_inactive: 'does not',
@@ -321,6 +322,11 @@ describe('an earlier row for the same person and campaign', () => {
       { paused: true, pausedFor: 'manual' },
       { evidenceStale: true },
       { recipientTimeZone: null },
+      // A promotional SMS to an Indian number read in Denver: the band never opens (review round 5).
+      {
+        channel: 'sms', recipient: '+919876543210', consent: { granted: true, source: 'form' },
+        template: { active: true, matches: true, category: 'promotional' }, recipientTimeZone: 'America/Denver',
+      },
       { now: new Date('2026-09-15T23:00:00.000Z') },
       { sentToday: 25 },
       { campaignStatus: 'paused' },
@@ -339,7 +345,8 @@ describe('an earlier row for the same person and campaign', () => {
     expect([...seen]).toEqual(
       expect.arrayContaining([
         'cold_channel_forbidden', 'unparseable_recipient', 'suppressed', 'bounced', 'consent_revoked', 'paused',
-        'stale_evidence', 'unknown_timezone', 'quiet_hours', 'daily_cap', 'campaign_inactive', 'needs_approval',
+        'stale_evidence', 'unknown_timezone', 'band_never_opens', 'quiet_hours', 'daily_cap', 'campaign_inactive',
+        'needs_approval',
       ]),
     )
     for (const [code, verdict] of Object.entries(DECIDED)) {

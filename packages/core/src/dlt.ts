@@ -156,6 +156,58 @@ export interface PromotionalBand {
    * go, not one that is early.
    */
   readonly opensToday: boolean
+  /**
+   * The first whole minute after the current one at which the band is open,
+   * at the offsets in force at `now` — within the next 24 hours, so null
+   * exactly when `opensToday` is false. The band alone: the send path asks
+   * `nextOpenMinute` itself for a minute the campaign's quiet hours leave
+   * open as well.
+   */
+  readonly nextOpen: Date | null
+}
+
+/**
+ * Whether a minute is inside every promotional band that applies:
+ * 10:00–21:00 on the recipient's clock, and on India's for an Indian number.
+ * Both are minutes past local midnight.
+ */
+export function insidePromotionalBand(local: number, india: number, indianNumber: boolean): boolean {
+  const inside = (m: number): boolean => m >= PROMOTIONAL_WINDOW.start && m < PROMOTIONAL_WINDOW.end
+  return inside(local) && (!indianNumber || inside(india))
+}
+
+/**
+ * The first whole minute after `now`'s at which `open` holds, within the
+ * next 24 hours — or null when none does, or when either zone is not one the
+ * runtime knows.
+ *
+ * `open` is asked about each minute as two wall clocks, minutes past
+ * midnight in `recipientTimeZone` and in India, read at the UTC offsets in
+ * force at `now`: 1,440 comparisons and no calendar maths, which is what
+ * `promotionalBand` always walked. A daylight-saving change inside the next
+ * day can move the true opening by the size of the change; that errs safe,
+ * because whoever waits for the minute asks every rule again when it comes,
+ * and a minute that turns out to be shut is deferred again, never sent early.
+ *
+ * The whole minute is the answer, not `now` plus a whole number of minutes:
+ * a band that opens at 10:00 is open from 10:00:00, and a sender that waits
+ * for it should not arrive at 10:00:42 and call that the first chance.
+ */
+export function nextOpenMinute(
+  now: Date,
+  recipientTimeZone: string,
+  open: (local: number, india: number) => boolean,
+): Date | null {
+  const local = localMinutes(now, recipientTimeZone)
+  const india = localMinutes(now, PROMOTIONAL_WINDOW.zone)
+  if (local === null || india === null) return null
+  const day = 24 * 60
+  const wrap = (m: number): number => ((m % day) + day) % day
+  const minute = Math.floor(now.getTime() / 60_000)
+  for (let k = 1; k <= day; k += 1) {
+    if (open(wrap(local + k), wrap(india + k))) return new Date((minute + k) * 60_000)
+  }
+  return null
 }
 
 /**
@@ -175,6 +227,12 @@ export interface PromotionalBand {
  * open or close the overlap (Los Angeles has half an hour of it in winter,
  * none in summer), and the answer is about the clocks as they are.
  *
+ * `nextOpen` is the first whole minute after `now`'s at which it is open.
+ * Some overlaps are half an hour wide — an Indian number read in New York or
+ * Los Angeles in winter, or in Chicago in summer — and a sender that came
+ * back an hour later each time stepped over one for days (review round 5),
+ * so the send path names the minute instead (`SendRefusal.retryAt`).
+ *
  * Null when the recipient's zone is not one the runtime knows — the caller
  * has already refused that as `unknown_timezone`.
  */
@@ -183,19 +241,12 @@ export function promotionalBand(now: Date, recipientTimeZone: string, recipient:
   const india = localMinutes(now, PROMOTIONAL_WINDOW.zone)
   if (local === null || india === null) return null
   const indian = isIndianNumber(recipient)
-  const inside = (m: number): boolean => m >= PROMOTIONAL_WINDOW.start && m < PROMOTIONAL_WINDOW.end
-  const openAt = (l: number, i: number): boolean => inside(l) && (!indian || inside(i))
-  // Each zone's offset from UTC at `now`, in minutes, then every minute of
-  // a UTC day read through both. 1,440 comparisons, and no calendar maths.
-  const utc = now.getUTCHours() * 60 + now.getUTCMinutes()
-  const localOffset = local - utc
-  const indiaOffset = india - utc
-  const day = 24 * 60
-  let opensToday = false
-  for (let m = 0; m < day && !opensToday; m += 1) {
-    opensToday = openAt((((m + localOffset) % day) + day) % day, (((m + indiaOffset) % day) + day) % day)
-  }
-  return { open: openAt(local, india), india: indian, opensToday }
+  // Every minute of the next day read through both clocks: 1,440 comparisons
+  // at most, and no calendar maths. The same wall-clock minute tomorrow is the
+  // last one asked, so a band open now always has a next open minute, and
+  // "none in the next day" is "none at all" at today's clocks.
+  const nextOpen = nextOpenMinute(now, recipientTimeZone, (l, i) => insidePromotionalBand(l, i, indian))
+  return { open: insidePromotionalBand(local, india, indian), india: indian, opensToday: nextOpen !== null, nextOpen }
 }
 
 // ---------------------------------------------------------------------------
