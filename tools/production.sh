@@ -15,8 +15,9 @@
 #                              URL is read from the Vercel project's own
 #                              production environment (tools/production-env.mjs)
 #   VERCEL_ORG_ID + VERCEL_PROJECT_ID, or VERCEL_TEAM    optional; without
-#                              them the project `agency-os` is linked on the
-#                              token's default team
+#                              them the project `agency-os` is found under
+#                              every scope the token reaches
+#                              (tools/vercel-project.mjs)
 #
 # No `set -x`, ever: it would print every expanded credential.
 set -euo pipefail
@@ -38,12 +39,15 @@ vercel_pull() {
   $pulled && return 0
   [ -n "${VERCEL_TOKEN:-}" ] || die "The VERCEL_TOKEN secret is not set."
   if [ -z "${VERCEL_ORG_ID:-}" ] || [ -z "${VERCEL_PROJECT_ID:-}" ]; then
-    # The CLI refuses one of the pair without the other.
-    unset VERCEL_ORG_ID VERCEL_PROJECT_ID
-    local team=()
-    [ -n "${VERCEL_TEAM:-}" ] && team=(--team "$VERCEL_TEAM")
-    "${VERCEL[@]}" link --yes --project "$PROJECT_NAME" "${team[@]}" --token "$VERCEL_TOKEN" >/dev/null \
-      || die "Could not link the Vercel project '$PROJECT_NAME' with this token. Set VERCEL_ORG_ID and VERCEL_PROJECT_ID (or VERCEL_TEAM)."
+    # Found through the API rather than `vercel link --yes`, which asks for
+    # the token's user first and fails for a token scoped to a team. The CLI
+    # reads the pair from the environment and refuses one without the other.
+    local ids
+    ids=$(node tools/vercel-project.mjs "$PROJECT_NAME" ${VERCEL_TEAM:+"$VERCEL_TEAM"}) \
+      || die "Could not find the Vercel project '$PROJECT_NAME' with this token (the lines above say why)."
+    VERCEL_ORG_ID=$(sed -n 's/^VERCEL_ORG_ID=//p' <<<"$ids")
+    VERCEL_PROJECT_ID=$(sed -n 's/^VERCEL_PROJECT_ID=//p' <<<"$ids")
+    export VERCEL_ORG_ID VERCEL_PROJECT_ID
   fi
   "${VERCEL[@]}" pull --yes --environment=production --token "$VERCEL_TOKEN" >/dev/null
   node tools/production-env.mjs mask "$PULLED"
