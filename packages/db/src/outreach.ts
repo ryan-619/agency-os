@@ -49,6 +49,8 @@ import * as schema from './schema.js'
 import { activeIcpProfile, type AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
 import { addSuppression } from './campaigns.js'
+// Review round 5: a raced duplicate delivery is not an opt-out lost.
+import { isUniqueViolation } from './pg-errors.js'
 import { advanceDeal } from './deals.js'
 
 export type TouchRow = typeof schema.touches.$inferSelect
@@ -2001,6 +2003,21 @@ export async function recordInboundReply(
   const now = args.now ?? new Date()
   const log = args.log ?? stderrLog
 
+  // Postgres refuses U+0000 in text, so a reply carrying one failed its
+  // INSERT on every retry — on every channel, not only SMS (review round 5:
+  // mailparser keeps a NUL decoded from quoted-printable `=00`, and IMAP,
+  // Resend and the generic webhook all land here), and a "stop" sent that
+  // way was recorded nowhere. Kept visible as U+FFFD rather than dropped, so
+  // the stored words say a character was there; and the words READ are the
+  // words stored. Here, once, for every caller — sms.ts' own strip before
+  // it changes nothing.
+  const withoutNul = <T extends string | null | undefined>(v: T): T =>
+    (typeof v === 'string' ? v.replace(/\u0000/g, '\uFFFD') : v) as T
+  const subject = withoutNul(args.subject)
+  const body = withoutNul(args.body)
+  const from = withoutNul(args.from)
+  const providerId = withoutNul(args.providerId ?? null)
+
   /**
    * Classified from the SAME opt-out reading that decides the suppression
    * below, rather than a second look at the text. One reading, one answer:
@@ -2032,9 +2049,9 @@ export async function recordInboundReply(
   // footer taught (`smsOptOut`: STOP, STOP 56161, CANCEL alone, …); the
   // prose reader runs on every channel, as before.
   const optedOut =
-    looksLikeOptOut(args.body) || ((args.channel === 'sms' || args.channel === 'whatsapp') && smsOptOut(args.body))
-  const automatic = !optedOut && args.autoReply === true && !mentionsRemovalOrDeparture(args.body)
-  const replyKind: ReplyKind = automatic ? 'auto_reply' : classifyReply(args.body, optedOut)
+    looksLikeOptOut(body) || ((args.channel === 'sms' || args.channel === 'whatsapp') && smsOptOut(body))
+  const automatic = !optedOut && args.autoReply === true && !mentionsRemovalOrDeparture(body)
+  const replyKind: ReplyKind = automatic ? 'auto_reply' : classifyReply(body, optedOut)
 
   /**
    * The reply and every consequence of it are ONE transaction: the row, the
@@ -2089,10 +2106,10 @@ export async function recordInboundReply(
           channel: args.channel,
           direction: 'in',
           status: 'replied',
-          subject: args.subject,
-          body: args.body,
-          recipient: args.from,
-          providerId: args.providerId ?? null,
+          subject,
+          body,
+          recipient: from,
+          providerId,
           inReplyTo: args.inReplyTo ?? null,
           replyKind,
           sentAt: now,
@@ -2142,7 +2159,7 @@ export async function recordInboundReply(
             addSuppression(sp as unknown as AgencyDb, {
               orgId: args.orgId,
               kind: suppressionKind,
-              value: args.from,
+              value: from,
               reason: `replied asking to stop, ${now.toISOString().slice(0, 10)}`,
               source: 'reply',
             }),
@@ -2251,10 +2268,22 @@ export async function recordInboundReply(
     // retries it, a bounded number of times (`drainUnseen`). Until a retry
     // records it, a "stop" is §2.1's obligation unmet, so it is said out
     // loud — ids and a reason class, never the address or the words.
-    if (optedOut) {
+    //
+    // Except a raced duplicate (review round 5). The one unique index the
+    // inbound INSERT can meet is 0019's on an inbound SMS's message id: two
+    // deliveries of one STOP both read "not seen", the winner recorded it
+    // with its suppression, and this loser's INSERT was refused. Its caller
+    // (`recordInboundSms`) answers it as the duplicate it is, so a line
+    // telling a person to record by hand an opt-out that IS recorded would
+    // be false — and a false alarm teaches people to skip the true one.
+    const duplicate = providerId !== null && isUniqueViolation(err)
+    if (optedOut && !duplicate) {
       log.error('OPT-OUT NOT RECORDED — the reply was rolled back; a provider retry records it, otherwise follow up by hand', {
         contactId: args.contactId,
         orgId: args.orgId,
+        // The message it answered, when it was matched by one: an id a
+        // caller can name in the alarm it raises (the email webhook does).
+        inReplyTo: args.inReplyTo ?? null,
         why: err instanceof Error ? err.name : 'UnknownError',
       })
     }
