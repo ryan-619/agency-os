@@ -18,6 +18,9 @@ import {
   NO_PHONE, SMS_DRAFTED_NOTE, SMS_DRAFT_STATUS, smsCheckAnswer, smsDraftAnswer, smsDraftSchema, smsRenderAnswer,
 } from '../src/app/api/contacts/[id]/sms/outcome'
 import { sendCheckSentence } from '../src/lib/consent-view'
+// The provider's own predicate, imported rather than restated: the composer's preview must
+// name the encoding DoveSoft will actually put on the wire (`unicode=1` or not).
+import { needsUnicode } from '../../agent/src/outreach/dovesoft'
 
 const BODY = 'Hi {#var#}, your posture review for {#var#} is ready. Reply STOP to opt out.'
 const parts = (body: string): readonly ComposerPart[] => {
@@ -39,12 +42,26 @@ describe('the live render', () => {
   })
 
   it('renders filled values exactly as core renders them', () => {
-    const values = ['Priya', 'rentman.io']
+    const values = ['Priya', 'Rentman']
     const r = renderPreview(parts(BODY), values)
     const core = renderTemplate(BODY, values)
     expect(core.ok && core.text).toBe(r.text)
     expect(r.complete).toBe(true)
     expect(r.problems).toEqual([])
+  })
+
+  /**
+   * A link or a phone number in a plain slot is the server's to refuse — core judges the rendered
+   * text, so a value can make one with its neighbour — and the preview shows the words as typed.
+   * A company's DOMAIN is a link to an operator's scrub; name the company instead.
+   */
+  it('leaves a link or a number in a plain slot to the server, which refuses it with a sentence', () => {
+    for (const values of [['Priya', 'rentman.io'], ['Priya', 'call 98765 43210']]) {
+      expect(renderPreview(parts(BODY), values).problems).toEqual([])
+      const core = renderTemplate(BODY, values)
+      expect(core).toMatchObject({ ok: false, reason: 'var_wrong_kind', slot: 2 })
+      if (!core.ok) expect(core.message).toMatch(/^Variable 2: it puts a (link|phone number) in the message/)
+    }
   })
 
   it('counts a value in code points, as the operator does, and says when one is too long', () => {
@@ -63,13 +80,46 @@ describe('length and segments', () => {
     expect(smsLength('a'.repeat(307))).toMatchObject({ segments: 3 })
   })
 
-  it('counts an extension character as two septets, and never splits one across segments', () => {
-    expect(smsLength('€'.repeat(80))).toMatchObject({ encoding: 'gsm7', characters: 80, units: 160, segments: 1 })
-    expect(smsLength('€'.repeat(81))).toMatchObject({ units: 162, segments: 2 })
-    // 152 plain septets, a euro, 152 more: 306 units is two segments by division, but the euro
-    // cannot be split after septet 152, so it moves whole and the tail spills into a third.
-    expect(smsLength(`${'a'.repeat(152)}€${'a'.repeat(152)}`)).toMatchObject({ units: 306, segments: 3 })
-    expect(smsLength('{}[]~|^\\')).toMatchObject({ encoding: 'gsm7', units: 16 })
+  /**
+   * The extension table (`€ [ ] { } ~ ^ \\ |`) is GSM-7 on paper, two septets each — and DoveSoft's
+   * provider sends any of it as `unicode=1` on purpose (a gateway may not apply the escape, and a
+   * mangled character is a DLT text the operator scrubs). The preview names what will be sent and
+   * billed, so one of these makes the whole message UCS-2 here too.
+   */
+  it('counts an extension-table character as the provider sends it: the whole message as UCS-2', () => {
+    expect(smsLength('€'.repeat(80))).toMatchObject({ encoding: 'ucs2', characters: 80, units: 80, segments: 2, perSegment: 67 })
+    // 149 plain characters and one '[': 150 GSM-7 septets would be one segment; as UCS-2 it is three.
+    expect(smsLength(`${'a'.repeat(149)}[`)).toMatchObject({ encoding: 'ucs2', units: 150, segments: 3 })
+    expect(smsLength('{}[]~|^\\')).toMatchObject({ encoding: 'ucs2', units: 8, segments: 1 })
+  })
+
+  /**
+   * One table, run through BOTH the composer and the provider, so the two cannot disagree about a
+   * character again. The rows are the provider's own test cases plus every extension-table
+   * character on its own.
+   */
+  it.each([
+    ['plain English', 'Your meeting is at 3pm. Reply STOP to opt out.'],
+    ['every accented letter the basic set holds', 'èéùìòÇØøÅåÆæßÉÄÖÑÜäöñüà¡¿'],
+    ['the Greek capitals it holds', 'ΔΦΓΛΩΠΨΣΘΞ'],
+    ['£ $ ¥ ¤ § @ and line breaks', '£5 $5 ¥5 ¤ § @home\r\nok'],
+    ['the rupee sign', '₹500'],
+    ['Devanagari', 'नमस्ते'],
+    ['an emoji', 'see you 👋'],
+    ['a curly quote', 'it’s'],
+    ['a tab', 'a\tb'],
+    ['a lower-case ç', 'ça'],
+    ['the escape character itself', 'a\u001bb'],
+    ['a form feed, the extension table’s page break', 'a\fb'],
+    ...Array.from('€[]{}~^\\|', (c) => [`the extension character ${c}`, `Ref ${c}12`] as [string, string]),
+  ])('names the encoding the provider sends: %s', (_why, text) => {
+    expect(smsLength(text).encoding).toBe(needsUnicode(text) ? 'ucs2' : 'gsm7')
+  })
+
+  it('agrees with the provider on every character from U+0000 to U+03FF, and on € and ₹', () => {
+    const chars = [...Array.from({ length: 0x400 }, (_, i) => String.fromCodePoint(i)), '€', '₹']
+    const disagree = chars.filter((c) => (smsLength(`a${c}`).encoding === 'ucs2') !== needsUnicode(`a${c}`))
+    expect(disagree).toEqual([])
   })
 
   it('sends the whole message as UCS-2 for one character outside GSM-7: 70, then 67', () => {

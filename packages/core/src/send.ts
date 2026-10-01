@@ -70,12 +70,17 @@
  * `template_mismatch` — after the bounce, because each is about the WORDS
  * and every refusal before them is about the person; and before the clock,
  * because a message held until morning would be scrubbed all the same. A
- * PROMOTIONAL SMS outside TRAI's band is the clock, not a refusal: it is
- * deferred as `quiet_hours`, right after the campaign's own quiet hours.
+ * PROMOTIONAL SMS outside its band — 10:00–21:00 where the recipient is, and
+ * TRAI's 10:00–21:00 IST as well for an Indian number — is the clock, not a
+ * refusal: it is deferred as `quiet_hours`, right after the campaign's own
+ * quiet hours. The one exception is an Indian number read in a zone whose
+ * hours never meet TRAI's band at today's clocks: no clock resolves that,
+ * so it is refused `unknown_timezone` (a person can resolve it — the
+ * contact's zone, or a service template) before the campaign's quiet hours.
  */
 
 import { normalisePhone, suppressionKeysFor, type SuppressionKind } from './normalise.js'
-import { PROMOTIONAL_WINDOW, promotionalWindowOpen, type TemplateCategory } from './dlt.js'
+import { PROMOTIONAL_WINDOW, promotionalBand, type TemplateCategory } from './dlt.js'
 
 export type Channel = 'email' | 'linkedin' | 'sms' | 'voice' | 'whatsapp'
 
@@ -433,6 +438,27 @@ export function decideSend(facts: SendFacts): SendDecision {
       true,
     )
   }
+
+  // 3'. A promotional SMS whose bands never meet (dlt.ts). An Indian number
+  //     read in a zone whose 10:00–21:00 misses TRAI's band entirely — Denver
+  //     and Phoenix all year, Los Angeles on daylight time — has no moment it
+  //     may go. Deferring it as quiet hours promised the clock would resolve
+  //     it, and re-queued it hourly for ever; so it is the zone the send path
+  //     cannot use, refused like a missing one, with the fix in the sentence.
+  //     Before the campaign's quiet hours, which would only defer it again.
+  const promotional = TEMPLATE_CHANNELS.has(facts.channel) && facts.template?.category === 'promotional'
+  const band = promotional ? promotionalBand(facts.now, facts.recipientTimeZone, facts.recipient) : null
+  if (band !== null && !band.opensToday) {
+    return refuse(
+      'unknown_timezone',
+      `This is a promotional SMS to an Indian number. TRAI's band for one is ${PROMOTIONAL_WINDOW.words}, and it ` +
+        `must also be ${PROMOTIONAL_WINDOW.hours} in ${facts.recipientTimeZone}, the timezone this contact is read ` +
+        'in — at today\'s clocks the two never overlap, so there is no moment it may go. Nothing was sent. If ' +
+        `they are in India, set ${PROMOTIONAL_WINDOW.zone} on the contact; if not, draft it again from a service template.`,
+      true,
+    )
+  }
+
   if (isQuiet(local, facts.quietStart, facts.quietEnd)) {
     return refuse(
       'quiet_hours',
@@ -442,18 +468,23 @@ export function decideSend(facts: SendFacts): SendDecision {
     )
   }
 
-  // 3a. A promotional SMS outside TRAI's band (dlt.ts). The clock, so it is
-  //     DEFERRED like quiet hours — the same code, which is what the sender
-  //     re-queues and what /approvals shows as held — never refused.
-  if (TEMPLATE_CHANNELS.has(facts.channel) && facts.template?.category === 'promotional') {
-    if (promotionalWindowOpen(facts.now, facts.recipientTimeZone) === false) {
-      return refuse(
-        'quiet_hours',
-        `This is a promotional SMS, and TRAI's band for one is ${PROMOTIONAL_WINDOW.words} — checked in ` +
-          `India and in ${facts.recipientTimeZone}. Nothing was sent; it goes when the band opens.`,
-        true,
-      )
-    }
+  // 3a. A promotional SMS outside its band (dlt.ts): TRAI's, in India, for
+  //     an Indian number, and 10:00–21:00 where the recipient is, for every
+  //     number. The clock, so it is DEFERRED like quiet hours — the same
+  //     code, which is what the sender re-queues and what /approvals shows
+  //     as held — never refused. 3' has already refused a band that never
+  //     opens, so "it goes when" is true here.
+  if (band !== null && !band.open) {
+    return refuse(
+      'quiet_hours',
+      band.india
+        ? `This is a promotional SMS to an Indian number, and TRAI's band for one is ${PROMOTIONAL_WINDOW.words} — ` +
+            `checked in India and in ${facts.recipientTimeZone}. Nothing was sent; it goes when both are open.`
+        : `This is a promotional SMS, and one goes only inside ${PROMOTIONAL_WINDOW.hours} in ` +
+            `${facts.recipientTimeZone}, where the recipient is. (TRAI's band governs Indian numbers, and this is ` +
+            'not one.) Nothing was sent; it goes when the band opens there.',
+      true,
+    )
   }
 
   // 4. The daily cap.
