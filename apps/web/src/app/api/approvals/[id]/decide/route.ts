@@ -26,6 +26,7 @@ import type { AgencyDb } from '@agency/db/queries'
  * stack trace teaches them to stop trusting the screen.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 export const revalidate = 0
 
 export async function POST(

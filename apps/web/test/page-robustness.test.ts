@@ -46,12 +46,12 @@ function pagesUnder(dir: string, prefix = ''): string[] {
   const out: string[] = []
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     if (entry.isDirectory()) out.push(...pagesUnder(join(dir, entry.name), `${prefix}${entry.name}/`))
-    else if (entry.name === 'page.tsx') out.push(`${prefix}page.tsx`)
+    else if (entry.name === 'page.tsx' || entry.name === 'route.ts') out.push(`${prefix}${entry.name}`)
   }
   return out.sort()
 }
 
-describe('every page that exports dynamic runs on the Node runtime, said out loud', () => {
+describe('every page and route that exports dynamic runs on the Node runtime, said out loud', () => {
   const PAGES = pagesUnder(fileURLToPath(new URL(APP, import.meta.url)))
   const DYNAMIC = PAGES.filter((p) => /^export const dynamic = /m.test(read(`${APP}${p}`)))
 
@@ -61,6 +61,8 @@ describe('every page that exports dynamic runs on the Node runtime, said out lou
     for (const p of [
       'page.tsx', 'companies/[domain]/page.tsx', 'settings/agents/page.tsx', 'signin/check-email/page.tsx',
       'approvals/page.tsx', 'book/[slug]/page.tsx', 'suppressions/page.tsx',
+      // Routes too: these three exported `dynamic` alone after the pages were fixed.
+      'api/approvals/[id]/decide/route.ts', 'api/chat/sessions/route.ts', 'api/health/route.ts',
     ]) {
       expect(DYNAMIC).toContain(p)
     }

@@ -67,6 +67,7 @@ import { workerStatus, type WorkerStatus } from '@/lib/worker-status'
  * the daily cron alerts on.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 export const revalidate = 0
 
 interface SchemaReport {

@@ -14,6 +14,7 @@ import { getDb } from '@/lib/db'
  * timestamp until the first message gives it a title.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 export const revalidate = 0
 
 export async function GET(): Promise<NextResponse> {
