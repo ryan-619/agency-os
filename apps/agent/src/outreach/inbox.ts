@@ -80,7 +80,11 @@ export interface InboxDeps {
   readonly optOutAlarm?: OptOutAlarm | null
 }
 
-/** What handling one message needs: the inbox's settings, with the alarm resolved. */
+/**
+ * What handling one message needs: the inbox's settings without the mailbox.
+ * Here a missing `optOutAlarm` means none — `startInbox` is what resolves it
+ * from the environment, once, and hands it in.
+ */
 export type InboundMessageDeps = Omit<InboxDeps, 'config'>
 
 /** Back-off between reconnects. Starts short, doubles, stops growing at five minutes. */
