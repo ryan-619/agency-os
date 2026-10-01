@@ -213,8 +213,9 @@ export default async function DeploymentPage() {
       </table>
       <p className="muted" style={{ fontSize: 13 }}>
         Register these two with DoveSoft, with the secret in place of <code>&lt;DOVESOFT_WEBHOOK_SECRET&gt;</code> —
-        it is never shown here. A route that can carry a header may send it as <code>x-dovesoft-token</code> instead.
-        The registered DLT templates are recorded on <a href="/settings/templates">Templates</a>.
+        it is never shown here — percent-encoded unless it is hex (<code>openssl rand -hex 32</code>). A route that can
+        carry a header may send it as <code>x-dovesoft-token</code> instead. Ask for POST rather than GET where DoveSoft
+        offers it (above). The registered DLT templates are recorded on <a href="/settings/templates">Templates</a>.
       </p>
 
       <h2>Variables</h2>

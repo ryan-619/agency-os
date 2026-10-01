@@ -15,7 +15,7 @@ import { DLT_VAR_MAX_CHARS, parseTemplate, renderTemplate, type SendRefusal } fr
 import type { SmsDraftRefusal } from '@agency/db/queries'
 import { SMS_VAR_MAX_CHARS, lengthLine, renderPreview, smsLength, type ComposerPart } from '../src/components/contacts/sms-text'
 import {
-  NO_PHONE, SMS_DRAFTED_NOTE, SMS_DRAFT_STATUS, smsCheckAnswer, smsDraftAnswer, smsDraftSchema, smsRenderAnswer,
+  SMS_DRAFTED_NOTE, SMS_DRAFT_STATUS, smsCheckAnswer, smsDraftAnswer, smsDraftSchema, smsRenderAnswer,
 } from '../src/app/api/contacts/[id]/sms/outcome'
 import { sendCheckSentence } from '../src/lib/consent-view'
 // The provider's own predicate, imported rather than restated: the composer's preview must
@@ -228,16 +228,15 @@ describe('POST /api/contacts/[id]/sms', () => {
     })
   })
 
-  it('says why a contact with no readable number cannot be texted, as smsDraft does', () => {
-    expect(NO_PHONE).toContain('no phone number in international form')
-  })
-
-  it('asks campaigns:write before it reads anything, and its dry run writes nothing', () => {
+  /**
+   * The dry run is `smsDraft` itself with `dryRun: true`, which writes
+   * nothing (packages/db/test/sms.test.ts); sms-route.test.ts drives it, the
+   * no-number sentence included, against a real database.
+   */
+  it('asks campaigns:write before it reads anything, and has no copy of smsDraft’s checks', () => {
     const src = readFileSync(fileURLToPath(new URL('../src/app/api/contacts/[id]/sms/route.ts', import.meta.url)), 'utf8')
     expect(src.indexOf("'campaigns:write'")).toBeLessThan(src.indexOf('request.text()'))
-    const dry = src.slice(src.indexOf('// The dry run'))
-    expect(dry).not.toMatch(/smsDraft\(|insert\(|appendAudit\(/)
-    expect(dry).toContain('previewSend(')
-    expect(dry).toContain('words: { templateId: template.id, body: rendered.text }')
+    expect(src).toContain('smsComposerAnswer(')
+    expect(src).not.toMatch(/previewSend\(|insert\(|appendAudit\(/)
   })
 })

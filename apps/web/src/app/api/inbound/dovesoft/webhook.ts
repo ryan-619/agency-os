@@ -1,7 +1,10 @@
-import type { InboundLog, InboundSmsOutcome, SmsDeliveryOutcome, SmsDeliveryStatus } from '@agency/db/queries'
+import {
+  smsTextAsksToStop,
+  type InboundLog, type InboundSmsOutcome, type SmsDeliveryOutcome, type SmsDeliveryStatus,
+} from '@agency/db/queries'
 import { secretMatches } from '../../../../lib/secret-compare'
 import type { NotificationEvent } from '../../../../lib/slack-message'
-import { smsOptOutNotRecordedNotification, smsReplyNotification } from './notification'
+import { smsOptOutNotRecordedNotification, smsReplyNotification, smsUnplacedOptOutNotification } from './notification'
 
 /**
  * DoveSoft's two pushes, the pure half (0019): who may post, what a payload
@@ -12,8 +15,8 @@ import { smsOptOutNotRecordedNotification, smsReplyNotification } from './notifi
  * everything that decides anything is here, with the database, the audit
  * writer, the logger and Slack handed in, and the routes are the few lines
  * that read the request and the environment. This file imports types, the
- * constant-time compare and the notification builders, relatively, and
- * nothing that reads the environment.
+ * recorder's own opt-out reader, the constant-time compare and the
+ * notification builders, relatively, and nothing that reads the environment.
  *
  * ## The formats are not public
  *
@@ -44,23 +47,94 @@ const MAX_TEXT_CHARS = 5_000
 export type DoveSoftAuth = { readonly ok: true } | { readonly ok: false; readonly status: 503 | 401; readonly error: string }
 
 /**
+ * Where a token may arrive. `query` is the `token` parameter as a form
+ * decoder reads it — `+` is a space — and `queryRaw` the same value
+ * percent-decoded with `+` left alone; see `tokenFrom`.
+ */
+export interface GivenToken {
+  readonly query: string | null
+  readonly queryRaw?: string | null
+  readonly header: string | null
+}
+
+/**
  * The shared secret, from the `token` query parameter — DoveSoft may not send
  * custom headers — or the `x-dovesoft-token` header. Unset means every request
  * is refused (503): an open inbound-text route would let anyone pause a
- * contact or write a suppression. Compared in constant time. Never logged.
+ * contact or write a suppression. Every candidate is compared, each in
+ * constant time, whichever matches. Never logged.
  */
-export function authoriseDoveSoft(
-  secret: string | undefined,
-  given: { readonly query: string | null; readonly header: string | null },
-): DoveSoftAuth {
+export function authoriseDoveSoft(secret: string | undefined, given: GivenToken): DoveSoftAuth {
   if (!secret) return { ok: false, status: 503, error: 'DoveSoft webhooks are not configured' }
-  if (secretMatches(secret, given.header) || secretMatches(secret, given.query)) return { ok: true }
+  const matched = [given.header, given.query, given.queryRaw ?? null].map((candidate) => secretMatches(secret, candidate))
+  if (matched.some(Boolean)) return { ok: true }
   return { ok: false, status: 401, error: 'unauthorized' }
 }
 
-/** The two places a token may arrive, read off a request. Never logged. */
-export function tokenFrom(request: Request): { readonly query: string | null; readonly header: string | null } {
-  return { query: new URL(request.url).searchParams.get('token'), header: request.headers.get('x-dovesoft-token') }
+/**
+ * The places a token may arrive, read off a request. Never logged.
+ *
+ * The query value is read twice, because `URLSearchParams` is a FORM
+ * decoder and reads `+` as a space. About half of all `openssl rand -base64
+ * 32` secrets contain a `+`, and one pasted raw into `?token=` — which is
+ * what the registration instructions asked for — never matched: every push,
+ * every STOP, was a 401. `queryRaw` is the value percent-decoded with
+ * `decodeURIComponent`, which leaves `+` alone, so a raw secret and a
+ * percent-encoded one both match.
+ */
+export function tokenFrom(request: Request): GivenToken {
+  const url = new URL(request.url)
+  return {
+    query: url.searchParams.get('token'),
+    queryRaw: rawQueryValue(url.search, 'token'),
+    header: request.headers.get('x-dovesoft-token'),
+  }
+}
+
+/**
+ * The first `name=` value of a query string, percent-decoded without reading
+ * `+` as a space; null when it is absent or its escapes do not decode.
+ */
+export function rawQueryValue(search: string, name: string): string | null {
+  for (const part of search.replace(/^\?/, '').split('&')) {
+    const eq = part.indexOf('=')
+    if ((eq < 0 ? part : part.slice(0, eq)) !== name) continue
+    try {
+      return decodeURIComponent(eq < 0 ? '' : part.slice(eq + 1))
+    } catch {
+      return null
+    }
+  }
+  return null
+}
+
+/** The routes whose refusals are logged, once each. */
+export type DoveSoftRoute = 'dlr' | 'sms'
+
+const REFUSALS_LOGGED = new Set<DoveSoftRoute>()
+
+/**
+ * One error line the first time a route refuses a token in this process —
+ * the route's name and nothing else, never what was sent. A 401 used to be
+ * silent, so a secret DoveSoft held wrongly (a `+` read as a space) refused
+ * every push, STOPs included, with nothing in any log to say so. Once per
+ * process per route, because anybody on the internet can send a wrong token
+ * and a line per request would bury the one that matters.
+ */
+export function logRefusalOnce(
+  route: DoveSoftRoute,
+  auth: DoveSoftAuth,
+  log: WebhookLog,
+  logged: Set<DoveSoftRoute> = REFUSALS_LOGGED,
+): void {
+  if (auth.ok || auth.status !== 401 || logged.has(route)) return
+  logged.add(route)
+  log.error(
+    'DoveSoft webhook refused a request whose token did not match DOVESOFT_WEBHOOK_SECRET — if DoveSoft sent it, ' +
+      'every push to this route is being refused: check the secret it was registered with (in a URL it must be ' +
+      'percent-encoded). Logged once per process.',
+    { route },
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -172,16 +246,22 @@ export const DLR_STATUS_FIELDS = ['errorstatus', 'status'] as const
 /** The operator's reason, for a failure. */
 export const DLR_REASON_FIELDS = ['errorreason'] as const
 
-/** The one word that means delivered (MoEngage's guide: "DELIVRD = delivered"). */
-const DELIVERED_WORDS = new Set(['delivrd'])
+/**
+ * The words that mean delivered: SMPP's receipt state `DELIVRD` (MoEngage's
+ * guide: "DELIVRD = delivered") and its spelled-out form — SMPP's own
+ * message-state name, `DELIVERED`, which a gateway may report in place of
+ * the abbreviation, as FAILED_WORDS already took spelled-out failures. A
+ * report saying "Delivered" was stored as pending.
+ */
+export const DELIVERED_WORDS: ReadonlySet<string> = new Set(['delivrd', 'delivered'])
 /**
  * The final words that mean it was not, and will not be, delivered: SMPP's
  * own message states (UNDELIV, EXPIRED, DELETED, REJECTD) and their spelled
  * out forms. Anything else — ENROUTE, ACCEPTD, UNKNOWN, a word nobody listed —
  * is `pending`, which claims nothing and lets a later final word land.
  */
-const FAILED_WORDS = new Set([
-  'undeliv', 'undelivered', 'expired', 'deleted', 'rejectd', 'rejected', 'failed', 'failure',
+export const FAILED_WORDS: ReadonlySet<string> = new Set([
+  'undeliv', 'undelivered', 'undeliverable', 'expired', 'deleted', 'rejectd', 'rejected', 'failed', 'failure',
 ])
 
 export type DlrRead =
@@ -193,7 +273,15 @@ export type DlrRead =
     }
   | { readonly ok: false; readonly missing: readonly ('messageid' | 'status')[] }
 
-/** A delivery report, or which of its two required fields was not there. */
+/**
+ * A delivery report, or which of its two required fields was not there.
+ *
+ * No time is read from it. DoveSoft's push format is not public, and a time
+ * with no zone ("2026-10-01 10:00:00", SMPP's `done date`) would be a guess
+ * of five and a half hours either way — so `delivered_at` is when the report
+ * reached this deployment, and the company page says "Delivery reported"
+ * beside it (`lib/delivery-view.ts`), never "delivered at".
+ */
 export function readDlr(fields: Fields): DlrRead {
   const id = (first(fields, DLR_ID_FIELDS) ?? '').trim()
   const word = (first(fields, DLR_STATUS_FIELDS) ?? '').trim()
@@ -286,11 +374,31 @@ export function readMo(fields: Fields, now: Date): MoRead {
   return {
     ok: true,
     from: readSender(from),
-    text: text.slice(0, MAX_TEXT_CHARS),
+    text: withoutNul(text).slice(0, MAX_TEXT_CHARS),
     to: first(fields, MO_TO_FIELDS)?.trim() || null,
-    providerMessageId: first(fields, MO_ID_FIELDS)?.trim() || null,
+    providerMessageId: withoutNul(first(fields, MO_ID_FIELDS) ?? '').trim() || null,
     receivedAt: readReceivedAt(first(fields, MO_TIME_FIELDS), now),
   }
+}
+
+/**
+ * U+0000 as U+FFFD. Some SMPP gateways decode GSM-7's `@` (0x00) as NUL,
+ * Postgres refuses NUL in text, and so every retry of such a push failed and
+ * a STOP sent that way was recorded nowhere. `recordInboundSms` does the
+ * same, for a caller that is not this route.
+ */
+function withoutNul(s: string): string {
+  return s.replace(/\u0000/g, '\uFFFD')
+}
+
+/**
+ * The CLASS of a fault, for a log line: drizzle's own message quotes every
+ * bound parameter — the number and the words — and Next `console.error`s an
+ * escaping Error whole, past `redact()`. So a fault is caught where it is
+ * thrown and only its name goes anywhere.
+ */
+function faultName(err: unknown): string {
+  return err instanceof Error ? err.name : 'UnknownError'
 }
 
 // ---------------------------------------------------------------------------
@@ -356,7 +464,8 @@ const shapeOf = (shape: RequestShape): Record<string, unknown> => ({
  * 200, matched or not: "no SMS this system sent has that id" is the answer
  * to a delivery, and a retry would never match either. Unreadable → 400 so
  * DoveSoft retries, `sms.dlr_unreadable` in the deployment's org, and an
- * error line with the field names and no payload.
+ * error line with the field names and no payload. A fault while recording →
+ * 500 so DoveSoft retries, and an error line naming the fault's class only.
  */
 export async function handleDoveSoftDlr(
   read: FieldsRead,
@@ -382,12 +491,21 @@ export async function handleDoveSoftDlr(
     })
     return { status: detail.why === 'too_large' ? 413 : 400, body: { error: 'unreadable delivery report', ...detail } }
   }
-  const outcome = await deps.record({
-    providerMessageId: dlr.providerMessageId,
-    status: dlr.status,
-    reason: dlr.reason,
-    orgId: deps.orgId,
-  })
+  let outcome: SmsDeliveryOutcome
+  try {
+    outcome = await deps.record({
+      providerMessageId: dlr.providerMessageId,
+      status: dlr.status,
+      reason: dlr.reason,
+      orgId: deps.orgId,
+    })
+  } catch (err) {
+    deps.log.error('DoveSoft delivery report could not be recorded; it was refused so DoveSoft retries', {
+      error: faultName(err),
+      status: dlr.status,
+    })
+    return { status: 500, body: { error: 'delivery report not recorded' } }
+  }
   if (!outcome.matched && !deps.orgId) {
     // The recorder had no org to audit it in; this line is the only record.
     deps.log.warn('DoveSoft delivery report matched no SMS, and DOVESOFT_ORG_ID is not set to file it under', {
@@ -431,6 +549,16 @@ export async function handleDoveSoftDlr(
  *
  * Unreadable (no sender or no words) → 400, `sms.inbound_unreadable` in the
  * deployment's org, and an error line that says it may have been a STOP.
+ *
+ * A fault while recording — a dropped connection, a timeout — → 500 so
+ * DoveSoft retries, with nothing recorded (`recordInboundReply` is one
+ * transaction). It is caught HERE: drizzle's error quotes every bound
+ * parameter, the number and the words, and Next logs an escaping error
+ * whole. The error line names the fault's class only. And when the words
+ * asked to stop (`smsTextAsksToStop`, the recorder's own reader) the loud
+ * path runs as it does for a STOP filed under nobody: a
+ * `contact.opt_out_not_recorded` row and the AWAITED alarm, under
+ * `DOVESOFT_ORG_ID`, with no contact — nothing says whose it was.
  */
 export async function handleDoveSoftMo(
   read: FieldsRead,
@@ -465,15 +593,20 @@ export async function handleDoveSoftMo(
     return { status: detail.why === 'too_large' ? 413 : 400, body: { error: 'unreadable inbound text', ...detail } }
   }
 
-  const outcome = await deps.record({
-    from: mo.from,
-    to: mo.to,
-    text: mo.text,
-    providerMessageId: mo.providerMessageId,
-    ...(mo.receivedAt ? { receivedAt: mo.receivedAt } : {}),
-    orgId: deps.orgId,
-    log: { error: (message, fields) => deps.log.error(message, { ...fields }) },
-  })
+  let outcome: InboundSmsOutcome
+  try {
+    outcome = await deps.record({
+      from: mo.from,
+      to: mo.to,
+      text: mo.text,
+      providerMessageId: mo.providerMessageId,
+      ...(mo.receivedAt ? { receivedAt: mo.receivedAt } : {}),
+      orgId: deps.orgId,
+      log: { error: (message, fields) => deps.log.error(message, { ...fields }) },
+    })
+  } catch (err) {
+    return moNotRecorded(smsTextAsksToStop(mo.text), faultName(err), shape, deps)
+  }
 
   if (outcome.matched === 'contact') {
     const alarm = smsOptOutNotRecordedNotification(outcome, deps.orgId)
@@ -518,4 +651,34 @@ export async function handleDoveSoftMo(
     return { status: 500, body: { error: 'opt-out not recorded', matched: 'none', why: outcome.why } }
   }
   return { status: 200, body: { matched: 'none', why: outcome.why, optOut: outcome.optOut, suppressed: outcome.suppressed } }
+}
+
+/**
+ * An inbound text whose recording threw. 500 either way, so DoveSoft
+ * retries; a STOP also takes the loud path, because nothing was written for
+ * it and a retry may fail the same way.
+ */
+async function moNotRecorded(
+  optOut: boolean,
+  error: string,
+  shape: RequestShape,
+  deps: DoveSoftDeps & { readonly alarm: (event: NotificationEvent) => Promise<void> },
+): Promise<WebhookAnswer> {
+  if (!optOut) {
+    deps.log.error('DoveSoft inbound text could not be recorded; it was refused so DoveSoft retries', { error, ...shapeOf(shape) })
+    return { status: 500, body: { error: 'inbound text not recorded' } }
+  }
+  const audited = await auditQuietly(deps, {
+    action: 'contact.opt_out_not_recorded',
+    detail: { channel: 'sms', why: 'record_failed' },
+  })
+  const alarm = smsUnplacedOptOutNotification(deps.orgId)
+  deps.log.error('OPT-OUT NOT RECORDED — a text that asked to stop could not be recorded; follow up by hand', {
+    error,
+    orgConfigured: deps.orgId !== null,
+    audited,
+    alarm: alarm ? 'raised' : 'not_raised_no_org',
+  })
+  if (alarm) await deps.alarm(alarm)
+  return { status: 500, body: { error: 'opt-out not recorded' } }
 }

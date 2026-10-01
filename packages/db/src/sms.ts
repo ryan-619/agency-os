@@ -19,7 +19,7 @@
 import { and, eq, inArray, sql } from 'drizzle-orm'
 import {
   normalisePhone, renderTemplate, smsOptOut,
-  type ReplyKind, type SendRefusalCode,
+  type ReplyKind, type SendDecision, type SendRefusalCode,
 } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
@@ -33,6 +33,29 @@ const stderrLog: InboundLog = {
   error: (message, fields) => {
     console.error(JSON.stringify({ level: 'error', message, ...fields, at: new Date().toISOString() }))
   },
+}
+
+/**
+ * Postgres refuses U+0000 in text, and some SMPP gateways decode GSM-7's `@`
+ * (0x00) as exactly that — so a text carrying one failed its INSERT on every
+ * retry, and a STOP sent that way was never recorded anywhere. It is kept
+ * visible as U+FFFD rather than dropped: the stored words say a character
+ * was there.
+ */
+function withoutNul(s: string): string {
+  return s.replace(/\u0000/g, '\uFFFD')
+}
+
+/**
+ * Whether a text a contact sent asks to stop: the SMS keyword reader
+ * (`smsOptOut`) or the prose reader an email reply goes through
+ * (`looksLikeOptOut`). The one reading `recordInboundSms` acts on, exported
+ * so a caller whose recording FAILED can still tell a STOP it could not
+ * record from an ordinary text, and raise the alarm for it.
+ */
+export function smsTextAsksToStop(text: string | null | undefined): boolean {
+  const t = withoutNul(text ?? '')
+  return smsOptOut(t) || looksLikeOptOut(t)
 }
 
 // ---------------------------------------------------------------------------
@@ -79,8 +102,41 @@ export type SmsDraftOutcome =
       readonly slot?: number
     }
 
+/**
+ * `smsDraft`'s dry run (`dryRun: true`): the same checks, in the same order,
+ * stopping before the insert — the composer's "Check".
+ *
+ * A refusal `smsDraft` would answer with a sentence comes back as that same
+ * refusal, so the two cannot disagree (a paused campaign, a draft already on
+ * its way). Past those, the answer is the send path's decision about these
+ * exact words, with `wouldNeedApproval` beside it — including a refusal
+ * nobody may approve past, which `smsDraft` turns into `refused`: the
+ * question was "what would happen", and that decision is its answer.
+ */
+export type SmsDraftCheck =
+  | {
+      readonly ok: true
+      /** The rendered text, exactly as it would be drafted. */
+      readonly body: string
+      readonly decision: SendDecision
+      readonly wouldNeedApproval: boolean
+    }
+  | Extract<SmsDraftOutcome, { ok: false }>
+
 /** Statuses in which a drafted SMS is still on its way — one at a time per person per campaign. */
 const LIVE_STATUSES = ['awaiting_approval', 'approved', 'queued', 'sending'] as const
+
+interface SmsDraftArgs {
+  readonly orgId: string
+  readonly contactId: string
+  readonly campaignId: string
+  readonly templateId: string
+  /** One value per `{#…#}` slot, in order. */
+  readonly vars: readonly string[]
+  /** A users.id, or 'agent' — the audit row's actor. */
+  readonly createdBy: string
+  readonly now?: Date
+}
 
 /**
  * Draft one SMS to one contact from one registered template, for a person
@@ -97,23 +153,23 @@ const LIVE_STATUSES = ['awaiting_approval', 'approved', 'queued', 'sending'] as 
  * nobody may approve past — no SMS consent, a suppression, a pause, and the
  * rest. A refusal a person can resolve is written and reported as
  * `wouldHold`.
+ *
+ * With `dryRun: true` it writes nothing and answers `SmsDraftCheck`: every
+ * one of those checks, in this order, the live-draft read included — so the
+ * composer's Check and its Draft give one answer.
  */
+export async function smsDraft(db: AgencyDb, args: SmsDraftArgs & { readonly dryRun: true }): Promise<SmsDraftCheck>
+export async function smsDraft(db: AgencyDb, args: SmsDraftArgs & { readonly dryRun?: false }): Promise<SmsDraftOutcome>
 export async function smsDraft(
   db: AgencyDb,
-  args: {
-    readonly orgId: string
-    readonly contactId: string
-    readonly campaignId: string
-    readonly templateId: string
-    /** One value per `{#…#}` slot, in order. */
-    readonly vars: readonly string[]
-    /** A users.id, or 'agent' — the audit row's actor. */
-    readonly createdBy: string
-    readonly now?: Date
-  },
-): Promise<SmsDraftOutcome> {
+  args: SmsDraftArgs & { readonly dryRun?: boolean },
+): Promise<SmsDraftOutcome | SmsDraftCheck> {
   const now = args.now ?? new Date()
-  const no = (reason: SmsDraftRefusal, message: string, extra: { code?: SendRefusalCode; slot?: number } = {}): SmsDraftOutcome => ({
+  const no = (
+    reason: SmsDraftRefusal,
+    message: string,
+    extra: { code?: SendRefusalCode; slot?: number } = {},
+  ): Extract<SmsDraftOutcome, { ok: false }> => ({
     ok: false,
     reason,
     message,
@@ -182,19 +238,10 @@ export async function smsDraft(
   })
   if (!preview.ok) return no('refused', `${preview.message}`)
   const decision = preview.decision
-  if (!decision.allowed && !decision.humanCanResolve) {
-    return no('refused', `${decision.reason} Nothing was drafted.`, { code: decision.code })
-  }
-  const wouldHold =
-    !decision.allowed && decision.code !== 'needs_approval' ? { code: decision.code, reason: decision.reason } : null
-
-  // One live draft per person per campaign, serialised on the contact: a
-  // double click is two requests that would each read "none live" under
-  // READ COMMITTED, so the read and the insert hold a transaction lock.
-  const drafted = await db.transaction(async (transaction) => {
-    const tx = transaction as unknown as AgencyDb
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('sms.draft'), hashtext(${contact.id}))`)
-    const live = await tx
+  const blocked = !decision.allowed && !decision.humanCanResolve
+  const ALREADY_QUEUED = 'An SMS to this contact under this campaign is already waiting to be approved or sent.'
+  const liveDraft = async (q: AgencyDb): Promise<boolean> => {
+    const live = await q
       .select({ id: schema.touches.id })
       .from(schema.touches)
       .where(
@@ -208,7 +255,29 @@ export async function smsDraft(
         ),
       )
       .limit(1)
-    if (live.length > 0) return null
+    return live.length > 0
+  }
+
+  if (args.dryRun) {
+    // The same order as below: a refusal nobody may approve past is the
+    // answer before the live-draft read, as it is `refused` there.
+    if (!blocked && (await liveDraft(db))) return no('already_queued', ALREADY_QUEUED)
+    return { ok: true, body: rendered.text, decision, wouldNeedApproval: preview.wouldNeedApproval }
+  }
+
+  if (blocked) {
+    return no('refused', `${decision.reason} Nothing was drafted.`, { code: decision.code })
+  }
+  const wouldHold =
+    !decision.allowed && decision.code !== 'needs_approval' ? { code: decision.code, reason: decision.reason } : null
+
+  // One live draft per person per campaign, serialised on the contact: a
+  // double click is two requests that would each read "none live" under
+  // READ COMMITTED, so the read and the insert hold a transaction lock.
+  const drafted = await db.transaction(async (transaction) => {
+    const tx = transaction as unknown as AgencyDb
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('sms.draft'), hashtext(${contact.id}))`)
+    if (await liveDraft(tx)) return null
     const [row] = await tx
       .insert(schema.touches)
       .values({
@@ -227,9 +296,7 @@ export async function smsDraft(
     if (!row) throw new Error('sms draft insert returned no row')
     return row.id
   })
-  if (drafted === null) {
-    return no('already_queued', 'An SMS to this contact under this campaign is already waiting to be approved or sent.')
-  }
+  if (drafted === null) return no('already_queued', ALREADY_QUEUED)
 
   await appendAudit(db, {
     orgId: args.orgId,
@@ -301,7 +368,7 @@ export async function recordSmsDelivery(
     readonly orgId?: string | null
   },
 ): Promise<SmsDeliveryOutcome> {
-  const id = args.providerMessageId.trim()
+  const id = withoutNul(args.providerMessageId).trim()
   if (!id) return { matched: false, why: 'blank_id' }
 
   const hits = await db
@@ -328,7 +395,7 @@ export async function recordSmsDelivery(
   }
   const hit = hits[0]!
 
-  const reason = (args.reason ?? '').replace(/\s+/g, ' ').trim().slice(0, MAX_DELIVERY_ERROR)
+  const reason = withoutNul(args.reason ?? '').replace(/\s+/g, ' ').trim().slice(0, MAX_DELIVERY_ERROR)
   const at = args.at ?? new Date()
   const set =
     args.status === 'delivered'
@@ -412,9 +479,13 @@ export type InboundSmsOutcome =
  * Record a text a contact sent back.
  *
  * The number is read as E.164 (`normalisePhone`) and matched against
- * contacts' phones — across every org, or within `orgId` when the
- * deployment names the org its DoveSoft account belongs to (as
- * `VOICE_ORG_ID` does for calls). Then:
+ * contacts' phones across EVERY org, as a delivery report is matched by its
+ * message id: drafting and sending an SMS are not scoped to one org, so a
+ * reply must not be either — a STOP from a person another org texted, read
+ * only inside `orgId`, was suppressed in the wrong org and left them on the
+ * list that texted them. `orgId`, the org the deployment's DoveSoft account
+ * belongs to, is the FALLBACK: where a text from a number no contact holds
+ * is filed. Then:
  *
  *  - EXACTLY ONE contact: the reply is recorded through `recordInboundReply`,
  *    the same function an email reply goes through — an inbound `sms` touch
@@ -452,15 +523,18 @@ export async function recordInboundSms(
     readonly text: string | null
     readonly providerMessageId: string | null
     readonly receivedAt?: Date
+    /** Where a text no contact can be found for is filed (`DOVESOFT_ORG_ID`). Never a filter on the match. */
     readonly orgId?: string | null
     readonly log?: InboundLog
   },
 ): Promise<InboundSmsOutcome> {
   const now = args.receivedAt ?? new Date()
   const log = args.log ?? stderrLog
-  const text = args.text ?? ''
-  const optOut = smsOptOut(text) || looksLikeOptOut(text)
-  const messageId = args.providerMessageId?.trim() || null
+  // A NUL fails the INSERT on every retry (`withoutNul`); the words read
+  // and the words stored are the same text.
+  const text = withoutNul(args.text ?? '')
+  const optOut = smsTextAsksToStop(text)
+  const messageId = (args.providerMessageId === null ? '' : withoutNul(args.providerMessageId)).trim() || null
   const none = (
     why: Extract<InboundSmsOutcome, { matched: 'none' }>['why'],
     suppressed = false,
@@ -473,7 +547,9 @@ export async function recordInboundSms(
     // and none can be written for it. An opt-out from it is lost unless a
     // person records it — so it is loud, never quiet.
     if (args.orgId) {
-      await auditUnmatched(db, args.orgId, { why: 'unreadable_number', optOut })
+      // `suppressed: false` said in so many words: /audit claims a
+      // suppression only where the row says one was written.
+      await auditUnmatched(db, args.orgId, { why: 'unreadable_number', optOut, ...(optOut ? { suppressed: false } : {}) })
     }
     if (optOut) {
       await optOutLost(db, log, { orgId: args.orgId ?? null, contactId: null, why: 'unparseable_number', now })
@@ -492,12 +568,10 @@ export async function recordInboundSms(
     .select({ id: schema.contacts.id, orgId: schema.contacts.orgId, phone: schema.contacts.phone })
     .from(schema.contacts)
     .where(
-      and(
-        args.orgId ? eq(schema.contacts.orgId, args.orgId) : undefined,
-        // Narrowed in SQL by digits, confirmed below by the same normaliser
-        // the suppression list uses, so `+91 98765 43210` on file matches.
-        sql`regexp_replace(coalesce(${schema.contacts.phone}, ''), '[^0-9]', '', 'g') IN (${e164.slice(1)}, ${`00${e164.slice(1)}`})`,
-      ),
+      // Every org (see above). Narrowed in SQL by digits, confirmed below by
+      // the same normaliser the suppression list uses, so `+91 98765 43210`
+      // on file matches.
+      sql`regexp_replace(coalesce(${schema.contacts.phone}, ''), '[^0-9]', '', 'g') IN (${e164.slice(1)}, ${`00${e164.slice(1)}`})`,
     )
     .limit(50)
   const matches = candidates.filter((c) => c.phone !== null && normalisePhone(c.phone) === e164)
@@ -511,7 +585,7 @@ export async function recordInboundSms(
         channel: 'sms',
         from: e164,
         subject: null,
-        body: args.text,
+        body: args.text === null ? null : text,
         providerId: messageId,
         now,
         log,

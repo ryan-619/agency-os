@@ -1,13 +1,17 @@
 import { z } from 'zod'
 import type { SendDecision } from '@agency/core'
-import type { SmsDraftOutcome, SmsDraftRefusal } from '@agency/db/queries'
+import { smsDraft, type AgencyDb, type SmsDraftCheck, type SmsDraftOutcome, type SmsDraftRefusal } from '@agency/db/queries'
 
 /**
- * `POST /api/contacts/[id]/sms`, the pure half (0019): what a request may
- * carry, and what each of `smsDraft`'s answers becomes on the wire.
+ * `POST /api/contacts/[id]/sms`, everything but the session (0019): what a
+ * request may carry, the one call it makes (`smsComposerAnswer`), and what
+ * each of `smsDraft`'s answers becomes on the wire.
  *
- * Kept beside the route, importing types and zod only, so
- * `apps/web/test/sms-composer.test.ts` runs the route's own mapping.
+ * Kept beside the route, with no `server-only` and no `@/` import, so
+ * `apps/web/test/sms-composer.test.ts` runs the route's own mapping and
+ * `apps/web/test/sms-route.test.ts` the route's own call, against a real
+ * database. The route reads the session and the body, and hands the rest
+ * here.
  */
 
 /** A body is three ids and the values: a few kilobytes at most. */
@@ -47,11 +51,6 @@ export const SMS_DRAFT_STATUS: Readonly<Record<SmsDraftRefusal, number>> = {
   already_queued: 409,
   refused: 409,
 }
-
-/** `smsDraft`'s own `no_phone` sentence, for the dry run that asks first. */
-export const NO_PHONE =
-  'This contact has no phone number in international form (+91 98765 43210), so there is nobody to text and the ' +
-  'suppression list cannot be checked. Fix the contact first.'
 
 /** Said beside every draft, because "drafted" must never read as "sent". */
 export const SMS_DRAFTED_NOTE =
@@ -93,8 +92,9 @@ export function smsDraftAnswer(outcome: SmsDraftOutcome, nothingWillSend: string
  * words, and whether it blocks the draft. `blocked` is a refusal nobody may
  * approve past (`humanCanResolve: false`) — `smsDraft` would refuse it too,
  * so the composer says so before anybody asks. A refusal a person can
- * resolve (quiet hours, TRAI's band, the cap) does not block: the draft is
- * written and held at sending.
+ * resolve does not block: the draft is written, and at sending the worker
+ * HOLDS the clock's refusals (quiet hours, TRAI's band, the cap) and refuses
+ * the rest (a missing timezone, say) — the composer says which.
  */
 export function smsCheckAnswer(input: {
   readonly decision: SendDecision
@@ -117,10 +117,79 @@ export function smsCheckAnswer(input: {
   }
 }
 
-/** The dry run when the values do not render: not an error — the answer to the question, with the slot. */
+/**
+ * The dry run when the values do not render: not an error — the answer to
+ * the question, with the slot. Says once that nothing was drafted, whether
+ * the sentence is the renderer's own or `smsDraft`'s, which already says so.
+ */
 export function smsRenderAnswer(render: { readonly message: string; readonly slot?: number }): WireAnswer {
+  const said = / Nothing was drafted\.$/.test(render.message) ? render.message : `${render.message} Nothing was drafted.`
   return {
     status: 200,
-    body: { rendered: false, error: `${render.message} Nothing was drafted.`, ...(render.slot !== undefined ? { slot: render.slot } : {}) },
+    body: { rendered: false, error: said, ...(render.slot !== undefined ? { slot: render.slot } : {}) },
+  }
+}
+
+/**
+ * `smsDraft`'s dry run on the wire. Every refusal `smsDraft` answers is
+ * answered exactly as a draft's would be — a paused campaign, an SMS already
+ * waiting, another org's template — so Check never offers a Draft that then
+ * answers 409; values that do not render are the answer to the question
+ * (`smsRenderAnswer`); past those, the send path's decision (`smsCheckAnswer`).
+ */
+export function smsDryRunAnswer(check: SmsDraftCheck): WireAnswer {
+  if (check.ok) return smsCheckAnswer(check)
+  if (check.reason === 'render_failed') return smsRenderAnswer(check)
+  return smsDraftAnswer(check, null)
+}
+
+export interface ComposerLog {
+  error(message: string, fields?: Record<string, unknown>): void
+}
+
+/** Said when the database failed under a draft or a check. Nothing was written: `smsDraft` inserts in one transaction. */
+export const SMS_FAULT =
+  'That could not be completed because the database did not answer. Nothing was drafted and nothing was sent — try again.'
+
+/**
+ * The route's one call: `smsDraft` — with `dryRun: true` for Check, so the
+ * two run the same checks in the same order and cannot disagree — mapped to
+ * the wire.
+ *
+ * A fault is caught HERE and answered 500 with a sentence, with one log
+ * line naming the fault's CLASS: drizzle's error message lists every bound
+ * parameter — the contact's number and the words typed into the template —
+ * and Next `console.error`s an escaping error whole, past `redact()`.
+ */
+export async function smsComposerAnswer(
+  db: AgencyDb,
+  args: {
+    readonly orgId: string
+    readonly contactId: string
+    readonly createdBy: string
+    readonly input: SmsDraftInput
+    readonly now: Date
+    /** `nothingWillSendNote(deployment())`, said beside a draft. */
+    readonly nothingWillSend: string | null
+  },
+  log: ComposerLog,
+): Promise<WireAnswer> {
+  const draft = {
+    orgId: args.orgId,
+    contactId: args.contactId,
+    campaignId: args.input.campaignId,
+    templateId: args.input.templateId,
+    vars: args.input.vars,
+    createdBy: args.createdBy,
+    now: args.now,
+  }
+  try {
+    if (args.input.dryRun) return smsDryRunAnswer(await smsDraft(db, { ...draft, dryRun: true }))
+    return smsDraftAnswer(await smsDraft(db, draft), args.nothingWillSend)
+  } catch (err) {
+    log.error(args.input.dryRun ? 'SMS check could not be run' : 'SMS draft could not be written', {
+      error: err instanceof Error ? err.name : 'UnknownError',
+    })
+    return { status: 500, body: { error: SMS_FAULT } }
   }
 }

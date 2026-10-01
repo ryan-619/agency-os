@@ -16,7 +16,7 @@ import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import {
   approveDraft, dispatchTouch, pauseReasonClass, previewSend, recordInboundSms, recordSmsDelivery, schema, smsDraft,
-  templatesSetActive,
+  smsTextAsksToStop, templatesSetActive,
   type AgencyDb, type InboundLog, type MessageProvider, type MessageTemplateRegistration,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
@@ -212,6 +212,66 @@ describe('SMS (0019)', () => {
   })
 
   // -------------------------------------------------------------------------
+  /**
+   * The composer's Check is `smsDraft` with `dryRun: true`. It used to be a
+   * restatement of smsDraft's checks in the route, which skipped two of
+   * them, so Check enabled Draft for a paused campaign and for a person who
+   * already had an SMS waiting — and Draft then answered 409.
+   */
+  describe('the dry run is smsDraft’s own checks', () => {
+    const check = (over: Partial<Parameters<typeof smsDraft>[1]> = {}) =>
+      smsDraft(db, { orgId, contactId, campaignId, templateId, vars: ['Priya', '3pm'], createdBy: userId, now: NOON_IST, ...over, dryRun: true })
+    const outbound = async () => (await db.select().from(schema.touches)).filter((t) => t.direction === 'out')
+
+    it('answers the decision and the words, and writes nothing', async () => {
+      expect(await check()).toEqual({
+        ok: true,
+        body: 'Hi Priya, your call with Acme is at 3pm. Reply STOP to opt out.',
+        decision: { allowed: true, code: 'send_now' },
+        wouldNeedApproval: true,
+      })
+      expect(await db.select().from(schema.touches)).toHaveLength(0)
+      expect(await audits('sms.drafted')).toHaveLength(0)
+    })
+
+    it('refuses a paused campaign exactly as smsDraft does', async () => {
+      await db.update(schema.campaigns).set({ status: 'paused' }).where(eq(schema.campaigns.id, campaignId))
+      const dry = await check()
+      expect(dry).toMatchObject({ ok: false, reason: 'campaign_not_active' })
+      expect(dry).toEqual(await draft())
+      expect(await outbound()).toHaveLength(0)
+    })
+
+    it('refuses a second draft while one is on its way, exactly as smsDraft does', async () => {
+      expect((await draft()).ok).toBe(true)
+      const dry = await check()
+      expect(dry).toMatchObject({ ok: false, reason: 'already_queued' })
+      expect(dry).toEqual(await draft())
+      expect(await outbound()).toHaveLength(1)
+    })
+
+    it('answers a refusal nobody may approve past with the decision, where smsDraft refuses it by its code', async () => {
+      await db.delete(schema.consents).where(eq(schema.consents.contactId, contactId))
+      const dry = await check()
+      expect(dry).toMatchObject({ ok: true, decision: { allowed: false, code: 'cold_channel_forbidden', humanCanResolve: false } })
+      expect(await draft()).toMatchObject({ ok: false, reason: 'refused', code: 'cold_channel_forbidden' })
+    })
+
+    it('reports a hold a person can resolve as the decision, and smsDraft writes it with the same code', async () => {
+      const dry = await check({ now: NIGHT_IST })
+      expect(dry).toMatchObject({ ok: true, decision: { allowed: false, code: 'quiet_hours', humanCanResolve: true } })
+      const real = await draft({ now: NIGHT_IST })
+      expect(real.ok && real.wouldHold?.code).toBe('quiet_hours')
+    })
+
+    it('refuses values that do not render with smsDraft’s own sentence and slot', async () => {
+      const dry = await check({ vars: ['Priya'] })
+      expect(dry).toMatchObject({ ok: false, reason: 'render_failed', slot: 2 })
+      expect(dry).toEqual(await draft({ vars: ['Priya'] }))
+    })
+  })
+
+  // -------------------------------------------------------------------------
   describe('the one send path', () => {
     const approved = async () => {
       const r = await draft()
@@ -373,6 +433,15 @@ describe('SMS (0019)', () => {
     it('refuses a blank id', async () => {
       expect(await recordSmsDelivery(db, { providerMessageId: '  ', status: 'delivered' })).toEqual({ matched: false, why: 'blank_id' })
     })
+
+    /** Postgres refuses U+0000 in text: a report carrying one failed its UPDATE on every retry. */
+    it('records a failure whose reason carries U+0000, and matches nothing by an id carrying one', async () => {
+      const id = await sentSms()
+      const r = await recordSmsDelivery(db, { providerMessageId: 'ds-msg-1', status: 'failed', reason: 'Absent\u0000subscriber' })
+      expect(r).toMatchObject({ matched: true, changed: true, deliveryStatus: 'failed' })
+      expect((await touch(id)).deliveryError).toBe('Absent\uFFFDsubscriber')
+      expect(await recordSmsDelivery(db, { providerMessageId: 'ds-msg-\u00001', status: 'delivered' })).toEqual({ matched: false, why: 'unknown_id' })
+    })
   })
 
   // -------------------------------------------------------------------------
@@ -485,9 +554,77 @@ describe('SMS (0019)', () => {
         )
       })
 
-      it('matches within the org the deployment names', async () => {
-        expect(await inbound({ orgId: otherOrgId })).toMatchObject({ matched: 'contact', orgId: otherOrgId, contactId: otherContactId })
+      /**
+       * The deployment's org is a FALLBACK, not a filter: drafting and
+       * sending are not scoped to it, so a reply read only inside it lost a
+       * STOP from a person another org had texted.
+       */
+      it('does not narrow the match to the org the deployment names — two orgs holding it is still ambiguous', async () => {
+        const r = await inbound({ orgId: otherOrgId, text: 'STOP' })
+        expect(r).toEqual({ matched: 'none', why: 'ambiguous', optOut: true, suppressed: true, optOutNotRecorded: false })
+        const rows = await db.select().from(schema.suppressions)
+        expect(rows.map((s) => s.orgId).sort()).toEqual([orgId, otherOrgId].sort())
+        expect(otherContactId).toBeTruthy()
       })
+    })
+
+    describe('across orgs, with DOVESOFT_ORG_ID as the fallback', () => {
+      let fallbackOrgId: string
+      beforeEach(async () => {
+        const [o] = await db.insert(schema.orgs).values({ name: 'The DoveSoft account’s org' }).returning({ id: schema.orgs.id })
+        fallbackOrgId = o!.id
+      })
+
+      it('files a STOP from a number one contact in another org holds under that contact, and suppresses it THERE', async () => {
+        const r = await inbound({ text: 'STOP', orgId: fallbackOrgId })
+        expect(r).toMatchObject({ matched: 'contact', orgId, contactId, suppressed: true, optOutNotRecorded: false })
+        const rows = await db.select().from(schema.suppressions)
+        expect(rows).toEqual([expect.objectContaining({ orgId, kind: 'phone', value: PHONE, source: 'reply' })])
+        const [c] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, contactId))
+        expect(c!.pausedAt).not.toBeNull()
+        expect(await audits('sms.inbound_unmatched')).toEqual([])
+      })
+
+      it('files an ordinary reply under that contact too, and cancels what was queued for them', async () => {
+        const d = await draft()
+        if (!d.ok) throw new Error(d.message)
+        expect(await inbound({ orgId: fallbackOrgId })).toMatchObject({ matched: 'contact', orgId, contactId, cancelled: 1 })
+      })
+
+      it('files a number no contact anywhere holds under the fallback org', async () => {
+        const r = await inbound({ from: '+919811111111', text: 'STOP', orgId: fallbackOrgId })
+        expect(r).toEqual({ matched: 'none', why: 'no_contact', optOut: true, suppressed: true, optOutNotRecorded: false })
+        expect(await db.select().from(schema.suppressions)).toEqual([
+          expect.objectContaining({ orgId: fallbackOrgId, value: '+919811111111', source: 'reply' }),
+        ])
+        expect((await audits('sms.inbound_unmatched')).map((a) => a.orgId)).toEqual([fallbackOrgId])
+      })
+    })
+
+    /**
+     * Some SMPP gateways decode GSM-7 `@` as U+0000, and Postgres refuses it
+     * in text: every retry failed, and a STOP sent that way was recorded
+     * nowhere. It is stored as U+FFFD.
+     */
+    it('records a text carrying U+0000, with the character kept visible', async () => {
+      const words = 'STOP\nmy name is Jo, jo\u0000example.in'
+      const r = await inbound({ text: words, providerMessageId: 'mo-\u0000-1' })
+      expect(r).toMatchObject({ matched: 'contact', contactId, replyKind: 'opted_out', suppressed: true })
+      if (r.matched !== 'contact') return
+      const row = await touch(r.touchId)
+      expect(row.body).toBe('STOP\nmy name is Jo, jo\uFFFDexample.in')
+      expect(row.providerId).toBe('mo-\uFFFD-1')
+      expect(await db.select().from(schema.suppressions)).toEqual([expect.objectContaining({ orgId, value: PHONE, source: 'reply' })])
+      // A retry of the same push is a duplicate, not a second row.
+      expect(await inbound({ text: words, providerMessageId: 'mo-\u0000-1' })).toMatchObject({ duplicate: true })
+    })
+
+    it('reads a STOP the way the recorder does, for a caller whose recording failed', () => {
+      expect(smsTextAsksToStop('STOP')).toBe(true)
+      expect(smsTextAsksToStop('stop 56161')).toBe(true)
+      expect(smsTextAsksToStop('please remove me')).toBe(true)
+      expect(smsTextAsksToStop('Sounds good, see you then')).toBe(false)
+      expect(smsTextAsksToStop(null)).toBe(false)
     })
 
     it('audits a number no contact has in the org the deployment names, and records an opt-out from it there', async () => {
@@ -511,6 +648,8 @@ describe('SMS (0019)', () => {
       expect(l.lines.some((m) => m.includes('OPT-OUT NOT RECORDED'))).toBe(true)
       expect(await audits('contact.opt_out_not_recorded')).toEqual([expect.objectContaining({ orgId, subjectId: null })])
       expect(await db.select().from(schema.suppressions)).toHaveLength(0)
+      // /audit claims a suppression only where the row says one was written.
+      expect((await audits('sms.inbound_unmatched'))[0]?.detail).toEqual({ why: 'unreadable_number', optOut: true, suppressed: false })
     })
 
     it('drops an ordinary text from a number it cannot read without alarm', async () => {

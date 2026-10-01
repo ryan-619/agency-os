@@ -141,7 +141,7 @@ export const DOVESOFT_TOKEN_PLACEHOLDER = '<DOVESOFT_WEBHOOK_SECRET>'
 export interface DoveSoftFacts {
   /** `DOVESOFT_WEBHOOK_SECRET` is set, so the two webhook routes accept a request. */
   readonly webhooks: boolean
-  /** `DOVESOFT_ORG_ID` is set: unplaceable texts and reports are filed under it. */
+  /** `DOVESOFT_ORG_ID` is set: texts no contact anywhere holds the number of, and unmatched reports, are filed under it. */
   readonly org: boolean
   /**
    * The two URLs to register with DoveSoft, built from `AUTH_URL` — never a
@@ -172,10 +172,13 @@ export function dovesoftFacts(
       webhooks
         ? 'Delivery reports and texts a contact sends back are accepted at the two URLs below, with DOVESOFT_WEBHOOK_SECRET as their token.'
         : 'DOVESOFT_WEBHOOK_SECRET is not set, so both DoveSoft routes answer 503: no delivery report is recorded, and no text a contact sends back — a STOP included — reaches this deployment.',
+      // 0019 r5: matching is across every org first; the org is a fallback, never a filter.
       org
-        ? 'A text from a number no contact holds, and a report naming a message this system did not send, are audited in the org DOVESOFT_ORG_ID names; a STOP from such a number is put on that org’s suppression list.'
-        : 'DOVESOFT_ORG_ID is not set: a text from a number no contact holds is logged and filed under no org, and a STOP from it can be recorded only in an org where a contact holds the number.',
+        ? 'A text is filed under the contact whose number it came from, in whichever org holds them. Only a text from a number no contact anywhere holds — and a report naming a message this system did not send — is audited in the org DOVESOFT_ORG_ID names, and a STOP from such a number is put on that org’s suppression list.'
+        : 'DOVESOFT_ORG_ID is not set. A text is still filed under the contact whose number it came from, in whichever org holds them; but one from a number no contact holds is filed under no org, and a STOP from such a number is recorded nowhere — it is answered 500 and logged OPT-OUT NOT RECORDED, for a person to record by hand.',
       'DoveSoft’s report and inbound formats are not public. The routes read the common field names, and a payload they cannot read is refused with a 4xx, audited and logged — never answered 200 and dropped.',
+      'Generate DOVESOFT_WEBHOOK_SECRET with `openssl rand -hex 32`, which needs no escaping anywhere. A secret with any other character must be percent-encoded where it stands in the URL (a + is %2B); the first refused token on each route is logged, by the route’s name, once per process.',
+      'A push by GET carries its fields in the URL, so the platform’s request log — and DoveSoft’s — holds the sender’s number and the words of every text sent back, beside the token. Ask DoveSoft to push by POST, a form or JSON, where it offers it.',
       'Sending is the worker’s: DOVESOFT_API_KEY and DOVESOFT_ENTITY_ID live on its host, which this page cannot see. Every SMS is drafted from a registered template with Draft SMS on /contacts, and approved by a person on /approvals.',
     ],
   }

@@ -10,10 +10,15 @@ describe('deliveryLine — what an SMS delivery report says (0019)', () => {
     expect(deliveryLine({ ...out, direction: 'in', deliveryStatus: 'delivered', deliveredAt: AT })).toBeNull()
   })
 
-  it('says delivered, with the handset’s time for the page to render', () => {
-    expect(deliveryLine({ ...out, deliveryStatus: 'delivered', deliveredAt: AT })).toEqual({
-      tone: 'ok', text: 'Delivered to the handset', at: AT,
-    })
+  /**
+   * `delivered_at` is when the report ARRIVED (the route reads no time from
+   * it), which can be hours after the handset took the message — so the line
+   * dates the report, never the delivery.
+   */
+  it('says a delivery was reported, beside the time the report arrived', () => {
+    const l = deliveryLine({ ...out, deliveryStatus: 'delivered', deliveredAt: AT })
+    expect(l).toEqual({ tone: 'ok', text: 'Delivery reported', at: AT })
+    expect(l?.text).not.toMatch(/handset/)
   })
 
   it('says a pending report is not a delivery', () => {

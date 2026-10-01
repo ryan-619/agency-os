@@ -402,6 +402,60 @@ describe('sentenceFor', () => {
   })
 
   /**
+   * A STOP from a number that could not be read writes no suppression, and
+   * its row used to carry no `suppressed` key — which the sentence read as
+   * "the number was put on the suppression list". A suppression is claimed
+   * only where the row says `suppressed: true`, and the row is an alarm
+   * otherwise.
+   */
+  it('claims a suppression for an unplaced SMS STOP only where the row says one was written', () => {
+    const say = (d: unknown) => sentenceFor(line('sms.inbound_unmatched', d, { actor: 'system' }), lookups)
+    const NOT = 'received a text from a number that could not be read, so it was filed under nobody; it asked to stop, and the number is NOT on the suppression list — follow up by hand'
+    // As sms.ts writes it now, and as it wrote it before r5 (no key).
+    expect(say({ why: 'unreadable_number', optOut: true, suppressed: false })).toBe(NOT)
+    expect(say({ why: 'unreadable_number', optOut: true })).toBe(NOT)
+    expect(say({ why: 'unreadable_number', optOut: false })).toBe('received a text from a number that could not be read, so it was filed under nobody')
+    expect(say(WRITTEN['sms.inbound_unmatched'])).toContain('the number was put on the suppression list')
+    const alarm = (d: Record<string, unknown>) => isAlarm(line('sms.inbound_unmatched', d, { actor: 'system' }))
+    expect(alarm({ why: 'unreadable_number', optOut: true, suppressed: false })).toBe(true)
+    expect(alarm({ why: 'unreadable_number', optOut: true })).toBe(true)
+    expect(alarm({ why: 'no_contact', optOut: true, contacts: 0, suppressed: false })).toBe(true)
+    expect(alarm(WRITTEN['sms.inbound_unmatched']!)).toBe(false)
+    expect(alarm({ why: 'no_contact', optOut: false, contacts: 0 })).toBe(false)
+  })
+
+  /**
+   * An SMS STOP nobody could place has no contact: no subject, no
+   * `contactId`. "A contact at an unknown company" sent the person following
+   * up to look for somebody who does not exist.
+   */
+  it('words an opt-out not recorded from a number no single contact holds, without inventing a contact', () => {
+    const unplaced = (d: Record<string, unknown>) =>
+      sentenceFor(line('contact.opt_out_not_recorded', d, { actor: 'system' }), {})
+    expect(unplaced({ channel: 'sms', why: 'unparseable_number' })).toBe(
+      'could not record an opt-out texted from a number no single contact holds (the number could not be read) — ' +
+        "it is NOT on the suppression list; read the number from the provider's inbound log and record it by hand",
+    )
+    expect(unplaced({ channel: 'sms', why: 'record_failed' })).toContain('(recording the text failed)')
+    // An error's class name says nothing a person can act on.
+    expect(unplaced({ channel: 'sms', why: 'DrizzleQueryError' })).toBe(
+      'could not record an opt-out texted from a number no single contact holds — ' +
+        "it is NOT on the suppression list; read the number from the provider's inbound log and record it by hand",
+    )
+    for (const d of [{ channel: 'sms', why: 'unparseable_number' }, { channel: 'sms', why: 'record_failed' }]) {
+      expect(unplaced(d)).not.toContain('a contact at')
+      expect(isAlarm(line('contact.opt_out_not_recorded', d, { actor: 'system' }))).toBe(true)
+    }
+    // Filed under a contact, it still names where they work.
+    expect(
+      sentenceFor(line('contact.opt_out_not_recorded', { channel: 'sms', why: 'Error' }, { subjectType: 'contact', subjectId: SUBJECT }), lookups),
+    ).toBe('could not record an opt-out from a contact at rentman.io — it is NOT on the suppression list; follow up by hand')
+    expect(sentenceFor(line('contact.opt_out_not_recorded', WRITTEN['contact.opt_out_not_recorded']), lookups)).toContain(
+      'from a contact at rentman.io',
+    )
+  })
+
+  /**
    * DoveSoft's two pushes, when they could not be read: which field was
    * missing, by name — a text nobody could read may have been a STOP, so
    * that row is an alarm.
