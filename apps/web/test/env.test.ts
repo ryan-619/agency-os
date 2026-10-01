@@ -42,6 +42,7 @@ beforeEach(() => {
     ...Object.keys(BASE), 'AUTH_TRUST_HOST', 'DATABASE_POOL_MAX', 'AGENT_URL',
     'CRON_SECRET', 'RESCAN_BATCH_SIZE', 'SLACK_WEBHOOK_URL', 'UNSUBSCRIBE_SECRET',
     'RESEND_WEBHOOK_SECRET', 'RESEND_API_KEY', 'SECRETS_KEY', 'VERCEL_ENV',
+    'INBOUND_WEBHOOK_SECRET', 'DOVESOFT_WEBHOOK_SECRET', 'DOVESOFT_ORG_ID',
   ]) {
     delete process.env[k]
   }
@@ -192,6 +193,7 @@ describe.each([
   ['CRON_SECRET', 32],
   ['UNSUBSCRIBE_SECRET', 32],
   ['RESEND_WEBHOOK_SECRET', 16],
+  ['DOVESOFT_WEBHOOK_SECRET', 32],
 ] as const)('%s', (name, min) => {
   it('is optional', async () => {
     const env = await loadWith(BASE)
@@ -294,5 +296,27 @@ describe('INBOUND_WEBHOOK_SECRET', () => {
   it('still refuses a short one', async () => {
     const env = await loadWith({ ...BASE, INBOUND_WEBHOOK_SECRET: 'short' })
     expect(() => env()).toThrow(/INBOUND_WEBHOOK_SECRET/)
+  })
+})
+
+describe('DOVESOFT_ORG_ID', () => {
+  /**
+   * The org a DoveSoft text from an unknown number is filed under, and where
+   * its opt-out is suppressed. A value that is not an org id would make every
+   * such write fail, so it is refused at startup rather than at the first STOP.
+   */
+  it('is optional, and a blank line is unset', async () => {
+    expect((await loadWith(BASE))().DOVESOFT_ORG_ID).toBeUndefined()
+    expect((await loadWith({ ...BASE, DOVESOFT_ORG_ID: ' ' }))().DOVESOFT_ORG_ID).toBeUndefined()
+  })
+
+  it('accepts an org id', async () => {
+    const id = '0b0e5a4e-7d1c-4c8e-9a51-1f7d1c0c0001'
+    expect((await loadWith({ ...BASE, DOVESOFT_ORG_ID: id }))().DOVESOFT_ORG_ID).toBe(id)
+  })
+
+  it('refuses something that is not one, and names the variable', async () => {
+    const env = await loadWith({ ...BASE, DOVESOFT_ORG_ID: 'agency' })
+    expect(() => env()).toThrow(/DOVESOFT_ORG_ID/)
   })
 })

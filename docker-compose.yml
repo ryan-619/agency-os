@@ -111,6 +111,10 @@ services:
       INBOUND_WEBHOOK_SECRET: ${INBOUND_WEBHOOK_SECRET:-}
       # To store connector credentials from the UI. The SAME value as the agent's.
       SECRETS_KEY: ${SECRETS_KEY:-}
+      # DoveSoft's delivery reports and inbound texts (/api/inbound/dovesoft/*),
+      # and the org its account belongs to. Sending SMS is the worker's.
+      DOVESOFT_WEBHOOK_SECRET: ${DOVESOFT_WEBHOOK_SECRET:-}
+      DOVESOFT_ORG_ID: ${DOVESOFT_ORG_ID:-}
     ports:
       - '3000:3000'
 

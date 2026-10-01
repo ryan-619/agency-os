@@ -38,6 +38,7 @@ const AREAS: readonly { readonly href: string; readonly title: string; readonly 
   { href: '/settings/icp', title: 'ICP', what: 'The profile every score is computed against. Read only.' },
   { href: '/settings/spend', title: 'Spend', what: 'What the model has cost, per day and per person.' },
   { href: '/settings/mail', title: 'Mail', what: 'SPF, DMARC and DKIM for our own sending domain.' },
+  { href: '/settings/templates', title: 'Templates', what: 'The DLT-registered SMS templates every SMS is drafted from.' },
   { href: '/settings/deployment', title: 'Deployment', what: 'What is configured, the worker, the schema.' },
   { href: '/compliance', title: 'Compliance', what: 'The questions an auditor asks, as counts.' },
   { href: '/audit', title: 'Audit', what: 'Every recorded action, newest first.' },

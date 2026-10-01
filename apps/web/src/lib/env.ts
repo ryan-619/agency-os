@@ -238,6 +238,22 @@ const schema = z.object({
    */
   RESEND_API_KEY: z.preprocess(blankIsUnset, z.string().min(1).optional()),
   /**
+   * Proves a DoveSoft delivery report or inbound text (`/api/inbound/dovesoft/
+   * dlr` and `/sms`) came from the account it was registered on — as a
+   * `token` query parameter, since DoveSoft may not send custom headers, or
+   * `x-dovesoft-token`. A bearer credential: never logged, compared in
+   * constant time. Unset → both routes answer 503: an unauthenticated inbound
+   * text route would let anyone pause a contact or write a suppression.
+   */
+  DOVESOFT_WEBHOOK_SECRET: z.preprocess(blankIsUnset, z.string().min(32).optional()),
+  /**
+   * The org this deployment's DoveSoft account belongs to, as `VOICE_ORG_ID`
+   * names it for calls. A text from a number no contact holds, and a report
+   * naming a message nobody sent, are audited in it — and an opt-out from an
+   * unknown number is suppressed in it. Unset → those are logged, not filed.
+   */
+  DOVESOFT_ORG_ID: z.preprocess(blankIsUnset, z.uuid().optional()),
+  /**
    * Documented here so `.env.example` and this schema agree; READ by
    * `secretsKeyFromEnv()` in packages/db, which reports a malformed key as
    * unset and says why. Nothing in this app reads the parsed value.
