@@ -161,7 +161,7 @@ export function DraftQueue({
       busy: busy === d.id,
       contactId: chosen.contactId,
       campaignId: chosen.campaignId,
-      block: approveBlock(decisionFor(d, chosen.contactId)),
+      block: approveBlock(decisionFor(d, chosen.contactId), d.channel),
     })
   }
 
@@ -285,7 +285,7 @@ export function DraftQueue({
           const chosen = choice[d.id] ?? EMPTY
           const forChannel = campaigns.filter((c) => c.channel === d.channel)
           const decision = decisionFor(d, chosen.contactId)
-          const block = chosen.contactId ? approveBlock(decision) : null
+          const block = chosen.contactId ? approveBlock(decision, d.channel) : null
           const note = evidenceNote(d.evidence, d.company !== null)
           const addressed = addressedByLabel(d.addressedBy)
           const companyHref = d.company ? `/companies/${encodeURIComponent(d.company.domain)}` : null
@@ -401,7 +401,7 @@ export function DraftQueue({
                             value={c.id}
                             // Nobody may approve past these, so they are not offered — except
                             // the person the row came addressed to, who must stay visible.
-                            disabled={approveBlock(c.decision) !== null && c.id !== d.contactId}
+                            disabled={approveBlock(c.decision, d.channel) !== null && c.id !== d.contactId}
                           >
                             {c.label} — {candidateLine(c.decision)}
                           </option>

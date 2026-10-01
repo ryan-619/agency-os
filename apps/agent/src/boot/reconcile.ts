@@ -36,7 +36,7 @@
  */
 import { and, eq, lt, sql } from 'drizzle-orm'
 import {
-  appendAudit, appendChatMessage, clearInterruptedTurns, schema,
+  appendAudit, appendChatMessage, clearInterruptedTurns, repauseForUnansweredReply, schema,
   type AgencyDb, type InterruptedTurn,
 } from '@agency/db'
 import type { Logger } from '../logger.js'
@@ -216,31 +216,60 @@ export async function sweepExpired(db: AgencyDb, log: Logger): Promise<number> {
  *
  * Scoped by boot time like everything else here: only a claim older than this
  * process can be one this process did not make.
+ *
+ * An ANSWER to a reply settled here also puts the reply's own pause back
+ * (`repauseForUnansweredReply`, review round 4), in the same transaction:
+ * the inbox resumed the person when the answer was drafted, and an answer
+ * that "may or may not have gone" must not leave them live in every campaign
+ * with their reply possibly unanswered — the conservative direction, under
+ * the helper's own guard (this answer resumed them, nobody resumed them
+ * since, no other answer of theirs is live).
  */
 export async function recoverStuckSends(db: AgencyDb, bootAt: Date, log: Logger): Promise<number> {
   try {
-    const stuck = await db
-      .update(schema.touches)
-      .set({
-        status: 'failed',
-        error: 'The worker restarted while this was being sent. It may or may not have gone; check the mailbox, then re-approve to send it again.',
-      })
-      // `updated_at` is set by a trigger on UPDATE and is NULL until then; the
-      // claim itself is an update, so it is normally set — but a row that
-      // was inserted as `sending` (nothing does, today) would be invisible
-      // to a bare comparison. Coalesce, so "older than the boot" is answered
-      // for every row.
-      .where(
-        and(
-          eq(schema.touches.status, 'sending'),
-          lt(sql`coalesce(${schema.touches.updatedAt}, ${schema.touches.createdAt})`, bootAt),
-        ),
-      )
-      .returning({ id: schema.touches.id })
-    if (stuck.length > 0) log.warn('marked messages the last worker left mid-send as failed', { count: stuck.length })
-    return stuck.length
+    return await db.transaction(async (transaction) => {
+      const tx = transaction as unknown as AgencyDb
+      const stuck = await recoverStuckRows(tx, bootAt)
+      const now = new Date()
+      for (const row of stuck) {
+        if (!row.answersTouchId) continue
+        await repauseForUnansweredReply(tx, {
+          orgId: row.orgId,
+          answer: { id: row.id, answersTouchId: row.answersTouchId },
+          actor: 'system',
+          because: 'failed',
+          now,
+        })
+      }
+      if (stuck.length > 0) log.warn('marked messages the last worker left mid-send as failed', { count: stuck.length })
+      return stuck.length
+    })
   } catch (err) {
     log.warn('could not recover stuck sends', { error: err instanceof Error ? err.name : 'UnknownError' })
     return 0
   }
+}
+
+async function recoverStuckRows(
+  db: AgencyDb,
+  bootAt: Date,
+): Promise<{ id: string; orgId: string; answersTouchId: string | null }[]> {
+  return db
+    .update(schema.touches)
+    .set({
+      status: 'failed',
+      error: 'The worker restarted while this was being sent. It may or may not have gone; check the mailbox, then re-approve to send it again.',
+    })
+    // `updated_at` is set by a trigger on UPDATE and is NULL until then; the
+    // claim itself is an update, so it is normally set — but a row that
+    // was inserted as `sending` (nothing does, today) would be invisible
+    // to a bare comparison. Coalesce, so "older than the boot" is answered
+    // for every row.
+    .where(
+      and(
+        eq(schema.touches.status, 'sending'),
+        lt(sql`coalesce(${schema.touches.updatedAt}, ${schema.touches.createdAt})`, bootAt),
+      ),
+    )
+    .returning({ id: schema.touches.id, orgId: schema.touches.orgId, answersTouchId: schema.touches.answersTouchId })
 }
