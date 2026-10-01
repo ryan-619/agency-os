@@ -166,11 +166,32 @@ export async function sendOne(
     }
   }
 
-  // 0019: an SMS or WhatsApp message is a registered template or nothing
-  // (`decideSend`'s `no_template`), and this entry point carries free text.
-  // Recorded as the refusal the sender would give it — a template-channel
-  // row may be stored refused, never queued without its template.
+  // 0019: an SMS or WhatsApp message is a registered template or nothing,
+  // and this entry point carries free text — so it cannot be queued (0019's
+  // CHECK) and is recorded as the refusal the sender would give it: through
+  // `decideSend` over these words with no template, so a person-level rule
+  // (no opt-in, a suppression) is still the reason logged ahead of
+  // `no_template`, in the decision's own order.
   if (TEMPLATE_CHANNELS.has(subject.channel as Channel)) {
+    const gathered = await sendFactsFor(db, {
+      orgId: req.orgId,
+      campaignId: req.campaignId,
+      contactId: req.contactId,
+      approvedByHuman: false,
+      evidenceAsOf: now,
+      words: { templateId: null, body: req.body },
+      now,
+    })
+    const decided = 'missing' in gathered ? null : decideSend(gathered.facts)
+    const decision: SendDecision & { allowed: false } =
+      decided && !decided.allowed
+        ? decided
+        : {
+            allowed: false,
+            code: 'no_template',
+            reason: `${subject.channel === 'sms' ? 'An SMS' : 'A WhatsApp message'} is sent from a registered template, and this one has none. Nothing was sent.`,
+            humanCanResolve: false,
+          }
     const [refused] = await db
       .insert(schema.touches)
       .values({
@@ -181,7 +202,7 @@ export async function sendOne(
         channel: subject.channel,
         direction: 'out',
         status: 'refused',
-        refusalCode: 'no_template',
+        refusalCode: decision.code,
         subject: req.subject,
         body: req.body,
       })
@@ -189,21 +210,12 @@ export async function sendOne(
     await appendAudit(db, {
       orgId: req.orgId,
       actor: 'system',
-      action: 'send.no_template',
+      action: `send.${decision.code}`,
       subjectType: 'touch',
       subjectId: refused?.id ?? null,
-      detail: { campaignId: req.campaignId, channel: subject.channel, code: 'no_template' },
+      detail: { campaignId: req.campaignId, channel: subject.channel, code: decision.code },
     }).catch(() => {})
-    return {
-      touchId: refused?.id ?? null,
-      decision: {
-        allowed: false,
-        code: 'no_template',
-        reason: `${subject.channel === 'sms' ? 'An SMS' : 'A WhatsApp message'} is sent from a registered template, and this one has none. Nothing was sent.`,
-        humanCanResolve: false,
-      },
-      sent: false,
-    }
+    return { touchId: refused?.id ?? null, decision, sent: false }
   }
 
   const rows = await db
