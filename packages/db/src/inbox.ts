@@ -428,6 +428,14 @@ export type ReplyReclassifyOutcome =
       readonly reason: 'not_found' | 'opt_out_is_not_a_choice' | 'suppressed' | 'reads_as_opt_out'
     }
 
+/** `replyReclassifyIfStill`'s one refusal more: the kind it was to replace is no longer there. */
+export interface ReplyReclassifyChangedMeanwhile {
+  readonly ok: false
+  readonly reason: 'changed_meanwhile'
+  /** The kind the reply has now — somebody else's, set while the caller was deciding. */
+  readonly current: ReplyKind | null
+}
+
 /**
  * Set a reply's kind to one of the five a person may choose.
  *
@@ -464,6 +472,39 @@ export async function replyReclassify(
     readonly now?: Date
   },
 ): Promise<ReplyReclassifyOutcome> {
+  return reclassify(db, args)
+}
+
+/**
+ * `replyReclassify`, only while the reply still has the kind `expected` —
+ * for the worker's reply triage (apps/agent/src/outreach/classify.ts), whose
+ * model answers seconds after the kind was read. Same guards, same pause and
+ * cancel off `auto_reply`, same audit row; and `changed_meanwhile` when a
+ * person or `classify_reply` set another kind in those seconds, because
+ * theirs is the later judgement. Review round 3, finding 8: the triage wrote
+ * by id alone, outside this path, so a model reading an auto-reply as a
+ * person's relabelled it and paused nobody.
+ */
+export async function replyReclassifyIfStill(
+  db: AgencyDb,
+  args: ReclassifyArgs & { readonly expected: ReplyKind | null },
+): Promise<ReplyReclassifyOutcome | ReplyReclassifyChangedMeanwhile> {
+  return reclassify(db, args, args.expected)
+}
+
+type ReclassifyArgs = Parameters<typeof replyReclassify>[1]
+
+async function reclassify(db: AgencyDb, args: ReclassifyArgs): Promise<ReplyReclassifyOutcome>
+async function reclassify(
+  db: AgencyDb,
+  args: ReclassifyArgs,
+  expected: ReplyKind | null,
+): Promise<ReplyReclassifyOutcome | ReplyReclassifyChangedMeanwhile>
+async function reclassify(
+  db: AgencyDb,
+  args: ReclassifyArgs,
+  expected?: ReplyKind | null,
+): Promise<ReplyReclassifyOutcome | ReplyReclassifyChangedMeanwhile> {
   if ((args.kind as string) === 'opted_out' || !REPLY_HUMAN_KINDS.includes(args.kind)) {
     return { ok: false, reason: 'opt_out_is_not_a_choice' }
   }
@@ -489,6 +530,11 @@ export async function replyReclassify(
       .for('update')
     const row = current[0]
     if (!row) return { ok: false, reason: 'not_found' } as const
+    // `replyReclassifyIfStill`: read under the row lock, so a kind set a
+    // moment ago is seen and stands.
+    if (expected !== undefined && (row.replyKind ?? null) !== expected) {
+      return { ok: false, reason: 'changed_meanwhile', current: (row.replyKind as ReplyKind | null) ?? null } as const
+    }
     if (row.replyKind === 'opted_out') return { ok: false, reason: 'opt_out_is_not_a_choice' } as const
     if (row.replyKind === null && looksLikeOptOut(row.body)) return { ok: false, reason: 'reads_as_opt_out' } as const
 
