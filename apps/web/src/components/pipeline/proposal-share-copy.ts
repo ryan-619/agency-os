@@ -24,11 +24,13 @@ export const SHARE_VIEWS_NOTE =
 
 /**
  * Why the Create button is not offered, in the order the route would refuse
- * — with one exception. A DRAFT whose scan a newer one has superseded is
- * told to regenerate before it is told to mark itself sent: `shareMint`
- * refuses a sent proposal over a superseded scan, and nothing makes a scan
- * current again, so "mark it sent first" was advice that could only end in
- * a second refusal over a proposal now marked sent.
+ * — with one exception. A DRAFT whose evidence is stale, or whose scan a
+ * newer one has superseded, is told so before it is told to mark itself
+ * sent: `shareMint` refuses a sent proposal over either, and nothing makes
+ * a scan current again — a re-scan writes a NEW scan, which supersedes this
+ * one — so "mark it sent first" was advice that could only end in a second
+ * refusal over a proposal now marked sent. Stale before superseded, as the
+ * route orders them for a sent proposal.
  */
 export function shareCreateBlocked(input: {
   readonly status: string
@@ -36,6 +38,9 @@ export function shareCreateBlocked(input: {
   /** A newer successful scan of the company exists, so this proposal's is no longer the one quoted. */
   readonly evidenceSuperseded?: boolean
 }): string | null {
+  if (input.status === 'draft' && input.evidenceStale) {
+    return 'Not while the evidence under this proposal is stale: re-verify before it appears in anything outbound. This draft could not be linked even once marked sent: re-scan the company, generate a fresh proposal, mark that one sent, and link it.'
+  }
   if (input.status === 'draft' && input.evidenceSuperseded) {
     return 'A newer scan exists — regenerate the proposal. This draft quotes an older scan, so it could not be linked even once marked sent: generate a fresh proposal from the latest scan, mark that one sent, and link it.'
   }
