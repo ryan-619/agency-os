@@ -189,7 +189,7 @@ variable and never the value.
 | `RESEND_API_KEY` | the same route's fetch of each received message — a key that can READ received email | `/api/inbound/resend` answers 503 |
 | `SECRETS_KEY` | storing a connector's credential (Settings → Connectors) and re-entering one (Settings → Credentials). **The same value on the worker** | both refuse with 503; Settings → Deployment reads "not set", or "set, not a valid key" |
 | `DOVESOFT_WEBHOOK_SECRET` | DoveSoft's two pushes, a delivery report and a text a contact sends back (see "SMS through DoveSoft"). `openssl rand -hex 32` — hex needs no escaping in a URL; a secret with any other character must be percent-encoded where it stands in `?token=` (a `+` is `%2B`). At least 32 characters | `/api/inbound/dovesoft/dlr` and `/sms` answer 503: no report is recorded, and no text back — a STOP included — reaches this deployment |
-| `DOVESOFT_ORG_ID` | the FALLBACK org (a uuid). A text back is matched against contacts' numbers in every org first, and filed under the one contact anywhere who holds the number; this org is where a text from a number NO contact holds is audited and its STOP suppressed, where an unmatched report or an unreadable push is audited, and where the Slack alarm is filed when a STOP filed under nobody could not be recorded. It never narrows the match | a text from a number no contact holds is logged and filed under no org, and a STOP from it is recorded nowhere: it is answered 500 and logged `OPT-OUT NOT RECORDED`, for a person to record by hand, with no Slack alarm — the error line says `alarm: 'not_raised_no_org'` |
+| `DOVESOFT_ORG_ID` | the FALLBACK org (a uuid). A text back is matched against contacts' numbers in every org first, and filed under the one contact anywhere who holds the number — or, when several do, the one this system texted at it, preferring this org's only when texted contacts sit in several orgs (several still left are each paused, and the text is filed under nobody); this org is where a text from a number NO contact holds is audited and its STOP suppressed, where an unmatched report or an unreadable push is audited, and where the Slack alarm is filed when a STOP filed under nobody could not be recorded. A holder in this org is no evidence on its own: when nobody was texted, it narrows nothing | a text from a number no contact holds is logged and filed under no org, and a STOP from it is recorded nowhere: it is answered 500 and logged `OPT-OUT NOT RECORDED`, for a person to record by hand, with no Slack alarm — the error line says `alarm: 'not_raised_no_org'` |
 
 **`DATABASE_POOL_MAX=1` matters.** Each serverless instance keeps its own pool,
 and they do not share. At the default of 10, a few concurrent instances
@@ -405,8 +405,14 @@ nothing.
 **Its status codes are decisions about retrying.** A message that could not be
 fetched gets 502 and a recording failure 500, so Resend retries both;
 everything the route did read — a non-match, a message with no sender — gets
-200. The generic `/api/inbound/email` answers 200 either way. This one does
-not, because a 2xx for a message nobody read could swallow a "stop".
+200, because a 2xx for a message nobody read could swallow a "stop". The
+generic `/api/inbound/email` keeps the same rule: a recording failure there
+is a 500 too. On both, a reply that said stop and whose recording failed
+once it was matched to a contact also writes a `contact.opt_out_not_recorded`
+row under that contact and raises the Slack opt-out alarm before the 500
+(one that failed before it was matched is logged at error with `alarm:
+'not_raised_unplaced'`), and the error line names the fault's class only,
+never the address or the words.
 
 Two limits, stated rather than discovered:
 

@@ -14,8 +14,7 @@ handling, one-click unsubscribe, a worker heartbeat, and two Vercel crons (a
 nightly rescan and a Slack digest). The agent's own tools went from nine to
 twenty-three. Everything web-side works with no worker; §2 describes each
 piece and §4 the decisions behind them, and DEPLOYING.md carries the release
-checklist, which starts with applying 0018 and then 0019 BEFORE the code that
-reads them.
+checklist, which applies the migrations BEFORE the code that reads them.
 
 **Then SMS through DoveSoft, on migration 0019** (§2, "SMS through DoveSoft"):
 the DLT-registered templates an Indian SMS must be sent from
@@ -28,7 +27,7 @@ tested against a fetch that records and never sends, and against PGlite —
 never against DoveSoft itself, whose push formats and `mobiles` format are
 assumptions to confirm before a real send. Calls
 and WhatsApp over DoveSoft are not built: DoveSoft publishes no API for
-either. Four review rounds, and the follow-ups they left open, have been fixed
+either. Five review rounds, and the follow-ups they left open, have been fixed
 on top of both releases; each fix is stated below where the rule it changed
 lives.
 
@@ -49,9 +48,19 @@ worker upserts a `worker_heartbeats` row (keyed `hostname:pid`) every
 **The web half is LIVE on Vercel** at **https://myagencyos.in** (first
 deployed as `agency-os-tau-murex.vercel.app`), against a Neon Postgres (18.6)
 with Resend for magic links, seeded. The code expects migration **0019**
-(`EXPECTED_MIGRATION`); production was at 0017 when the 0018 release was
-written, and 0018 and then 0019 are applied BEFORE this code deploys, never
-after — DEPLOYING.md, "migrate FIRST", and GO-LIVE.md Part 2b. Proved live: `/api/health` reports
+(`EXPECTED_MIGRATION`), and production is on 0019: it was at 0017 when the
+0018 release was written, and the release run's Vercel build applied 0018
+and then 0019 before `next build` (`tools/vercel-build-migrate.mjs`, under
+`AGENCY_MIGRATE_ON_BUILD=1`). A migration is always applied BEFORE the code
+that reads it deploys, never after — DEPLOYING.md, "migrate FIRST", and
+GO-LIVE.md Part 2b. That is done from GitHub, with no credential on a
+laptop: the hand-run **Production** workflow
+(`.github/workflows/production.yml`, running `tools/production.sh`) has the
+actions `status`, `migrate`, `deploy`, `release` (migrate, then deploy, then
+wait for `/api/health?strict=1` to report the checkout's migration) and
+`worker` (deploy `apps/agent` to Fly and point the web app at it), each but
+`status` confirmed by typing its name; DEPLOYING.md says what each needs.
+Proved live: `/api/health` reports
 `database: ok`, `/signin` renders, `/book/agency` serves the public booking
 page (it 404'd until the seed claimed the slug), and a sign-in request logged
 `magic link sent`. See [DEPLOYING.md](DEPLOYING.md) — including the two things
@@ -154,7 +163,12 @@ one.
   service, which records what its number receives, spoken or TEXTED: its
   inbound SMS STOP wrote no source until review round 3, so every such
   opt-out was stored NULL and `/compliance` counted it as written before
-  0018. A STOP texted to DoveSoft's number is a reply (`reply`).
+  0018. Its `/sms` handler reads a text with `smsTextAsksToStop` — the
+  reading DoveSoft's texts are recorded by — as well as the spoken reader it
+  always used, so STOPALL, UNSUB, CANCEL, END and QUIT texted to it are
+  `voice` phone suppressions (review round 5); with the spoken reader alone
+  they were opt-outs to DoveSoft's webhook and ordinary texts here. A STOP
+  texted to DoveSoft's number is a reply (`reply`).
 - **A refusal is final until an owner lifts it.** `contactsRecordConsent`
   refuses a grant over a recorded refusal (`refused_is_final`), and the rule
   is IN the statement, not only in the read before it: `contactsConsentUpsert`
@@ -686,7 +700,13 @@ The fourteen added with 0018, one line each:
   open now or closed inside it. Below five it prints "insufficient data".
 - **`get_company_timeline`** merges touches, scans with THAT scan's score,
   deal audit rows, meetings, proposals, calls, notes and tasks, newest first.
-  A message is its subject and first line; a note is `note by <name>: "…"`,
+  A message is its subject and first line, except a LinkedIn message
+  `linkedinThreadWithheld` names, which prints only `<channel> message out,
+  <status> — words withheld (<why>)` (review round 5: a person could
+  otherwise copy them from a chat into LinkedIn past every rule Start
+  runs), and then the summary adds "A LinkedIn message’s words are shown
+  only where /tasks would show them — Start checks every send rule first."
+  A note is `note by <name>: "…"`,
   and the summary says a note is a teammate's words, not evidence. A meeting
   is printed in its own zone with the UTC instant beside it.
 - **`get_compliance_summary`** is `complianceSummary` at the ICP's stale
@@ -818,7 +838,7 @@ quiet stretch. Every panel dates evidence from `scans.ran_at` through
 | 5 ✅ | `proposalFromFindings` and `meetingBrief` — the two documents the pipeline writes, pure, refusing stale evidence |
 | 6 ✅ | the AI disclosure, the opt-out/handoff/sentiment readers, the scripted turn, and §5.5's `decideLlmCall` |
 | 0018 release ✅ | the informational signals' words, `diffFindings`, rotting and `pipelineMetrics`, enrolment's gate and draft, the kickoff and renewal templates, the bounce and auto-reply readers, the connector catalog as data, suppression sources; from review, the one stale-threshold reader (`staleAfterDaysOf`) and the pause as its own refusal, with its class and words (`pauseReasonClass`, `pausedSentence`, re-exported by `packages/db`'s inbox); from later review, `htmlToText` (`html-text.ts`, linear time, the one converter both inbound paths use) and the opt-out alarm's Slack payload (`slack-payload.ts`, so the web and the worker post identical bytes) |
-| 0019 release ✅ | DLT (`dlt.ts`): `parseTemplate`, `renderTemplate`, `matchesTemplate` (both judging links and call-back numbers on the rendered text, `smuggledRuns`), `DLT_VAR_MAX_CHARS` (30 code points), TRAI's `PROMOTIONAL_WINDOW` (10:00–21:00 IST, and `hours` for the recipient's own clock), `promotionalBand` (`{ open, india, opensToday }`) and `isIndianNumber`, `smsOptOut`, `parseTemplateCategory`, `normaliseDltHeader`; `TEMPLATE_CHANNELS`, `TemplateFacts` and the two template steps in `decideSend`, and the promotional band's two (a band that never opens, a band not open now) |
+| 0019 release ✅ | DLT (`dlt.ts`): `parseTemplate`, `renderTemplate`, `matchesTemplate` (both judging links and call-back numbers on the rendered text, `smuggledRuns`), `DLT_VAR_MAX_CHARS` (30 code points), TRAI's `PROMOTIONAL_WINDOW` (10:00–21:00 IST, and `hours` for the recipient's own clock), `promotionalBand` (`{ open, india, opensToday, nextOpen }`), `insidePromotionalBand`, `nextOpenMinute` and `isIndianNumber`, `smsOptOut`, `parseTemplateCategory`, `normaliseDltHeader`; `TEMPLATE_CHANNELS`, `TemplateFacts` and the two template steps in `decideSend`, and the promotional band's two (a band that never opens, `band_never_opens`; a band not open now); from review, `SendRefusal.retryAt` and `deferUntil` with its three bounds (`DEFER_FALLBACK_MS`, `DEFER_MAX_MS`, `DEFER_SLOW_MS`) in `send.ts` |
 
 ---
 
@@ -835,8 +855,8 @@ draft go through it. The order is §8.4's, with the steps it does not name
 put where they belong — cold channel → unparseable recipient → suppressed →
 consent (`no_consent`, `consent_revoked`) → **paused → stale evidence →
 bounced** → **no template → template mismatch** (SMS and WhatsApp only,
-0019) → zone → a promotional SMS to a +91 number whose bands never meet
-(`unknown_timezone`, below) → the campaign's quiet hours → the promotional
+0019) → zone → a promotional SMS whose band never opens
+(`band_never_opens`, below) → the campaign's quiet hours → the promotional
 band (also `quiet_hours`) → daily cap → campaign inactive → approval — and
 `packages/core/test/send.test.ts` asserts the ORDER, not just the outcomes,
 in two tables: every channel's, and SMS's with the template steps — the
@@ -926,18 +946,43 @@ else is terminal, stale evidence included. **One band is not the clock**
 (review round 4): a promotional SMS to a +91 number read in a zone whose
 10:00–21:00 never meets IST's at today's clocks — Denver and Phoenix all
 year, Los Angeles on daylight time — has no moment it may go, so it is
-refused `unknown_timezone` (terminal, `humanCanResolve: true`), checked
-right after the zone and before the campaign's quiet hours, with a sentence
-naming the zone and both fixes: set `Asia/Kolkata` on the contact if they
-are in India, or draft again from a service template. Deferring it re-queued
-the row every hour for ever behind "it goes when the band opens", and the
-words would have been months old if it ever went. It reuses
-`unknown_timezone`, already resolvable and terminal at the tick, rather than
-a new code; a zone fixed before the draft is sent makes the same draft
-sendable. "Today" is the UTC offsets in force at the moment of sending,
+refused `band_never_opens` (terminal at the tick, `humanCanResolve: true`,
+worded "promotional band never opens for them"), checked right after the
+zone and before the campaign's quiet hours, with a sentence naming the zone
+and both fixes: set `Asia/Kolkata` on the contact if they are in India, or
+draft again from a service template. Deferring it re-queued the row every
+hour for ever behind "it goes when the band opens", and the words would
+have been months old if it ever went. Round 4 reused `unknown_timezone`,
+which every screen words "no timezone on the contact" — false of a contact
+whose zone is Denver — so review round 5 gave it a code of its own, listed
+in `REFUSALS_A_CORRECTION_RESOLVES` and
+`COMPLIANCE_REFUSAL_HUMAN_CAN_RESOLVE`; a zone fixed before the draft is
+sent makes the same draft sendable. The same code refuses a band that opens
+only inside the campaign's own quiet hours, so that no minute of the day is
+open to both — which would otherwise be deferred an hour at a time for ever
+too — and that sentence names the window and says to narrow it. "Today" is
+the UTC offsets in force at the moment of sending,
 because a daylight-saving change opens or closes the overlap. The default window wraps
 midnight, and the naive comparison is not merely wrong for 21:00–08:00, it is
 inverted.
+
+**A deferral names the minute it may go** (review round 5). A `quiet_hours`
+refusal carries `retryAt`: the first whole minute after now that is outside
+the campaign's quiet hours and, for a promotional SMS, inside the band,
+read at the UTC offsets in force at now (`nextOpenMinute`, which asks each
+of the next 1,440 minutes). `deferUntil(decision, now)` in
+`packages/core/src/send.ts` is what the worker's tick and LinkedIn's Start
+both put in `scheduled_for`, so the two cannot land in different places:
+`retryAt` when it is ahead of now, capped at 24 hours (`DEFER_MAX_MS`); an
+hour (`DEFER_FALLBACK_MS`) when it is missing or not ahead; six hours
+(`DEFER_SLOW_MS`) for the cap and a paused campaign; and null — terminal —
+for every other code. It was a flat hour, and a band half an hour wide (an
+Indian number read in New York or Los Angeles in winter, or in Chicago in
+summer) was stepped over by every retry whose minute past the hour fell
+outside it, for up to ten days. A daylight-saving change between the
+deferral and the retry can make the message late by the size of the change
+or defer it once more, never early, because whoever waits asks every rule
+again. `decisionView` leaves `retryAt` out of what reaches `/approvals`.
 
 **Every outbound message carries a campaign**, because the campaign is where
 the cap and the quiet hours live. Companies and contacts carry an IANA
@@ -985,7 +1030,13 @@ word, `unsub` included, and one token, with an optional `all` before the
 token — `STOP ALL 56161`, `UNSUBSCRIBE ALL ACMEIN` — and a comma, colon or
 dash allowed after the keyword; "reply STOP"; a few SMS sentences, and the
 email reader's whole-message forms restated behind an optional
-please/pls/plz/kindly, the curly apostrophe accepted) as well as by the
+please/pls/plz/kindly and before one optional trailing please, pls, plz,
+thanks, thank you or thx set off by a space, a comma or a full stop, the
+curly apostrophe accepted; a phone's msg, msgs, txt, txts and sms read
+wherever message or text is — "Dont msg me", "no more msgs pls" — and
+"remove me from your/the/this list", with mailing, sms, text, texting or
+contact allowed before "list"; review round 5 found "stop messaging me
+please" read as an ordinary reply) as well as by the
 prose reader every channel gets. Whitespace, punctuation, symbols and emoji
 are stripped from both ENDS only — `STOP)`, `¡STOP!`, `STOP 👍` — never from
 the middle, so "Don't stop! 👍" is still not one (review round 4). The email
@@ -1008,13 +1059,26 @@ sent to an aborted transaction is answered ROLLBACK with no error, which
 drizzle resolves (measured on PGlite): without one, a swallowed failure
 discarded the whole reply while the function returned its id
 (`packages/db/test/inbound-atomic.test.ts`). The deterministic kind is
-written on the row's own INSERT. A stop reply whose whole transaction rolled
+written on the row's own INSERT. A U+0000 in the subject, the body, the From
+or the provider id is stored as U+FFFD on every channel, and the words read
+are the words stored (review round 5): Postgres refuses U+0000 in text, and
+mailparser keeps one decoded from quoted-printable `=00`, so such a reply
+failed its INSERT on every retry and a "stop" sent that way was recorded
+nowhere. Still open: a NUL in an email's Message-ID reaches
+`handleInboundEmail`'s dedupe read unreplaced, before the recorder runs. A
+stop reply whose whole transaction rolled
 back logs `OPT-OUT NOT RECORDED — the reply was rolled back; a provider retry
-records it, otherwise follow up by hand` (ids and the error's name); the
+records it, otherwise follow up by hand` (ids, `inReplyTo` — the message the
+reply answered — and the error's name), except for a raced duplicate: a
+unique violation with a provider id set is 0019's inbound-SMS index refusing
+the second delivery of a STOP the first recorded, and a line telling a
+person to record it by hand would be false. The
 audit rows of such an attempt are not written, so the route's 500 or that
 line is the record until a retry lands — the provider's on the webhook
 routes, and on IMAP the worker's own, since it leaves a message it could not
-record unseen (below). Inbound mail is matched by the Message-ID this system
+record unseen (below); for such a stop the two email webhook routes also
+write `contact.opt_out_not_recorded` and raise the alarm (§2, "The Resend
+inbound route is a READER"). Inbound mail is matched by the Message-ID this system
 sent (unambiguous), then by an address that belongs to exactly ONE contact
 across every org — two orgs with the same address on file is a reply nobody
 can place, and it is dropped and logged rather than filed under the wrong
@@ -1060,7 +1124,14 @@ never against a live IMAP server (the Phase 4 table).
 one row produce one UPDATE that matches. A worker that died mid-send leaves
 a row that says so, and `recoverStuckSends` marks it `failed` with a reason
 — the safe direction; the alternative is guessing the provider was not
-reached and sending it twice. For an answer to a reply it also puts the
+reached and sending it twice. The reason is worded by the row's own channel
+(`STUCK_SEND_ERRORS` in `apps/agent/src/boot/reconcile.ts`): a text "may or
+may not have gone; check the DoveSoft console before drafting it again", an
+email the same with "check the mailbox", and a LinkedIn step names the
+conversation. None says "re-approve to send it again", as the one sentence
+for every channel did: `approveDraft` takes only `awaiting_approval`, so a
+`failed` row is sent again only as a new draft (`LINKEDIN_STEP_STUCK_ERROR`,
+`/tasks`' own stuck-claim sentence, says "draft it again" too). For an answer to a reply it also puts the
 reply's pause back, in the same transaction (`repauseForUnansweredReply`,
 §2, "Replies have a screen").
 
@@ -1191,7 +1262,9 @@ re-draft.
 **The duplicate guard is one rule, applied by the read and by the INSERT's
 own NOT EXISTS.** A `refused` row counts unless its code is one a correction
 or a re-scan resolves (`REFUSALS_A_CORRECTION_RESOLVES`: `bounced`,
-`unparseable_recipient`, `unknown_timezone`, `stale_evidence`, and `paused`
+`unparseable_recipient`, `unknown_timezone`, `band_never_opens` — a zone or
+a quiet window to correct, met only on a row another path wrote, because
+enrolment drafts no SMS — `stale_evidence`, and `paused`
 — a hold, not a no, which stops nothing once a person has lifted it; a
 contact paused NOW is skipped before any row is read) or one the clock
 resolves (`REFUSALS_THE_CLOCK_RESOLVES`: `quiet_hours`, `daily_cap`,
@@ -1351,7 +1424,9 @@ caused — a reason that is exactly `replied <ISO instant>`
 (`pauseReasonClass` is `replied`) — with a `contact.resumed` audit row that
 records the pause's class as `pausedFor`, never its text, which can carry a
 teammate's address or the contact's words into an append-only log (the
-`/contacts` resume records the same). Any other pause — a teammate's, an
+`/contacts` resume records the same, and so does the third writer,
+`dispatchTouch`'s lift of a recovery's re-pause, beside `answerTouchId` —
+below). Any other pause — a teammate's, an
 unsubscribe's, an erasure that could not finish — is somebody else's
 decision, and answering is a 409 `paused_for_another_reason` that sends the
 person to `/contacts`; before, answering an old reply resumed a person
@@ -1394,7 +1469,29 @@ one of `dispatchTouch`'s terminal states goes through; the bounce's cancel
 (`outreachRecordBounce`); and `recoverStuckSends`
 (`apps/agent/src/boot/reconcile.ts`), now one transaction, because an
 answer that "may or may not have gone" must not leave the person live —
-the conservative direction. Two settles are not an ending (`answerEndedBy`):
+the conservative direction. If the provider had taken that answer after
+all, `dispatchTouch`'s correction (`recordRecoveredSend`) lifts the re-pause
+in the same transaction as the `sent` UPDATE (review round 5) — left on, it
+held a person whose reply WAS answered, and answering the reply again from
+`/inbox` resumed them, so a second answer could follow the first. Only
+while it is still that pause (`liftRecoveryPause`): the newest
+`contact.paused` row naming this answer with `answerEnded: 'failed'` is the
+recovery's, no other audit row about the contact is at or after it
+(compared in SQL against its stored `created_at`), because a reply that
+arrived meanwhile kept the recovery's reason (`pauseContact` keeps the
+first) and is unanswered, and the reason is still exactly `replied
+<instant>` (`resumeContact`'s `expectedReason`). It writes `contact.resumed`
+`{ reason: 'the answer to their reply went after all', pausedFor:
+'replied', answerTouchId }`, actor `system`, which `/audit` words "…who had
+been paused by their reply, because the answer to it went after all".
+**One lock order, contact before touch:** `denyDraft` reads the answer
+row, locks the reply's contact (`lockReplyContact`, `FOR UPDATE`) and only
+then UPDATEs the answer, the order the reply, bounce, reclassify and
+erasure writers take, and `recordRecoveredSend` locks the reply's contact
+before its UPDATE too. A deny that locked the answer first could deadlock
+(40P01) with a reply, a bounce or a reclassify for the same person on a
+real Postgres; PGlite has one session and cannot show it, so a source test
+pins the order (`packages/db/test/lock-order.test.ts`). Two settles are not an ending (`answerEndedBy`):
 a clock deferral (`REFUSALS_THE_CLOCK_RESOLVES`), which the tick and the
 LinkedIn step put back `approved`, and a `suppressed` refusal, whose writer
 pauses with the stronger reason itself. The unsubscribe, erasure, reply and
@@ -1402,8 +1499,7 @@ reclassify cancels pause the person with their own reason, which
 `pauseContact` never replaces, so they need no call; nor do the LinkedIn
 step's "I did not send it" and `/tasks`' own stuck-claim recovery, because
 an answer is only ever email — no inbound LinkedIn path exists, and the
-inbox refuses SMS and WhatsApp (`outreach.ts`' comment on the helper still
-names the LinkedIn step as a caller; it is not one). The `replied <instant>`
+inbox refuses SMS and WhatsApp. The `replied <instant>`
 pause returns only when this answer is what resumed them (`reply.answer_drafted`
 says `resumed: true`), nobody resumed them since (no later `contact.resumed`
 row, compared in SQL by id, read after the contact row is LOCKED, so a
@@ -1486,7 +1582,10 @@ the replaced reason's text.) It is returned as
 `InboundOutcome` too (false on a duplicate), so `/api/inbound/email` and
 `/api/inbound/resend` send the `opt_out_not_recorded` Slack event (`path:
 'reply'`) AWAITED, in place of the ordinary reply message, and still answer
-200: a retry would be a duplicate and record nothing more. The worker's IMAP
+200: a retry would be a duplicate and record nothing more. (A stop whose
+whole recording threw is the other case: nothing was stored, so those
+routes answer 500, raising the same alarm first when the recorder had
+matched a contact — §2, "The Resend inbound route is a READER".) The worker's IMAP
 path raises the same alarm now, awaited and before the reply
 triage, through `apps/agent/src/notify.ts` when the worker has
 `SLACK_WEBHOOK_URL` — the same bytes as the web's, built by
@@ -1526,13 +1625,20 @@ pause as `paused` ("This contact was paused a moment ago." plus the class's
 moment ago"; and re-reads the bounce mark. The final `sent` UPDATE matches
 only a row still in flight — `sending`, or the status a direct caller handed
 in — so a row somebody else settled meanwhile is not overwritten, with one
-exception: a row a stuck-send recovery marked `failed` while the provider
-had it (`failed`, `sent_at` and `refusal_code` NULL) is recorded `sent` with
-its `provider_id`, `sent_at` and recipient, and the recovery's "re-approve
-to send it again" error is cleared — the provider's acceptance is better
-evidence than "may or may not have gone", and left `failed` the row could
-not be tied to a reply or a bounce by its Message-ID and a supervised
-re-enrolment drafted the same opener again. Neither that UPDATE nor a
+exception, made by a second UPDATE (`recordRecoveredSend`) that runs only
+when the in-flight one matched nothing: a row a stuck-send recovery marked
+`failed` while the provider had it (`failed`, `sent_at` and `refusal_code`
+NULL) is recorded `sent` with its `provider_id`, `sent_at` and recipient,
+and the recovery's "may or may not have gone; check … before drafting it
+again" error is cleared — the provider's acceptance is better evidence
+than "may or may not have gone", and left `failed` the row could not be
+tied to a reply or a bounce by its Message-ID and a supervised re-enrolment
+drafted the same opener again. For an answer to a reply it locks the
+reply's contact first and lifts the pause the recovery put back (§2,
+"Replies have a screen"). A refusal settled over such a row — this dispatch
+never reached the provider — clears the recovery's error too, unless the
+refusal brings its own (review round 5), because "may or may not have gone"
+is false of it. Neither `sent` UPDATE nor a
 refusal's settle writes `recipient` back to a row whose `contact_id` is now
 NULL. A campaign that bounces past `OUTREACH_BOUNCE_PAUSE_PCT` (default 5;
 30 days, at least 20 people written to) pauses itself — the existing
@@ -1620,9 +1726,10 @@ open and the retry does all of it, and the step's audit row is no longer
 caught, because a caught failure inside a transaction aborts it and the
 COMMIT would undo the rest without a word. **And no other screen prints
 words `/tasks` withholds**: the company page's Conversation panel printed
-every touch's body, the withheld words one click away. `linkedinThreadWithheld`
-(`packages/db/src/linkedin-step.ts`) is `/tasks`' own rule for other
-screens — no subject or body for an outbound LinkedIn message Start has not
+every touch's body, the withheld words one click away, and the agent's
+`get_company_timeline` printed each message's subject and first line.
+`linkedinThreadWithheld` (`packages/db/src/linkedin-step.ts`) is `/tasks`'
+own rule for both — no subject or body for an outbound LinkedIn message Start has not
 handed over (an awaiting, approved, queued, refused or failed row included),
 nor for a handed one whose step is open and whose re-check withholds it;
 a handed message whose step is closed is history, and shows. `/tasks`
@@ -1669,9 +1776,24 @@ From, call numbers, and each email's domain — not only the contact row's.
 `handleInboundEmail` and can send nothing — no second matcher, and the same
 opt-out reader the IMAP listener and `/api/inbound/email` use. Its status codes
 are decisions about retrying: an unfetchable message is 502 and a recording
-failure 500, so Resend retries both; everything it read is 200. The generic
-route's "200 either way" is deliberately not copied, because a 2xx for an
-unread message could swallow a "stop". An HTML-only reply is converted to text
+failure 500, so Resend retries both; everything it read is 200, because a
+2xx for an unread message could swallow a "stop". The generic
+`/api/inbound/email` answered 200 or let a fault escape whole, and since
+review round 5 it keeps the same rule: it catches a recording fault, logs
+the fault's class only — drizzle's message quotes the address and the
+words, and Next logs an escaping error whole — and answers 500 so the
+provider retries. On both routes a stop whose recording threw takes the
+loud path before that 500 (`inboundEmailNotRecorded`, and `raisingOnFault`
+around the Resend reader's recorder, both in
+`apps/web/src/app/api/inbound/email/fault.ts`): a
+`contact.opt_out_not_recorded` row `{ channel: 'email', why:
+'record_failed' }` under the contact, and the awaited alarm naming the
+message the reply answered, or none when it was matched by address. Whose
+it was comes from the recorder's own rolled-back line
+(`keepingRolledBackOptOut`), so nothing is read again from a database that
+just failed; a fault before the recorder ran leaves nothing saying whose,
+and a stop is logged at error with `alarm: 'not_raised_unplaced'`. The
+recorder's lines on both routes go to the web logger. An HTML-only reply is converted to text
 with its lines kept, so a one-word "Stop" above a `<blockquote>` reads as an
 opt-out. The worker's IMAP path uses the same converter now
 (`htmlToText` in `packages/core/src/html-text.ts`), closing what was an open
@@ -1761,13 +1883,17 @@ each slot placement checked by two prefix-sum subtractions, so the sender
 refuses `template_mismatch` whatever wrote the text.
 `PROMOTIONAL_WINDOW` is TRAI's band, 10:00–21:00 IST (not the 09:00 of the
 2010 rules, cited in the file). `promotionalBand(now, zone, recipient)`
-answers `{ open, india, opensToday }`: 10:00–21:00 where the recipient is,
+answers `{ open, india, opensToday, nextOpen }`: 10:00–21:00 where the recipient is,
 for every number, and TRAI's band as well only for a +91 one
 (`isIndianNumber`, through `normalisePhone`, so `0091 98765 43210` is
 Indian and a number with no country code is not — and an unreadable one is
 refused `unparseable_recipient` long before the clock).
 `opensToday` is false when the two never overlap at the offsets in force
-(§2, "The clock is not a refusal"). It replaced `promotionalWindowOpen`,
+(§2, "The clock is not a refusal"). `nextOpen` is the first whole minute
+after now at which the band is open, at those offsets, and null exactly
+when `opensToday` is false; it is the band alone, so the send path asks
+`nextOpenMinute` itself for a minute the campaign's quiet hours leave open
+too (`retryAt`). It replaced `promotionalWindowOpen`,
 which applied IST to every number, Indian or not, and deferred a band that
 never opens for ever. `smsOptOut`
 is the keyword reader (§2, "A reply does four things"). `decideSend` reads
@@ -1798,7 +1924,7 @@ band that never opens — is drafted anyway and reported as `wouldHold`. The
 composer says "would wait" only where the worker waits — `DEFERRED_CODES`
 (`quiet_hours`, `daily_cap`, `campaign_inactive`) — and "would be refused at
 sending … fix it before approving" for any other resolvable hold, a missing
-zone included, which the tick refuses for good. Its Check is `smsDraft`'s
+zone and `band_never_opens` included, which the tick refuses for good. Its Check is `smsDraft`'s
 own dry run (`dryRun: true`, review round 4): every check above in the same
 order, the campaign's status and the live-draft (`already_queued`) read
 included, stopping before the insert with a `SmsDraftCheck`; it used to be
@@ -1905,7 +2031,8 @@ and the AWAITED alarm with no touch and no contact, as for a STOP filed
 under nobody (below). U+0000, which some SMPP gateways decode GSM-7's `@`
 as and Postgres refuses in text, is stored as U+FFFD in an inbound text and
 its message id and in a report's id and reason, so such a push no longer
-fails on every retry.
+fails on every retry — and `recordInboundReply` does the same for every
+inbound reply on every channel (§2, "A reply does four things").
 
 - **A delivery report** (`messageid`/`msgid`, `errorstatus`/`status`,
   `errorreason`): `DELIVRD` and the spelled-out `Delivered` are
@@ -1948,15 +2075,35 @@ fails on every retry.
   read only inside `DOVESOFT_ORG_ID`, was suppressed in the wrong org and
   left them on the list that texted them. `DOVESOFT_ORG_ID` is the FALLBACK,
   never a filter: where a text from a number no contact anywhere holds is
-  filed, and its STOP suppressed. A number held in two orgs is ambiguous
-  even when one of them is `DOVESOFT_ORG_ID`. EXACTLY ONE contact: it goes through
+  filed, and its STOP suppressed. Several holders are narrowed by the
+  evidence (`whoseText`, review round 5) to the contacts this system TEXTED
+  at that number — a `sent` outbound SMS whose recipient reads as that
+  E.164 — and, when those sit in several orgs, to the one in
+  `DOVESOFT_ORG_ID` if exactly one is there. When nobody was texted no org is preferred, so a number
+  held in two orgs is ambiguous even when one of them is `DOVESOFT_ORG_ID`.
+  EXACTLY ONE contact, or exactly one left: it goes through
   `recordInboundReply`, the function an email reply goes through — an
   inbound `sms` touch, the pause, the cancel, the deal forward, and a STOP
   written as a PHONE suppression, source `reply` — and answers **200**,
   having AWAITED the `opt_out_not_recorded` Slack alarm first when the
-  suppression could not be written. None or several: nothing is filed under a
-  guessed person, and `sms.inbound_unmatched` is audited (ids and counts) in
-  every org involved — but a STOP is not dropped, because a phone
+  suppression could not be written. A STOP filed under one contact is also
+  phone-suppressed in every OTHER org holding the number, with an
+  `sms.inbound_unmatched` row there (`why: 'ambiguous'`, `optOut`,
+  `suppressed`), because narrowing the match must not take the suppression
+  away from an org it would have reached. None, or several left (the texted
+  ones when two or more were texted, every holder when none was): nothing is
+  filed under a guessed person, and `sms.inbound_unmatched` is audited (ids
+  and counts) in every org involved — but each of the several is PAUSED
+  `replied <ISO>` (`pauseContact`, so an existing pause keeps its reason)
+  and their queued, awaiting-approval and approved messages on every channel
+  are refused `consent_revoked`, one transaction per org, with `paused` and
+  `cancelledQueued` counts on the row, which `/audit` words. It used to
+  pause nobody, so an approved text to any of them went on the next tick. A
+  fault while holding throws, and the route answers 500 so DoveSoft
+  retries. One edge is left by design: when exactly one of two holders was
+  texted, the reply is filed under them and the other is not paused, though
+  a STOP still suppresses the number in their org. And a STOP is not
+  dropped, because a phone
   suppression is keyed by the number: it is written in every org whose
   contacts carry it, or in `DOVESOFT_ORG_ID`'s when no contact does, and the
   loud path runs where it cannot be — with no contact and no org named,
@@ -1986,11 +2133,22 @@ fails on every retry.
   reached a person only through an error line and an audit row. The
   subject-less `contact.opt_out_not_recorded` row reads on `/audit` "could
   not record an opt-out texted from a number no single contact holds (the
-  number could not be read | recording the text failed) — it is NOT on the
-  suppression list; read the number from the provider's inbound log and
-  record it by hand", where it said "a contact at an unknown company"; the
-  builder is `smsUnplacedOptOutNotification` in the route's
-  `notification.ts`, shared with the fault path above.
+  number could not be read) — it is NOT on the suppression list; read the
+  number from the provider's inbound log and record it by hand", where it
+  said "a contact at an unknown company" — the bracket only for
+  `unparseable_number`. The fault path's `why: 'record_failed'` has its own
+  sentence (review round 5), because that writer never learned whose number
+  it was — the recording threw, most often inside the one matched contact's
+  rolled-back `recordInboundReply` — and "no single contact holds" sent the
+  person following up to record a bare suppression and never pause them:
+  "could not record an opt-out texted in: recording the text failed before
+  anything was written, so whose number it was is not known — it is NOT on
+  the suppression list and nobody was paused; it was refused so DoveSoft
+  retries, but until a retry is recorded, read the number from the
+  provider's inbound log, put it on /suppressions and pause whichever
+  contact holds it". The alarm's builder is
+  `smsUnplacedOptOutNotification` in the route's `notification.ts`, shared
+  with the fault path above.
   Deduplicated by the message id, and the partial unique index settles two
   deliveries that race.
 
@@ -2026,15 +2184,21 @@ WITHOUT the `+` (country code first, `dovesoftMobile`), the common Indian
 gateway form, the one thing to confirm with DoveSoft before a real send.
 Also open: the stale-evidence step judges an SMS draft by its company's
 scan although a template may quote no scan (the composer's dry run shows
-that refusal as it is); two labels lag the promotional band (review round
-4) — `/settings/templates`' hint for a promotional template
-(`CATEGORY_HINT` in `apps/web/src/app/settings/templates/words.ts`) still
-says "Held outside 10:00–21:00 India time" whatever the number, and
-`refusal-words.ts` still calls `unknown_timezone` "no timezone on the
-contact", which a +91 number in a zone whose band never opens now shares;
+that refusal as it is); a daylight-saving change between a deferral and
+its retry can send a promotional SMS late by the size of the change or
+defer it once more (never early), and one to a +91 number in Los Angeles
+deferred across the switch to summer time is then refused
+`band_never_opens`, because the half hour its band had in winter is gone;
 the email opt-out reader still misses decoration at the ends (§2, "A reply
 does four things"); and a GET push logs a text's number and words at the
-platform, by design, until DoveSoft pushes by POST.
+platform, by design, until DoveSoft pushes by POST. The two labels round 4
+left lagging the band are current: `/settings/templates`' hint for a
+promotional template (`CATEGORY_HINT` in
+`apps/web/src/app/settings/templates/words.ts`) reads "Held outside
+10:00–21:00 where the recipient is — and outside 10:00–21:00 India time as
+well for an Indian (+91) number — and the operator drops it to a DND
+number", and `unknown_timezone`'s "no timezone on the contact" is true
+again of everything left under it, now the band has its own code.
 
 ### The pipeline (Phase 5, §8.6)
 
@@ -2543,7 +2707,11 @@ that sends and reads a mailbox, and the page used to tell that deployment
 nothing sends. A worker sending only SMS counts as sending too:
 `workerSends` (`lib/dashboard-view.ts`, which the recorders import) reads
 the row's `sms` beside its `outreach`, the mailbox, so a worker with
-DoveSoft and no SMTP is no longer "not sending" here or on the dashboard.
+DoveSoft and no SMTP is no longer "not sending" here or on the dashboard,
+and the replies recorder says of such a worker "The worker is running with
+email outreach switched off" — its outreach is not off, only its mailbox —
+the dashboard's own words for the same heartbeat (`notReadingBecause`;
+review round 5; `workerSendsSms`).
 And where `deployment().smsInbound` holds, the replies recorder says no
 EMAIL webhook is configured and that texts, a STOP included, still arrive
 through DoveSoft's webhook. Configuration speaks only when the heartbeat cannot be read,
@@ -2608,11 +2776,14 @@ message links to `/inbox`, `/pipeline` or an id-based page, and
 that message — with the 4,000-character cut every message gets — is built in
 `packages/core/src/slack-payload.ts`, because the worker posts it too and a
 person in the channel must not be able to tell which process noticed. Its
-`touchId` is `string | null`, like `contactId` beside it: null for an SMS
-STOP filed under nobody or whose recording threw (§2, "SMS through
-DoveSoft"), whose message says no
-message is on file and links `/compliance` where a filed alarm links
-`/suppressions`; a filed alarm's bytes are unchanged. The webhook
+`touchId` is `string | null`, like `contactId` beside it. With neither — an
+SMS STOP filed under nobody or whose recording threw (§2, "SMS through
+DoveSoft") — the message says no message is on file and that nothing in the
+app holds the number, and links `/compliance` where a filed alarm links
+`/suppressions`. With a contact and no touch — an email stop whose
+recording threw, matched by its sender's address alone — it says no message
+is on file, names the contact and links `/suppressions`, because the
+contact's record holds the address. A filed alarm's bytes are unchanged. The webhook
 URL is a bearer credential `redact()` cannot see, so it is never logged and a
 failure is reported by error NAME or Slack's short token. One attempt, 3 s,
 no retry, and an audit row `notification.sent|failed` with actor `system`.
@@ -2626,11 +2797,13 @@ deal won inside `setProposalStatus`, and that close is not announced again.
 `opt_out_not_recorded` is the exception: it is AWAITED — on the unsubscribe
 and erasure paths, which are already answering 500; on the two email inbound
 routes and DoveSoft's `/api/inbound/dovesoft/sms`, which answer 200 because a
-retry would be a duplicate and record nothing more — except DoveSoft's for a
+retry would be a duplicate and record nothing more — except for a stop
+whose recording threw, which all three answer 500 so the provider
+retries (DoveSoft's since review round 4, the email routes since
+round 5: §2, "The Resend inbound route is a READER"), and DoveSoft's for a
 STOP filed under nobody, which keeps its 500 (400 for an unreadable number)
 so the suppression is retried, and raises the alarm again on each delivery
-that fails again, and for a STOP whose recording threw (500, review round
-4); and on the worker's IMAP
+that fails again; and on the worker's IMAP
 path, before the reply triage (§2, "The opt-out reader runs first"), which is
 the worker's one Slack path. **`campaign_paused` comes from the digest cron**, because the
 pause happens in the worker, which has no Slack path for it: `digestOnce` posts one
@@ -2878,7 +3051,7 @@ absent.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 5243 tests in 190 files: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice + the 0018 release + DoveSoft SMS (0019) + four review rounds
+npm test                 # 5243 <!-- TODO suite count --> tests in 190 files: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice + the 0018 release + DoveSoft SMS (0019) + five review rounds
 npx vitest run --maxWorkers=1 --minWorkers=1   # the same suite on a machine short of memory
 npm run build            # packages, then the Next app
 
@@ -2993,7 +3166,7 @@ process, keeps the finished data directory, and hands each test a COPY via
 a new instance rather than attaching to one. Measured: the whole suite went
 from **290s to 97s** single-worker, with the same tests passing, and
 `apps/voice` alone from 9.8s to 4.4s. The suite has grown several times
-over since: at 0019, after DoveSoft and four review rounds, it is 5,243 tests
+over since: at 0019, after DoveSoft and four review rounds, it is 5,243 <!-- TODO suite count --> tests
 in 190 files, and the full single-worker run at `db09f4d` took 1,590 s —
 every test green. (At 0018 it was 4,246 in 154 and took 1,088 s.)
 
@@ -3012,6 +3185,12 @@ snapshot built from older migrations would carry every earlier one: 0019's
 `message_templates` and `touches.template_id`/`delivery_status`, then 0018's
 `findings.scored` and 0017's `reply_kind` as further lines — and re-checks
 the UTC pin the snapshot could have lost.
+
+**PGlite's clock is millisecond-grained** — 108 of 200 back-to-back reads
+shared a timestamp — so a test that asserts the order of rows stamped by
+`now()` gives each row its own stated moment: the erasure test's suppression
+history did not, its tiebreak was a random uuid, and its order assertion
+failed in CI (`packages/db/test/erasure.test.ts`, `appendAuditAt`).
 
 `packages/core` and `packages/db` compile to `dist/` and are consumed as
 JavaScript, so **run `npx tsc --build` after changing them** or the web app
@@ -3122,6 +3301,19 @@ therefore failed with `Failed to collect page data for /api/health` unless
 production secrets were passed to `docker build`. An image build must not need
 runtime credentials. CI builds the web app with no secrets in the environment
 to keep it that way. Never call `env()` or `getDb()` at module scope.
+
+**Vercel's own builders take a different path through Next from every other
+build.** They switch @vercel/next's new adapter on (`NEXT_ENABLE_ADAPTER=1`),
+and with this app's `output: 'standalone'` its `onBuildComplete` opens an
+`apps/web/.next/next-server.js.nft.json` the build never wrote, so every
+remote build failed after its migration step — the release run that put
+production on 0019 applied both migrations and then deployed nothing. A
+`vercel build` run anywhere else takes the classic path and works. So the
+Production workflow's remote path (`release` with no
+`PRODUCTION_DATABASE_URL`) passes `--build-env NEXT_ENABLE_ADAPTER=0`
+beside `AGENCY_MIGRATE_ON_BUILD=1`, and `deploy` builds on the runner and
+uploads the prebuilt output (`tools/production.sh`); both then wait for
+`/api/health?strict=1` to report the checkout's migration.
 
 **Sign-in reveals nothing about who has access.** Membership is checked inside
 `sendVerificationRequest`, not by returning `false` from the `signIn` callback.
@@ -3418,9 +3610,10 @@ revealed only after the rules pass, because a message a person could copy
 before the rules ran is a message that can go after a refusal — and, for the
 same reason, withheld again on a later read once the send path refuses them
 past approval, the person is paused, or the hand-over is a day old — on
-every screen, not only `/tasks`: the company page's Conversation panel
-applies the same rule (`linkedinThreadWithheld`), because a withheld message
-one click away is not withheld.
+every screen, not only `/tasks`: the company page's Conversation panel and
+the agent's `get_company_timeline` apply the same rule
+(`linkedinThreadWithheld`), because a withheld message one click or one
+question away is not withheld.
 
 **A per-tool review that can only DISABLE, where §6 recommends wildcards that
 ALLOW.** §2's gate section explains why the wildcard is refused; this is what
