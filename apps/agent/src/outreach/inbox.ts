@@ -17,11 +17,21 @@
  *    else is logged and left alone. A reply filed under the wrong company is
  *    a follow-up that reads as nobody having read what they wrote — the exact
  *    outcome §8.4's pause exists to prevent.
- *  - **Process a message twice.** Each UID is marked `\Seen` after handling
- *    and the fetch asks for unseen only, so a reconnect does not replay the
- *    inbox. It means this listener must own the mailbox: a person reading
- *    the same inbox in a mail client marks things seen too, and a reply they
- *    opened first is one this never sees. Documented in .env.example.
+ *  - **Process a message twice.** Each UID is marked `\Seen` once it is
+ *    handled and the fetch asks for unseen only, so a reconnect does not
+ *    replay the inbox. It means this listener must own the mailbox: a person
+ *    reading the same inbox in a mail client marks things seen too, and a
+ *    reply they opened first is one this never sees. Documented in
+ *    .env.example.
+ *  - **Mark seen what was not recorded.** `recordInboundReply` is one
+ *    transaction, so a database fault leaves NO row — and a "stop" marked
+ *    seen after one was never retried and never recorded. A message is
+ *    marked seen when it was handled or never can be (no source, no
+ *    readable sender, a parse that throws); a failure to record it leaves
+ *    it unseen for the next drain, which a timer brings round while the
+ *    mailbox is idle. Bounded: after `INBOUND_MAX_ATTEMPTS` failures it is
+ *    marked seen and logged `INBOUND MESSAGE ABANDONED` at error, for a
+ *    person to handle by hand (`drainUnseen`).
  *  - **Die on one bad email.** Every message is handled in its own try; the
  *    connection is re-established on its own schedule; and nothing here can
  *    stop the worker's other work.
@@ -78,6 +88,10 @@ export interface InboxDeps {
    * none, so the alarm is on wherever the variable is set.
    */
   readonly optOutAlarm?: OptOutAlarm | null
+  /** For tests: the IMAP client. Defaults to an `ImapFlow` on `config`. */
+  readonly connect?: (config: InboxConfig) => InboxClient
+  /** For tests: the idle-time drains' timing. Defaults to `DRAIN_TIMING`. */
+  readonly timing?: DrainTiming
 }
 
 /**
@@ -85,11 +99,66 @@ export interface InboxDeps {
  * Here a missing `optOutAlarm` means none — `startInbox` is what resolves it
  * from the environment, once, and hands it in.
  */
-export type InboundMessageDeps = Omit<InboxDeps, 'config'>
+export type InboundMessageDeps = Omit<InboxDeps, 'config' | 'connect' | 'timing'>
+
+/**
+ * The part of an IMAP client the inbox uses. `ImapFlow` is one; a test
+ * hands in a fake, because the session cannot otherwise be driven without a
+ * mailbox.
+ */
+export interface InboxClient {
+  connect(): Promise<void>
+  getMailboxLock(path: string): Promise<{ release(): void }>
+  idle(): Promise<unknown>
+  noop(): Promise<unknown>
+  logout(): Promise<unknown>
+  search(query: { seen: false }, options: { uid: true }): Promise<number[] | false>
+  fetchOne(uid: string, query: { source: true }, options: { uid: true }): Promise<{ source?: Buffer } | false>
+  messageFlagsAdd(uid: string, flags: string[], options: { uid: true }): Promise<unknown>
+  on(event: 'exists', listener: () => void): unknown
+  off(event: 'exists', listener: () => void): unknown
+}
 
 /** Back-off between reconnects. Starts short, doubles, stops growing at five minutes. */
 const RECONNECT_MIN_MS = 5_000
 const RECONNECT_MAX_MS = 5 * 60_000
+
+/**
+ * How many times one message may fail to be recorded before a drain gives up
+ * on it, marks it seen, and says so at error. In memory, per UID: a restart
+ * forgets the count, and the message is retried as if new — the safe
+ * direction, since the inbound path is idempotent on the reply's Message-ID.
+ */
+export const INBOUND_MAX_ATTEMPTS = 5
+
+export interface DrainTiming {
+  /**
+   * The wait before re-reading a mailbox whose last drain left a message
+   * unseen, for its first failure; it doubles with each further one, so the
+   * attempts span a quarter of an hour rather than five minutes — long
+   * enough for a database to come back. Capped at `refreshMs`.
+   */
+  readonly retryMs: number
+  /**
+   * The longest IDLE runs with nothing to wake it before the mailbox is
+   * re-read anyway. RFC 2177 asks a client to re-issue IDLE inside 29
+   * minutes; this is well inside that, and catches anything an EXISTS that
+   * never arrived would have announced.
+   */
+  readonly refreshMs: number
+}
+
+export const DRAIN_TIMING: DrainTiming = { retryMs: 60_000, refreshMs: 10 * 60_000 }
+
+/**
+ * A message `parseInbound` could not read. It will not read the next time
+ * either, so a drain marks it seen; every other failure leaves it unseen to
+ * be retried. `message` is the parser's error NAME — never its text, which
+ * can quote the mail.
+ */
+export class UnreadableInboundMessage extends Error {
+  override readonly name = 'UnreadableInboundMessage'
+}
 
 /**
  * mailparser INLINES a `message/delivery-status` part into `text` unless told
@@ -235,16 +304,23 @@ function headerText(value: HeaderValue | undefined): string | null {
  * optional triage. Exported so the whole path can be driven without a
  * mailbox; the IMAP session below only fetches and marks seen.
  *
- * Answers null for a message with no readable sender. Throws only what
- * `parseInbound` or `handleInboundEmail` throw — the caller's per-message
- * try owns that; the alarm and the triage never throw out of here.
+ * Answers null for a message with no readable sender. Throws
+ * `UnreadableInboundMessage` when `parseInbound` throws, and whatever
+ * `handleInboundEmail` throws — the caller's per-message try owns both, and
+ * tells them apart: the first never reads, the second may record on a retry.
+ * The alarm and the triage never throw out of here.
  */
 export async function handleInboundMessage(
   source: Buffer | string,
   uid: number | string,
   deps: InboundMessageDeps,
 ): Promise<InboundOutcome | null> {
-  const mail = await parseInbound(source)
+  let mail: Awaited<ReturnType<typeof parseInbound>>
+  try {
+    mail = await parseInbound(source)
+  } catch (err) {
+    throw new UnreadableInboundMessage(err instanceof Error ? err.name : 'UnknownError')
+  }
   if (!mail) {
     deps.log.info('inbound mail had no readable sender; skipped', { uid })
     return null
@@ -309,6 +385,98 @@ export async function handleInboundMessage(
   return outcome
 }
 
+export interface DrainDeps {
+  readonly log: Logger
+  /** One message, start to finish: `handleInboundMessage` with the inbox's deps, in production. */
+  readonly handle: (source: Buffer, uid: number) => Promise<unknown>
+  /**
+   * Failures so far, per UID. The inbox owns it, so it outlives a drain and
+   * a reconnect; a drain deletes a UID's entry once the message is settled.
+   */
+  readonly attempts: Map<number, number>
+  readonly stopped?: () => boolean
+}
+
+/**
+ * Read every unseen message once, and say how soon the mailbox should be
+ * read again.
+ *
+ * A message is marked `\Seen` when it was handled, or when it never can be:
+ * the server returned no source for it (expunged meanwhile), it has no
+ * readable sender (`handleInboundMessage` answers null), or the parser threw
+ * (`UnreadableInboundMessage`). Anything else that throws — a database
+ * fault inside `recordInboundReply`, which rolls the whole reply back, or a
+ * fetch that failed — leaves it UNSEEN, so the next drain tries again: that
+ * is the difference between a "stop" recorded a minute late and one never
+ * recorded at all. Before, every UID was marked seen in a `finally`.
+ *
+ * Bounded. Each failure is counted against its UID, and the
+ * `INBOUND_MAX_ATTEMPTS`th marks it seen and logs `INBOUND MESSAGE
+ * ABANDONED — handle it by hand` at error, with the UID and the error's
+ * name — the mailbox still holds the message; the log holds nothing of it.
+ * Only the FIRST failure of a drain is counted: a database that is down
+ * fails every message behind that one too, and charging each would abandon
+ * the whole inbox to one outage. The messages behind it are still tried, so
+ * one that will never record does not hold up a "stop" that arrived after
+ * it.
+ *
+ * Answers `retryInMs` when something was left unseen — `timing.retryMs`,
+ * doubled for each failure already counted against the message that failed
+ * first, capped at `timing.refreshMs` — and null when nothing was.
+ */
+export async function drainUnseen(
+  c: Pick<InboxClient, 'search' | 'fetchOne' | 'messageFlagsAdd'>,
+  deps: DrainDeps,
+  timing: DrainTiming = DRAIN_TIMING,
+): Promise<{ readonly retryInMs: number | null }> {
+  // UIDs of everything not yet seen. `search` returns them in mailbox
+  // order; `false` means the mailbox is empty, which imapflow types as a
+  // possible result.
+  const uids = await c.search({ seen: false }, { uid: true })
+  if (!uids || uids.length === 0) return { retryInMs: null }
+
+  let charged: number | null = null
+  let leftUnseen = false
+  for (const uid of uids) {
+    if (deps.stopped?.()) break
+    let seen = true
+    try {
+      const msg = await c.fetchOne(String(uid), { source: true }, { uid: true })
+      if (msg && msg.source) await deps.handle(msg.source, uid)
+      deps.attempts.delete(uid)
+    } catch (err) {
+      if (err instanceof UnreadableInboundMessage) {
+        // It will not parse next time either.
+        deps.log.error('could not read an inbound message; marked seen', { uid, error: err.message })
+        deps.attempts.delete(uid)
+      } else {
+        const error = err instanceof Error ? err.name : 'UnknownError'
+        const counts: boolean = charged === null
+        const attempts: number = (deps.attempts.get(uid) ?? 0) + (counts ? 1 : 0)
+        if (counts) charged = attempts
+        if (attempts >= INBOUND_MAX_ATTEMPTS) {
+          deps.attempts.delete(uid)
+          deps.log.error('INBOUND MESSAGE ABANDONED — handle it by hand', { uid, error })
+        } else {
+          if (counts) deps.attempts.set(uid, attempts)
+          deps.log.error('could not record an inbound message; left unseen to retry', {
+            uid,
+            error,
+            attempt: attempts,
+            of: INBOUND_MAX_ATTEMPTS,
+          })
+          seen = false
+          leftUnseen = true
+        }
+      }
+    }
+    if (seen) await c.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true }).catch(() => {})
+  }
+  if (!leftUnseen) return { retryInMs: null }
+  const doublings = Math.max((charged ?? 1) - 1, 0)
+  return { retryInMs: Math.min(timing.retryMs * 2 ** doublings, timing.refreshMs) }
+}
+
 /**
  * Listen for replies until stopped.
  *
@@ -317,13 +485,29 @@ export async function handleInboundMessage(
  */
 export function startInbox(deps: InboxDeps): () => Promise<void> {
   let stopped = false
-  let client: ImapFlow | null = null
+  let client: InboxClient | null = null
   let backoff = RECONNECT_MIN_MS
+  const timing = deps.timing ?? DRAIN_TIMING
+  // Per UID, across drains and reconnects (`drainUnseen`).
+  const attempts = new Map<number, number>()
   // Resolved once, at start: the boot log says whether the alarm is on.
   const handling: InboundMessageDeps = {
     ...deps,
     optOutAlarm: deps.optOutAlarm !== undefined ? deps.optOutAlarm : optOutAlarmFromEnvironment({ db: deps.db, log: deps.log }),
   }
+  const connect =
+    deps.connect ??
+    ((config: InboxConfig): InboxClient =>
+      new ImapFlow({
+        host: config.host,
+        port: config.port,
+        secure: config.secure,
+        auth: { user: config.user, pass: config.password },
+        // imapflow logs at debug level by default, and its log lines include
+        // message envelopes. Off, for §2.3.
+        logger: false,
+        emitLogs: false,
+      }))
 
   const loop = async (): Promise<void> => {
     while (!stopped) {
@@ -343,17 +527,18 @@ export function startInbox(deps: InboxDeps): () => Promise<void> {
   }
 
   const session = async (): Promise<void> => {
-    const c = new ImapFlow({
-      host: deps.config.host,
-      port: deps.config.port,
-      secure: deps.config.secure,
-      auth: { user: deps.config.user, pass: deps.config.password },
-      // imapflow logs at debug level by default, and its log lines include
-      // message envelopes. Off, for §2.3.
-      logger: false,
-      emitLogs: false,
-    })
+    const c = connect(deps.config)
     client = c
+    // `idle()` resolves only when IDLE ends, and imapflow ends it only to
+    // run another command — an EXISTS for new mail is an event, not an end.
+    // So a wake is a NOOP, which breaks the IDLE, and `woken` remembers one
+    // that fired while a drain was running, when there was no IDLE to break.
+    let woken = false
+    const wake = (): void => {
+      woken = true
+      void c.noop().catch(() => {})
+    }
+    c.on('exists', wake)
     await c.connect()
     const lock = await c.getMailboxLock(deps.config.mailbox)
     try {
@@ -361,47 +546,30 @@ export function startInbox(deps: InboxDeps): () => Promise<void> {
 
       // Anything unseen at connect time is handled first: replies that
       // arrived while the worker was down are the ones most in need of a
-      // pause.
-      await drain(c)
-
-      // Then wait. `idle()` resolves when the server reports a change or the
-      // idle window ends; either way, drain and idle again. imapflow emits
-      // 'exists' for new mail, which is what wakes the idle.
+      // pause. Then wait, and drain again on new mail, on the retry a
+      // failed message asked for, or on the refresh — whichever is first.
       while (!stopped) {
-        await c.idle()
+        woken = false
+        const { retryInMs } = await drainUnseen(c, {
+          log: deps.log,
+          handle: (source, uid) => handleInboundMessage(source, uid, handling),
+          attempts,
+          stopped: () => stopped,
+        }, timing)
         if (stopped) break
-        await drain(c)
+        if (woken) continue
+        const timer = setTimeout(wake, retryInMs ?? timing.refreshMs)
+        try {
+          await c.idle()
+        } finally {
+          clearTimeout(timer)
+        }
       }
     } finally {
+      c.off('exists', wake)
       lock.release()
       await c.logout().catch(() => {})
       client = null
-    }
-  }
-
-  const drain = async (c: ImapFlow): Promise<void> => {
-    // UIDs of everything not yet seen. `search` returns them in mailbox
-    // order; `false` means the mailbox is empty, which imapflow types as a
-    // possible result.
-    const uids = await c.search({ seen: false }, { uid: true })
-    if (!uids || uids.length === 0) return
-
-    for (const uid of uids) {
-      if (stopped) return
-      try {
-        const msg = await c.fetchOne(String(uid), { source: true }, { uid: true })
-        if (!msg || !msg.source) continue
-        await handleInboundMessage(msg.source, uid, handling)
-      } catch (err) {
-        deps.log.error('could not handle an inbound message', {
-          uid,
-          error: err instanceof Error ? err.name : 'UnknownError',
-        })
-      } finally {
-        // Seen whatever happened. A message that failed to parse will fail
-        // again; leaving it unseen would make every drain retry it forever.
-        await c.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true }).catch(() => {})
-      }
     }
   }
 

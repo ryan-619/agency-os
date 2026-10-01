@@ -711,6 +711,29 @@ describe('enrolling a campaign', () => {
     expect(await outbound()).toEqual([])
   })
 
+  /**
+   * An SMS campaign is a real thing since 0019 — every SMS is filed under
+   * one — and enrolment never fills it. The refusal says where its messages
+   * are written instead; on any other channel there is nowhere to point.
+   */
+  it('tells an SMS campaign’s refusal where SMS is drafted, and no other channel’s', async () => {
+    await scan()
+    await contact()
+    const sms = await campaign({ name: 'Reminders', channel: 'sms' })
+    expect(await enrol({ campaignId: sms, dryRun: true })).toEqual({
+      ok: false,
+      reason: 'campaign_channel_unsupported',
+      message:
+        'Reminders is on sms, which is not a cold channel. Enrolment writes email and LinkedIn drafts only. ' +
+        'SMS is drafted per person with Draft SMS on /contacts.',
+    })
+    const wa = await campaign({ name: 'WhatsApp', channel: 'whatsapp' })
+    const r = await enrol({ campaignId: wa })
+    expect(r).toMatchObject({ ok: false, reason: 'campaign_channel_unsupported' })
+    if (!r.ok) expect(r.message).not.toContain('Draft SMS')
+    expect(await outbound()).toEqual([])
+  })
+
   it('refuses when there is no active ICP to qualify against', async () => {
     await db.update(schema.icpProfiles).set({ active: false }).where(eq(schema.icpProfiles.orgId, orgId))
     expect(await enrol()).toMatchObject({ ok: false, reason: 'no_icp' })

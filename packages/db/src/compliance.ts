@@ -511,8 +511,9 @@ export interface ComplianceDraftOnStaleEvidence {
   /**
    * Whether the send path refuses this row at sending as `stale_evidence`
    * (unless an earlier rule refuses it first): the scan its words were
-   * written from is past its deadline now. Nobody can approve past it; the
-   * fix is a re-scan and a new draft. False for a row the send path does not
+   * written from is past its deadline now, or a newer successful scan of the
+   * company has superseded it. Nobody can approve past it; the fix is a new
+   * draft from a fresh, latest scan. False for a row the send path does not
    * judge by evidence — no successful scan behind the words, or an answer to
    * a reply — which goes as written unless another rule stops it.
    */
@@ -534,8 +535,15 @@ export interface ComplianceDraftOnStaleEvidence {
  *    were written from an older one that is past its deadline now. A re-scan
  *    after the words were written does not freshen them; the send path
  *    refuses them and `/approvals` blocks them, so they are counted too.
+ *  - `superseded`: the words were written from a scan that is still within
+ *    its deadline, but a newer successful scan of the company exists — it
+ *    may say a gap they name is closed, and only the latest is quoted in
+ *    anything outbound. The send path refuses them `stale_evidence` too
+ *    (`evidenceState` in outreach.ts, r4), so they are counted. Aged AND
+ *    superseded is `rescanned_since`, the plainer of two true reasons, as
+ *    the sender words it.
  */
-export const COMPLIANCE_STALE_EVIDENCE_WHY = Object.freeze(['stale', 'no_evidence', 'rescanned_since'] as const)
+export const COMPLIANCE_STALE_EVIDENCE_WHY = Object.freeze(['stale', 'no_evidence', 'rescanned_since', 'superseded'] as const)
 export type ComplianceStaleEvidenceWhy = (typeof COMPLIANCE_STALE_EVIDENCE_WHY)[number]
 
 export interface ComplianceDraftsOnStaleEvidence {
@@ -576,7 +584,9 @@ export interface ComplianceDraftsOnStaleEvidence {
  * company — the touch's own for a contact-less agent draft, which can only
  * be approved to somebody there — at or before the row's `created_at`,
  * compared in SQL against the stored values, and none for an answer to a
- * reply. The rest — no successful scan behind the words, or an answer — go
+ * reply; refused when that scan is past its deadline or a newer successful
+ * scan has superseded it (`superseded`, asked in SQL as `evidenceState`
+ * asks it). The rest — no successful scan behind the words, or an answer — go
  * as written unless another rule stops them, and the approved, queued and
  * sending ones among them go with nobody looking again. This is the
  * reporting half; refusing is the send
@@ -603,6 +613,28 @@ export async function complianceDraftsOnStaleEvidence(
        AND s.company_id = coalesce(${schema.contacts.companyId}, ${schema.touches.companyId})
        AND s.ok AND s.ran_at <= ${schema.touches.createdAt}
   )`.mapWith(schema.scans.ranAt)
+  // Whether a newer successful scan has superseded that one — the sender's
+  // own question (`evidenceState` in outreach.ts): the same scan, picked the
+  // same way (latest `ok` at or before the words, ORDER BY ran_at DESC
+  // LIMIT 1), then a newer `ok` scan of the company compared against its
+  // STORED `ran_at` and excluded by id. Never a millisecond `Date` read back
+  // and compared, which matched the scan itself (round 2's
+  // `scanSuperseded`). Null with no scan behind the words.
+  const writtenFromSuperseded = sql<boolean | null>`(
+    SELECT EXISTS (
+      SELECT 1 FROM scans newer
+       WHERE newer.org_id = w.org_id AND newer.company_id = w.company_id
+         AND newer.ok AND newer.id <> w.id AND newer.ran_at > w.ran_at
+    )
+      FROM (
+        SELECT s.id, s.org_id, s.company_id, s.ran_at FROM scans s
+         WHERE s.org_id = ${orgId}::uuid
+           AND s.company_id = coalesce(${schema.contacts.companyId}, ${schema.touches.companyId})
+           AND s.ok AND s.ran_at <= ${schema.touches.createdAt}
+         ORDER BY s.ran_at DESC
+         LIMIT 1
+      ) w
+  )`
   const drafts = await db
     .select({
       touchId: schema.touches.id,
@@ -612,6 +644,7 @@ export async function complianceDraftsOnStaleEvidence(
       createdAt: schema.touches.createdAt,
       answersTouchId: schema.touches.answersTouchId,
       writtenFrom,
+      writtenFromSuperseded,
     })
     .from(schema.touches)
     .leftJoin(
@@ -668,9 +701,20 @@ export async function complianceDraftsOnStaleEvidence(
     const answersReply = d.answersTouchId !== null
     // `evidenceAsOfFor`: an answer to a reply is judged by no scan.
     const writtenFromScanAt = answersReply ? null : d.writtenFrom
-    const refused = writtenFromScanAt !== null && isStale(writtenFromScanAt, staleDays, now)
+    const aged = writtenFromScanAt !== null && isStale(writtenFromScanAt, staleDays, now)
+    const superseded = writtenFromScanAt !== null && d.writtenFromSuperseded === true
+    // The sender refuses aged OR superseded (`decideGathered`).
+    const refused = aged || superseded
     const why: ComplianceStaleEvidenceWhy | null =
-      ranAt === null ? 'no_evidence' : isStale(ranAt, staleDays, now) ? 'stale' : refused ? 'rescanned_since' : null
+      ranAt === null
+        ? 'no_evidence'
+        : isStale(ranAt, staleDays, now)
+          ? 'stale'
+          : aged
+            ? 'rescanned_since'
+            : superseded
+              ? 'superseded'
+              : null
     if (!why) continue
     const status = d.status as ComplianceUnsentStatus
     byStatus[status] += 1

@@ -321,7 +321,9 @@ describe('the reporting tools', () => {
       expect(out.summary).toContain(
         'Outbound messages not yet sent on stale or missing evidence: 1 of 1 not yet sent (must be 0) — 0 awaiting approval, ' +
           '0 approved, 1 queued, 0 sending. 0 were written from a scan that is stale now and are refused at sending ' +
-          '(stale_evidence) — waiting to be refused, or to be re-drafted after a re-scan; 1 have no successful scan behind ' +
+          '(stale_evidence) — waiting to be refused, or to be re-drafted after a re-scan; 0 were written from a scan a newer ' +
+          'successful scan has superseded, and are refused at sending too (stale_evidence) — waiting to be refused, or to be ' +
+          're-drafted from the latest scan; 1 have no successful scan behind ' +
           'them or answer a reply, so the send path does not judge them by evidence and they go as written unless another ' +
           'rule stops them — 1 of those with nobody looking again (approved, queued or sending).',
       )
@@ -349,7 +351,31 @@ describe('the reporting tools', () => {
       expect(out.summary).toContain('0 of those with nobody looking again')
       expect((out.data as { draftsOnStaleEvidence: Record<string, unknown> }).draftsOnStaleEvidence).toMatchObject({
         count: 2, refusedAtSending: 2, notJudgedAtSending: 0, notJudgedNoFurtherLook: 0,
-        byWhy: { stale: 2, no_evidence: 0, rescanned_since: 0 },
+        byWhy: { stale: 2, no_evidence: 0, rescanned_since: 0, superseded: 0 },
+      })
+    })
+
+    // Round 4: the send path refuses words written from a scan that is still
+    // fresh once a newer successful scan exists. Counted, and said apart —
+    // "a scan that is stale now" would be false about them.
+    it('says words a newer scan has superseded are refused at sending too, apart from stale ones', async () => {
+      const [contact] = await db.insert(schema.contacts).values({ orgId, companyId, email: 'p@rentman.io' }).returning({ id: schema.contacts.id })
+      const quoted = new Date(Date.now() - 3 * DAY)
+      await db.insert(schema.scans).values({ orgId, companyId, ranAt: quoted, ok: true })
+      await db.insert(schema.scans).values({ orgId, companyId, ranAt: new Date(Date.now() - DAY), ok: true })
+      await db.insert(schema.touches).values({
+        orgId, companyId, contactId: contact!.id, channel: 'email', direction: 'out', status: 'approved',
+        createdAt: new Date(quoted.getTime() + 3_600_000), approvedBy: userId, approvedAt: new Date(quoted.getTime() + 3_600_000),
+      })
+      const out = await run(getComplianceSummary, {})
+      if (!out.ok) throw new Error(out.message)
+      expect(out.summary).toContain('0 were written from a scan that is stale now and are refused at sending (stale_evidence)')
+      expect(out.summary).toContain(
+        '1 were written from a scan a newer successful scan has superseded, and are refused at sending too (stale_evidence)',
+      )
+      expect((out.data as { draftsOnStaleEvidence: Record<string, unknown> }).draftsOnStaleEvidence).toMatchObject({
+        count: 1, refusedAtSending: 1, notJudgedAtSending: 0,
+        byWhy: { stale: 0, no_evidence: 0, rescanned_since: 0, superseded: 1 },
       })
     })
 

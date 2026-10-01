@@ -1298,7 +1298,14 @@ export type DraftDecision =
   | { readonly ok: true; readonly touch: TouchRow }
   | {
       readonly ok: false
-      readonly reason: 'not_found' | 'already_decided' | 'no_such_contact' | 'no_such_campaign' | 'wrong_company' | 'wrong_channel'
+      readonly reason:
+        | 'not_found'
+        | 'already_decided'
+        | 'no_such_contact'
+        | 'no_such_campaign'
+        | 'wrong_company'
+        | 'wrong_channel'
+        | 'rendered_for_another'
     }
 
 /**
@@ -1349,6 +1356,18 @@ export async function approveDraft(
   // elsewhere is a claim about the wrong company.
   if (touch.companyId && contact.companyId !== touch.companyId) {
     return { ok: false, reason: 'wrong_company' }
+  }
+
+  // On SMS and WhatsApp the words are a registered template with each slot
+  // filled FOR ONE PERSON — their name, their meeting — and the row names
+  // them. The approver chooses the recipient of an email draft (one from
+  // chat is written to nobody); here the choice was made when the body was
+  // rendered, and approving it to a colleague sends them a text that greets
+  // somebody else. /approvals offers only that person, but a direct call to
+  // the route does not go through its list. A row whose contact is gone
+  // (NULL) was rendered for somebody too, and may go to nobody.
+  if (TEMPLATE_CHANNELS.has(touch.channel as Channel) && touch.contactId !== contact.id) {
+    return { ok: false, reason: 'rendered_for_another' }
   }
 
   const campaignRows = await db
@@ -2115,8 +2134,9 @@ export async function recordInboundReply(
     })
   } catch (err) {
     // Rolled back: nothing about this reply was stored. A webhook's provider
-    // retries it; the worker's IMAP path marks the message seen and does
-    // not. For a "stop" that is §2.1's obligation unmet, so it is said out
+    // retries it; the worker's IMAP path leaves the message unseen and
+    // retries it, a bounded number of times (`drainUnseen`). Until a retry
+    // records it, a "stop" is §2.1's obligation unmet, so it is said out
     // loud — ids and a reason class, never the address or the words.
     if (optedOut) {
       log.error('OPT-OUT NOT RECORDED — the reply was rolled back; a provider retry records it, otherwise follow up by hand', {

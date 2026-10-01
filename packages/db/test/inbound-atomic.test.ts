@@ -177,9 +177,10 @@ describe('an inbound reply, a fault, and the retry', () => {
 
   /**
    * §2.1's Phase 4 obligation, for the delivery that rolled back: a "stop"
-   * that was not stored is said out loud. The webhook's provider retries it;
-   * the worker's IMAP path marks the message seen and does not, so the line
-   * is what a person sees. Ids and a reason class — no address, no words.
+   * that was not stored is said out loud. The webhook's provider retries it,
+   * and the worker's IMAP path leaves it unseen and retries it a bounded
+   * number of times; until one records it, and after the last, the line is
+   * what a person sees. Ids and a reason class — no address, no words.
    */
   it('says OPT-OUT NOT RECORDED when a stop reply is rolled back, and nothing for an ordinary one', async () => {
     await failOnce(test.pg, { table: 'contacts', event: 'UPDATE' })

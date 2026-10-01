@@ -118,7 +118,7 @@ describe('stale or missing evidence, split by what the send path does at sending
     expect(byId.get(noScan.id)).toEqual(['no_evidence', false])
     expect(out.count).toBe(5)
     expect(out.unsent).toBe(6)
-    expect(out.byWhy).toEqual({ stale: 4, no_evidence: 1, rescanned_since: 0 })
+    expect(out.byWhy).toEqual({ stale: 4, no_evidence: 1, rescanned_since: 0, superseded: 0 })
     expect(out.refusedAtSending).toBe(2)
     expect(out.notJudgedAtSending).toBe(3)
     // Of the three, the answer waits on a person; the queued and the sending one do not.
@@ -173,10 +173,87 @@ describe('stale or missing evidence, split by what the send path does at sending
     await draft(r, 19, 'queued')
     const never = await companyWith('never.test', [])
     await draft(never, 1, 'approved')
+    const sup = await companyWith('superseded.test', [5, 1])
+    await draft(sup, 3, 'approved')
     const s = await complianceSummary(db, orgId, { staleDays: STALE_DAYS, now: NOW })
     expect(s.draftsOnStaleEvidence).toMatchObject({
-      count: 2, refusedAtSending: 1, notJudgedAtSending: 1, notJudgedNoFurtherLook: 1,
-      byWhy: { stale: 0, no_evidence: 1, rescanned_since: 1 },
+      count: 3, refusedAtSending: 2, notJudgedAtSending: 1, notJudgedNoFurtherLook: 1,
+      byWhy: { stale: 0, no_evidence: 1, rescanned_since: 1, superseded: 1 },
+    })
+  })
+
+  /**
+   * Round 4 made the send path refuse `stale_evidence` when the scan the
+   * words were written from is still FRESH but a newer successful scan
+   * exists: the newer one may say a gap they name is closed. The count did
+   * not list those rows, so /compliance said zero while the sender refused.
+   */
+  describe('superseded evidence', () => {
+    it('lists words written from a fresh scan a newer successful one has superseded, refused at sending', async () => {
+      // Written 3 days ago from the scan 5 days ago; re-scanned yesterday. Neither scan is past 14 days.
+      const r = await companyWith('superseded.test', [5, 1])
+      const t = await draft(r, 3, 'queued')
+
+      const out = await complianceDraftsOnStaleEvidence(db, orgId, STALE_DAYS, NOW)
+      expect(out.rows.map((x) => [x.touchId, x.why, x.refusedAtSending])).toEqual([[t.id, 'superseded', true]])
+      expect(out.rows[0]!.writtenFromScanAt?.toISOString()).toBe(ago(5).toISOString())
+      expect(out.rows[0]!.lastOkScanAt?.toISOString()).toBe(ago(1).toISOString())
+      expect(out).toMatchObject({ count: 1, refusedAtSending: 1, notJudgedAtSending: 0, notJudgedNoFurtherLook: 0 })
+      expect(out.byWhy).toEqual({ stale: 0, no_evidence: 0, rescanned_since: 0, superseded: 1 })
+
+      // The sender agrees, row by row.
+      const preview = await previewSend(db, { orgId, campaignId, contactId: r.contactId, writtenAt: evidenceAsOfFor(t), now: NOW })
+      if (!preview.ok) throw new Error(preview.message)
+      expect(preview.facts.evidenceStale).toBe(true)
+    })
+
+    it('does not list words written from the latest scan, or from one only a FAILED scan came after', async () => {
+      const latest = await companyWith('latest.test', [5, 1])
+      const fromLatest = await draft(latest, 0.5, 'queued')
+      // A newer scan that did not reach the site observed nothing and supersedes nothing.
+      const blocked = await companyWith('blocked.test', [5])
+      await db.insert(schema.scans).values({ orgId, companyId: blocked.companyId, ranAt: ago(1), ok: false })
+      const fromBlocked = await draft(blocked, 3, 'queued')
+
+      const out = await complianceDraftsOnStaleEvidence(db, orgId, STALE_DAYS, NOW)
+      expect(out.rows).toEqual([])
+      for (const [t, to] of [[fromLatest, latest], [fromBlocked, blocked]] as const) {
+        const preview = await previewSend(db, { orgId, campaignId, contactId: to.contactId, writtenAt: evidenceAsOfFor(t), now: NOW })
+        if (!preview.ok) throw new Error(preview.message)
+        expect(preview.facts.evidenceStale, t.id).toBe(false)
+      }
+    })
+
+    /**
+     * `ran_at` is `DEFAULT now()`, stored to the microsecond. A scan read
+     * back as a millisecond `Date` and compared in SQL is EARLIER than its
+     * own stored value, so it "superseded" itself — the trap round 2 found
+     * in the share link. Compared stored against stored, with the scan
+     * excluded by id, a scan never supersedes itself.
+     */
+    it('never counts a scan as superseding itself, with ran_at and created_at stored to the microsecond', async () => {
+      const [c] = await db.insert(schema.companies).values({ orgId, domain: 'micro.test', timeZone: 'Europe/London' }).returning({ id: schema.companies.id })
+      const [p] = await db.insert(schema.contacts).values({ orgId, companyId: c!.id, email: 'p@micro.test' }).returning({ id: schema.contacts.id })
+      await db.insert(schema.scans).values({ orgId, companyId: c!.id, ok: true })
+      const [t] = await db
+        .insert(schema.touches)
+        .values({ orgId, companyId: c!.id, contactId: p!.id, campaignId, channel: 'email', direction: 'out', status: 'queued', subject: 'S', body: 'words' })
+        .returning({ id: schema.touches.id, createdAt: schema.touches.createdAt, answersTouchId: schema.touches.answersTouchId })
+      const at = new Date(Date.now() + DAY)
+      const out = await complianceDraftsOnStaleEvidence(db, orgId, STALE_DAYS, at)
+      expect(out.rows).toEqual([])
+      const preview = await previewSend(db, { orgId, campaignId, contactId: p!.id, writtenAt: evidenceAsOfFor(t!), now: at })
+      if (!preview.ok) throw new Error(preview.message)
+      expect(preview.facts.evidenceStale).toBe(false)
+    })
+
+    /** Aged AND superseded is `rescanned_since` — the plainer of two true reasons, as the sender words it. */
+    it('calls words that are both aged and superseded rescanned_since, once', async () => {
+      const r = await companyWith('both.test', [20, 1])
+      await draft(r, 19, 'awaiting_approval')
+      const out = await complianceDraftsOnStaleEvidence(db, orgId, STALE_DAYS, NOW)
+      expect(out.byWhy).toEqual({ stale: 0, no_evidence: 0, rescanned_since: 1, superseded: 0 })
+      expect(out.refusedAtSending).toBe(1)
     })
   })
 })

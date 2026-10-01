@@ -41,15 +41,26 @@ export function smsReplyNotification(outcome: InboundSmsOutcome): Extract<Notifi
  * reply). AWAITED by the route. Null for every other outcome, including a
  * retry, which answers `optOutNotRecorded: false`.
  *
- * Only for a text filed under a contact: the event names the message the
- * request arrived on, and a STOP from a number no single contact holds has
- * no message row. That case is answered 500 so DoveSoft retries the
- * suppression, and the recorder's audit row and error line record it.
+ * A STOP filed under a contact names the message it arrived on. One from a
+ * number no single contact holds — nobody, several people, or a number that
+ * is not E.164 — has no message row and no contact, so it goes with
+ * `touchId: null` and `contactId: null`, and the message links to
+ * /compliance rather than to anything built from the number. It is filed
+ * under `unplacedOrgId`, the deployment's `DOVESOFT_ORG_ID` — the org the
+ * recorder audits such a push under — and is null without one: the
+ * notification's audit row needs an org, and the route then says in its
+ * error line that no alarm was raised.
  */
 export function smsOptOutNotRecordedNotification(
   outcome: InboundSmsOutcome,
+  unplacedOrgId: string | null,
 ): Extract<NotificationEvent, { kind: 'opt_out_not_recorded' }> | null {
-  if (outcome.matched !== 'contact' || outcome.duplicate || !outcome.optOutNotRecorded) return null
+  if (!outcome.optOutNotRecorded) return null
+  if (outcome.matched === 'none') {
+    if (unplacedOrgId === null) return null
+    return { kind: 'opt_out_not_recorded', orgId: unplacedOrgId, touchId: null, contactId: null, path: 'reply' }
+  }
+  if (outcome.duplicate) return null
   return {
     kind: 'opt_out_not_recorded',
     orgId: outcome.orgId,

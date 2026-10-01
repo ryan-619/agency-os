@@ -37,4 +37,17 @@ describe('/compliance on messages waiting to go on stale or missing evidence', (
     expect(block).toContain("r.why === 'rescanned_since'")
     expect(prose).toContain('refused — stale evidence')
   })
+
+  /**
+   * Round 4: the sender also refuses words written from a scan that is still
+   * fresh when a newer successful scan exists. The count lists those as
+   * `superseded`; the page names the reason per row and in its rule, rather
+   * than leaving a listed row its prose does not account for.
+   */
+  it('words a row listed because a newer scan superseded the one its words quote', () => {
+    expect(block).toContain("r.why === 'superseded'")
+    expect(prose).toContain('superseded by the newer scan of')
+    expect(prose).toContain('or that a newer successful scan has superseded')
+    expect(prose).toContain('and when a newer successful scan has superseded it')
+  })
 })
