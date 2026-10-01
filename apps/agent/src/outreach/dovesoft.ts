@@ -259,15 +259,15 @@ export function createDoveSoftProvider(config: DoveSoftConfig): MessageProvider 
         throw new DoveSoftError(
           'unreachable',
           timedOut
-            ? `DoveSoft did not answer within ${Math.round(timeoutMs / 1000)} seconds. The text may or may not have been accepted — check the DoveSoft console before approving it again.`
-            : 'DoveSoft could not be reached. The text may or may not have been accepted — check the DoveSoft console before approving it again.',
+            ? `DoveSoft did not answer within ${Math.round(timeoutMs / 1000)} seconds. The text may or may not have been accepted — check the DoveSoft console before it is sent again.`
+            : 'DoveSoft could not be reached. The text may or may not have been accepted — check the DoveSoft console before it is sent again.',
         )
       }
 
       if (!res.ok) {
         throw new DoveSoftError(
           'http',
-          `DoveSoft answered HTTP ${res.status}; the text was not confirmed as accepted. Check the DoveSoft console before approving it again.`,
+          `DoveSoft answered HTTP ${res.status}; the text was not confirmed as accepted. Check the DoveSoft console before it is sent again.`,
           res.status,
         )
       }
@@ -284,7 +284,7 @@ export function createDoveSoftProvider(config: DoveSoftConfig): MessageProvider 
       if (providerId === null) {
         throw new DoveSoftError(
           'unreadable_response',
-          `DoveSoft answered HTTP ${res.status} without a message id this worker can read; the text was not confirmed as accepted. Check the DoveSoft console before approving it again.`,
+          `DoveSoft answered HTTP ${res.status} without a message id this worker can read; the text was not confirmed as accepted. Check the DoveSoft console before it is sent again.`,
           res.status,
         )
       }
