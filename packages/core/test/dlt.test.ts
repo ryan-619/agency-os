@@ -108,6 +108,86 @@ describe('rendering', () => {
     expect(renderTemplate('See {#url#}', ['https://x.co/a']).ok).toBe(true)
   })
 
+  /**
+   * Review round 4: a bare domain, a shortener, a call-back number, or a link split across two
+   * adjacent slots all rendered. DLT needs links and call-back numbers to be part of the registered
+   * template, so the RENDERED text is judged: a link or a phone-number-shaped run that a plain
+   * slot contributes to — alone or joined to the text beside it — is refused.
+   */
+  it.each([
+    ['a shortener', 'Your report: {#var#}', ['tinyurl.com/abc'], 'link'],
+    ['another shortener', 'Your report: {#var#}', ['bit.ly/x'], 'link'],
+    ['a bare domain', 'Your report: {#var#}', ['acme.in'], 'link'],
+    ['a bare domain under a second-level suffix', 'Your report: {#var#}', ['ACME.co.in'], 'link'],
+    ['a WhatsApp click-to-chat link', 'Your report: {#var#}', ['wa.me/919876543210'], 'link'],
+    ['a link split across adjacent slots', 'Hi {#var#}{#var#}, thanks.', ['https:/', '/evil.example/x'], 'link'],
+    ['a domain split across adjacent slots', 'Hi {#var#}{#var#}, thanks.', ['tinyurl', '.com/abc'], 'link'],
+    ['a domain finished by the literal text', 'Visit {#var#}.com/offer today', ['tinyurl'], 'link'],
+    ['a scheme the template does not name', 'See {#var#}', ['ftp://acme/x'], 'link'],
+    ['a call-back number', 'Your report: {#var#}', ['call +91 98765 43210'], 'number'],
+    ['ten bare digits', 'Your report: {#var#}', ['9876543210'], 'number'],
+    ['a landline with its code in brackets', 'Your report: {#var#}', ['(022) 2345 6789'], 'number'],
+    ['a toll-free number with dashes', 'Your report: {#var#}', ['1800-123-4567'], 'number'],
+    ['a number split across adjacent slots', 'Call {#var#} {#var#}', ['98765', '43210'], 'number'],
+    ['a number finished by the literal text', 'Call 98765 {#var#}', ['43210'], 'number'],
+    ['a number in an {#alphanumeric#} slot', 'Ref {#alphanumeric#}', ['9876543210'], 'number'],
+  ])('refuses %s', (_why, body, vars, what) => {
+    const r = renderTemplate(body, vars)
+    expect(r).toMatchObject({ ok: false, reason: 'var_wrong_kind', slot: 1 })
+    if (r.ok) return
+    expect(r.message).toMatch(what === 'link' ? /a link/ : /a phone number/)
+    for (const v of vars) expect(r.message).not.toContain(v)
+    // And the scrub refuses the same text, whatever renders it.
+    const queue = [...vars]
+    const text = body.replace(/\{#[a-z]+#\}/gi, () => queue.shift() ?? '')
+    expect(matchesTemplate(text, body)).toBe(false)
+  })
+
+  it.each([
+    ['an amount', 'Paid Rs. {#var#} today', ['1,200']],
+    ['an amount in lakhs', 'Paid {#var#} today', ['₹1,20,000']],
+    ['an amount with paise', 'Paid Rs {#var#} today', ['123456.78']],
+    ['an amount after the currency', 'Paid {#var#} today', ['Rs 1500000']],
+    ['a date with dashes', 'Your call on {#var#}', ['15-09-2026']],
+    ['a date with dots', 'Your call on {#var#}', ['15.09.2026']],
+    ['an ISO date', 'Your call on {#var#}', ['2026-09-15']],
+    ['a date with slashes', 'Your call on {#var#}', ['15/09/2026']],
+    ['a date and a time', 'Your call on {#var#}', ['15-09-2026 10:30 IST']],
+    ['a time range', 'Your slot is {#var#}', ['10.30-11.30']],
+    ['a short reference', 'Ref {#var#}', ['123456']],
+    ['a reference glued to its prefix', 'Ref {#var#}', ['INV1234567']],
+    ['an honorific with no space', 'Hi {#var#}', ['Dr.Rao']],
+    ['initials', 'Hi {#var#}', ['A.K. Sharma']],
+    ['a version', 'Update {#var#}', ['v2.0.1']],
+    ['a file name', 'See {#var#}', ['report.pdf']],
+    ['an email address', 'Mail {#var#}', ['priya.in@acme.com']],
+    ['a name beside the literal full stop', 'Hi {#var#}.Your call is confirmed.', ['Priya']],
+  ])('does not refuse %s', (_why, body, vars) => {
+    const r = renderTemplate(body, vars)
+    expect(r.ok).toBe(true)
+    expect(r.ok && matchesTemplate(r.text, body)).toBe(true)
+  })
+
+  it('leaves a link or a number that is the template’s own fixed text alone', () => {
+    const body = 'Call 1800 123 4567 or visit https://acme.in/offers, {#var#}.'
+    const r = renderTemplate(body, ['Priya'])
+    expect(r).toEqual({ ok: true, text: 'Call 1800 123 4567 or visit https://acme.in/offers, Priya.' })
+    expect(r.ok && matchesTemplate(r.text, body)).toBe(true)
+  })
+
+  it('lets a slot registered for a link or a number carry one', () => {
+    expect(renderTemplate('See {#url#}', ['https://acme.in/r/123456789']).ok).toBe(true)
+    expect(renderTemplate('Call {#cbn#}', ['+919876543210']).ok).toBe(true)
+    expect(renderTemplate('Order {#numeric#}', ['4058123987']).ok).toBe(true)
+    expect(matchesTemplate('See https://acme.in/r/123456789', 'See {#url#}')).toBe(true)
+    expect(matchesTemplate('Call +919876543210', 'Call {#cbn#}')).toBe(true)
+  })
+
+  it('names the first slot that makes the link, and never the value', () => {
+    const r = renderTemplate('Hi {#var#}, {#var#}{#var#}', ['Priya', 'bit', '.ly/x'])
+    expect(r).toMatchObject({ ok: false, reason: 'var_wrong_kind', slot: 2 })
+  })
+
   it('holds a pre-tagged slot to its kind', () => {
     expect(renderTemplate('OTP {#numeric#}', ['12a4'])).toMatchObject({ ok: false, reason: 'var_wrong_kind' })
     expect(renderTemplate('OTP {#numeric#}', ['1234']).ok).toBe(true)

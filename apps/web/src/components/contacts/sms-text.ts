@@ -36,8 +36,10 @@ const codePoints = (s: string): number => Array.from(s).length
  * Fill the slots for the preview. A value is shown as typed; a slot with
  * nothing in it shows its `{#kind#}`, so the person sees what is missing
  * where it is missing. Blank and over-long values are reported here because
- * they are the two every person meets; the rest — a link in a plain
- * `{#var#}`, digits in a `{#numeric#}` — is the server's to say.
+ * they are the two every person meets; the rest — a link or a phone number
+ * a plain `{#var#}` puts in the message, alone or with its neighbours, and
+ * letters in a `{#numeric#}` — is the server's to say, because core judges
+ * the rendered text and its rules are not restated here.
  */
 export function renderPreview(parts: readonly ComposerPart[], values: readonly string[]): ComposerRender {
   let text = ''

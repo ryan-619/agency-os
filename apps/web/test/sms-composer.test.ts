@@ -42,12 +42,26 @@ describe('the live render', () => {
   })
 
   it('renders filled values exactly as core renders them', () => {
-    const values = ['Priya', 'rentman.io']
+    const values = ['Priya', 'Rentman']
     const r = renderPreview(parts(BODY), values)
     const core = renderTemplate(BODY, values)
     expect(core.ok && core.text).toBe(r.text)
     expect(r.complete).toBe(true)
     expect(r.problems).toEqual([])
+  })
+
+  /**
+   * A link or a phone number in a plain slot is the server's to refuse — core judges the rendered
+   * text, so a value can make one with its neighbour — and the preview shows the words as typed.
+   * A company's DOMAIN is a link to an operator's scrub; name the company instead.
+   */
+  it('leaves a link or a number in a plain slot to the server, which refuses it with a sentence', () => {
+    for (const values of [['Priya', 'rentman.io'], ['Priya', 'call 98765 43210']]) {
+      expect(renderPreview(parts(BODY), values).problems).toEqual([])
+      const core = renderTemplate(BODY, values)
+      expect(core).toMatchObject({ ok: false, reason: 'var_wrong_kind', slot: 2 })
+      if (!core.ok) expect(core.message).toMatch(/^Variable 2: it puts a (link|phone number) in the message/)
+    }
   })
 
   it('counts a value in code points, as the operator does, and says when one is too long', () => {
