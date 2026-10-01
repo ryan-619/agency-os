@@ -188,8 +188,8 @@ variable and never the value.
 | `RESEND_WEBHOOK_SECRET` | replies through Resend (see "Replies through Resend"): the endpoint's `whsec_…` signing secret | `/api/inbound/resend` answers 503 |
 | `RESEND_API_KEY` | the same route's fetch of each received message — a key that can READ received email | `/api/inbound/resend` answers 503 |
 | `SECRETS_KEY` | storing a connector's credential (Settings → Connectors) and re-entering one (Settings → Credentials). **The same value on the worker** | both refuse with 503; Settings → Deployment reads "not set", or "set, not a valid key" |
-| `DOVESOFT_WEBHOOK_SECRET` | DoveSoft's two pushes, a delivery report and a text a contact sends back (see "SMS through DoveSoft"). `openssl rand -base64 32`, at least 32 characters | `/api/inbound/dovesoft/dlr` and `/sms` answer 503: no report is recorded, and no text back — a STOP included — reaches this deployment |
-| `DOVESOFT_ORG_ID` | the org (a uuid) an unmatched report or a text from a number no contact holds is audited under, where a STOP from such a number is suppressed, and where the Slack alarm is filed when that STOP could not be recorded | such a text is logged and filed under no org; a STOP from it is recorded only in an org where a contact holds the number, and one that could not be recorded raises no Slack alarm — the error line says `alarm: 'not_raised_no_org'` |
+| `DOVESOFT_WEBHOOK_SECRET` | DoveSoft's two pushes, a delivery report and a text a contact sends back (see "SMS through DoveSoft"). `openssl rand -hex 32` — hex needs no escaping in a URL; a secret with any other character must be percent-encoded where it stands in `?token=` (a `+` is `%2B`). At least 32 characters | `/api/inbound/dovesoft/dlr` and `/sms` answer 503: no report is recorded, and no text back — a STOP included — reaches this deployment |
+| `DOVESOFT_ORG_ID` | the FALLBACK org (a uuid). A text back is matched against contacts' numbers in every org first, and filed under the one contact anywhere who holds the number; this org is where a text from a number NO contact holds is audited and its STOP suppressed, where an unmatched report or an unreadable push is audited, and where the Slack alarm is filed when a STOP filed under nobody could not be recorded. It never narrows the match | a text from a number no contact holds is logged and filed under no org, and a STOP from it is recorded nowhere: it is answered 500 and logged `OPT-OUT NOT RECORDED`, for a person to record by hand, with no Slack alarm — the error line says `alarm: 'not_raised_no_org'` |
 
 **`DATABASE_POOL_MAX=1` matters.** Each serverless instance keeps its own pool,
 and they do not share. At the default of 10, a few concurrent instances
@@ -646,7 +646,13 @@ It has two halves, set up in this order:
    The file must be UTF-8 — a file that is not is refused whole, and Excel's
    plain "CSV" is Windows-1252, which fails the moment a body holds a
    character outside ASCII, so save it as "CSV UTF-8". A template that should
-   stop being used is switched off, never edited.
+   stop being used is switched off, never edited. **A link or a call-back
+   number must be in the template's registered fixed text, or in a slot
+   registered for it** (`{#url#}` or `{#urlott#}` for a link, `{#cbn#}` for
+   a number) — TRAI's August 2024 direction, which the operator enforces.
+   Typed into a plain `{#var#}`, alone or joined to the text beside it, a
+   company's bare domain included, the draft is refused with a sentence
+   naming the slot, and the sender refuses the same text again.
 3. **The worker, on Fly** — both, or SMS stays off:
 
    ```bash
@@ -663,9 +669,13 @@ It has two halves, set up in this order:
    `sms: dovesoft off` and names the missing variable, and approved texts
    wait in the queue — never claimed, never lost.
 4. **The web app, on Vercel** (Production, marked sensitive):
-   `DOVESOFT_WEBHOOK_SECRET` (`openssl rand -base64 32`, at least 32
-   characters) and `DOVESOFT_ORG_ID` (the org's id: `SELECT id, name FROM
-   orgs` in Neon's SQL editor). Redeploy.
+   `DOVESOFT_WEBHOOK_SECRET` (`openssl rand -hex 32`, at least 32
+   characters; hex, because the secret may ride in a URL, where a secret
+   with any other character must be percent-encoded) and
+   `DOVESOFT_ORG_ID` (the org's id: `SELECT id, name FROM orgs` in Neon's
+   SQL editor). Texts are matched against contacts in every org first;
+   `DOVESOFT_ORG_ID` is only the fallback — where a text from a number no
+   contact holds is filed, and its STOP suppressed. Redeploy.
 5. **Register the two webhook URLs with DoveSoft's account manager.**
    **Settings → Deployment** prints both, built from `AUTH_URL`:
 
@@ -677,13 +687,21 @@ It has two halves, set up in this order:
    Ask for the secret to be sent as the **`x-dovesoft-token` header**. Use
    `?token=<DOVESOFT_WEBHOOK_SECRET>` on the URL only if DoveSoft cannot send
    a header: a query string lands in access logs — Vercel's request log, and
-   whatever DoveSoft keeps — where a header does not.
+   whatever DoveSoft keeps — where a header does not. A secret that is not
+   hex is percent-encoded there. And ask for the pushes by **POST** (a form
+   or JSON): a GET push of a text puts the sender's number and the words in
+   the URL too, so they land in the same logs. GET is still accepted,
+   because a STOP that cannot arrive is worse. The first refused token on
+   each route is logged once per process, by route name — the line to look
+   for when nothing arrives.
 6. **Send one to yourself.** Create an SMS campaign on `/campaigns` and set
    it active, record an SMS opt-in on your own contact on `/contacts`, use
    Draft SMS, and approve it on `/approvals`. The delivery report shows on
-   the company page, in the Conversation panel under the message: "Delivered
-   to the handset" with the time, "The operator has it; no final delivery
-   report yet.", or "Not delivered" with the operator's reason (stored as
+   the company page, in the Conversation panel under the message: "Delivery
+   reported" with the time the report reached this deployment (no time is
+   read from a report, and DoveSoft may send it hours after the handset took
+   the text), "The operator has it; no final delivery report yet.", or "Not
+   delivered" with the operator's reason (stored as
    `touches.delivery_status`, `delivered_at`, `delivery_error`). Nothing
    there means no report has arrived. A report naming no message this
    system sent leaves an `sms.delivery_unmatched` line in `/audit`.
@@ -709,7 +727,13 @@ holds whose suppression could not be written is 500, so it is retried too;
 that one, and a STOP from a number that cannot be read (400), also raise the
 Slack opt-out alarm before answering — with no message and no number in it,
 linking `/compliance` — filed under `DOVESOFT_ORG_ID`, and not raised
-without it.
+without it. A fault while recording — a dropped connection, a timeout — is
+500 on either route, so DoveSoft retries, and the error line names the
+fault's class only, never the number or the words; when the text asked to
+stop, the same opt-out alarm is raised and a `contact.opt_out_not_recorded`
+row written under `DOVESOFT_ORG_ID`. A NUL character in a pushed text, id
+or reason (some gateways decode GSM-7's `@` as one) is stored as U+FFFD
+rather than failing every retry.
 
 ## Every deploy after the first: migrate FIRST
 
@@ -928,11 +952,14 @@ laptop that was theoretical. On a public URL it is not:
   without it as the `x-dovesoft-token` header or a `token` parameter. With it
   they can write — the second can pause a contact and put a number on the
   suppression list, which is why it is never open — and bodies are bounded at
-  16 KB.
+  16 KB. A GET push carries its fields in the URL: for a text back that is
+  the sender's number and the words.
 
 The platform's own request logs record every request's path, so `/p/<token>`
 and `/unsubscribe/<token>` are in Vercel's logs — and so is a DoveSoft
-`?token=`, which is why the header is the form to register. A share link can
+`?token=`, which is why the header is the form to register, and so are a
+GET-pushed text's number and words, which is why POST is the form to ask
+DoveSoft for. A share link can
 be revoked; an unsubscribe token can only ever do the one thing its holder
 asked for; a DoveSoft secret that reached a log is rotated by setting a new
 one in Vercel and with DoveSoft.

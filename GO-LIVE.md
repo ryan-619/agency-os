@@ -517,7 +517,11 @@ enrols people into one. Calls and WhatsApp over DoveSoft are not built.
 2. **YOU — load the templates.** Export them from the portal as CSV, then
    **https://myagencyos.in/settings/templates** → import. Only approved rows
    import; a re-import changes nothing. The file must be UTF-8 — in Excel,
-   save as "CSV UTF-8" — or it is refused whole.
+   save as "CSV UTF-8" — or it is refused whole. A link or a call-back
+   number must be in a template's registered fixed text, or in a slot
+   registered for it (`{#url#}`, `{#cbn#}`): typed into a plain `{#var#}` —
+   a company's bare domain included — Draft SMS refuses it with a sentence,
+   because the operator would block it.
 3. **YOU — the worker's two secrets**, on whatever host the worker runs
    (Part 5): `DOVESOFT_API_KEY` and `DOVESOFT_ENTITY_ID` (the PE ID, digits
    only). Both, or SMS stays off. Leave `DOVESOFT_BASE_URL` unset. The boot
@@ -525,18 +529,25 @@ enrols people into one. Calls and WhatsApp over DoveSoft are not built.
    "texts through DoveSoft". On your Mac, `./tools/run-worker.sh` asks for
    both (the key at a hidden prompt).
 4. **YOU — Vercel**, Production, marked sensitive: `DOVESOFT_WEBHOOK_SECRET`
-   (`openssl rand -base64 32`) and `DOVESOFT_ORG_ID` (the org's id —
-   `SELECT id, name FROM orgs` in Neon's SQL editor). **ME** — redeploy.
-   Without `DOVESOFT_ORG_ID`, a STOP texted from a number no contact holds
-   that could not be recorded raises no Slack alarm — the alarm needs an org
-   to be filed under.
+   (`openssl rand -hex 32` — hex, because it may ride in a URL, where a
+   secret with any other character must be percent-encoded) and
+   `DOVESOFT_ORG_ID` (the org's id — `SELECT id, name FROM orgs` in Neon's
+   SQL editor). **ME** — redeploy. A text back is matched against contacts
+   in every org first; `DOVESOFT_ORG_ID` is only the fallback, where a text
+   from a number no contact holds is filed and its STOP suppressed. Without
+   it, such a STOP is recorded nowhere — the route answers 500 and logs
+   `OPT-OUT NOT RECORDED` for a person to record by hand — and raises no
+   Slack alarm, which needs an org to be filed under.
 5. **YOU — DoveSoft's account manager.** Register the two URLs
    **https://myagencyos.in/settings/deployment** prints:
    `https://myagencyos.in/api/inbound/dovesoft/dlr` (delivery reports) and
    `https://myagencyos.in/api/inbound/dovesoft/sms` (texts sent back). Ask
    them to send the secret as the **`x-dovesoft-token` header**. Only if they
-   cannot, append `?token=<the secret>` — a query string lands in access
-   logs, Vercel's and theirs, where a header does not.
+   cannot, append `?token=<the secret>` (percent-encoded, unless it is hex)
+   — a query string lands in access logs, Vercel's and theirs, where a
+   header does not. And ask them to push by **POST** (a form or JSON): a
+   push by GET puts the sender's number and the words of every text in the
+   URL, so they land in the same logs.
 6. **YOU — confirm three things with them** before the first real text,
    because their public documentation does not say: that `mobiles` takes
    the country code and number with no `+`; the field names of the
@@ -545,8 +556,8 @@ enrols people into one. Calls and WhatsApp over DoveSoft are not built.
 7. **YOU — one test text to yourself.** An SMS campaign on `/campaigns`, set
    active; an SMS opt-in recorded on your own contact on `/contacts`; Draft
    SMS; approve it on `/approvals`. Once DoveSoft reports, your company's
-   page shows "Delivered to the handset" (or why not) under the message, in
-   the Conversation panel.
+   page shows "Delivery reported" with the time the report arrived (or why
+   not) under the message, in the Conversation panel.
 
 Until step 4, both webhook routes answer 503 — the correct failure: nothing
 can pause a contact or write a suppression through them. `DEPLOYING.md`,
