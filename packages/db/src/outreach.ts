@@ -607,13 +607,47 @@ async function gatherFacts(
 }
 
 /**
- * The moment a stored message's WORDS were written, for the stale-evidence
- * step: its `created_at` — or null for an answer to a reply, which quotes no
- * scan. Exported so a screen previewing a stored draft asks the question
- * the sender will ask about it (`previewSend`'s `writtenAt`).
+ * A STORED message's words, as the stale-evidence step asks about them: the
+ * row, by id, whose `created_at` is the moment they were written.
+ *
+ * The id is what is compared, in SQL, against the stored value. `writtenAt`
+ * is that same instant read back as a `Date` — for a screen to show, or to
+ * key by — and is never what decides: a `Date` holds milliseconds and
+ * `timestamptz` microseconds, so `ran_at <= writtenAt` asked about the START
+ * of the draft's millisecond, and a scan stamped inside it, a few hundred
+ * microseconds before the words, was not seen. The sender read "no scan
+ * behind these words" while `/compliance`, comparing in SQL, read the same
+ * row as written from that scan and refused at sending. Found by review.
  */
-export function evidenceAsOfFor(touch: { readonly createdAt: Date; readonly answersTouchId: string | null }): Date | null {
-  return touch.answersTouchId ? null : touch.createdAt
+export interface StoredWords {
+  readonly touchId: string
+  readonly writtenAt: Date
+}
+
+/**
+ * When the words a send-check is about were written:
+ *
+ *  - `StoredWords` — a stored message (`evidenceAsOfFor`), judged against
+ *    its stored `created_at`;
+ *  - a `Date` — a message nobody has stored yet, written at that instant
+ *    (the moment a dry run is asked);
+ *  - `null` — an answer to a reply, which quotes no scan.
+ */
+export type EvidenceAsOf = StoredWords | Date | null
+
+/**
+ * The moment a stored message's WORDS were written, for the stale-evidence
+ * step: its row, whose `created_at` decides — or null for an answer to a
+ * reply, which quotes no scan. Exported so a screen previewing a stored draft
+ * asks the question the sender will ask about it (`previewSend`'s
+ * `writtenAt`).
+ */
+export function evidenceAsOfFor(touch: {
+  readonly id: string
+  readonly createdAt: Date
+  readonly answersTouchId: string | null
+}): StoredWords | null {
+  return touch.answersTouchId ? null : { touchId: touch.id, writtenAt: touch.createdAt }
 }
 
 /**
@@ -641,9 +675,10 @@ export async function sendFactsFor(
     readonly contactId: string
     readonly approvedByHuman: boolean
     /**
-     * When the WORDS were written — a stored message's `created_at`
-     * (`evidenceAsOfFor`), or the moment a hypothetical one would be. Null
-     * for a message that quotes no scan: an answer to a reply.
+     * When the WORDS were written — a stored message's row
+     * (`evidenceAsOfFor`), whose stored `created_at` is compared in SQL, or
+     * the moment a hypothetical one would be. Null for a message that quotes
+     * no scan: an answer to a reply.
      *
      * Required, so a caller cannot forget the question. The evidence behind
      * the words is the latest SUCCESSFUL scan of the contact's company at or
@@ -652,7 +687,7 @@ export async function sendFactsFor(
      * never by `findings.stale`. A later re-scan does not freshen words that
      * were written before it; a new draft does.
      */
-    readonly evidenceAsOf: Date | null
+    readonly evidenceAsOf: EvidenceAsOf
     readonly now: Date
   },
 ): Promise<
@@ -796,14 +831,28 @@ export async function sendFactsFor(
  * — `staleAfterDaysOf`, which gives §2.2's default when there is no profile,
  * it will not parse, or the value is not a positive number (`isStale` throws
  * on one, and a bad ICP value must not stop the sender).
+ *
+ * For a stored message the moment is the row's own `created_at`, read in
+ * the same statement — `complianceDraftsOnStaleEvidence`'s predicate, so the
+ * count and the sender cannot disagree about which scan the words quote.
+ * The `Date` beside the id is the fallback only for a row that is gone by
+ * the time this runs (another org's id included), which is the moment the
+ * caller last read it as.
  */
 async function evidenceIsStale(
   db: AgencyDb,
   orgId: string,
   companyId: string,
-  writtenAt: Date,
+  writtenAt: StoredWords | Date,
   now: Date,
 ): Promise<boolean> {
+  const atOrBefore =
+    writtenAt instanceof Date
+      ? lte(schema.scans.ranAt, writtenAt)
+      : sql`${schema.scans.ranAt} <= coalesce(
+          (SELECT t.created_at FROM touches t WHERE t.id = ${writtenAt.touchId}::uuid AND t.org_id = ${orgId}::uuid),
+          ${writtenAt.writtenAt.toISOString()}::timestamptz
+        )`
   const [scan] = await db
     .select({ ranAt: schema.scans.ranAt })
     .from(schema.scans)
@@ -812,7 +861,7 @@ async function evidenceIsStale(
         eq(schema.scans.orgId, orgId),
         eq(schema.scans.companyId, companyId),
         eq(schema.scans.ok, true),
-        lte(schema.scans.ranAt, writtenAt),
+        atOrBefore,
       ),
     )
     .orderBy(desc(schema.scans.ranAt))
@@ -1079,6 +1128,7 @@ async function denialCode(
 ): Promise<'needs_approval' | 'stale_evidence'> {
   const [draft] = await db
     .select({
+      id: schema.touches.id,
       contactId: schema.touches.contactId,
       campaignId: schema.touches.campaignId,
       createdAt: schema.touches.createdAt,

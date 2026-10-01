@@ -1,9 +1,9 @@
 import { redirect } from 'next/navigation'
 import { can, isStale, parseIcpDefinition, staleAfterDaysOf, type IcpDefinition } from '@agency/core'
-import { and, desc, eq, lte } from 'drizzle-orm'
+import { and, desc, eq, sql } from 'drizzle-orm'
 import {
   evidenceAsOfFor, listCampaigns, listContactsForCompany, pendingApprovals, pendingDrafts, previewSend, quotableFindings,
-  readContact, schema, type AgencyDb,
+  readContact, schema, type AgencyDb, type StoredWords,
 } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
@@ -154,20 +154,22 @@ export default async function ApprovalsPage() {
   })
 
   /**
-   * The previews, one per distinct (person, campaign, moment the words were
-   * written): two drafts about one company written together share their
-   * answers. The moment is part of the question since stale evidence is a
-   * rule (§2.2): the sender judges a draft's words by the scan current when
-   * they were WRITTEN, so a preview "as if written now" would call fresh a
-   * draft the worker will refuse. An answer to a reply quotes no scan
-   * (`evidenceAsOfFor`). The preselected people go first, so the limit never
-   * costs the card the one person it was addressed to.
+   * The previews, one per distinct (person, campaign, stored words): the
+   * words are part of the question since stale evidence is a rule (§2.2) —
+   * the sender judges a draft's words by the scan current when they were
+   * WRITTEN, so a preview "as if written now" would call fresh a draft the
+   * worker will refuse. The words are named by their row (`evidenceAsOfFor`),
+   * whose stored `created_at` the sender compares to the microsecond; two
+   * drafts in one millisecond are not one moment. An answer to a reply
+   * quotes no scan, so every answer to a person shares one preview. The
+   * preselected people go first, so the limit never costs the card the one
+   * person it was addressed to.
    */
-  const key = (contactId: string, campaignId: string, writtenAt: Date | null) =>
-    `${contactId}:${campaignId}:${writtenAt ? writtenAt.toISOString() : 'answer'}`
-  const wanted: { contactId: string; campaignId: string; writtenAt: Date | null }[] = []
+  const key = (contactId: string, campaignId: string, writtenAt: StoredWords | null) =>
+    `${contactId}:${campaignId}:${writtenAt ? writtenAt.touchId : 'answer'}`
+  const wanted: { contactId: string; campaignId: string; writtenAt: StoredWords | null }[] = []
   const seen = new Set<string>()
-  const want = (contactId: string, campaignId: string, writtenAt: Date | null) => {
+  const want = (contactId: string, campaignId: string, writtenAt: StoredWords | null) => {
     const k = key(contactId, campaignId, writtenAt)
     if (seen.has(k)) return
     seen.add(k)
@@ -249,24 +251,26 @@ export default async function ApprovalsPage() {
 
   /**
    * The scan each draft's words were written from. Most drafts were written
-   * after their company's latest scan, and that IS the one; only a draft
-   * older than the latest scan needs a read of its own, one per distinct
-   * (company, moment), four at a time — the pool is one connection on Vercel.
+   * after their company's latest scan, and that IS the one; only a draft not
+   * provably later than the latest scan needs a read of its own, one per
+   * draft, four at a time — the pool is one connection on Vercel.
+   *
+   * "Provably later" is a strictly later MILLISECOND, because a `Date` holds
+   * no more. A scan in the draft's own millisecond may be either side of the
+   * words, so that draft is read in SQL against its stored `created_at`, as
+   * the sender reads it (`evidenceAsOfFor`) — never by comparing two `Date`s
+   * that agree to the millisecond and disagree in the database.
    */
-  const writtenKey = (companyId: string, at: Date) => `${companyId}:${at.toISOString()}`
-  const olderThanLatest = [
-    ...new Map(
-      drafts.flatMap((d) => {
-        const at = evidenceAsOfFor(d.touch)
-        if (!d.company || !at) return []
-        const latest = latestByCompany.get(d.company.id)?.scan
-        if (!latest || latest.ranAt.getTime() <= at.getTime()) return []
-        return [[writtenKey(d.company.id, at), { companyId: d.company.id, at }] as const]
-      }),
-    ).values(),
-  ]
+  const writtenKey = (companyId: string, at: StoredWords) => `${companyId}:${at.touchId}`
+  const notProvablyAfterLatest = drafts.flatMap((d) => {
+    const at = evidenceAsOfFor(d.touch)
+    if (!d.company || !at) return []
+    const latest = latestByCompany.get(d.company.id)?.scan
+    if (!latest || latest.ranAt.getTime() < at.writtenAt.getTime()) return []
+    return [{ companyId: d.company.id, at }]
+  })
   const writtenFromOlder = new Map<string, EvidenceScan | null>(
-    await mapLimit(olderThanLatest, PREVIEW_CONCURRENCY, async ({ companyId, at }) => {
+    await mapLimit(notProvablyAfterLatest, PREVIEW_CONCURRENCY, async ({ companyId, at }) => {
       const rows = await db
         .select({ id: schema.scans.id, ranAt: schema.scans.ranAt })
         .from(schema.scans)
@@ -275,7 +279,10 @@ export default async function ApprovalsPage() {
             eq(schema.scans.orgId, user.orgId),
             eq(schema.scans.companyId, companyId),
             eq(schema.scans.ok, true),
-            lte(schema.scans.ranAt, at),
+            sql`${schema.scans.ranAt} <= coalesce(
+              (SELECT t.created_at FROM touches t WHERE t.id = ${at.touchId}::uuid AND t.org_id = ${user.orgId}::uuid),
+              ${at.writtenAt.toISOString()}::timestamptz
+            )`,
           ),
         )
         .orderBy(desc(schema.scans.ranAt))
@@ -292,7 +299,7 @@ export default async function ApprovalsPage() {
     const writtenFrom =
       at === null
         ? null
-        : latest.scan && latest.scan.ranAt.getTime() <= at.getTime()
+        : latest.scan && latest.scan.ranAt.getTime() < at.writtenAt.getTime()
           ? latest.scan
           : writtenFromOlder.get(writtenKey(d.company.id, at)) ?? null
     return draftEvidenceFrom({ answersReply: at === null, writtenFrom, latest: latest.scan, latestLines: latest.lines })
