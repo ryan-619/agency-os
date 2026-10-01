@@ -23,8 +23,10 @@
  * count and what they mean — are pure and live in
  * `packages/core/src/enrolment.ts`. This file gathers the rows and writes the
  * drafts, and says the earlier-row rule twice: once in the read that names a
- * skip, and again in the INSERT's own NOT EXISTS, so a race cannot slip a
- * draft past it.
+ * skip, and again in the INSERT's own NOT EXISTS. That statement runs in a
+ * short transaction under a per-person advisory lock (`insertDraft`), so two
+ * enrolments racing for one person write one draft: the NOT EXISTS alone
+ * could not see the other's uncommitted row.
  */
 import { and, eq, inArray, or, sql } from 'drizzle-orm'
 import {
@@ -347,13 +349,24 @@ async function priorRows(
  * One draft, written only if the person has no earlier row that counts.
  *
  * The check lives in the INSERT's own SELECT rather than in a read before it,
- * so it is one statement: two people pressing Enrol at once can still both
- * pass (neither sees the other's uncommitted row), which leaves at most one
- * extra draft per person — visible in /approvals and deniable. It is not a
- * constraint on purpose: the table legitimately holds several rows for one
- * pair (`sender.test.ts`'s batch-order test inserts five approved rows for
- * one), and
- * a partial unique index would be a migration this feature does not own.
+ * and the statement runs in a short transaction that first takes
+ * `pg_advisory_xact_lock` on (org, contact, channel). On its own the NOT
+ * EXISTS could not see an uncommitted row, so two enrolments pressed at once
+ * — or two auto-send campaigns on one channel, the case `enrolPriorScope`
+ * exists for — could both insert an opener for the same person, and under
+ * auto-send both are `queued` and go out unread; they never reach
+ * /approvals. Review round 3, finding 10. With the lock, the second INSERT
+ * waits for the first transaction to commit and, under READ COMMITTED,
+ * takes its snapshot after it, so its NOT EXISTS sees the first draft. The
+ * key covers every row that can count for the person: a row of this
+ * campaign is on its channel, and under auto-send the rule reads the
+ * channel. The pattern 0018's other writers use (`claimRescan`,
+ * `usersRevoke`), and one that works through a transaction pooler.
+ *
+ * Not a constraint on purpose: the table legitimately holds several rows for
+ * one pair (`sender.test.ts`'s batch-order test inserts five approved rows
+ * for one), and a partial unique index would be a migration this feature
+ * does not own.
  *
  * It is `enrolPriorSkip`'s rule in SQL, over `priorRows`'s rows: a row
  * counts unless it is `refused` with a code in `ENROL_IGNORED_REFUSALS`, or
@@ -377,23 +390,29 @@ async function insertDraft(
 ): Promise<string | null> {
   const list = (values: readonly string[]) => sql.join(values.map((v) => sql`${v}`), sql`, `)
   const ignoredStatuses = enrolIgnoredStatuses(rule.autoSend)
-  const res: unknown = await db.execute(sql`
-    INSERT INTO touches (org_id, campaign_id, contact_id, company_id, channel, direction, status, subject, body)
-    SELECT ${rule.orgId}::uuid, ${rule.campaignId}::uuid, ${d.contactId}::uuid, ${d.companyId}::uuid,
-           ${rule.channel}, 'out', ${d.status}, ${d.subject}, ${d.body}
-    WHERE NOT EXISTS (
-      SELECT 1 FROM touches t
-       WHERE t.org_id = ${rule.orgId}::uuid
-         AND t.contact_id = ${d.contactId}::uuid
-         AND t.direction = 'out'
-         AND (t.campaign_id = ${rule.campaignId}::uuid${
-           enrolPriorScope(rule.autoSend) === 'channel' ? sql` OR t.channel = ${rule.channel}` : sql``
-         })
-         AND NOT (t.status = 'refused' AND coalesce(t.refusal_code, '') IN (${list(ENROL_IGNORED_REFUSALS)}))${
-           ignoredStatuses.length > 0 ? sql` AND t.status NOT IN (${list(ignoredStatuses)})` : sql``
-         }
+  const res: unknown = await db.transaction(async (tx) => {
+    const t = tx as unknown as AgencyDb
+    await t.execute(
+      sql`SELECT pg_advisory_xact_lock(hashtext('enrol.draft'), hashtext(${`${rule.orgId}:${d.contactId}:${rule.channel}`}))`,
     )
-    RETURNING id`)
+    return t.execute(sql`
+      INSERT INTO touches (org_id, campaign_id, contact_id, company_id, channel, direction, status, subject, body)
+      SELECT ${rule.orgId}::uuid, ${rule.campaignId}::uuid, ${d.contactId}::uuid, ${d.companyId}::uuid,
+             ${rule.channel}, 'out', ${d.status}, ${d.subject}, ${d.body}
+      WHERE NOT EXISTS (
+        SELECT 1 FROM touches t
+         WHERE t.org_id = ${rule.orgId}::uuid
+           AND t.contact_id = ${d.contactId}::uuid
+           AND t.direction = 'out'
+           AND (t.campaign_id = ${rule.campaignId}::uuid${
+             enrolPriorScope(rule.autoSend) === 'channel' ? sql` OR t.channel = ${rule.channel}` : sql``
+           })
+           AND NOT (t.status = 'refused' AND coalesce(t.refusal_code, '') IN (${list(ENROL_IGNORED_REFUSALS)}))${
+             ignoredStatuses.length > 0 ? sql` AND t.status NOT IN (${list(ignoredStatuses)})` : sql``
+           }
+      )
+      RETURNING id`)
+  })
   // node-postgres and PGlite both answer `{ rows }`; an array is accepted too
   // so a driver that returns rows bare cannot read as "nothing inserted".
   const rows = Array.isArray(res) ? res : ((res as { rows?: unknown[] } | null)?.rows ?? [])
