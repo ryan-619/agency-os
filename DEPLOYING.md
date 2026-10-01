@@ -743,13 +743,18 @@ always the same one: **apply the migrations, then deploy the app.**
 **From GitHub, with no credential on any laptop:** Actions → Production → Run
 workflow, ref the release branch, action `release`, confirm `release`
 (`.github/workflows/production.yml`, which runs `tools/production.sh`). It
-migrates, deploys only if that succeeded, and waits for `/api/health?strict=1`
-to report the ref's `EXPECTED_MIGRATION`. It needs one Actions secret,
-`VERCEL_TOKEN`: the database URL is read from the Vercel project's own
-production `DATABASE_URL` (the pooled string, with Neon's `-pooler` taken off
-the host for the direct one). Add `PRODUCTION_DATABASE_URL` — the direct
-string — only if that variable is marked Sensitive, which `vercel pull` never
-returns. `status`, `migrate` and `deploy` run one half each. A schema
+needs one Actions secret, `VERCEL_TOKEN` (the project is found under every
+scope the token reaches, `tools/vercel-project.mjs`). The production database
+URL is a Sensitive variable on the Vercel project, which `vercel pull` returns
+as a placeholder, so the release asks Vercel to build the checkout itself with
+`--build-env AGENCY_MIGRATE_ON_BUILD=1`: that one build applies the pending
+migrations before `next build` (`tools/vercel-build-migrate.mjs`, run by
+`build:vercel`), a failed migration fails the build so nothing is deployed,
+and every other build — preview, git-connected, CI — does nothing there and
+says so. The run then waits for `/api/health?strict=1` to report the ref's
+`EXPECTED_MIGRATION`. With a `PRODUCTION_DATABASE_URL` secret (Neon's direct
+string) it migrates from the runner instead, then deploys a prebuilt output.
+`status`, `migrate` and `deploy` run one half each. A schema
 that is ahead of the code is harmless — nothing reads the new column. Code
 that is ahead of the schema is a live error page.
 

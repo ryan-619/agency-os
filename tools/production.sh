@@ -6,14 +6,18 @@
 #   tools/production.sh deploy    build and deploy this checkout to Vercel prod
 #   tools/production.sh release   migrate, THEN deploy, then check /api/health
 #                                 reports this checkout's migration — the order
-#                                 DEPLOYING.md requires ("migrate FIRST")
+#                                 DEPLOYING.md requires ("migrate FIRST"). With
+#                                 no PRODUCTION_DATABASE_URL, Vercel builds the
+#                                 checkout and the BUILD migrates first
+#                                 (tools/vercel-build-migrate.mjs)
 #
 # Credentials come from the workflow's secrets and are never echoed (§2.3):
-#   VERCEL_TOKEN               deploy and release; also how the database URL
-#                              is found when the next one is unset
-#   PRODUCTION_DATABASE_URL    optional: Neon's DIRECT string. Without it the
-#                              URL is read from the Vercel project's own
-#                              production environment (tools/production-env.mjs)
+#   VERCEL_TOKEN               deploy and release
+#   PRODUCTION_DATABASE_URL    optional: Neon's DIRECT string. Without it,
+#                              `release` lets the Vercel build migrate, with
+#                              the project's own (Sensitive) database URL, and
+#                              `migrate` reads it from `vercel pull`, which
+#                              only works where that variable is NOT Sensitive
 #   VERCEL_ORG_ID + VERCEL_PROJECT_ID, or VERCEL_TEAM    optional; without
 #                              them the project `agency-os` is found under
 #                              every scope the token reaches
@@ -34,9 +38,7 @@ die() {
   exit 1
 }
 
-pulled=false
-vercel_pull() {
-  $pulled && return 0
+vercel_ids() {
   [ -n "${VERCEL_TOKEN:-}" ] || die "The VERCEL_TOKEN secret is not set."
   if [ -z "${VERCEL_ORG_ID:-}" ] || [ -z "${VERCEL_PROJECT_ID:-}" ]; then
     # Found through the API rather than `vercel link --yes`, which asks for
@@ -49,6 +51,12 @@ vercel_pull() {
     VERCEL_PROJECT_ID=$(sed -n 's/^VERCEL_PROJECT_ID=//p' <<<"$ids")
     export VERCEL_ORG_ID VERCEL_PROJECT_ID
   fi
+}
+
+pulled=false
+vercel_pull() {
+  $pulled && return 0
+  vercel_ids
   "${VERCEL[@]}" pull --yes --environment=production --token "$VERCEL_TOKEN" >/dev/null
   node tools/production-env.mjs mask "$PULLED"
   pulled=true
@@ -97,6 +105,17 @@ deploy() {
   "${VERCEL[@]}" deploy --prebuilt --prod --archive=tgz --token "$VERCEL_TOKEN"
 }
 
+# A REMOTE build: Vercel builds this checkout with the project's own
+# production variables — the Sensitive database URL included, which no pull
+# returns — and `AGENCY_MIGRATE_ON_BUILD=1` makes that build apply pending
+# migrations before `next build` (tools/vercel-build-migrate.mjs). A failed
+# migration fails the build, so nothing is deployed ahead of its schema.
+deploy_remote_migrating() {
+  vercel_ids
+  "${VERCEL[@]}" deploy --prod --yes --logs --archive=tgz \
+    --build-env AGENCY_MIGRATE_ON_BUILD=1 --token "$VERCEL_TOKEN"
+}
+
 verify() {
   local want body
   want=$(expected_migration)
@@ -116,13 +135,31 @@ verify() {
   die "$SITE did not report migration $want within five minutes."
 }
 
+# What production says it has applied, from its own health check — needs no
+# credential at all.
+health_status() {
+  curl -fsS --max-time 15 "$SITE/api/health" | node -e '
+    let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
+      const h = JSON.parse(s)
+      console.log(`${process.argv[1]}: database ${h.database}, schema ${h.schema?.state} (applied ${h.schema?.applied}, expected ${h.schema?.expected})`)
+    })' "$SITE"
+}
+
 case "$ACTION" in
-  status) db status ;;
+  status)
+    if [ -n "${PRODUCTION_DATABASE_URL:-}" ]; then db status; else health_status; fi
+    ;;
   migrate) migrate ;;
   deploy) deploy ;;
   release)
-    migrate
-    deploy
+    if [ -n "${PRODUCTION_DATABASE_URL:-}" ]; then
+      # Migrate from here, then deploy what was built here.
+      migrate
+      deploy
+    else
+      # The database URL is Vercel's alone: the build migrates, then deploys.
+      deploy_remote_migrating
+    fi
     verify
     ;;
   verify) verify ;;
