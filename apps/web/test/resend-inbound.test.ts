@@ -167,7 +167,8 @@ describe('mapReceivedEmail', () => {
     expect(mapReceivedEmail({ ...RECEIVED, message_id: undefined, headers: {} })?.messageId).toBeNull()
   })
 
-  it('never has a DSN: the receiving API lists attachments without inlining them', () => {
+  /** A report's parts are attachments, read by further requests in receiveResendWebhook — resend-dsn.test.ts. */
+  it('has no DSN of its own: the receiving API lists attachments without inlining them', () => {
     expect(mapReceivedEmail(RECEIVED)?.dsn).toBeNull()
   })
 })

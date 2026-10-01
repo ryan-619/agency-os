@@ -1,5 +1,6 @@
-import { htmlToText } from '@agency/core'
+import { MAIL_SIGNAL_LIMITS, htmlToText } from '@agency/core'
 import type { handleInboundEmail, InboundOutcome } from '@agency/db/queries'
+import { isScannableHost } from '@agency/scanner'
 import { log } from './logger'
 import { verifySvix } from './svix'
 
@@ -31,7 +32,8 @@ import { verifySvix } from './svix'
  *  - **401** for a signature that does not verify. An unauthenticated
  *    version of this route would let anyone on the internet mark a contact
  *    as having replied, pause their sequence and suppress their address.
- *  - **502** when the message could not be FETCHED. This is the one place
+ *  - **502** when the message could not be FETCHED — or, for a delivery
+ *    report, one of the report parts it was read for. This is the one place
  *    the answer differs from the generic route's "200 either way", on
  *    purpose: a 200 tells Resend the message was read, and a message this
  *    system never read might say "stop". Resend's API failing now is
@@ -50,17 +52,33 @@ import { verifySvix } from './svix'
  * this system SENT, and on a deployment with no worker nothing sends; so a
  * reply is filed by its From address, and only when exactly one contact in
  * every org has it. Whether Resend's `headers` carries `In-Reply-To` and
- * `References` at all is undocumented — they are read when present. And no
- * DSN: a delivery-status report arrives as an attachment, which the
- * receiving API lists but does not inline, so a bounce reaching this route
- * is read as a reply, not recognised as a bounce (`dsn: null`).
+ * `References` at all is undocumented — they are read when present.
+ *
+ * ## A bounce, read from its attachments
+ *
+ * A delivery report (RFC 3464) is a `multipart/report` whose parts the
+ * receiving API lists as `attachments` — id, `content_type`, size — without
+ * their contents. Each part's contents are a second call:
+ * `GET /emails/receiving/{email_id}/attachments/{id}` answers a signed,
+ * expiring `download_url` on Resend's CDN, fetched WITHOUT the key. So,
+ * exactly as the IMAP parser does, and only when the message's ROOT is
+ * `multipart/report` and it lists a `message/delivery-status` part: that
+ * part is fetched as the DSN, and the returned copy (`message/rfc822` or
+ * `text/rfc822-headers`) for the Message-ID that ties the report to a
+ * message this system sent. Each read is bounded, the whole report shares
+ * one deadline, and the result goes to the same `readMailSignals` /
+ * `handleBounce` the IMAP path reaches. A report nested inside a forwarded
+ * message is not read as one: the root is not a report (the IMAP rule —
+ * recording a reply nobody wrote is recoverable, losing an opt-out is not).
  *
  * ## §2.3
  *
- * The API key goes in the `Authorization` header of one request to one
- * pinned origin, with redirects refused, and nowhere else: not a log line,
- * not a return value. Failures are reported by status and error NAME. The
- * message body is never logged; only ids, counts and `why`.
+ * The API key goes in the `Authorization` header of requests to one pinned
+ * origin, with redirects refused, and nowhere else: not a log line, not a
+ * return value, and not the CDN request for a report part — a
+ * `download_url` is a bearer link of its own, so it is never logged either.
+ * Failures are reported by status and error NAME. The message body is never
+ * logged; only ids, counts and `why`.
  *
  * No `server-only` marker and no environment: the route reads `env()` and
  * hands the two secrets in, so the test suite can drive this whole path
@@ -204,7 +222,9 @@ function referencesFrom(headers: Map<string, string>): string[] {
  *
  * Pure. `text` is the plain part when there is one and the HTML converted
  * to text otherwise: a reply that is only HTML must still be readable for
- * the opt-out check.
+ * the opt-out check. `dsn` is always null HERE: a report's parts are
+ * attachments whose contents take further requests, which
+ * `receiveResendWebhook` makes (`deliveryReportParts`, `fetchDeliveryReport`).
  */
 export function mapReceivedEmail(json: unknown): InboundMail | null {
   if (!json || typeof json !== 'object' || Array.isArray(json)) return null
@@ -229,6 +249,198 @@ export function mapReceivedEmail(json: unknown): InboundMail | null {
     references: referencesFrom(folded),
     headers: Object.fromEntries([...folded].map(([k, v]) => [k, v.slice(0, MAX_HEADER_VALUE)])),
     dsn: null,
+  }
+}
+
+/** The delivery-status parts (RFC 3464; RFC 6533's internationalised twin) — the IMAP parser's set. */
+const DSN_TYPES = new Set(['message/delivery-status', 'message/global-delivery-status'])
+/** Where a report carries the message it returns — whole, or its headers only. */
+const RETURNED_TYPES = new Set(['message/rfc822', 'text/rfc822-headers', 'message/global', 'message/global-headers'])
+/**
+ * Bytes read of one report part. A delivery-status part's fields are at its
+ * start, and a returned copy is read for its headers only — this system's
+ * own messages carry a dozen.
+ */
+const REPORT_PART_MAX_BYTES = 64 * 1024
+/** Returned copies read per report; a report returns one message. */
+const MAX_RETURNED_PARTS = 2
+
+/** The attachments of a received message that make it a delivery report, by id. */
+export interface DeliveryReportParts {
+  readonly status: string
+  readonly returned: readonly string[]
+}
+
+/**
+ * Which of a received message's attachments are a delivery report's parts,
+ * or null for a mail that is not one. Pure.
+ *
+ * A report only when the ROOT says so — `Content-Type: multipart/report` in
+ * the message's own headers — AND it lists a delivery-status part. A read
+ * receipt is a multipart/report too, with no such part; a person forwarding
+ * a bounce has a multipart/mixed root. Neither is read as a bounce.
+ */
+export function deliveryReportParts(json: unknown): DeliveryReportParts | null {
+  if (!json || typeof json !== 'object' || Array.isArray(json)) return null
+  const o = json as Record<string, unknown>
+  const root = foldHeaders(o['headers']).get('content-type') ?? ''
+  if (!/^\s*multipart\/report\s*(?:;|$)/i.test(root)) return null
+  const attachments = Array.isArray(o['attachments']) ? (o['attachments'] as unknown[]) : []
+  const parts = attachments.flatMap((a) => {
+    if (!a || typeof a !== 'object') return []
+    const r = a as Record<string, unknown>
+    const id = typeof r['id'] === 'string' && EMAIL_ID.test(r['id']) ? r['id'] : null
+    const type = typeof r['content_type'] === 'string' ? (r['content_type'].split(';')[0] ?? '').trim().toLowerCase() : ''
+    return id ? [{ id, type }] : []
+  })
+  const status = parts.find((p) => DSN_TYPES.has(p.type))
+  if (!status) return null
+  return {
+    status: status.id,
+    returned: parts.filter((p) => RETURNED_TYPES.has(p.type)).slice(0, MAX_RETURNED_PARTS).map((p) => p.id),
+  }
+}
+
+/**
+ * The Message-ID, then References, in the header section of a returned copy
+ * — what the IMAP parser reads off mailparser's `messageId` and
+ * `references`. A header section ends at the first blank line, continuation
+ * lines are unfolded, and the first occurrence of each header wins.
+ */
+export function returnedMessageIds(copy: string): string[] {
+  const head = copy.replace(/\r\n?/g, '\n').split(/\n[ \t]*\n/)[0] ?? ''
+  const fields = new Map<string, string>()
+  let last: string | null = null
+  for (const line of head.split('\n')) {
+    if (/^[ \t]/.test(line) && last !== null) {
+      fields.set(last, `${fields.get(last) ?? ''} ${line.trim()}`)
+      continue
+    }
+    const m = /^([!-9;-~]+)[ \t]*:(.*)$/.exec(line)
+    last = m?.[1] ? m[1].toLowerCase() : null
+    if (m?.[1] && last !== null && !fields.has(last)) fields.set(last, (m[2] ?? '').trim())
+  }
+  const ids: string[] = []
+  const messageId = fields.get('message-id')?.trim()
+  if (messageId) ids.push(messageId)
+  for (const id of (fields.get('references') ?? '').split(/\s+/)) if (id.trim()) ids.push(id.trim())
+  return [...new Set(ids)]
+}
+
+export type DeliveryReportFetch =
+  | { readonly ok: true; readonly dsn: string; readonly originalMessageIds: readonly string[] }
+  | {
+      readonly ok: false
+      readonly part: 'delivery-status' | 'returned-copy'
+      readonly status: number | null
+      readonly error: string
+    }
+
+/**
+ * A signed CDN link a part may be downloaded from: `https:` on a public DNS
+ * name, no credentials or port in it. Not pinned to one Resend hostname —
+ * the docs show `inbound-cdn.resend.com` for attachments and call the raw
+ * message's link a CloudFront URL, and a pin that guessed wrong would turn
+ * every bounce into a 502 Resend retries for days. What it must never be is
+ * a link into the network this function runs in.
+ */
+function isDownloadUrl(raw: unknown): raw is string {
+  if (typeof raw !== 'string') return false
+  try {
+    const u = new URL(raw)
+    return u.protocol === 'https:' && !u.username && !u.password && !u.port && isScannableHost(u.hostname.toLowerCase())
+  } catch {
+    return false
+  }
+}
+
+/** At most `max` bytes of a body, the stream cancelled past them. */
+async function readBounded(res: Response, max: number): Promise<Buffer> {
+  if (!res.body) return Buffer.alloc(0)
+  const reader = res.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    while (total < max) {
+      const { done, value } = await reader.read()
+      if (done) break
+      chunks.push(value)
+      total += value.byteLength
+    }
+  } finally {
+    await reader.cancel().catch(() => {})
+  }
+  return Buffer.concat(chunks).subarray(0, max)
+}
+
+/** One part: its signed link from the receiving API (with the key), then its bytes from the CDN (without). */
+async function fetchReportPart(
+  apiKey: string,
+  emailId: string,
+  attachmentId: string,
+  fetchImpl: typeof fetch,
+  signal: AbortSignal,
+): Promise<{ readonly ok: true; readonly bytes: Buffer } | { readonly ok: false; readonly status: number | null; readonly error: string }> {
+  try {
+    const meta = await fetchImpl(`${RESEND_API}/emails/receiving/${emailId}/attachments/${attachmentId}`, {
+      method: 'GET',
+      headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' },
+      redirect: 'manual',
+      signal,
+    })
+    if (!meta.ok) return { ok: false, status: meta.status, error: `http_${meta.status}` }
+    let json: unknown
+    try {
+      json = await meta.json()
+    } catch (err) {
+      return { ok: false, status: meta.status, error: errorName(err) }
+    }
+    const url = json && typeof json === 'object' ? (json as Record<string, unknown>)['download_url'] : undefined
+    if (url === undefined || url === null) return { ok: false, status: meta.status, error: 'no_download_url' }
+    if (!isDownloadUrl(url)) return { ok: false, status: meta.status, error: 'download_url_refused' }
+    // No Authorization header: the link is signed, and the key belongs to api.resend.com alone.
+    const res = await fetchImpl(url, { method: 'GET', redirect: 'manual', signal })
+    if (!res.ok) return { ok: false, status: res.status, error: `download_http_${res.status}` }
+    return { ok: true, bytes: await readBounded(res, REPORT_PART_MAX_BYTES) }
+  } catch (err) {
+    return { ok: false, status: null, error: errorName(err) }
+  }
+}
+
+/**
+ * The delivery-status text and the returned copy's ids, for a message
+ * `deliveryReportParts` called a report. Never throws. Every part is read
+ * under ONE deadline, so a report costs the route at most what fetching
+ * the message did; a part that cannot be read fails the whole report, and
+ * the route answers 502 so Resend asks again — a bounce read without the
+ * copy that ties it to our message would change nothing, and say so as if
+ * it had been read.
+ */
+export async function fetchDeliveryReport(
+  apiKey: string,
+  emailId: string,
+  parts: DeliveryReportParts,
+  fetchImpl: typeof fetch = fetch,
+): Promise<DeliveryReportFetch> {
+  if (!EMAIL_ID.test(emailId)) return { ok: false, part: 'delivery-status', status: null, error: 'invalid_email_id' }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+  try {
+    const status = await fetchReportPart(apiKey, emailId, parts.status, fetchImpl, controller.signal)
+    if (!status.ok) return { ok: false, part: 'delivery-status', status: status.status, error: status.error }
+    const ids: string[] = []
+    for (const id of parts.returned) {
+      const copy = await fetchReportPart(apiKey, emailId, id, fetchImpl, controller.signal)
+      if (!copy.ok) return { ok: false, part: 'returned-copy', status: copy.status, error: copy.error }
+      ids.push(...returnedMessageIds(copy.bytes.toString('utf8')))
+    }
+    return {
+      ok: true,
+      dsn: status.bytes.toString('utf8').slice(0, MAIL_SIGNAL_LIMITS.dsnChars),
+      originalMessageIds: [...new Set(ids)],
+    }
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -314,12 +526,27 @@ export async function receiveResendWebhook(request: Request, deps: ResendWebhook
     return answer(502, { error: 'the message could not be fetched', retry: true })
   }
 
-  const mail = mapReceivedEmail(fetched.email)
-  if (!mail) {
+  const mapped = mapReceivedEmail(fetched.email)
+  if (!mapped) {
     // Read, and unplaceable: a retry would fetch the same message with the
     // same missing sender.
     log.warn('received email had no readable sender; not filed', { emailId, delivery })
     return answer(200, { matched: 'none', why: 'the message had no readable sender' })
+  }
+
+  // A delivery report: its parts, read the way the IMAP parser reads them.
+  // A part that could not be read is a message that was not read — 502.
+  let mail: InboundMail = mapped
+  const parts = deliveryReportParts(fetched.email)
+  if (parts) {
+    const report = await fetchDeliveryReport(apiKey, emailId, parts, deps.fetchImpl ?? fetch)
+    if (!report.ok) {
+      log.error('a delivery report part could not be fetched from Resend; answering 502 so it is retried', {
+        emailId, delivery, part: report.part, status: report.status, error: report.error,
+      })
+      return answer(502, { error: 'the message could not be fetched', retry: true })
+    }
+    mail = { ...mapped, dsn: report.dsn, originalMessageIds: report.originalMessageIds }
   }
 
   let outcome: InboundOutcome
@@ -332,8 +559,21 @@ export async function receiveResendWebhook(request: Request, deps: ResendWebhook
     return answer(500, { error: 'the message could not be recorded', retry: true })
   }
 
+  if (outcome.matched === 'none' && outcome.bounce) {
+    // A delivery report tied to a message this system sent. Ids and the
+    // report's status code: the address is in the row, not here.
+    log.info('delivery report recorded', {
+      emailId,
+      contactId: outcome.bounce.contactId,
+      touchId: outcome.bounce.touchId,
+      permanent: outcome.bounce.permanent,
+      code: outcome.bounce.code,
+      marked: outcome.bounce.marked,
+    })
+    return answer(200, { matched: 'none', why: outcome.why }, outcome)
+  }
   if (outcome.matched === 'none') {
-    log.info('received email did not match a contact', { emailId, why: outcome.why })
+    log.info('received email did not match a contact', { emailId, why: outcome.why, report: parts !== null })
     return answer(200, { matched: 'none', why: outcome.why }, outcome)
   }
   log.info('inbound reply recorded', {
