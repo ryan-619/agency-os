@@ -46,20 +46,121 @@ export function decodeHtmlEntities(s: string): string {
   })
 }
 
-/** HTML as text, a block element per line and a `<blockquote>` opened with `> `. See the header. */
+/**
+ * HTML as text, a block element per line and a `<blockquote>` opened with `> `. See the header.
+ *
+ * Six passes, in this order, each over the previous one's output: script,
+ * style, head and title elements dropped whole; comments dropped; a
+ * `<blockquote>` opened with `> `; `<br>` as a line end; a block element's
+ * tag as a line end; any other tag as a space. Each pass answers exactly
+ * what the regex it replaced answered (`/<[^>]*>/g` for the last, and so
+ * on — html-text.test.ts keeps those regexes as its reference), and each is
+ * a forward scan that STOPS at the first closing marker that never comes.
+ * The regexes did not stop: with no `>` after them, `<[^>]*>` retried from
+ * every one of 200,000 `<` and read to the end each time — 50 s of one
+ * thread for one email any stranger could send, on the worker's only event
+ * loop or in the Resend webhook. Found by review.
+ */
 export function htmlToText(html: string): string {
-  const flat = html
-    .slice(0, HTML_TEXT_MAX_INPUT)
-    .replace(/<(script|style|head|title)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/<blockquote\b[^>]*>/gi, '\n> ')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/?(?:p|div|li|ul|ol|tr|table|h[1-6]|blockquote|pre|section|article|header|footer|hr)\b[^>]*>/gi, '\n')
-    .replace(/<[^>]*>/g, ' ')
+  let flat = html.slice(0, HTML_TEXT_MAX_INPUT)
+  flat = dropElements(flat)
+  flat = dropComments(flat)
+  flat = replaceTags(flat, /<blockquote\b/gi, '\n> ')
+  // Bounded on its own: `\s*` reads one run of whitespace per `<br`, and the
+  // runs after two different `<br` never overlap.
+  flat = flat.replace(/<br\s*\/?>/gi, '\n')
+  flat = replaceTags(flat, /<\/?(?:p|div|li|ul|ol|tr|table|h[1-6]|blockquote|pre|section|article|header|footer|hr)\b/gi, '\n')
+  flat = replaceTags(flat, /</g, ' ')
   return decodeHtmlEntities(flat)
     .split(/\r?\n/)
     .map((line) => line.replace(/[ \t\f\v\u00a0]+/g, ' ').trim())
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
+}
+
+/**
+ * `s.replace(OPENER[^>]*>, by)` — a tag that starts with what `opener`
+ * matches and runs to the first `>` after it — in one forward pass.
+ *
+ * `opener` must be global (`g`). The first `>` at or after a position is
+ * remembered until the scan passes it, and once there is none, no later
+ * opener can close either: the scan stops and the rest is kept as it is,
+ * which is what the regex left after failing at every one of them.
+ */
+function replaceTags(s: string, opener: RegExp, by: string): string {
+  let out = ''
+  let kept = 0
+  let gt = -1
+  opener.lastIndex = 0
+  for (let m = opener.exec(s); m !== null; m = opener.exec(s)) {
+    const from = m.index + m[0].length
+    if (gt < from) gt = s.indexOf('>', from)
+    if (gt === -1) break
+    out += s.slice(kept, m.index) + by
+    kept = gt + 1
+    opener.lastIndex = kept
+  }
+  return out + s.slice(kept)
+}
+
+/**
+ * `s.replace(/<!--[\s\S]*?-->/g, '')` in one forward pass. A comment with
+ * no `-->` after it is kept, and so is everything after it: a later `<!--`
+ * could only close on a `-->` that is not there.
+ */
+function dropComments(s: string): string {
+  let out = ''
+  let kept = 0
+  for (let open = s.indexOf('<!--'); open !== -1; open = s.indexOf('<!--', kept)) {
+    const close = s.indexOf('-->', open + 4)
+    if (close === -1) break
+    out += s.slice(kept, open)
+    kept = close + 3
+  }
+  return out + s.slice(kept)
+}
+
+const DROPPED_ELEMENTS = ['script', 'style', 'head', 'title'] as const
+
+/**
+ * `s.replace(/<(script|style|head|title)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, '')`
+ * in one forward pass: an element whose opening tag closes and whose
+ * closing tag follows is dropped whole, contents and all.
+ *
+ * The cost the regex paid for an element that is never closed — reading to
+ * the end once per opening tag — is paid once per NAME here: a search for
+ * `</script>` that found nothing from one position finds nothing from any
+ * later one, so it is not run again. An unclosed element is kept for the
+ * later passes, which turn its tags into spaces and keep its words, as
+ * before.
+ */
+function dropElements(s: string): string {
+  const opener = /<(script|style|head|title)\b/gi
+  const closers = new Map<string, RegExp>(
+    DROPPED_ELEMENTS.map((name) => [name, new RegExp(`<\\/${name}\\s*>`, 'gi')]),
+  )
+  const neverClosed = new Set<string>()
+  let out = ''
+  let kept = 0
+  let gt = -1
+  for (let m = opener.exec(s); m !== null; m = opener.exec(s)) {
+    const from = m.index + m[0].length
+    if (gt < from) gt = s.indexOf('>', from)
+    // No `>` after this opener means none after any later one either.
+    if (gt === -1) break
+    const name = m[1]!.toLowerCase()
+    const closer = closers.get(name)
+    if (!closer || neverClosed.has(name)) continue
+    closer.lastIndex = gt + 1
+    const close = closer.exec(s)
+    if (!close) {
+      neverClosed.add(name)
+      continue
+    }
+    out += s.slice(kept, m.index)
+    kept = close.index + close[0].length
+    opener.lastIndex = kept
+  }
+  return out + s.slice(kept)
 }
