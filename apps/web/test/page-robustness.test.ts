@@ -99,7 +99,9 @@ describe('the ICP is read through the guarded helper where a bad profile made a 
   it('/contacts/import no longer parses the profile bare', () => {
     const src = code(read(`${APP}contacts/import/page.tsx`))
     expect(src).not.toContain('parseIcpDefinition(')
-    expect(src).toContain('readIcp(')
+    // The sidebar label was its only use, and Shell names the org itself now
+    // (sidebar-org-name.test.ts), so the page reads no profile at all.
+    expect(src).not.toContain('icpForOrg(')
   })
 
   it('the company page reads a profile that does not parse as no profile', () => {
