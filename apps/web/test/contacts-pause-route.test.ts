@@ -15,6 +15,16 @@
  *  - Pause on somebody a reply had already paused changed nothing and
  *    answered `{paused: true}`; answering the reply then resumed them over
  *    the teammate's hold.
+ *
+ * And two from round 4:
+ *
+ *  - [20] Resume lifted whatever pause the ROUTE read after the click, not
+ *    the one the page showed, so a teammate's hold written since the page
+ *    loaded was lifted from a stale tab. Every Resume button now sends the
+ *    `pausedReason` it rendered, and the route lifts that one and no other.
+ *  - [12] The route wrote `contact.resumed` after the resume had committed,
+ *    behind `.catch(() => {})`, and the re-pause guard reads that row. The
+ *    row is now `contactResumeByHand`'s own, in the resume's transaction.
  */
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
@@ -27,6 +37,13 @@ const code = (source: string): string => source.replace(/\/\*[\s\S]*?\*\//g, '')
 
 const route = code(read('../src/app/api/contacts/[id]/route.ts'))
 const ledger = code(read('../src/components/contacts/ledger.tsx'))
+/** Every component with a Resume button that calls the route. */
+const RESUME_BUTTONS = [
+  '../src/components/contacts/ledger.tsx',
+  '../src/components/outreach/contacts.tsx',
+  '../src/components/outreach/suppressions.tsx',
+  '../src/components/inbox/queue.tsx',
+] as const
 
 const branch = (action: string): string => {
   const start = route.indexOf(`if (action === '${action}')`)
@@ -36,16 +53,25 @@ const branch = (action: string): string => {
 }
 
 describe('PATCH /api/contacts/[id]', () => {
-  it('resumes only through contactResumeByHand, on the reason the page read, and answers a refusal with its sentence', () => {
+  it('resumes only through contactResumeByHand, on the pause the PAGE showed, and answers a refusal with its sentence', () => {
     const resume = branch('resume')
-    expect(resume).toMatch(/contactResumeByHand\(db, \{ orgId: user\.orgId, contact \}\)/)
-    // Never the unconditional UPDATE any more.
+    expect(resume).toMatch(
+      /contactResumeByHand\(db, \{\s*orgId: user\.orgId, contact, expectedReason: pausedReason, actor: user\.id,?\s*\}\)/,
+    )
+    // Never the unconditional UPDATE, and never the reason the route read.
     expect(resume).not.toMatch(/resumeContact\(/)
-    expect(resume).toMatch(/status: 409/)
-    expect(resume).toMatch(/r\.message/)
-    // The audit row is written only for a resume that happened.
-    expect(resume.indexOf('if (!r.ok)')).toBeGreaterThan(-1)
-    expect(resume.indexOf('if (!r.ok)')).toBeLessThan(resume.indexOf("action: 'contact.resumed'"))
+    expect(resume).not.toMatch(/contact\.pausedReason/)
+    // A body that names no pause is refused before anything is read as one.
+    expect(resume.indexOf("typeof pausedReason !== 'string'")).toBeGreaterThan(-1)
+    expect(resume.indexOf("typeof pausedReason !== 'string'")).toBeLessThan(resume.indexOf('contactResumeByHand('))
+    expect(resume).toMatch(/status: 400/)
+    expect(resume).toMatch(/r\.reason === 'not_found' \? 404 : 409/)
+    expect(resume).toMatch(/error: r\.message/)
+  })
+
+  it('writes no `contact.resumed` row of its own: the resume writes it, in its own transaction', () => {
+    expect(branch('resume')).not.toMatch(/appendAudit\(/)
+    expect(route).not.toMatch(/action: 'contact\.resumed'/)
   })
 
   it('pauses only through contactPauseByHand, and never answers paused for a pause that did not happen', () => {
@@ -59,6 +85,34 @@ describe('PATCH /api/contacts/[id]', () => {
     expect(pause.indexOf('if (!r.ok)')).toBeLessThan(pause.indexOf("action: 'contact.paused'"))
     // `{ paused: true }` only after the refusal has been answered.
     expect(pause.indexOf('if (!r.ok)')).toBeLessThan(pause.indexOf('paused: true'))
+  })
+})
+
+describe('every Resume button', () => {
+  it('sends the pause it showed, so the route lifts that one and no other', () => {
+    for (const path of RESUME_BUTTONS) {
+      const src = code(read(path))
+      const calls = src.match(/action: 'resume'[^}]*\}/g) ?? []
+      expect(calls.length, path).toBeGreaterThan(0)
+      for (const call of calls) expect(call, path).toMatch(/pausedReason: \w+(?:\.\w+)*\.pausedReason\b/)
+    }
+  })
+
+  it('there is no Resume button the list above misses', async () => {
+    const { readdirSync, statSync } = await import('node:fs')
+    const root = fileURLToPath(new URL('../src', import.meta.url))
+    const found: string[] = []
+    const walk = (dir: string): void => {
+      for (const name of readdirSync(dir)) {
+        const full = `${dir}/${name}`
+        if (statSync(full).isDirectory()) walk(full)
+        else if (/\.tsx?$/.test(name) && /action: 'resume'/.test(code(readFileSync(full, 'utf8')))) {
+          found.push(`../src${full.slice(root.length)}`)
+        }
+      }
+    }
+    walk(root)
+    expect(found.sort()).toEqual([...RESUME_BUTTONS].sort())
   })
 })
 

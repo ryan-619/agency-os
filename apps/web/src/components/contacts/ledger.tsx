@@ -23,7 +23,10 @@ import { sendCheckSentence, type SendCheckView } from '@/lib/consent-view'
  * Resume, so a teammate can hold somebody whose reply someone may answer.
  * The route also refuses a resume while an opt-out the audit log says was
  * never recorded matches no suppression row; that needs the database, so
- * the row shows the route's sentence when it happens. The one thing it asks for
+ * the row shows the route's sentence when it happens. Resume sends the
+ * pause the row SHOWS (`pausedReason`), and the route lifts that one and no
+ * other: a pause somebody wrote after the page loaded is a 409 saying to
+ * reload (review round 4). The one thing it asks for
  * itself is "Why can't I reach them?", which calls the sender's own dry run
  * (`/api/contacts/[id]/send-check`) and prints the answer in the words every
  * other screen uses. That call queues nothing; the page says so beside it.
@@ -251,7 +254,7 @@ export function ContactsLedger({
                             No Resume: they asked to be erased and it did not complete. An owner finishes it with Erase….
                           </span>
                         ) : pausedFor ? (
-                          <button type="button" className="linkish" disabled={busy === r.id} onClick={() => void patch(r.id, { action: 'resume' })}>
+                          <button type="button" className="linkish" disabled={busy === r.id} onClick={() => void patch(r.id, { action: 'resume', pausedReason: r.pausedReason })}>
                             Resume
                           </button>
                         ) : null}

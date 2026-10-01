@@ -126,7 +126,9 @@ export function SuppressionsPanel({
       const res = await fetch(`/api/contacts/${p.id}`, {
         method: 'PATCH',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ action: 'resume' }),
+        // The pause this list showed, so the route lifts that one and no
+        // other: a pause written since is a 409 saying to reload.
+        body: JSON.stringify({ action: 'resume', pausedReason: p.pausedReason }),
       })
       if (res.ok) {
         window.location.reload()

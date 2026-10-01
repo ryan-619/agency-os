@@ -111,7 +111,7 @@ export function ContactsPanel({
                 {canWrite ? (
                   <div className="row-actions">
                     {c.pausedAt ? (
-                      <button type="button" disabled={busy === c.id} onClick={() => void patch(c.id, { action: 'resume' })}>
+                      <button type="button" disabled={busy === c.id} onClick={() => void patch(c.id, { action: 'resume', pausedReason: c.pausedReason })}>
                         Resume
                       </button>
                     ) : (

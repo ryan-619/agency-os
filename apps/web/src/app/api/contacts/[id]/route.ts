@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { assertCan } from '@agency/core'
 import {
-  appendAudit, contactPatchInput, contactPauseByHand, contactResumeByHand, contactsUpdate, pauseReasonClass,
+  appendAudit, contactPatchInput, contactPauseByHand, contactResumeByHand, contactsUpdate,
   readContact, updateContactTimeZone, type AgencyDb,
 } from '@agency/db/queries'
 import { auth } from '@/auth'
@@ -17,12 +17,18 @@ import { getDb } from '@/lib/db'
  *    reply's pause it REPLACES the reply's reason, so answering that reply
  *    cannot lift the teammate's hold; over any other pause it is refused
  *    with a sentence (409) and that pause stands (`contactPauseByHand`).
- *  - `resume`. A person deciding a paused contact may be written to again.
- *    Deliberate, audited, and the ONLY way a pause ends — except the two a
- *    person may not lift: an opt-out nobody could record, and an erasure
- *    that did not finish, which are recorded or finished instead
+ *  - `resume` with `pausedReason`, the pause the page SHOWED (its reason's
+ *    text). A person deciding a paused contact may be written to
+ *    again. Deliberate, audited, and the ONLY way a pause ends — except the
+ *    two a person may not lift: an opt-out nobody could record, and an
+ *    erasure that did not finish, which are recorded or finished instead
  *    (`contactResumeByHand`, 409 with its sentence). It lifts the pause the
- *    page read and no other.
+ *    page showed and no other (review round 4): this route used to judge
+ *    and lift the pause IT read after the click, so a teammate's hold
+ *    written after the page loaded was lifted from a stale tab. A pause
+ *    that changed since is a 409 saying to reload. The `contact.resumed`
+ *    row is written by `contactResumeByHand`, in the resume's own
+ *    transaction, never here.
  *  - `timeZone`. The thing that unblocks a contact the send path has been
  *    refusing as `unknown_timezone`.
  *  - `update`: name, title and addresses (`contactPatchInput`). The email is
@@ -59,7 +65,12 @@ export async function PATCH(
   } catch {
     return NextResponse.json({ error: 'invalid_json' }, { status: 400 })
   }
-  const { action, reason, timeZone } = (body ?? {}) as { action?: unknown; reason?: unknown; timeZone?: unknown }
+  const { action, reason, timeZone, pausedReason } = (body ?? {}) as {
+    action?: unknown
+    reason?: unknown
+    timeZone?: unknown
+    pausedReason?: unknown
+  }
 
   if (action === 'pause') {
     const why = typeof reason === 'string' ? reason.trim() : ''
@@ -81,15 +92,21 @@ export async function PATCH(
   }
 
   if (action === 'resume') {
-    const r = await contactResumeByHand(db, { orgId: user.orgId, contact })
-    if (!r.ok) return NextResponse.json({ error: r.message, reason: r.reason }, { status: 409 })
-    await appendAudit(db, {
-      orgId: user.orgId, actor: user.id, action: 'contact.resumed', subjectType: 'contact', subjectId: id,
-      // The CLASS of the pause, never its text: a manual reason carries a
-      // teammate's address and, often, the contact's own words, and the audit
-      // log is append-only — an erasure cannot scrub it.
-      detail: { pausedFor: pauseReasonClass(contact.pausedReason) },
-    }).catch(() => {})
+    // The pause the page showed, sent back by the button. Absent — a page
+    // from before this rule — there is no pause to name, and lifting the
+    // one read here is what this replaced.
+    if (pausedReason !== null && typeof pausedReason !== 'string') {
+      return NextResponse.json(
+        { error: 'Resume names the pause it lifts. Reload the page and try again. Nothing was changed.' },
+        { status: 400 },
+      )
+    }
+    const r = await contactResumeByHand(db, {
+      orgId: user.orgId, contact, expectedReason: pausedReason, actor: user.id,
+    })
+    if (!r.ok) {
+      return NextResponse.json({ error: r.message, reason: r.reason }, { status: r.reason === 'not_found' ? 404 : 409 })
+    }
     return NextResponse.json({ paused: false })
   }
 

@@ -75,9 +75,15 @@ export function groupInbox<T>(
 // The words
 // ---------------------------------------------------------------------------
 
+/**
+ * Answering resumes somebody only where there IS an Answer — an email reply
+ * (review round 4). A text is answered with Draft SMS on /contacts, which
+ * refuses a paused person and resumes nobody.
+ */
 export const INBOX_LEDE =
   'Every reply that reached this system, newest first. A reply pauses the person in every campaign; ' +
-  'answering resumes them, and the answer is a draft a person approves.'
+  'answering an email reply here resumes them, and the answer is a draft a person approves. ' +
+  'A text is answered with Draft SMS on /contacts, after resuming them there.'
 
 export const OPTED_OUT_NOTE = 'asked to stop — do not answer. The suppression row is what enforces it.'
 

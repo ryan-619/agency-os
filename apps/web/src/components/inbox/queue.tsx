@@ -24,7 +24,9 @@ import {
  *    (their reply paused them everywhere), and the worker sends it only after
  *    a person approves it and every rule passes again at that moment. Not
  *    on SMS or WhatsApp (0019): an answer there is a registered template, so
- *    the row points at Draft SMS on /contacts instead of offering free text.
+ *    the row points at Draft SMS on /contacts instead of offering free text
+ *    — and, since Draft SMS refuses a paused person and resumes nobody, says
+ *    to resume them there first when their reply paused them.
  *
  * The reply's body is shown whole. Somebody deciding what to do about a
  * message has to be able to read all of it.
@@ -134,7 +136,9 @@ export function InboxQueue({
 
   const resume = async (row: InboxRowView) => {
     if (!row.contact) return
-    if (await send(row.id, `/api/contacts/${row.contact.id}`, 'PATCH', { action: 'resume' })) router.refresh()
+    // The pause this row showed: the route lifts that one and no other.
+    const body = { action: 'resume', pausedReason: row.contact.pausedReason }
+    if (await send(row.id, `/api/contacts/${row.contact.id}`, 'PATCH', body)) router.refresh()
   }
 
   const formFor = (row: InboxRowView) =>
@@ -305,9 +309,9 @@ export function InboxQueue({
                         </label>
                         <p className="hint" style={{ marginTop: 10 }}>
                           Drafting resumes {row.contact?.name ?? 'them'}: their reply paused them in every campaign, and an
-                          approved answer to a paused person is refused. If the draft is denied, the pause their reply
-                          caused goes back on — unless somebody resumes them before then, or another answer to them is
-                          still waiting.
+                          approved answer to a paused person is refused. If the draft is denied, or the answer fails or
+                          is refused when it would be sent, the pause their reply caused goes back on — unless somebody
+                          resumes them before then, or another answer to them is still waiting.
                         </p>
                         <div className="inbox-actions" style={{ marginTop: 10 }}>
                           <button
@@ -375,7 +379,7 @@ export function InboxQueue({
 
                     {canAnswer && row.contact && !optedOut && !row.suppressed && !live && answersByTemplate(row.channel) ? (
                       <span className="hint" style={{ maxWidth: 190, textAlign: 'right' }}>
-                        {answerElsewhere(row.channel)}
+                        {answerElsewhere(row.channel, row.contact)}
                         {row.channel === 'sms' ? (
                           <>
                             {' '}
