@@ -1,0 +1,110 @@
+name: Production
+
+# Run by hand (Actions → Production → Run workflow, or the API), never on a
+# push. It exists so a release can be migrated and deployed without a
+# production credential ever touching a laptop's shell history, a chat, or an
+# assistant's context (§2.3): the connection string and the Vercel token live
+# in this repository's Actions secrets, are masked in the log, and reach only
+# the one step that needs each.
+#
+#   status   — which migrations the production database has applied
+#   migrate  — apply every pending migration from the chosen ref, in order,
+#              each in its own transaction (the migrator refuses an edited
+#              shipped migration). Migrate BEFORE the code that reads it
+#              deploys — DEPLOYING.md, "migrate FIRST".
+#   deploy   — build and deploy the chosen ref to Vercel production. Only
+#              needed when the Vercel project is NOT git-connected; when it
+#              is, merging to main deploys.
+#
+# Secrets (Settings → Secrets and variables → Actions):
+#   PRODUCTION_DATABASE_URL  Neon's DIRECT (unpooled) connection string
+#   VERCEL_TOKEN, VERCEL_ORG_ID, VERCEL_PROJECT_ID   only for `deploy`
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'status, migrate or deploy'
+        required: true
+        default: status
+        type: choice
+        options: [status, migrate, deploy]
+      confirm:
+        description: 'For migrate or deploy, type the action again'
+        required: false
+        default: ''
+
+concurrency:
+  group: production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  database:
+    if: inputs.action == 'status' || inputs.action == 'migrate'
+    name: database ${{ inputs.action }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse an unconfirmed migration
+        if: inputs.action == 'migrate' && inputs.confirm != 'migrate'
+        run: |
+          echo "::error::Type 'migrate' in the confirm field to apply migrations to production."
+          exit 1
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: ${{ inputs.action }}
+        env:
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+          NODE_ENV: production
+          ACTION: ${{ inputs.action }}
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::The PRODUCTION_DATABASE_URL secret is not set."
+            exit 1
+          fi
+          if [ "$ACTION" = "migrate" ]; then
+            npm run db:migrate
+          fi
+          npm run db:migrate -- status
+
+  deploy:
+    if: inputs.action == 'deploy'
+    name: deploy to Vercel production
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse an unconfirmed deploy
+        if: inputs.confirm != 'deploy'
+        run: |
+          echo "::error::Type 'deploy' in the confirm field to deploy to production."
+          exit 1
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      # The CLI is fetched for this step only and pinned; it is not a
+      # dependency of the repository. No .env exists in a checkout, so the
+      # local-build exfiltration path DEPLOYING.md warns about cannot arise.
+      - name: Build and deploy
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          if [ -z "$VERCEL_TOKEN" ] || [ -z "$VERCEL_ORG_ID" ] || [ -z "$VERCEL_PROJECT_ID" ]; then
+            echo "::error::VERCEL_TOKEN, VERCEL_ORG_ID and VERCEL_PROJECT_ID must all be set to deploy from here."
+            exit 1
+          fi
+          npx --yes vercel@62.1.0 pull --yes --environment=production --token="$VERCEL_TOKEN"
+          npx --yes vercel@62.1.0 build --prod --token="$VERCEL_TOKEN"
+          npx --yes vercel@62.1.0 deploy --prebuilt --prod --token="$VERCEL_TOKEN"
