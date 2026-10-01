@@ -683,8 +683,9 @@ prefer the script.)
    is `true`); `worker.ageSeconds` is how long ago the newest heartbeat
    landed. A live row reads `live` even where this deployment has no
    `AGENT_URL` — a worker writing to the database is an observation, and it
-   beats configuration. The dashboard and Settings → Deployment still call a
-   retired row `silent`, which is true — nothing is sending.
+   beats configuration. Every surface calls such a row `retired` — the
+   dashboard ("Worker retired — last seen …"), Settings, Settings →
+   Deployment, this endpoint and the digest — and none of them alerts on it.
    `worker: null` with a `workerError` means the table could not be read —
    almost always 0018 not applied, which `schema` will already say. None of
    this changes the status code, not even under `?strict=1`: strict asks

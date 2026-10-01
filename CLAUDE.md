@@ -128,8 +128,10 @@ one.
   NEVER ASKED, never to granted — and its DELETE and that audit row are one
   transaction. The route gates the lift to owners.
 - **A bounce is not an opt-out.** `contacts_bounce_has_code` keeps
-  `email_bounced_at` and `email_bounce_code` NULL together; the code must be an
-  RFC 3463 status; the mark is lifted only by `contactsUpdate` changing the
+  `email_bounced_at` and `email_bounce_code` NULL together, and (0019)
+  `contacts_bounce_code_is_rfc3463` makes the code an RFC 3463 status — 0018
+  paired the NULLs only, while this line already claimed the format; the
+  mark is lifted only by `contactsUpdate` changing the
   address, in the same UPDATE. It is a column and a `bounced` refusal, never a
   suppression row (§2, "A bounce is evidence about an address").
 - **A reply is handled by a person, and only a reply.**
@@ -1772,9 +1774,10 @@ observation beats configuration — `never` is a configured worker with no row,
 and `not_configured` is neither; the one exception is the retired row above.
 `/api/health`'s `worker.status` is `heartbeatReportedStatus`, which says
 `retired` for it, beside `retired: true|false`. `retired` is not a fifth
-value of `HeartbeatReport['status']`, which stays `silent`, so the dashboard
-and `/settings/deployment` still call such a row silent — true, since
-nothing sends, but not the digest's word. `worker` never changes
+value of `HeartbeatReport['status']`, which stays `silent`; every reader
+words it through `workerWord` (`lib/dashboard-view.ts`), so the dashboard
+("Worker retired — last seen …"), `/settings` and `/settings/deployment` say
+`retired` too, as the digest does. `worker` never changes
 `/api/health`'s status or code, even under `?strict=1`.
 
 ### Search, exports and records
