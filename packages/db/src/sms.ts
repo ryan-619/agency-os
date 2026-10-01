@@ -43,7 +43,7 @@ const stderrLog: InboundLog = {
  * was there.
  */
 function withoutNul(s: string): string {
-  return s.replace(/\u0000/g, '�')
+  return s.replace(/\u0000/g, '\uFFFD')
 }
 
 /**

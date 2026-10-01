@@ -248,9 +248,10 @@ export const DLR_REASON_FIELDS = ['errorreason'] as const
 
 /**
  * The words that mean delivered: SMPP's receipt state `DELIVRD` (MoEngage's
- * guide: "DELIVRD = delivered") and its spelled-out form, which SMPP's own
- * message-state name `DELIVERED` and most gateways' reports use. A report
- * saying "Delivered" was stored as pending.
+ * guide: "DELIVRD = delivered") and its spelled-out form — SMPP's own
+ * message-state name, `DELIVERED`, which a gateway may report in place of
+ * the abbreviation, as FAILED_WORDS already took spelled-out failures. A
+ * report saying "Delivered" was stored as pending.
  */
 export const DELIVERED_WORDS: ReadonlySet<string> = new Set(['delivrd', 'delivered'])
 /**
