@@ -3,6 +3,7 @@
 import { Fragment, useState } from 'react'
 import { When } from '@/components/when'
 import { ContactEdit } from '@/components/contacts/edit'
+import { SmsComposer } from '@/components/contacts/sms-composer'
 import { sendCheckSentence, type SendCheckView } from '@/lib/consent-view'
 
 /**
@@ -16,6 +17,10 @@ import { sendCheckSentence, type SendCheckView } from '@/lib/consent-view'
  * itself is "Why can't I reach them?", which calls the sender's own dry run
  * (`/api/contacts/[id]/send-check`) and prints the answer in the words every
  * other screen uses. That call queues nothing; the page says so beside it.
+ *
+ * "Draft SMS", on a row with a phone number, opens the SMS composer
+ * (`sms-composer.tsx`): a registered DLT template, its variables filled, the
+ * sender's dry run over those exact words, and a draft parked on /approvals.
  *
  * Two more per row. "Download record" is everything held about the person,
  * as JSON (`/api/contacts/[id]/record`, any member, audited). "Erase…" is
@@ -71,7 +76,7 @@ export interface LedgerCampaign {
 
 const KEY_WORDS: Record<LedgerSuppressionView['key'], string> = { email: 'email', phone: 'phone', linkedin: 'LinkedIn' }
 
-type Panel = 'check' | 'edit' | 'erase'
+type Panel = 'check' | 'edit' | 'erase' | 'sms'
 
 /** Only a URL that is plainly a LinkedIn page becomes a link; anything else is shown as text. */
 function linkedinHref(url: string): string | null {
@@ -214,6 +219,16 @@ export function ContactsLedger({
                         <button type="button" className="linkish" onClick={() => toggle(r.id, 'edit')}>
                           Edit and consent
                         </button>
+                        {r.phone ? (
+                          <button
+                            type="button"
+                            className="linkish"
+                            onClick={() => toggle(r.id, 'sms')}
+                            title="From a registered DLT template, for a person to approve. Nothing is sent from here."
+                          >
+                            Draft SMS
+                          </button>
+                        ) : null}
                         {r.pausedAt ? (
                           <button type="button" className="linkish" disabled={busy === r.id} onClick={() => void patch(r.id, { action: 'resume' })}>
                             Resume
@@ -249,6 +264,13 @@ export function ContactsLedger({
                       <SendCheck contactId={r.id} campaigns={campaigns} />
                     ) : panel === 'erase' ? (
                       <EraseContact contactId={r.id} name={r.name} onCancel={() => setOpen(null)} />
+                    ) : panel === 'sms' ? (
+                      <SmsComposer
+                        contactId={r.id}
+                        smsConsent={r.channels.find((c) => c.channel === 'sms')?.state ?? null}
+                        campaigns={campaigns}
+                        onCancel={() => setOpen(null)}
+                      />
                     ) : (
                       <ContactEdit
                         contact={{
