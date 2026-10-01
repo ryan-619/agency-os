@@ -156,3 +156,12 @@ ALTER TABLE touches ADD CONSTRAINT touches_delivery_error_is_bounded
 --     inbound email keeps its own (read-only) dedup as it was.
 CREATE UNIQUE INDEX touches_inbound_sms_provider_id_key ON touches (provider_id)
   WHERE direction = 'in' AND channel = 'sms' AND provider_id IS NOT NULL;
+
+-- (5) A bounce code IS an RFC 3463 status. 0018's `contacts_bounce_has_code`
+--     pairs the two columns' NULLs and nothing more, so a script or a hand
+--     UPDATE could store `email_bounce_code = 'bounced'` — a mark whose
+--     evidence is not a status code. The one writer, `outreachRecordBounce`,
+--     has refused anything but `^[45]\.\d{1,3}\.\d{1,3}$` since 0018 shipped,
+--     so no stored row can fail this. Found by review.
+ALTER TABLE contacts ADD CONSTRAINT contacts_bounce_code_is_rfc3463
+  CHECK (email_bounce_code IS NULL OR email_bounce_code ~ '^[45]\.[0-9]{1,3}\.[0-9]{1,3}$');

@@ -1418,6 +1418,19 @@ describe('0018 — evidence, consent records and operations', () => {
       )
       expect(rows).toHaveLength(1)
     })
+
+    it('REFUSES a code that is not an RFC 3463 status (0019)', async () => {
+      for (const code of ['bounced', '550', '5.1', '2.0.0', '5.1.1 user unknown', ' 5.1.1', '']) {
+        const msg = await reject(
+          `UPDATE contacts SET email_bounced_at = now(), email_bounce_code = $2 WHERE id = $1`, [contactId, code],
+        )
+        expect(msg, code).toMatch(/contacts_bounce_code_is_rfc3463|contacts_bounce_has_code/)
+      }
+      const rows = await db.driver.select<{ id: string }>(
+        `UPDATE contacts SET email_bounced_at = now(), email_bounce_code = '4.2.2' WHERE id = $1 RETURNING id`, [contactId],
+      )
+      expect(rows).toHaveLength(1)
+    })
   })
 
   describe('meetings.outcome', () => {

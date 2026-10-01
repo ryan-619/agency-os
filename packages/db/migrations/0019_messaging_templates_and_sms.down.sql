@@ -3,6 +3,7 @@
 -- touch loses the link to the template it was rendered from, and every SMS
 -- delivery report (status, time, reason) is lost. Inbound SMS rows stay —
 -- they are ordinary inbound touches — and only their uniqueness index goes.
+ALTER TABLE contacts DROP CONSTRAINT IF EXISTS contacts_bounce_code_is_rfc3463;
 DROP INDEX IF EXISTS touches_inbound_sms_provider_id_key;
 ALTER TABLE touches DROP CONSTRAINT IF EXISTS touches_delivery_error_is_bounded;
 ALTER TABLE touches DROP CONSTRAINT IF EXISTS touches_delivery_failure_has_its_reason;
