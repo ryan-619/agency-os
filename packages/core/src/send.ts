@@ -59,11 +59,23 @@
  * would still bounce.
  *
  *   cold channel → unparseable → suppressed → consent → paused →
- *   stale evidence → bounced → timezone / quiet hours → cap → campaign →
- *   approval
+ *   stale evidence → bounced → template → timezone / quiet hours → cap →
+ *   campaign → approval
+ *
+ * ## The template steps (0019, DoveSoft)
+ *
+ * An SMS or WhatsApp message must be a registered template with every slot
+ * filled (`dlt.ts`): an Indian operator scrubs anything else, so no approval
+ * makes it arrive. Two refusals nobody may approve past — `no_template` and
+ * `template_mismatch` — after the bounce, because each is about the WORDS
+ * and every refusal before them is about the person; and before the clock,
+ * because a message held until morning would be scrubbed all the same. A
+ * PROMOTIONAL SMS outside TRAI's band is the clock, not a refusal: it is
+ * deferred as `quiet_hours`, right after the campaign's own quiet hours.
  */
 
 import { normalisePhone, suppressionKeysFor, type SuppressionKind } from './normalise.js'
+import { PROMOTIONAL_WINDOW, promotionalWindowOpen, type TemplateCategory } from './dlt.js'
 
 export type Channel = 'email' | 'linkedin' | 'sms' | 'voice' | 'whatsapp'
 
@@ -83,6 +95,29 @@ export const OPT_IN_ONLY_CHANNELS: ReadonlySet<Channel> = new Set<Channel>([
   'whatsapp',
 ])
 
+/**
+ * The channels whose every message must be a registered template (0019):
+ * SMS, because DLT requires it of every commercial SMS to an Indian number,
+ * and WhatsApp, because a business-initiated message outside a customer's
+ * own 24-hour window is a template or nothing. `decideSend` reads
+ * `SendFacts.template` for these channels and for no other.
+ */
+export const TEMPLATE_CHANNELS: ReadonlySet<Channel> = new Set<Channel>(['sms', 'whatsapp'])
+
+/**
+ * What the send path knows about the template a message was rendered from.
+ * Gathered by `sendFactsFor` from the row's `template_id`, the template row
+ * and the message body; never taken from a caller's say-so.
+ */
+export interface TemplateFacts {
+  /** The template row exists in this org, on this channel, and is active. */
+  readonly active: boolean
+  /** The body is the registered text with every slot filled (`matchesTemplate`). */
+  readonly matches: boolean
+  /** Decides the sending window: a `promotional` SMS waits for TRAI's band. */
+  readonly category: TemplateCategory
+}
+
 export type SendRefusalCode =
   | 'unparseable_recipient'
   | 'suppressed'
@@ -92,6 +127,8 @@ export type SendRefusalCode =
   | 'consent_revoked'
   | 'paused'
   | 'stale_evidence'
+  | 'no_template'
+  | 'template_mismatch'
   | 'quiet_hours'
   | 'unknown_timezone'
   | 'daily_cap'
@@ -196,6 +233,14 @@ export interface SendFacts {
    * Absent reads as `other`.
    */
   readonly pausedFor?: PauseReasonClass
+  /**
+   * The registered template behind THESE words, for a `TEMPLATE_CHANNELS`
+   * message — or null, which on those channels is the `no_template`
+   * refusal. Required, like `evidenceStale`, so a caller cannot forget the
+   * question; not read for email, LinkedIn or voice, where the caller
+   * passes null.
+   */
+  readonly template: TemplateFacts | null
   /** The recipient's IANA zone. Null means unknown, which is a refusal. */
   readonly recipientTimeZone: string | null
   /** Local wall-clock times, from the campaign. */
@@ -343,6 +388,33 @@ export function decideSend(facts: SendFacts): SendDecision {
     )
   }
 
+  // 2d. The registered template (0019, dlt.ts). After every refusal about
+  //     the PERSON, because these are about the words: a suppressed or
+  //     declined person must be logged as that, never as a template fault.
+  //     Before the clock, because a scrubbed message is scrubbed in the
+  //     morning too. Nobody may approve past either — an approval does not
+  //     make the operator deliver words it did not register — and the fix
+  //     is a new draft from a registered, active template.
+  if (TEMPLATE_CHANNELS.has(facts.channel)) {
+    const what = facts.channel === 'sms' ? 'SMS' : 'WhatsApp message'
+    if (facts.template === null || !facts.template.active) {
+      return refuse(
+        'no_template',
+        `${what === 'SMS' ? 'An SMS' : 'A WhatsApp message'} must be sent from a registered, active template, and ` +
+          'this one names none (or names one that was deactivated). Nothing was sent, and approving does not ' +
+          'register it. Draft it again from an active template.',
+      )
+    }
+    if (!facts.template.matches) {
+      return refuse(
+        'template_mismatch',
+        `This ${what} is not its registered template with the variables filled in, so the ` +
+          'operator would not deliver it. Nothing was sent, and approving does not change the words. Draft it ' +
+          'again from the template.',
+      )
+    }
+  }
+
   // 3. Quiet hours, in the RECIPIENT's timezone (§2.1) — never the sender's.
   if (facts.recipientTimeZone === null) {
     return refuse(
@@ -368,6 +440,20 @@ export function decideSend(facts: SendFacts): SendDecision {
         `in ${facts.recipientTimeZone}). Nothing was sent; schedule it for after ${facts.quietEnd}.`,
       true,
     )
+  }
+
+  // 3a. A promotional SMS outside TRAI's band (dlt.ts). The clock, so it is
+  //     DEFERRED like quiet hours — the same code, which is what the sender
+  //     re-queues and what /approvals shows as held — never refused.
+  if (TEMPLATE_CHANNELS.has(facts.channel) && facts.template?.category === 'promotional') {
+    if (promotionalWindowOpen(facts.now, facts.recipientTimeZone) === false) {
+      return refuse(
+        'quiet_hours',
+        `This is a promotional SMS, and TRAI's band for one is ${PROMOTIONAL_WINDOW.words} — checked in ` +
+          `India and in ${facts.recipientTimeZone}. Nothing was sent; it goes when the band opens.`,
+        true,
+      )
+    }
   }
 
   // 4. The daily cap.

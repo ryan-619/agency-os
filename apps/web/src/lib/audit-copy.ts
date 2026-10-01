@@ -869,6 +869,63 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     }
     return join([digest, alert, unannounced])
   },
+
+  // --- DoveSoft (0019): registered templates and SMS -----------------------
+  // A template is a registration copied from the DLT portal; an SMS is drafted
+  // from one and goes through the one send path. Ids and counts only.
+  'template.created': (c) => {
+    const id = text(c.d, 'externalId', 64)
+    const category = word(c.d, 'category')
+    return `recorded ${aChannel(word(c.d, 'channel'))} template${id ? ` (${id})` : ''}${category ? `, ${spaced(category)}` : ''}`
+  },
+  'template.activated': (c) => {
+    const id = text(c.d, 'externalId', 64)
+    return `switched ${aChannel(word(c.d, 'channel'))} template back on${id ? ` (${id})` : ''}; messages can be drafted from it again`
+  },
+  'template.deactivated': (c) => {
+    const id = text(c.d, 'externalId', 64)
+    return `switched off ${aChannel(word(c.d, 'channel'))} template${id ? ` (${id})` : ''}; a draft written from it is refused at sending`
+  },
+  'template.imported': (c) => {
+    const n = (k: string): number | null => num(c.d, k)
+    return `imported templates from a DLT export${tail([
+      n('imported') !== null && `${n('imported')} added`,
+      (n('alreadyPresent') ?? 0) > 0 && `${n('alreadyPresent')} already present`,
+      (n('skipped') ?? 0) > 0 && `${n('skipped')} skipped`,
+      (n('refused') ?? 0) > 0 && `${n('refused')} refused`,
+    ])}`
+  },
+  'sms.drafted': (c) =>
+    `drafted an SMS to a contact at ${c.co} from a registered template; it waits for approval and nothing was sent`,
+  'sms.delivery_unmatched': (c) =>
+    `received a delivery report for an SMS this system did not send${
+      word(c.d, 'why') === 'ambiguous' ? ' (it named more than one message)' : ''
+    }; nothing was changed`,
+  'sms.inbound_unmatched': (c) => {
+    const why = own(SMS_UNMATCHED, word(c.d, 'why')) ?? 'that could not be placed'
+    const optOut = flag(c.d, 'optOut') === true
+    const suppressed = flag(c.d, 'suppressed')
+    return `received a text from a number ${why}, so it was filed under nobody${
+      optOut
+        ? suppressed === false
+          ? '; it asked to stop, and the number is NOT on the suppression list — follow up by hand'
+          : '; it asked to stop, and the number was put on the suppression list'
+        : ''
+    }`
+  },
+}
+
+/** "an SMS", "a WhatsApp", "a voice" — a channel's name with its article, for a template. */
+function aChannel(channel: string | null): string {
+  const name = channelName(channel)
+  return /^(SMS|[aeiou])/i.test(name) ? `an ${name}` : `a ${name}`
+}
+
+/** Why `sms.inbound_unmatched` filed a text under nobody — `sms.ts`'s own reasons. */
+const SMS_UNMATCHED: Readonly<Record<string, string>> = {
+  no_contact: 'no contact has',
+  ambiguous: 'more than one contact has',
+  unreadable_number: 'that could not be read',
 }
 
 /** Every action this page has a sentence for. The test iterates it. */
@@ -1012,6 +1069,7 @@ const FAMILY_LABEL: Readonly<Record<string, string>> = {
   approval: 'Approvals', turn: 'Chat turns', connector: 'Connectors', credential: 'Credentials', user: 'Team',
   company: 'Companies', note: 'Notes', task: 'Tasks', call: 'Calls', notification: 'Notifications',
   scan: 'Scheduled rescans', cron: 'Scheduled jobs', export: 'Exports', linkedin: 'LinkedIn steps',
+  template: 'Message templates', sms: 'SMS',
 }
 export const AUDIT_FAMILIES: readonly { readonly value: string; readonly label: string }[] = Object.freeze(
   [...new Set(AUDIT_ACTIONS.map((a) => a.split('.')[0] ?? a))].map((value) => ({
@@ -1038,6 +1096,7 @@ export const AUDIT_SUBJECT_TYPES: readonly { readonly value: string; readonly la
   { value: 'task', label: 'A task' },
   { value: 'user', label: 'A teammate' },
   { value: 'secret', label: 'A stored credential' },
+  { value: 'message_template', label: 'A message template' },
 ])
 
 /**

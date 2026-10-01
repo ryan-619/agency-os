@@ -193,6 +193,8 @@ describe('the consent ledger writers', () => {
       consent: consent ? { granted: consent.granted, source: consent.source } : null,
       paused: false,
       evidenceStale: false,
+      // A registered template, so the refusal below is the consent and nothing after it (0019).
+      template: { active: true, matches: true, category: 'service_explicit' },
       recipientTimeZone: 'America/Los_Angeles',
       quietStart: '21:00',
       quietEnd: '08:00',

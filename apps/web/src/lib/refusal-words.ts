@@ -34,6 +34,9 @@ export const REFUSAL_WORDS: Readonly<Record<string, string>> = {
   needs_approval: 'denied by a person',
   bounced: 'address bounced',
   stale_evidence: 'the evidence it quotes is stale',
+  // 0019: an SMS or WhatsApp message the operator would not deliver.
+  no_template: 'no registered template',
+  template_mismatch: 'not its registered template',
 }
 
 /** The words for a code, or the code itself made readable. */

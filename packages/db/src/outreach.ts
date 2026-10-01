@@ -38,6 +38,11 @@ import {
   pauseReasonClass, pausedSentence, readMailSignals, staleAfterDaysOf, suppressionKeysFor,
   type Channel, type MailSignal, type SendDecision, type SendFacts, type SuppressionKind, classifyReply, type ReplyKind,
 } from '@agency/core'
+// 0019 (DoveSoft): the template facts and the SMS opt-out reader. A separate
+// import so the line above stays as it was for a parallel edit to merge onto.
+import {
+  TEMPLATE_CHANNELS, matchesTemplate, smsOptOut, type TemplateCategory, type TemplateFacts,
+} from '@agency/core'
 import * as schema from './schema.js'
 import { activeIcpProfile, type AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
@@ -91,7 +96,27 @@ export interface MessageProvider {
      * satisfies the interface by ignoring them.
      */
     readonly headers?: Readonly<Record<string, string>>
+    /**
+     * 0019: the registration an SMS or WhatsApp message was checked against
+     * — the DLT template id and header (or Meta's template name and the WABA
+     * number) the operator compares the words with. Read by `dispatchTouch`
+     * from the row the message names, never from a caller, and present on
+     * every `TEMPLATE_CHANNELS` message that reaches a provider. A provider
+     * for those channels refuses (throws) without it; email and LinkedIn
+     * providers ignore it.
+     */
+    readonly template?: MessageTemplateRegistration
   }): Promise<{ readonly providerId: string }>
+}
+
+/** What a provider is told about the template a message was rendered from (0019). */
+export interface MessageTemplateRegistration {
+  /** DLT's content-template id (`tempid`), or Meta's template name. */
+  readonly externalId: string
+  /** The DLT header (`senderid`), or the WABA number. */
+  readonly senderId: string
+  readonly category: string
+  readonly language: string
 }
 
 export interface SendRequest {
@@ -159,6 +184,58 @@ export async function sendOne(
       },
       sent: false,
     }
+  }
+
+  // 0019: an SMS or WhatsApp message is a registered template or nothing,
+  // and this entry point carries free text — so it cannot be queued (0019's
+  // CHECK) and is recorded as the refusal the sender would give it: through
+  // `decideSend` over these words with no template, so a person-level rule
+  // (no opt-in, a suppression) is still the reason logged ahead of
+  // `no_template`, in the decision's own order.
+  if (TEMPLATE_CHANNELS.has(subject.channel as Channel)) {
+    const gathered = await sendFactsFor(db, {
+      orgId: req.orgId,
+      campaignId: req.campaignId,
+      contactId: req.contactId,
+      approvedByHuman: false,
+      evidenceAsOf: now,
+      words: { templateId: null, body: req.body },
+      now,
+    })
+    const decided = 'missing' in gathered ? null : decideSend(gathered.facts)
+    const decision: SendDecision & { allowed: false } =
+      decided && !decided.allowed
+        ? decided
+        : {
+            allowed: false,
+            code: 'no_template',
+            reason: `${subject.channel === 'sms' ? 'An SMS' : 'A WhatsApp message'} is sent from a registered template, and this one has none. Nothing was sent.`,
+            humanCanResolve: false,
+          }
+    const [refused] = await db
+      .insert(schema.touches)
+      .values({
+        orgId: req.orgId,
+        campaignId: req.campaignId,
+        contactId: req.contactId,
+        companyId: req.companyId ?? subject.companyId,
+        channel: subject.channel,
+        direction: 'out',
+        status: 'refused',
+        refusalCode: decision.code,
+        subject: req.subject,
+        body: req.body,
+      })
+      .returning({ id: schema.touches.id })
+    await appendAudit(db, {
+      orgId: req.orgId,
+      actor: 'system',
+      action: `send.${decision.code}`,
+      subjectType: 'touch',
+      subjectId: refused?.id ?? null,
+      detail: { campaignId: req.campaignId, channel: subject.channel, code: decision.code },
+    }).catch(() => {})
+    return { touchId: refused?.id ?? null, decision, sent: false }
   }
 
   const rows = await db
@@ -396,6 +473,28 @@ export async function dispatchTouch(
   }
   Object.assign(headers, opts.headersFor?.(touch) ?? {})
 
+  // 0019: the registration the words were checked against, for the
+  // provider to name (DLT's `tempid` and `senderid`). `decideSend` has just
+  // refused a template-channel message with none, and 0019's RESTRICT keeps
+  // the row; a miss here is refused `no_template` all the same, never sent
+  // bare.
+  const template = TEMPLATE_CHANNELS.has(touch.channel as Channel)
+    ? await registrationFor(db, touch)
+    : undefined
+  if (template === null) {
+    await settle(db, touch.id, { status: 'refused', refusalCode: 'no_template', recipient: facts.recipient })
+    return {
+      touchId: touch.id,
+      decision: {
+        allowed: false,
+        code: 'no_template',
+        reason: 'The registered template this message names could not be read a moment ago. Nothing was sent.',
+        humanCanResolve: false,
+      },
+      sent: false,
+    }
+  }
+
   let providerId: string
   try {
     const sent = await provider.send({
@@ -403,6 +502,7 @@ export async function dispatchTouch(
       subject: touch.subject ?? '',
       body: touch.body ?? '',
       headers,
+      ...(template ? { template } : {}),
     })
     providerId = sent.providerId
   } catch (err) {
@@ -602,8 +702,78 @@ async function gatherFacts(
     contactId: touch.contactId,
     approvedByHuman: touch.status === 'approved' && touch.approvedBy !== null,
     evidenceAsOf: evidenceAsOfFor(touch),
+    // 0019: the words this row holds, and the template it names.
+    words: { templateId: touch.templateId, body: touch.body },
     now,
   })
+}
+
+/**
+ * The words a send-check is about, for the template steps (0019): the
+ * template a message names and its body. On a `TEMPLATE_CHANNELS` channel
+ * the sender judges these — never a caller's claim that they match.
+ */
+export interface MessageWords {
+  readonly templateId: string | null
+  readonly body: string | null
+}
+
+/**
+ * The template facts for one message's words on a template channel, or null
+ * when they name no template this org holds on this channel — the sender's
+ * `no_template`. Read from the row, never from the caller: `matches` is
+ * `matchesTemplate` over the stored body, the operator's own scrub run first.
+ */
+async function templateFactsFor(
+  db: AgencyDb,
+  orgId: string,
+  channel: Channel,
+  words: MessageWords | null,
+): Promise<TemplateFacts | null> {
+  if (!words?.templateId) return null
+  const [row] = await db
+    .select({ body: schema.messageTemplates.body, active: schema.messageTemplates.active, category: schema.messageTemplates.category })
+    .from(schema.messageTemplates)
+    .where(
+      and(
+        eq(schema.messageTemplates.id, words.templateId),
+        eq(schema.messageTemplates.orgId, orgId),
+        eq(schema.messageTemplates.channel, channel),
+      ),
+    )
+    .limit(1)
+  if (!row) return null
+  return {
+    active: row.active,
+    matches: matchesTemplate(words.body ?? '', row.body),
+    category: row.category as TemplateCategory,
+  }
+}
+
+/**
+ * The registration a template-channel message names, as its provider is told
+ * it (0019), or null when the row names none this org holds on this
+ * channel. Active or not: `decideSend` has already judged that.
+ */
+async function registrationFor(db: AgencyDb, touch: TouchRow): Promise<MessageTemplateRegistration | null> {
+  if (!touch.templateId) return null
+  const [row] = await db
+    .select({
+      externalId: schema.messageTemplates.externalId,
+      senderId: schema.messageTemplates.senderId,
+      category: schema.messageTemplates.category,
+      language: schema.messageTemplates.language,
+    })
+    .from(schema.messageTemplates)
+    .where(
+      and(
+        eq(schema.messageTemplates.id, touch.templateId),
+        eq(schema.messageTemplates.orgId, touch.orgId),
+        eq(schema.messageTemplates.channel, touch.channel),
+      ),
+    )
+    .limit(1)
+  return row ?? null
 }
 
 /**
@@ -688,6 +858,14 @@ export async function sendFactsFor(
      * were written before it; a new draft does.
      */
     readonly evidenceAsOf: EvidenceAsOf
+    /**
+     * The words, for the template steps on SMS and WhatsApp (0019). Omitted:
+     * the stored message `evidenceAsOf` names, when it names one — so a
+     * screen previewing a stored draft asks what the sender will ask —
+     * and otherwise nothing is known about the words (`wordsKnown: false`),
+     * which the decision reads as no template. Ignored on other channels.
+     */
+    readonly words?: MessageWords
     readonly now: Date
   },
 ): Promise<
@@ -695,6 +873,14 @@ export async function sendFactsFor(
       facts: SendFacts
       recipient: string
       zoneFrom: 'contact' | 'company' | null
+      /**
+       * Whether the template fact is about real words — given, or read off
+       * a stored message. False on a template channel when neither was
+       * there: `facts.template` is then null, which is the sender's
+       * `no_template`, and `previewSend` asks a person-level question in its
+       * place. Always true off the template channels.
+       */
+      wordsKnown: boolean
       paused: boolean
       /** Why they are paused, as recorded — null when they are not. */
       pausedReason: string | null
@@ -786,9 +972,23 @@ export async function sendFactsFor(
   const paused = row.contact.pausedAt !== null
   const pausedReason = paused ? row.contact.pausedReason ?? 'paused' : null
 
+  // 0019: the registered template behind THESE words, on SMS and WhatsApp.
+  // The caller's words, else the stored message the evidence question names.
+  let words: MessageWords | null = args.words ?? null
+  if (!words && TEMPLATE_CHANNELS.has(channel) && args.evidenceAsOf !== null && !(args.evidenceAsOf instanceof Date)) {
+    const [stored] = await db
+      .select({ templateId: schema.touches.templateId, body: schema.touches.body })
+      .from(schema.touches)
+      .where(and(eq(schema.touches.id, args.evidenceAsOf.touchId), eq(schema.touches.orgId, orgId)))
+      .limit(1)
+    words = stored ?? null
+  }
+  const template = TEMPLATE_CHANNELS.has(channel) ? await templateFactsFor(db, orgId, channel, words) : null
+
   return {
     recipient,
     zoneFrom,
+    wordsKnown: !TEMPLATE_CHANNELS.has(channel) || words !== null,
     paused,
     pausedReason,
     consentRecorded,
@@ -807,6 +1007,7 @@ export async function sendFactsFor(
       paused,
       ...(paused ? { pausedFor: pauseReasonClass(row.contact.pausedReason) } : {}),
       evidenceStale,
+      template,
       recipientTimeZone: row.contact.timeZone ?? row.companyTimeZone ?? null,
       quietStart: row.campaign.quietStart,
       quietEnd: row.campaign.quietEnd,
@@ -1133,6 +1334,8 @@ async function denialCode(
       campaignId: schema.touches.campaignId,
       createdAt: schema.touches.createdAt,
       answersTouchId: schema.touches.answersTouchId,
+      templateId: schema.touches.templateId,
+      body: schema.touches.body,
     })
     .from(schema.touches)
     .where(
@@ -1150,6 +1353,7 @@ async function denialCode(
     contactId: draft.contactId,
     approvedByHuman: true,
     evidenceAsOf: evidenceAsOfFor(draft),
+    words: { templateId: draft.templateId, body: draft.body },
     now,
   })
   if ('missing' in gathered) return 'needs_approval'
@@ -1405,7 +1609,11 @@ export async function recordInboundReply(
    * kinds — `opted_out` is settled here, by a pure function, before any
    * model is consulted (§2.1).
    */
-  const optedOut = looksLikeOptOut(args.body)
+  // 0019: an SMS or WhatsApp reply is also read by the keyword reader its
+  // footer taught (`smsOptOut`: STOP, STOP 56161, CANCEL alone, …); the
+  // prose reader runs on every channel, as before.
+  const optedOut =
+    looksLikeOptOut(args.body) || ((args.channel === 'sms' || args.channel === 'whatsapp') && smsOptOut(args.body))
   const automatic = !optedOut && args.autoReply === true && !mentionsRemovalOrDeparture(args.body)
   const replyKind: ReplyKind = automatic ? 'auto_reply' : classifyReply(args.body, optedOut)
   await db
@@ -1437,7 +1645,11 @@ export async function recordInboundReply(
 
   let suppressed = false
   let optOutNotRecorded = false
-  if (args.channel === 'email' && optedOut) {
+  // The key the reply came from: the address for email, the number for SMS
+  // and WhatsApp (0019). Any other channel records no suppression here.
+  const suppressionKind: SuppressionKind | null =
+    args.channel === 'email' ? 'email' : args.channel === 'sms' || args.channel === 'whatsapp' ? 'phone' : null
+  if (suppressionKind !== null && optedOut) {
     // A THROW is what a database fault actually does, and `{ ok: false }` is
     // what an unreadable address does; both are the same failure to the
     // person who asked to be left alone. (The same lesson recordOptOut in
@@ -1447,14 +1659,14 @@ export async function recordInboundReply(
     try {
       added = await addSuppression(db, {
         orgId: args.orgId,
-        kind: 'email',
+        kind: suppressionKind,
         value: args.from,
         reason: `replied asking to stop, ${now.toISOString().slice(0, 10)}`,
         source: 'reply',
       })
       // `added.message` quotes the address back; the audit row and the log
       // carry a reason CLASS instead (§2.3).
-      why = 'unparseable_address'
+      why = suppressionKind === 'phone' ? 'unparseable_number' : 'unparseable_address'
     } catch (err) {
       added = { ok: false, message: 'The suppression could not be written.' }
       why = err instanceof Error ? err.name : 'UnknownError'

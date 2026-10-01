@@ -40,6 +40,8 @@ const SEND_CODES = {
   campaign_inactive: true,
   needs_approval: true,
   stale_evidence: false,
+  no_template: false,
+  template_mismatch: false,
 } satisfies Record<SendRefusalCode, boolean>
 
 const refusal = (code: string, humanCanResolve: boolean): CandidateDecision =>
@@ -106,7 +108,13 @@ describe('approveBlock', () => {
         expect(block).toContain(refusal(code, resolvable).words)
         // Another person at the company gets the same aged words, so stale
         // evidence names its own fix instead.
-        expect(block).toContain(code === 'stale_evidence' ? 're-scan the company, then draft it again' : 'choose someone else')
+        expect(block).toContain(
+          code === 'stale_evidence'
+            ? 're-scan the company, then draft it again'
+            : code === 'no_template' || code === 'template_mismatch'
+              ? 'draft it again from an active registered template'
+              : 'choose someone else',
+        )
       }
     }
   })
@@ -133,6 +141,16 @@ describe('approveBlock', () => {
     )
     expect(block).not.toMatch(/deny/i)
     expect(candidateLine(refusal('paused', false))).toBe('contact paused — nobody may approve past this')
+  })
+
+  /** 0019: the words are what the operator scrubs, so "choose someone else" fixes nothing. */
+  it('names the fix for a template refusal — a new draft from a registered template — never another person', () => {
+    for (const code of ['no_template', 'template_mismatch']) {
+      const block = approveBlock(refusal(code, false))
+      expect(block).toMatch(/^Approving is pointless: .* — the operator would not deliver it/)
+      expect(block).toContain('Deny it, then draft it again from an active registered template.')
+      expect(block).not.toContain('choose someone else')
+    }
   })
 
   it('leaves Approve enabled when nothing stops the message', () => {

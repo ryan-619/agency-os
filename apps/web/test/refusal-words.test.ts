@@ -25,6 +25,8 @@ const SEND_CODES = {
   campaign_inactive: true,
   needs_approval: true,
   stale_evidence: true,
+  no_template: true,
+  template_mismatch: true,
 } satisfies Record<SendRefusalCode, true>
 
 /** Every code the send path produces — `bounced` among them since bounce handling landed. */

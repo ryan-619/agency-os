@@ -309,6 +309,7 @@ describe('an earlier row for the same person and campaign', () => {
       campaignStatus: 'active' as const,
       autoSend: false,
       evidenceStale: false,
+      template: null,
       now: new Date('2026-09-15T12:00:00.000Z'),
     }
     const variants: (Partial<Parameters<typeof decideSend>[0]> & { readonly evidenceStale?: boolean })[] = [
