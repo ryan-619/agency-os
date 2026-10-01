@@ -4,8 +4,8 @@ import { useEffect, useRef, useState } from 'react'
 import { When } from '@/components/when'
 import {
   EVIDENCE_LINES_SHOWN, KEY_HELP, OTHER_CAMPAIGN_NOTE,
-  addressedByLabel, approvability, approveBlock, approveFootnote, candidateLine, checkedUnderLabel,
-  evidenceHeading, evidenceNote, keyAction,
+  addressedByLabel, approvability, approveBlock, approveFootnote, approvedMessage, candidateLine, checkedUnderLabel,
+  evidenceHeading, evidenceNote, keyAction, queueNoSenderNote,
   type AddressedBy, type Approvability, type CandidateDecision, type CheckedUnder, type DraftEvidence,
 } from '@/lib/approval-view'
 
@@ -18,7 +18,11 @@ import {
  * names the recipient and the campaign, and their name goes on the row.
  *
  * Nothing is sent by approving: the worker's next tick re-checks every §2.1
- * rule at the moment of sending. What this card adds is the rule IN VIEW
+ * rule at the moment of sending — and a LinkedIn draft is never the
+ * worker's at all: approved, it is a step on /tasks that a person starts,
+ * the rules are checked then, and they send it from their own account. The
+ * words say which (`approvedMessage`, `approveFootnote`, by the draft's
+ * channel). What this card adds is the rule IN VIEW
  * while the person reads the words — each candidate's `previewSend` answer,
  * from the sender's own fact-gatherer, in `REFUSAL_WORDS` — and the evidence
  * the draft may quote, dated, with §2.2's warning when it is stale. The
@@ -79,10 +83,11 @@ export function DraftQueue({
   campaigns: readonly CampaignChoice[]
   canDecide: boolean
   /**
-   * `nothingWillSendNote()`: null when a worker drains the queue. Set on a
-   * deployment that runs only the web app, where an approved message stays
-   * approved forever — and telling somebody "it will send on the next pass"
-   * would be the product claiming something it did not do.
+   * `nothingWillSendNote()`: null when a worker is configured. Set on a
+   * deployment that is not configured to reach one — and telling somebody
+   * "it will send on the next pass" would be the product claiming something
+   * it does not know. Shown above the queue only while a draft on it is one
+   * a worker would send (`queueNoSenderNote`): LinkedIn is a person's.
    */
   noSenderNote?: string | null
 }) {
@@ -129,11 +134,7 @@ export function DraftQueue({
             outcome: decision === 'approved' ? 'approved' : 'refused',
             message:
               decision === 'approved'
-                ? noSenderNote === null
-                  ? 'Approved. The worker will send it on its next pass — after checking the suppression list, ' +
-                    'consent, quiet hours and the daily cap again. If it lands in quiet hours it waits for morning.'
-                  : 'Approved, and queued. No worker is connected to this deployment, so nothing will send it ' +
-                    'until one is — every rule is still checked at that moment, not now.'
+                ? approvedMessage(draft.channel, noSenderNote)
                 : 'Denied. Nothing was sent, and the note is kept with the draft.',
           },
         }))
@@ -261,11 +262,13 @@ export function DraftQueue({
     return () => document.removeEventListener('keydown', onKey)
   }, [canDecide])
 
+  const queueNote = queueNoSenderNote(drafts.map((d) => d.channel), noSenderNote)
+
   return (
     <>
-      {noSenderNote ? (
+      {queueNote ? (
         <div className="note note-warn" style={{ marginBottom: 10 }}>
-          {noSenderNote}
+          {queueNote}
         </div>
       ) : null}
       {canDecide ? (
@@ -469,7 +472,7 @@ export function DraftQueue({
                         {block}
                       </span>
                     ) : (
-                      <span className="muted">{approveFootnote(noSenderNote)}</span>
+                      <span className="muted">{approveFootnote(noSenderNote, d.channel)}</span>
                     )}
                   </div>
                 </>

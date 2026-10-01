@@ -13,8 +13,9 @@ import type { SendRefusalCode } from '@agency/core'
 import { describe, expect, it } from 'vitest'
 import {
   ANSWER_EVIDENCE_NOTE, APPROVE_DOES_NOT_SEND, DEFERRED_CODES, EVIDENCE_LINES_SHOWN, MISSING_EVIDENCE_NOTE,
-  NO_WORKER_FOOTNOTE, OTHER_CAMPAIGN_NOTE, STALE_EVIDENCE_NOTE,
-  addressedByLabel, addressedByOf, approvability, approveBlock, approveFootnote, campaignToCheck, candidateLine,
+  LINKEDIN_APPROVED, LINKEDIN_APPROVE_FOOTNOTE, NO_WORKER_FOOTNOTE, OTHER_CAMPAIGN_NOTE, STALE_EVIDENCE_NOTE,
+  addressedByLabel, addressedByOf, approvability, approveBlock, approveFootnote, approvedMessage, campaignToCheck,
+  candidateLine, queueNoSenderNote,
   checkedUnderLabel, decisionView, draftEvidenceFrom, evidenceHeading, evidenceLine, evidenceNote, keyAction, nextFocus,
   uncheckedDecision,
   type Approvability, type CandidateDecision,
@@ -351,6 +352,62 @@ describe('approving does not send', () => {
     expect(approveFootnote(note)).toBe(NO_WORKER_FOOTNOTE)
     expect(NO_WORKER_FOOTNOTE.startsWith('Approving does not send')).toBe(true)
     expect(approveFootnote(note)).not.toContain('The worker re-checks')
+  })
+
+  /**
+   * `deployment().worker` is configuration: a worker on Fly can send against
+   * this database while this web half holds no AGENT_URL. So the words say
+   * what is configured, never that nothing will send. Round 3, finding [20].
+   */
+  it('says what is configured without a worker, never that nothing will send', () => {
+    const note = 'No agent worker is configured.'
+    for (const s of [NO_WORKER_FOOTNOTE, approvedMessage('email', note)]) {
+      expect(s).toContain('No worker is configured on this deployment')
+      expect(s).not.toMatch(/nothing (on this deployment )?will (send|until)/i)
+      expect(s).not.toContain('No worker is connected')
+    }
+  })
+})
+
+/**
+ * The worker never sends LinkedIn — its one provider sends email — so an
+ * approved LinkedIn draft is a step on /tasks that a PERSON presses Start on
+ * and sends from their own account, with a worker or without one. Telling
+ * the approver the worker will send it was how a message waited for ever.
+ * Review round 3, finding [19].
+ */
+describe('a LinkedIn draft', () => {
+  const note = 'No agent worker is configured.'
+
+  it('is approved into a step on /tasks for a person, never to the worker', () => {
+    for (const n of [null, note]) {
+      const said = approvedMessage('linkedin', n)
+      expect(said).toBe(LINKEDIN_APPROVED)
+      expect(said).toContain('/tasks')
+      expect(said).toContain('presses Start')
+      expect(said).toContain('from their own LinkedIn account')
+      expect(said).not.toContain('The worker will send it')
+      expect(said).not.toMatch(/until (a worker|one) is/)
+    }
+  })
+
+  it('has a footnote about the person who sends it, whatever the worker is doing', () => {
+    expect(approveFootnote(null, 'linkedin')).toBe(LINKEDIN_APPROVE_FOOTNOTE)
+    expect(approveFootnote(note, 'linkedin')).toBe(LINKEDIN_APPROVE_FOOTNOTE)
+    expect(LINKEDIN_APPROVE_FOOTNOTE).toContain('/tasks')
+    expect(LINKEDIN_APPROVE_FOOTNOTE).not.toMatch(/worker/i)
+  })
+
+  it('keeps the email words for email', () => {
+    expect(approveFootnote(null, 'email')).toBe(APPROVE_DOES_NOT_SEND)
+    expect(approvedMessage('email', null)).toContain('The worker will send it on its next pass')
+  })
+
+  it('shows the no-worker note above the queue only while a draft on it is one a worker would send', () => {
+    expect(queueNoSenderNote(['linkedin', 'linkedin'], note)).toBeNull()
+    expect(queueNoSenderNote(['linkedin', 'email'], note)).toBe(note)
+    expect(queueNoSenderNote(['email'], null)).toBeNull()
+    expect(queueNoSenderNote([], note)).toBeNull()
   })
 })
 

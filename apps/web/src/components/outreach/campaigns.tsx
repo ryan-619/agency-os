@@ -409,13 +409,19 @@ function EnrolPanel({
     void enrol(true)
   }, [])
 
-  const linkedInWarning =
-    campaign.channel === 'linkedin' ? (
-      <p className="note note-warn" style={{ marginTop: 8 }}>
-        No provider can send on LinkedIn; approved rows will wait for the LinkedIn step.
-      </p>
-    ) : null
-  const noSender = noSenderNote ? (
+  // The worker never sends LinkedIn: its one provider sends email. A queued or
+  // approved LinkedIn row is a step on /tasks that a person starts — every
+  // rule is checked then — and sends from their own account, so nothing here
+  // says "the worker", and the no-worker note is not about these rows.
+  // Review round 3, finding [19].
+  const linkedIn = campaign.channel === 'linkedin'
+  const linkedInWarning = linkedIn ? (
+    <p className="note note-warn" style={{ marginTop: 8 }}>
+      Nothing sends LinkedIn automatically. Each message becomes a step on <a href="/tasks">/tasks</a>: a person
+      presses Start, every rule is checked again at that moment, and they send it from their own LinkedIn account.
+    </p>
+  ) : null
+  const noSender = noSenderNote && !linkedIn ? (
     <p className="note note-warn" style={{ marginTop: 8 }}>
       {noSenderNote}
     </p>
@@ -426,7 +432,13 @@ function EnrolPanel({
       <div style={{ marginTop: 12 }}>
         <div className="note">
           <p style={{ margin: 0 }}>
-            {done.status === 'queued' ? (
+            {done.status === 'queued' && linkedIn ? (
+              <>
+                Queued <strong>{plural(done.queued, 'message', 'messages')}</strong> as steps on /tasks for a person to
+                send from their own LinkedIn account. Nothing was sent — every rule is checked again when they press
+                Start.
+              </>
+            ) : done.status === 'queued' ? (
               <>
                 Queued <strong>{plural(done.queued, 'message', 'messages')}</strong> for the worker to send. Nothing was
                 sent yet — each one is checked against every rule at the moment it is sent.
@@ -478,9 +490,13 @@ function EnrolPanel({
               </p>
             ) : null}
             <p style={{ margin: '8px 0 0' }}>
-              {plan.status === 'queued'
-                ? 'This campaign auto-sends: these go to the worker without a person reading each one. Every rule is still checked at the moment of sending.'
-                : 'Each draft waits in Approvals for a person to read it and choose to send it.'}
+              {plan.status === 'queued' && linkedIn
+                ? 'This campaign auto-sends, but LinkedIn has no automatic sender: each message becomes a step on /tasks, and a person reads each one and sends it from their own account once every rule passes at Start.'
+                : plan.status === 'queued'
+                  ? 'This campaign auto-sends: these go to the worker without a person reading each one. Every rule is still checked at the moment of sending.'
+                  : linkedIn
+                    ? 'Each draft waits in Approvals for a person to read it; once approved, it becomes a step on /tasks for a person to send from their own LinkedIn account.'
+                    : 'Each draft waits in Approvals for a person to read it and choose to send it.'}
               {campaign.status !== 'active'
                 ? ` The campaign is ${campaign.status}, so nothing in it is sent until it is active.`
                 : ''}
@@ -503,7 +519,9 @@ function EnrolPanel({
             {busy
               ? 'Queuing…'
               : plan.status === 'queued'
-                ? `Queue ${plural(plan.queued, 'message', 'messages')} to send`
+                ? linkedIn
+                  ? `Queue ${plural(plan.queued, 'message', 'messages')} as /tasks steps`
+                  : `Queue ${plural(plan.queued, 'message', 'messages')} to send`
                 : `Queue ${plural(plan.queued, 'draft', 'drafts')} for approval`}
           </button>
         ) : null}
