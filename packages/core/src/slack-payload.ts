@@ -51,8 +51,13 @@ export function slackLink(origin: string | null, path: string): string | null {
 export interface SlackOptOutNotRecordedEvent {
   readonly kind: 'opt_out_not_recorded'
   readonly orgId: string
-  /** The touch the request arrived on: the clicked message, or the inbound reply. */
-  readonly touchId: string
+  /**
+   * The touch the request arrived on: the clicked message, or the inbound
+   * reply. Null when there is none — a STOP texted from a number no single
+   * contact holds is filed under nobody, so no message row records it, and
+   * the alarm must still go.
+   */
+  readonly touchId: string | null
   readonly contactId: string | null
   /** Which way the person asked: the unsubscribe link, an erasure, or a reply that said stop. */
   readonly path: 'unsubscribe' | 'erasure' | 'reply'
@@ -61,13 +66,27 @@ export interface SlackOptOutNotRecordedEvent {
 /**
  * §2.1's Phase 4 obligation, said to a person: an opt-out that failed to
  * store. The link is the suppressions page, where it is recorded by hand.
+ *
+ * With no touch there is no row in the app that holds the number, and the
+ * number is lead data, so it is not in the message either: the person is
+ * told where it is (the provider's inbound log), and the link is the
+ * Compliance page, which counts the failure by the audit row the recorder
+ * wrote — never a link built from the number.
  */
 export function slackOptOutNotRecordedPayload(event: SlackOptOutNotRecordedEvent, origin: string | null): SlackPayload {
   const way = event.path === 'unsubscribe' ? 'the unsubscribe link' : event.path === 'reply' ? 'a reply' : 'an erasure request'
   const lines = [
     `OPT-OUT NOT RECORDED. Somebody asked to be left alone through ${way} and no suppression row could be written. A person has to record it now.`,
-    `touch ${event.touchId} · contact ${event.contactId ?? 'unknown'}`,
   ]
+  if (event.touchId === null) {
+    lines.push(
+      `no message on file · contact ${event.contactId ?? 'unknown'}`,
+      'Nothing in the app holds the number it came from: read it from the provider’s inbound log and record it on the Suppressions page. The Compliance page counts it.',
+      slackLink(origin, '/compliance') ?? 'It is counted on the Compliance page in the app.',
+    )
+    return slackPayloadOf(lines)
+  }
+  lines.push(`touch ${event.touchId} · contact ${event.contactId ?? 'unknown'}`)
   const link = slackLink(origin, '/suppressions')
   lines.push(link ?? 'Record it on the Suppressions page in the app.')
   return slackPayloadOf(lines)

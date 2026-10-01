@@ -418,9 +418,15 @@ export async function handleDoveSoftDlr(
  *    audited it, and taken the loud path if it was a STOP;
  *  - a STOP from a number no single contact holds whose suppression could
  *    not be written: 500, because nothing was written for it and a retry
- *    re-attempts the suppression. There is no message row to raise the
- *    Slack alarm about; the recorder's `contact.opt_out_not_recorded` row
- *    and the error line are the record, and /compliance counts it;
+ *    re-attempts the suppression. The recorder's `contact.opt_out_not_recorded`
+ *    row and the error line are the record, and /compliance counts it;
+ *
+ *  and for both of those, when the text was a STOP that nobody recorded,
+ *  the `opt_out_not_recorded` alarm is AWAITED before the answer, with no
+ *  touch and no contact (there is no message row), filed under
+ *  `DOVESOFT_ORG_ID`. With no org named it cannot be filed, and the error
+ *  line says `alarm: 'not_raised_no_org'`. Each delivery that fails again
+ *  raises it again, as it writes the audit row again;
  *  - anything else it filed under nobody: 200, the answer to a delivery.
  *
  * Unreadable (no sender or no words) → 400, `sms.inbound_unreadable` in the
@@ -470,7 +476,7 @@ export async function handleDoveSoftMo(
   })
 
   if (outcome.matched === 'contact') {
-    const alarm = smsOptOutNotRecordedNotification(outcome)
+    const alarm = smsOptOutNotRecordedNotification(outcome, deps.orgId)
     if (alarm) await deps.alarm(alarm)
     const event = smsReplyNotification(outcome)
     if (event) {
@@ -486,19 +492,29 @@ export async function handleDoveSoftMo(
     }
   }
 
+  // A STOP filed under nobody that could not be suppressed reaches a person
+  // as the filed one does: AWAITED, before the answer, under the org the
+  // deployment names. Without one there is no org to file the alarm under,
+  // and the error line says so.
+  const alarm = smsOptOutNotRecordedNotification(outcome, deps.orgId)
+  const alarmed = alarm ? 'raised' : outcome.optOutNotRecorded ? 'not_raised_no_org' : null
   if (outcome.why === 'unreadable_number') {
     deps.log.error('DoveSoft inbound text came from a number that could not be read as E.164; nothing was filed', {
       optOut: outcome.optOut,
       optOutNotRecorded: outcome.optOutNotRecorded,
+      ...(alarmed ? { alarm: alarmed } : {}),
       ...shapeOf(shape),
     })
+    if (alarm) await deps.alarm(alarm)
     return { status: 400, body: { error: 'unreadable sender number', matched: 'none', why: outcome.why } }
   }
   if (outcome.optOutNotRecorded) {
     deps.log.error('OPT-OUT NOT RECORDED — a STOP from a number no single contact holds could not be suppressed', {
       why: outcome.why,
       orgConfigured: deps.orgId !== null,
+      alarm: alarmed,
     })
+    if (alarm) await deps.alarm(alarm)
     return { status: 500, body: { error: 'opt-out not recorded', matched: 'none', why: outcome.why } }
   }
   return { status: 200, body: { matched: 'none', why: outcome.why, optOut: outcome.optOut, suppressed: outcome.suppressed } }

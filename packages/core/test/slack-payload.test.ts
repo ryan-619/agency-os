@@ -52,6 +52,28 @@ describe('slackOptOutNotRecordedPayload', () => {
     expect(text).toMatch(/^OPT-OUT NOT RECORDED\./)
   })
 
+  /**
+   * A STOP texted from a number no single contact holds has no message row
+   * and no contact. The alarm still goes; it names no number (lead data, and
+   * the app holds none to name), says where the number is, and links to the
+   * Compliance page rather than to anything built from it.
+   */
+  it('says there is no message on file and links to /compliance, for an alarm with no touch', () => {
+    const unplaced: SlackOptOutNotRecordedEvent = { ...EVENT, touchId: null, contactId: null }
+    expect(slackOptOutNotRecordedPayload(unplaced, 'https://app.test/').text).toBe(
+      'OPT-OUT NOT RECORDED. Somebody asked to be left alone through a reply and no suppression row could be written. ' +
+        'A person has to record it now.\n' +
+        'no message on file · contact unknown\n' +
+        'Nothing in the app holds the number it came from: read it from the provider’s inbound log and record it on the Suppressions page. ' +
+        'The Compliance page counts it.\n' +
+        'https://app.test/compliance',
+    )
+    const bare = slackOptOutNotRecordedPayload(unplaced, null).text
+    expect(bare).not.toMatch(/https?:/)
+    expect(bare).toContain('It is counted on the Compliance page in the app.')
+    expect(bare).not.toContain('touch ')
+  })
+
   /** The builder names its fields; a row with more on it never reaches the channel. */
   it('drops decoy lead data handed to it through a cast', () => {
     const decoy = {

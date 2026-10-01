@@ -34,6 +34,8 @@ const EVENTS: readonly NotificationEvent[] = [
   { kind: 'campaign_paused', orgId: ORG, campaignId: '00000000-0000-4000-8000-000000000006', bouncePct: 7.5, threshold: 5 },
   // A reply that said stop and could not be suppressed (the inbound routes).
   { kind: 'opt_out_not_recorded', orgId: ORG, touchId: '00000000-0000-4000-8000-000000000007', contactId: '00000000-0000-4000-8000-000000000001', path: 'reply' },
+  // A STOP texted from a number no single contact holds: no message row, no contact (the DoveSoft route).
+  { kind: 'opt_out_not_recorded', orgId: ORG, touchId: null, contactId: null, path: 'reply' },
 ]
 
 /** The lines of a payload that are not the deep link. */
@@ -224,6 +226,21 @@ describe('slackMessage', () => {
         'touch 00000000-0000-4000-8000-000000000007 · contact 00000000-0000-4000-8000-000000000001\n' +
         'https://app.test/suppressions',
     })
+  })
+
+  /**
+   * With no message row the alarm cannot point at a touch, and the number it
+   * came from is lead data: it links to the Compliance page, which counts the
+   * failure, and names no number, no touch and no suppressions link.
+   */
+  it('links an opt-out alarm with no touch to /compliance, and names no number', () => {
+    const text = slackMessage(EVENTS[9]!, ORIGIN).text
+    expect(text).toMatch(/^OPT-OUT NOT RECORDED\./)
+    expect(text).toContain('no message on file · contact unknown')
+    expect(text.split('\n').at(-1)).toBe(`${ORIGIN}/compliance`)
+    expect(text).not.toContain('/suppressions')
+    expect(text).not.toContain('touch ')
+    expect(text).not.toMatch(/\+?\d{10,}/)
   })
 
   it('says why a campaign paused itself', () => {
