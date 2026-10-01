@@ -22,7 +22,10 @@ const BASE = {
 const load = (vars: Record<string, string>) => loadEnv({ ...BASE, ...vars } as NodeJS.ProcessEnv)
 
 describe('a blank optional variable is unset', () => {
-  it.each(['UNSUBSCRIBE_SECRET', 'WEB_PUBLIC_URL', 'LLM_PROVIDER', 'LLM_MODEL', 'AGENT_MODEL', 'SLACK_WEBHOOK_URL'] as const)(
+  it.each([
+    'UNSUBSCRIBE_SECRET', 'WEB_PUBLIC_URL', 'LLM_PROVIDER', 'LLM_MODEL', 'AGENT_MODEL', 'SLACK_WEBHOOK_URL',
+    'DOVESOFT_API_KEY', 'DOVESOFT_ENTITY_ID',
+  ] as const)(
     '%s', (name) => {
       expect(load({ [name]: '' })[name]).toBeUndefined()
       expect(load({ [name]: '   ' })[name]).toBeUndefined()
@@ -32,6 +35,13 @@ describe('a blank optional variable is unset', () => {
   /** A blank read as a value: the Ollama URL failed `url()`, and the model was named `''`. */
   it('falls back to the default Ollama URL', () => {
     expect(load({ OLLAMA_BASE_URL: '' }).OLLAMA_BASE_URL).toBe('http://127.0.0.1:11434')
+  })
+
+  /** DoveSoft's own API, blank or absent. */
+  it('falls back to DoveSoft’s own API', () => {
+    expect(load({}).DOVESOFT_BASE_URL).toBe('https://api.dovesoft.io')
+    expect(load({ DOVESOFT_BASE_URL: '' }).DOVESOFT_BASE_URL).toBe('https://api.dovesoft.io')
+    expect(load({ DOVESOFT_BASE_URL: '  ' }).DOVESOFT_BASE_URL).toBe('https://api.dovesoft.io')
   })
 
   /**
@@ -51,6 +61,14 @@ describe('a blank optional variable is unset', () => {
     ['LLM_PROVIDER', 'gemini'],
     ['OUTREACH_BOUNCE_PAUSE_PCT', '101'],
     ['SLACK_WEBHOOK_URL', 'not a url'],
+    ['DOVESOFT_API_KEY', 'short'],
+    ['DOVESOFT_ENTITY_ID', 'PE-1101234567'],
+    ['DOVESOFT_ENTITY_ID', '1101 2345'],
+    ['DOVESOFT_BASE_URL', 'not a url'],
+    ['DOVESOFT_BASE_URL', 'ftp://api.dovesoft.io'],
+    ['DOVESOFT_BASE_URL', 'https://user:hunter2-secret@api.dovesoft.io'],
+    ['DOVESOFT_BASE_URL', 'https://api.dovesoft.io/?key=leaked-in-a-query'],
+    ['DOVESOFT_BASE_URL', 'https://api.dovesoft.io/#fragment-secret'],
   ])('still refuses a malformed %s', (name, value) => {
     expect(() => load({ [name]: value })).toThrow(new RegExp(name))
     try {
@@ -72,10 +90,74 @@ describe('a blank optional variable is unset', () => {
       OLLAMA_BASE_URL: '',
       AGENT_MODEL: '',
       SLACK_WEBHOOK_URL: '',
+      DOVESOFT_API_KEY: '',
+      DOVESOFT_ENTITY_ID: '',
+      DOVESOFT_BASE_URL: '',
     })
     expect(env.UNSUBSCRIBE_SECRET).toBeUndefined()
     expect(env.WEB_PUBLIC_URL).toBeUndefined()
     expect(env.OUTREACH_BOUNCE_PAUSE_PCT).toBe(5)
+    // SMS is off, and the default API passes the production rule below.
+    expect(env.DOVESOFT_API_KEY).toBeUndefined()
+    expect(env.DOVESOFT_ENTITY_ID).toBeUndefined()
+    expect(env.DOVESOFT_BASE_URL).toBe('https://api.dovesoft.io')
+  })
+})
+
+/**
+ * The SMS API key is sent, as a header, to whatever DOVESOFT_BASE_URL names.
+ * In production that is https on a public host or the worker does not boot;
+ * in development it may be a local stand-in. A refusal names the variable
+ * and never the value.
+ */
+describe('DoveSoft', () => {
+  it('reads the key and the entity id as given', () => {
+    const env = load({ DOVESOFT_API_KEY: 'dsk-0123456789', DOVESOFT_ENTITY_ID: '1101234567890123456' })
+    expect(env.DOVESOFT_API_KEY).toBe('dsk-0123456789')
+    expect(env.DOVESOFT_ENTITY_ID).toBe('1101234567890123456')
+  })
+
+  it.each([
+    ['https://api.dovesoft.io'],
+    ['https://api.dovesoft.io/'],
+    ['https://gateway.dovesoft.example.com/v2'],
+  ])('accepts %s in production', (url) => {
+    expect(load({ NODE_ENV: 'production', DOVESOFT_BASE_URL: url }).DOVESOFT_BASE_URL).toBe(url)
+  })
+
+  it.each([
+    ['plain http', 'http://api.dovesoft.io'],
+    ['loopback', 'https://localhost:8443'],
+    ['an IPv4 literal', 'https://169.254.169.254'],
+    ['an IPv6 literal', 'https://[::1]:8443'],
+    ['a compose service name', 'https://dovesoft-mock:8443'],
+    ['an internal suffix', 'https://sms.internal'],
+  ])('refuses %s in production, naming the variable and never the value', (_why, url) => {
+    let message = ''
+    try {
+      load({ NODE_ENV: 'production', DOVESOFT_BASE_URL: url })
+    } catch (e) {
+      message = e instanceof Error ? e.message : String(e)
+    }
+    expect(message).toMatch(/DOVESOFT_BASE_URL/)
+    expect(message).not.toContain(url)
+  })
+
+  it('accepts a local stand-in in development', () => {
+    expect(load({ NODE_ENV: 'development', DOVESOFT_BASE_URL: 'http://localhost:4010' }).DOVESOFT_BASE_URL).toBe(
+      'http://localhost:4010',
+    )
+  })
+
+  it('never puts the key in the refusal of a malformed one', () => {
+    let message = ''
+    try {
+      load({ DOVESOFT_API_KEY: 'k3y!' })
+    } catch (e) {
+      message = e instanceof Error ? e.message : String(e)
+    }
+    expect(message).toMatch(/DOVESOFT_API_KEY/)
+    expect(message).not.toContain('k3y!')
   })
 })
 

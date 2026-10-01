@@ -5,8 +5,9 @@ import { drizzle } from 'drizzle-orm/node-postgres'
 import {
   appendAudit, appendChatMessage, cancelPendingApprovals, clearTurnRunning,
   createSmtpProvider, ensureChatSessionTitle, markTurnRunning, masterKey, readConnector, schema,
-  sessionCostUsd, setSdkSessionId, usd, type AgencyDb,
+  sessionCostUsd, setSdkSessionId, usd, type AgencyDb, type MessageProvider,
 } from '@agency/db'
+import type { Channel } from '@agency/core'
 import type { AgentCredential } from './runtime/options.js'
 import type { Env } from './env.js'
 import type { Logger } from './logger.js'
@@ -14,7 +15,8 @@ import { answerHealth, startHealthServer, type HealthInputs } from './health.js'
 import { acquireWorkerLock, type WorkerLock } from './boot/singleton.js'
 import { reconcileAfterRestart, recoverStuckSends, sweepExpired } from './boot/reconcile.js'
 import { lastHeartbeatAt, startHeartbeat } from './boot/heartbeat.js'
-import { startSender } from './outreach/sender.js'
+import { startSender, WORKER_SEND_CHANNELS } from './outreach/sender.js'
+import { createDoveSoftProvider, doveSoftConfigFrom } from './outreach/dovesoft.js'
 import { outreachOptions } from './outreach/options.js'
 import { providerFrom } from '@agency/llm'
 import { startInbox } from './outreach/inbox.js'
@@ -129,6 +131,9 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
   )
 
   const outreachMode = outreachModeFrom(env)
+  // Decided once, and said once (`sms: dovesoft on|off`), before the sender
+  // starts; the heartbeat row carries the same answer.
+  const senders = senderProvidersFrom(env, log)
   const healthInputs = (): HealthInputs => ({
     pool,
     halted: halt?.halted() ?? false,
@@ -261,24 +266,21 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
    * must never run before mid-send rows from the last worker have been
    * settled. Both halves are optional and independent — a mailbox that can
    * send but has no IMAP still sends, and is reported as 'send-only'.
+   *
+   * One tick, with one provider per channel: the mailbox for email and
+   * DoveSoft for SMS (0019), whichever are configured. It runs when either
+   * is, and leaves rows on the other channel exactly where they are.
    */
   const stops: Array<() => Promise<void>> = []
-  if (env.SMTP_HOST && env.MAIL_FROM) {
-    const provider = createSmtpProvider({
-      host: env.SMTP_HOST,
-      port: env.SMTP_PORT,
-      secure: env.SMTP_SECURE,
-      user: env.SMTP_USER,
-      password: env.SMTP_PASSWORD,
-      from: env.MAIL_FROM,
-    })
+  if (senders.providers.length > 0) {
     // The required settings are named here; the optional ones — whatever a
     // later feature derives from the environment — arrive through the spread,
     // so adding one never edits this file.
     stops.push(
       startSender({
         db,
-        provider,
+        provider: senders.providers,
+        unserved: senders.unserved,
         log,
         batch: env.OUTREACH_BATCH,
         intervalMs: env.OUTREACH_TICK_MS,
@@ -327,7 +329,7 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
         return {
           outreach: now.outreach,
           chat: now.chatEnabled ? 'enabled' : 'disabled',
-          detail: { halted: now.halted, lockHeld: now.lockHeld },
+          detail: { halted: now.halted, lockHeld: now.lockHeld, sms: senders.sms },
         }
       },
     }),
@@ -341,6 +343,7 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
     apiBind: env.AGENT_BIND,
     chat: credential ? `enabled (${credential.kind})` : 'disabled',
     outreach: outreachMode,
+    sms: senders.sms,
     triage: triage ? `${triage.name} (${triage.local ? 'local' : 'REMOTE'})` : 'deterministic',
   })
 
@@ -556,6 +559,57 @@ async function beginTurn(args: {
         }
       },
     } satisfies TurnHandle,
+  }
+}
+
+/**
+ * The providers the sender tick gets, one per channel, and what is left
+ * unserved — from the configuration, decided once at boot.
+ *
+ *  - email: the SMTP mailbox, with SMTP_HOST and MAIL_FROM;
+ *  - sms: DoveSoft, with DOVESOFT_API_KEY and DOVESOFT_ENTITY_ID — both, or
+ *    SMS is off and says which is missing, by NAME (§2.3).
+ *
+ * Nothing here carries LinkedIn (a person sends it, from /tasks), voice
+ * (there is no code path that places a call) or WhatsApp (not built), so the
+ * tick can never pick a row up on one of those. `unserved` is every channel
+ * a worker provider exists for that this one lacks: the tick reports its due
+ * rows by id and leaves them alone. Logs `sms: dovesoft on|off` once.
+ */
+export function senderProvidersFrom(
+  env: Env,
+  log: Logger,
+): { readonly providers: readonly MessageProvider[]; readonly unserved: readonly Channel[]; readonly sms: 'on' | 'off' } {
+  const providers: MessageProvider[] = []
+  if (env.SMTP_HOST && env.MAIL_FROM) {
+    providers.push(
+      createSmtpProvider({
+        host: env.SMTP_HOST,
+        port: env.SMTP_PORT,
+        secure: env.SMTP_SECURE,
+        user: env.SMTP_USER,
+        password: env.SMTP_PASSWORD,
+        from: env.MAIL_FROM,
+      }),
+    )
+  }
+
+  const dovesoft = doveSoftConfigFrom(env)
+  if (dovesoft.on) {
+    providers.push(createDoveSoftProvider(dovesoft.config))
+    log.info('sms: dovesoft on')
+  } else if (dovesoft.missing.length < 2) {
+    // Half configured is a mistake somebody made, not a choice: say it louder.
+    log.warn('sms: dovesoft off', { missing: dovesoft.missing })
+  } else {
+    log.info('sms: dovesoft off', { missing: dovesoft.missing })
+  }
+
+  const carried = new Set(providers.flatMap((p) => p.channels))
+  return {
+    providers,
+    unserved: WORKER_SEND_CHANNELS.filter((c) => !carried.has(c)),
+    sms: dovesoft.on ? 'on' : 'off',
   }
 }
 

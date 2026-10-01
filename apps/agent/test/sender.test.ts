@@ -357,6 +357,17 @@ describe('the sender tick', () => {
       expect(await status()).toBe('active')
     })
 
+    /** A worker with DoveSoft and no mailbox writes to no address, so it judges none. */
+    it('is left to a tick that sends email', async () => {
+      await history(20, 2)
+      const smsOnly: MessageProvider = { name: 'sms-only', channels: ['sms'], send: provider.send }
+      const s = await runSenderTick({ db, provider: smsOnly, log: silent, batch: 20, now: () => NOON, bouncePausePct: 5 })
+      expect(s.autoPaused).toBe(0)
+      expect(await status()).toBe('active')
+      expect((await tickAt5()).autoPaused).toBe(1)
+      expect(await status()).toBe('paused')
+    })
+
     it('pauses once past the threshold with twenty sent — audited once, one log line — and a second tick does not re-audit', async () => {
       await history(20, 2) // 10%
       const log = keepingLog()
