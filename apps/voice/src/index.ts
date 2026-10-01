@@ -337,8 +337,12 @@ export async function startVoiceService(deps: VoiceDeps): Promise<VoiceService> 
           log.info('inbound opt-out by SMS', { readable: e164 !== null })
           let added: { ok: boolean; message?: string }
           try {
+            // `voice`: this service records the opt-outs its number receives,
+            // spoken (calls.ts) or texted (here), under the one source 0018
+            // gives it. With none the row was stored NULL, which /compliance
+            // reads as "written before 0018".
             added = await addSuppression(db, {
-              orgId: org.id, kind: 'phone', value: from, reason: 'asked to stop by SMS',
+              orgId: org.id, kind: 'phone', value: from, reason: 'asked to stop by SMS', source: 'voice',
             })
           } catch (err) {
             added = { ok: false, message: err instanceof Error ? err.name : 'UnknownError' }
