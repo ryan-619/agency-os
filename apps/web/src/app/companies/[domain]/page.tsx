@@ -18,6 +18,7 @@ import { ContactsPanel } from '@/components/outreach/contacts'
 import { CompanyActions } from '@/components/pipeline/company-actions'
 import { When } from '@/components/when'
 import { getDb } from '@/lib/db'
+import { deliveryLine } from '@/lib/delivery-view'
 import { inZone } from '@/lib/format'
 import { companyByDomain, icpForOrg, scanWithFindings } from '@/lib/queries'
 
@@ -402,6 +403,18 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
                     </>
                   )}
                   {t.error ? <div className="err-line">{t.error}</div> : null}
+                  {(() => {
+                    // 0019: an SMS delivery report, its own line beside the
+                    // status — a report never moves `status` (delivery-view.ts).
+                    const d = deliveryLine(t)
+                    if (!d) return null
+                    return (
+                      <div className={d.tone === 'warn' ? 'err-line' : 'muted'} style={{ fontSize: 12.5 }}>
+                        {d.text}
+                        {d.at ? <> · <When iso={d.at.toISOString()} /></> : null}
+                      </div>
+                    )
+                  })()}
                   {t.decisionNote ? <div className="muted" style={{ fontSize: 12.5 }}>Note: {t.decisionNote}</div> : null}
                 </div>
               )
