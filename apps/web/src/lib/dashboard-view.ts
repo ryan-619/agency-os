@@ -495,6 +495,23 @@ function cronBullet(d: Deployment, facts: DashboardFacts): HonestyBullet {
 export const RESCAN_OVERDUE_HOURS = 36
 
 // ---------------------------------------------------------------------------
+// The Active ICP table
+// ---------------------------------------------------------------------------
+
+/**
+ * Under the Active ICP table, which shows the profile's `outreach.channels`
+ * and `max_per_day` beside its qualify-at score. The score is operative —
+ * `scoreCompany` qualifies against it — and the other two are not: the send
+ * path applies each campaign's own channel, daily cap and quiet hours and
+ * reads neither (/settings/icp says the same of the whole outreach block).
+ * Shown under bare "Channels" and "Daily cap" headings they read as the
+ * limits in force, which is the claim this module exists to stop.
+ */
+export const ICP_OUTREACH_NOTE =
+  'The channels and daily cap are what this profile describes, not what the send path enforces: each campaign ' +
+  'applies its own channel, daily cap and quiet hours.'
+
+// ---------------------------------------------------------------------------
 // "Needs a look"
 // ---------------------------------------------------------------------------
 

@@ -28,6 +28,7 @@ import { HEARTBEAT_RETIRED_AFTER_DAYS, heartbeatReport, heartbeatReportedStatus 
 import type { Deployment } from '../src/lib/deployment-facts'
 import { slackMessage, type NotificationEvent } from '../src/lib/slack-message'
 import {
+  ICP_OUTREACH_NOTE,
   RESCAN_OVERDUE_HOURS,
   RETIRED_WORKER_WORDS,
   complianceChecksFailing,
@@ -805,5 +806,36 @@ describe('the dashboard page', () => {
 
   it('links the Contacts total to /contacts', () => {
     expect(src).toMatch(/href="\/contacts"><div className="n">\{c\.contacts\}/)
+  })
+
+  /**
+   * CLAUDE.md §4 called this table "the one place left that overstates"
+   * the profile's outreach block: it showed `outreach.channels` and
+   * `max_per_day` under bare "Channels" and "Daily cap" headings, as if the
+   * send path applied them. It applies each CAMPAIGN's channel, cap and
+   * quiet hours, and reads neither value.
+   */
+  describe('the Active ICP table', () => {
+    const table = src.slice(src.indexOf('<h2>Active ICP</h2>'), src.indexOf('<h2>', src.indexOf('<h2>Active ICP</h2>') + 1))
+
+    it('is found, so the checks below read the table and not an empty string', () => {
+      expect(table).toContain('<table>')
+      expect(table).toContain('{dailyCap')
+    })
+
+    it('never heads the profile’s channels or cap as if they were the operative values', () => {
+      expect(table).not.toMatch(/<th>Channels<\/th>|<th>Daily cap<\/th>/)
+      expect(table).toContain('<th>Channels it describes</th>')
+      expect(table).toContain('<th>Daily cap it describes</th>')
+    })
+
+    it('says what the send path applies instead, and links to where those caps live', () => {
+      expect(table).toContain('{ICP_OUTREACH_NOTE}')
+      expect(table).toMatch(/<a href="\/campaigns">/)
+      expect(ICP_OUTREACH_NOTE).toBe(
+        'The channels and daily cap are what this profile describes, not what the send path enforces: each campaign ' +
+          'applies its own channel, daily cap and quiet hours.',
+      )
+    })
   })
 })
