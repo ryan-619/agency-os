@@ -29,6 +29,7 @@ function facts(over: Partial<SendFacts> = {}): SendFacts {
     consent: null,
     paused: false,
     evidenceStale: false,
+    template: null,
     recipientTimeZone: 'Europe/London',
     quietStart: '21:00',
     quietEnd: '08:00',
@@ -244,7 +245,7 @@ describe('§2.1 rule 2 — consent, where absence means no', () => {
   )
 
   it.each(['sms', 'voice', 'whatsapp'] as const)(
-    'allows %s once an opt-in is recorded',
+    'allows %s once an opt-in is recorded (and, on SMS and WhatsApp, the words are a registered template — 0019)',
     (channel) => {
       const d = decideSend(
         facts({
@@ -253,6 +254,7 @@ describe('§2.1 rule 2 — consent, where absence means no', () => {
           consent: { granted: true, source: 'signup form 2026-03-01' },
           recipientTimeZone: 'America/New_York',
           now: new Date('2026-09-15T18:00:00.000Z'), // 14:00 in New York.
+          template: channel === 'voice' ? null : { active: true, matches: true, category: channel === 'sms' ? 'service_explicit' : 'utility' },
         }),
       )
       expect(d.allowed).toBe(true)
@@ -850,6 +852,152 @@ describe('the ORDER the rules fire in', () => {
     expect(d.allowed).toBe(false)
     if (!d.allowed) expect(d.code).toBe('unparseable_recipient')
   })
+
+  /**
+   * 0019. On SMS the two template steps sit after the bounce and before the
+   * clock, and a promotional SMS outside TRAI's band is the clock — deferred
+   * as `quiet_hours`, after the campaign's own quiet hours. A recorded
+   * refusal of SMS is `cold_channel_forbidden` (step 0 needs a GRANTED
+   * opt-in), so `consent_revoked` has no row here.
+   */
+  it('fires in exactly this order on SMS, the template steps included', () => {
+    const NOON_IST = new Date('2026-09-15T06:30:00.000Z')
+    const ELEVEN_PM_IST = new Date('2026-09-15T17:30:00.000Z')
+    const NINE_AM_IST = new Date('2026-09-15T03:30:00.000Z')
+    const sms = (over: Partial<SendFacts>): SendFacts =>
+      facts({
+        channel: 'sms',
+        recipient: '+919876543210',
+        consent: { granted: true, source: 'booking form' },
+        recipientTimeZone: 'Asia/Kolkata',
+        template: { active: true, matches: true, category: 'service_explicit' },
+        now: NOON_IST,
+        ...over,
+      })
+    const promo = { active: true, matches: true, category: 'promotional' as const }
+    const steps: [Partial<SendFacts>, string, RegExp?][] = [
+      [{ consent: null }, 'cold_channel_forbidden'],
+      [{ recipient: 'nope' }, 'unparseable_recipient'],
+      [{ suppressed: true }, 'suppressed'],
+      [{ paused: true, pausedFor: 'manual' }, 'paused'],
+      [{ evidenceStale: true }, 'stale_evidence'],
+      [{ recipientBounced: true }, 'bounced'],
+      [{ template: null }, 'no_template'],
+      [{ template: { active: true, matches: false, category: 'promotional' } }, 'template_mismatch'],
+      [{ recipientTimeZone: null }, 'unknown_timezone'],
+      [{ now: ELEVEN_PM_IST, template: promo }, 'quiet_hours', /^It is currently quiet hours/],
+      [{ now: NINE_AM_IST, template: promo }, 'quiet_hours', /TRAI/],
+      [{ sentToday: 99 }, 'daily_cap'],
+      [{ campaignStatus: 'paused' }, 'campaign_inactive'],
+      [{ autoSend: false }, 'needs_approval'],
+    ]
+    for (let i = 0; i < steps.length; i += 1) {
+      const [own, code, words] = steps[i]!
+      const over = Object.assign({}, ...steps.slice(i).map(([o]) => o), own) as Partial<SendFacts>
+      const d = decideSend(sms(over))
+      expect(d.allowed, code).toBe(false)
+      if (d.allowed) continue
+      expect(d.code, `row ${i}`).toBe(code)
+      if (words) expect(d.reason, `row ${i}`).toMatch(words)
+    }
+    // And with nothing violated, it goes.
+    expect(decideSend(sms({}))).toEqual({ allowed: true, code: 'send_now' })
+  })
+})
+
+describe('the registered template (0019)', () => {
+  const NOON_IST = new Date('2026-09-15T06:30:00.000Z')
+  const sms = (over: Partial<SendFacts> = {}): SendFacts =>
+    facts({
+      channel: 'sms',
+      recipient: '+919876543210',
+      consent: { granted: true, source: 'booking form' },
+      recipientTimeZone: 'Asia/Kolkata',
+      template: { active: true, matches: true, category: 'service_implicit' },
+      now: NOON_IST,
+      ...over,
+    })
+
+  it.each([
+    ['no template at all', { template: null }, 'no_template'],
+    ['a deactivated template', { template: { active: false, matches: true, category: 'service_implicit' as const } }, 'no_template'],
+    ['words that are not the template', { template: { active: true, matches: false, category: 'service_implicit' as const } }, 'template_mismatch'],
+  ])('refuses %s, and neither an approval nor auto-send gets past it', (_label, over, code) => {
+    for (const who of [{ autoSend: false, approvedByHuman: true }, { autoSend: true }]) {
+      const d = decideSend(sms({ ...over, ...who }))
+      expect(d.allowed).toBe(false)
+      if (d.allowed) continue
+      expect(d.code).toBe(code)
+      expect(d.humanCanResolve).toBe(false)
+      expect(d.reason).toMatch(/Nothing was sent/)
+      expect(d.reason).not.toContain('+919876543210')
+    }
+  })
+
+  it('refuses a WhatsApp message with no template the same way', () => {
+    const d = decideSend(sms({ channel: 'whatsapp', template: null }))
+    expect(d.allowed).toBe(false)
+    if (!d.allowed) expect(d.code).toBe('no_template')
+  })
+
+  it('does not read the template on email, LinkedIn or voice', () => {
+    expect(decideSend(facts({ template: null }))).toEqual({ allowed: true, code: 'send_now' })
+    expect(
+      decideSend(facts({ template: { active: false, matches: false, category: 'promotional' } })),
+    ).toEqual({ allowed: true, code: 'send_now' })
+  })
+
+  it('needs a granted opt-in before the template is read — a service-explicit template adds no second consent', () => {
+    const d = decideSend(sms({ consent: null, template: { active: true, matches: true, category: 'service_explicit' } }))
+    expect(d.allowed).toBe(false)
+    if (!d.allowed) expect(d.code).toBe('cold_channel_forbidden')
+  })
+
+  it('reports the person before the words: a suppressed number with no template is suppressed', () => {
+    const d = decideSend(sms({ suppressed: true, template: null }))
+    expect(d.allowed).toBe(false)
+    if (!d.allowed) expect(d.code).toBe('suppressed')
+  })
+
+  describe('a promotional SMS waits for TRAI’s band', () => {
+    const promo = { active: true, matches: true, category: 'promotional' as const }
+    it.each([
+      ['09:59 IST', '2026-09-15T04:29:00.000Z', false],
+      ['10:00 IST', '2026-09-15T04:30:00.000Z', true],
+      ['20:59 IST', '2026-09-15T15:29:00.000Z', true],
+    ])('at %s', (_label, at, goes) => {
+      // A campaign whose own quiet hours are off, so the band alone decides.
+      const d = decideSend(sms({ template: promo, now: new Date(at), quietStart: '00:00', quietEnd: '00:00' }))
+      expect(d.allowed).toBe(goes)
+    })
+
+    it('is held at 21:00 IST and later, as quiet hours a person can wait out', () => {
+      const d = decideSend(sms({ template: promo, now: new Date('2026-09-15T15:30:00.000Z'), quietStart: '00:00', quietEnd: '00:00' }))
+      expect(d.allowed).toBe(false)
+      if (d.allowed) return
+      expect(d.code).toBe('quiet_hours')
+      expect(d.humanCanResolve).toBe(true)
+      expect(d.reason).toMatch(/TRAI/)
+    })
+
+    it('reads the band in India AND where the recipient is', () => {
+      // 11:00 in India is 06:30 in London: inside the band, outside it locally.
+      const d = decideSend(
+        sms({ template: promo, recipientTimeZone: 'Europe/London', now: new Date('2026-09-15T05:30:00.000Z'), quietStart: '00:00', quietEnd: '00:00' }),
+      )
+      expect(d.allowed).toBe(false)
+      if (!d.allowed) expect(d.code).toBe('quiet_hours')
+    })
+
+    it('does not hold a service or transactional SMS to the band', () => {
+      for (const category of ['service_implicit', 'service_explicit', 'transactional'] as const) {
+        const d = decideSend(
+          sms({ template: { active: true, matches: true, category }, now: new Date('2026-09-15T03:30:00.000Z'), quietStart: '00:00', quietEnd: '00:00' }),
+        )
+        expect(d, category).toEqual({ allowed: true, code: 'send_now' })
+      }
+    })
+  })
 })
 
 describe('what a refusal says', () => {
@@ -870,6 +1018,11 @@ describe('what a refusal says', () => {
       facts({ autoSend: false }),
       facts({ recipient: 'nope' }),
       facts({ channel: 'sms', recipient: '+14155550100' }),
+      facts({ channel: 'sms', recipient: '+14155550100', consent: { granted: true, source: 'form' }, template: null }),
+      facts({
+        channel: 'sms', recipient: '+14155550100', consent: { granted: true, source: 'form' },
+        template: { active: true, matches: false, category: 'service_implicit' },
+      }),
     ]
     for (const f of cases) {
       const d = decideSend(f)
@@ -882,8 +1035,14 @@ describe('what a refusal says', () => {
   })
 
   it('says plainly which refusals nobody can approve past', () => {
-    const noOverride = ['suppressed', 'consent_revoked', 'paused', 'stale_evidence', 'cold_channel_forbidden']
+    const noOverride = [
+      'suppressed', 'consent_revoked', 'paused', 'stale_evidence', 'cold_channel_forbidden', 'no_template', 'template_mismatch',
+    ]
+    const smsWith = (template: SendFacts['template']) =>
+      facts({ channel: 'sms', recipient: '+14155550100', consent: { granted: true, source: 'form' }, template })
     for (const f of [
+      smsWith(null),
+      smsWith({ active: true, matches: false, category: 'service_implicit' }),
       facts({ suppressed: true }),
       facts({ consent: { granted: false, source: 'reply' } }),
       facts({ paused: true, pausedFor: 'replied' }),

@@ -206,6 +206,7 @@ describe('the compliance counts', () => {
     it('agrees with decideSend on every code it can produce', () => {
       const base: SendFacts = {
         channel: 'email', recipient: 'priya@rentman.io', suppressed: false, consent: null, paused: false, evidenceStale: false,
+        template: null,
         recipientTimeZone: 'Europe/London', quietStart: '21:00', quietEnd: '08:00',
         sentToday: 0, dailyCap: 25, campaignStatus: 'active', autoSend: true,
         now: new Date('2026-09-15T12:00:00.000Z'),
@@ -218,6 +219,12 @@ describe('the compliance counts', () => {
         consent_revoked: { consent: { granted: false, source: 'reply' } },
         paused: { paused: true, pausedFor: 'manual' },
         stale_evidence: { evidenceStale: true },
+        // 0019: an SMS with a granted opt-in, and no template or the wrong words.
+        no_template: { channel: 'sms', recipient: '+14155550100', consent: { granted: true, source: 'form' }, template: null },
+        template_mismatch: {
+          channel: 'sms', recipient: '+14155550100', consent: { granted: true, source: 'form' },
+          template: { active: true, matches: false, category: 'service_implicit' },
+        },
         unknown_timezone: { recipientTimeZone: null },
         quiet_hours: { now: new Date('2026-09-15T23:00:00.000Z') },
         daily_cap: { sentToday: 25 },

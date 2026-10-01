@@ -193,6 +193,10 @@ export const COMPLIANCE_REFUSAL_HUMAN_CAN_RESOLVE: Readonly<Record<SendRefusalCo
   consent_revoked: false,
   paused: false,
   stale_evidence: false,
+  // 0019: an SMS or WhatsApp message that is not a registered, active
+  // template with its slots filled. No approval makes the operator deliver it.
+  no_template: false,
+  template_mismatch: false,
   quiet_hours: true,
   unknown_timezone: true,
   daily_cap: true,

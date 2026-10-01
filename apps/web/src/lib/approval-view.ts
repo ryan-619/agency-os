@@ -119,6 +119,14 @@ export function approveBlock(decision: CandidateDecision | null): string | null 
       'The rule below says what lifts it; the draft can wait here until then, or choose someone else.'
     )
   }
+  // 0019: the WORDS are what the operator would scrub, so another person
+  // gets the same refusal. The fix is a new draft from a registered template.
+  if (decision.code === 'no_template' || decision.code === 'template_mismatch') {
+    return (
+      `Approving is pointless: ${decision.words} — the operator would not deliver it, and nobody may approve past ` +
+      'that. Deny it, then draft it again from an active registered template.'
+    )
+  }
   return (
     `Approving is pointless: ${decision.words}, and nobody may approve past that — the worker would refuse it. ` +
     'Deny the draft, or choose someone else.'

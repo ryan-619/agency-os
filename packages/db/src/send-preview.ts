@@ -19,9 +19,10 @@ import {
   decideSend, pauseReasonClass, suppressionKeysFor,
   type Channel, type PauseReasonClass, type SendDecision, type SuppressionKind,
 } from '@agency/core'
+import { TEMPLATE_CHANNELS, type TemplateCategory, type TemplateFacts } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
-import { sendFactsFor, type EvidenceAsOf } from './outreach.js'
+import { sendFactsFor, type EvidenceAsOf, type MessageWords } from './outreach.js'
 
 export interface SendPreviewInput {
   readonly orgId: string
@@ -40,6 +41,16 @@ export interface SendPreviewInput {
    * quotes no scan.
    */
   readonly writtenAt?: EvidenceAsOf
+  /**
+   * The words, for the template steps on SMS and WhatsApp (0019): the
+   * template a message names and its body — a draft about to be written
+   * (`smsDraft`'s dry run), or a stored one a screen holds. Omitted: the
+   * stored draft `writtenAt` names, if it names one; otherwise this is a
+   * question about the PERSON, answered as if the message were rendered
+   * from one of the channel's active templates (`facts.template.source`
+   * says which).
+   */
+  readonly words?: MessageWords
 }
 
 /** The sender's facts, plus how each one was arrived at, for a screen to show. */
@@ -81,6 +92,26 @@ export interface SendPreviewFacts {
   readonly sentToday: number
   readonly dailyCap: number
   readonly campaignStatus: string
+  /**
+   * The template step, on SMS and WhatsApp (0019); null on other channels.
+   *
+   *  - `message`: about real words — given, or the stored draft's. `active`
+   *    false is the `no_template` refusal (none named, none in this org on
+   *    this channel, or deactivated); `matches` false is `template_mismatch`.
+   *  - `any_active`: a question about the person, asked before any words
+   *    exist. The decision assumed a message rendered from one of the
+   *    channel's active templates — a non-promotional one when there is
+   *    one, so TRAI's band does not hold an answer about a person — and
+   *    `activeOnChannel` says how many there are. None is `no_template`,
+   *    which is true of anything one could write.
+   */
+  readonly template: {
+    readonly source: 'message' | 'any_active'
+    readonly active: boolean
+    readonly matches: boolean
+    readonly category: TemplateCategory | null
+    readonly activeOnChannel?: number
+  } | null
 }
 
 export type SendPreview =
@@ -136,11 +167,47 @@ export async function previewSend(db: AgencyDb, input: SendPreviewInput): Promis
     contactId: input.contactId,
     approvedByHuman: true,
     evidenceAsOf: input.writtenAt === undefined ? now : input.writtenAt,
+    ...(input.words ? { words: input.words } : {}),
     now,
   })
   if ('missing' in gathered) return { ok: false, reason: 'missing', message: gathered.missing }
 
-  const { facts, recipient, zoneFrom, paused, pausedReason, consentRecorded } = gathered
+  const { recipient, zoneFrom, paused, pausedReason, consentRecorded } = gathered
+  let facts = gathered.facts
+  // 0019: the template step. About real words when there are any; otherwise
+  // about the person, with the words assumed to be one of the channel's
+  // active templates — said so in `template.source`, never silently.
+  let template: SendPreviewFacts['template'] = null
+  if (TEMPLATE_CHANNELS.has(facts.channel)) {
+    if (gathered.wordsKnown) {
+      template = facts.template
+        ? { source: 'message', ...facts.template }
+        : { source: 'message', active: false, matches: false, category: null }
+    } else {
+      const active = await db
+        .select({ category: schema.messageTemplates.category })
+        .from(schema.messageTemplates)
+        .where(
+          and(
+            eq(schema.messageTemplates.orgId, input.orgId),
+            eq(schema.messageTemplates.channel, facts.channel),
+            eq(schema.messageTemplates.active, true),
+          ),
+        )
+      const pick = active.find((t) => t.category !== 'promotional') ?? active[0]
+      const assumed: TemplateFacts | null = pick
+        ? { active: true, matches: true, category: pick.category as TemplateCategory }
+        : null
+      facts = { ...facts, template: assumed }
+      template = {
+        source: 'any_active',
+        active: assumed !== null,
+        matches: assumed !== null,
+        category: assumed?.category ?? null,
+        activeOnChannel: active.length,
+      }
+    }
+  }
   const decision = decideSend(facts)
   return {
     ok: true,
@@ -164,6 +231,7 @@ export async function previewSend(db: AgencyDb, input: SendPreviewInput): Promis
       sentToday: facts.sentToday,
       dailyCap: facts.dailyCap,
       campaignStatus: facts.campaignStatus,
+      template,
     },
   }
 }
