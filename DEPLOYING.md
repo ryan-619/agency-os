@@ -738,7 +738,18 @@ rather than failing every retry.
 ## Every deploy after the first: migrate FIRST
 
 The app and the database ship separately here, so the order matters and it is
-always the same one: **apply the migrations, then deploy the app.** A schema
+always the same one: **apply the migrations, then deploy the app.**
+
+**From GitHub, with no credential on any laptop:** Actions → Production → Run
+workflow, ref the release branch, action `release`, confirm `release`
+(`.github/workflows/production.yml`, which runs `tools/production.sh`). It
+migrates, deploys only if that succeeded, and waits for `/api/health?strict=1`
+to report the ref's `EXPECTED_MIGRATION`. It needs one Actions secret,
+`VERCEL_TOKEN`: the database URL is read from the Vercel project's own
+production `DATABASE_URL` (the pooled string, with Neon's `-pooler` taken off
+the host for the direct one). Add `PRODUCTION_DATABASE_URL` — the direct
+string — only if that variable is marked Sensitive, which `vercel pull` never
+returns. `status`, `migrate` and `deploy` run one half each. A schema
 that is ahead of the code is harmless — nothing reads the new column. Code
 that is ahead of the schema is a live error page.
 
