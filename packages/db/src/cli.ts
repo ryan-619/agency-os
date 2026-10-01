@@ -8,13 +8,19 @@
  *   npm run db:migrate -- down 3  revert the last three
  *   npm run db:migrate -- reset   revert everything, then re-apply from zero
  *
+ * `down` and `reset` refuse to revert 0018 while any user has revoked access:
+ * its down drops `users.revoked_at`, and older code would let each of them
+ * sign in again. `--restores-revoked-access` reverts anyway, and says so.
+ *
  * Reads DATABASE_URL from the environment. The URL contains a password, so it
  * is never printed, not even on error (PROMPT.md §2.3).
  */
 import { Client } from 'pg'
 import { pgDriver } from './driver.js'
 import { MIGRATIONS_DIR } from './paths.js'
-import { readMigrations, migrateUp, migrateDown, migrationStatus } from './migrator.js'
+import {
+  RESTORES_REVOKED_ACCESS_FLAG, readMigrations, migrateUp, migrateDown, migrationStatus,
+} from './migrator.js'
 import { safeTarget } from './safe-target.js'
 
 
@@ -26,7 +32,15 @@ async function main(): Promise<void> {
     process.exit(1)
   }
 
-  const [command = 'up', arg] = process.argv.slice(2)
+  const argv = process.argv.slice(2)
+  const flags = argv.filter((a) => a.startsWith('--'))
+  const unknown = flags.filter((f) => f !== RESTORES_REVOKED_ACCESS_FLAG)
+  if (unknown.length > 0) {
+    console.error(`unknown option ${unknown.join(', ')}. The one option is ${RESTORES_REVOKED_ACCESS_FLAG} (down and reset).`)
+    process.exit(1)
+  }
+  const downOptions = { restoresRevokedAccess: flags.includes(RESTORES_REVOKED_ACCESS_FLAG) }
+  const [command = 'up', arg] = argv.filter((a) => !a.startsWith('--'))
   const migrations = readMigrations(MIGRATIONS_DIR)
 
   // A Client, not a Pool — the migrator issues BEGIN/COMMIT as separate
@@ -54,8 +68,11 @@ async function main(): Promise<void> {
           console.error(`down expects a positive integer or "all", got "${arg}"`)
           process.exit(1)
         }
-        const undone = await migrateDown(driver, migrations, steps, log)
+        const undone = await migrateDown(driver, migrations, steps, log, downOptions)
         console.log(undone.length ? `reverted ${undone.join(', ')}` : 'nothing to revert')
+        if (downOptions.restoresRevokedAccess && undone.includes('0018')) {
+          console.log('users.revoked_at is gone: every revoked user can sign in again with the code this database now matches')
+        }
         break
       }
       case 'status': {
@@ -72,13 +89,15 @@ async function main(): Promise<void> {
           console.error('refusing to reset in production')
           process.exit(1)
         }
-        await migrateDown(driver, migrations, 'all', log)
+        // All the way down drops the users table too, so the 0018 guard has
+        // nothing to refuse here; the options are passed for the day it does.
+        await migrateDown(driver, migrations, 'all', log, downOptions)
         await migrateUp(driver, migrations, log)
         console.log('reset complete')
         break
       }
       default:
-        console.error(`unknown command "${command}". Use: up | down [n|all] | status | reset`)
+        console.error(`unknown command "${command}". Use: up | down [n|all] | status | reset [${RESTORES_REVOKED_ACCESS_FLAG}]`)
         process.exit(1)
     }
   } finally {

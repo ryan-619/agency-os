@@ -244,15 +244,68 @@ export async function migrateUp(
   return result
 }
 
+/** What the CLI calls `MigrateDownOptions.restoresRevokedAccess`; the refusal names it. */
+export const RESTORES_REVOKED_ACCESS_FLAG = '--restores-revoked-access'
+
+export interface MigrateDownOptions {
+  /**
+   * Revert 0018 although some users have revoked access. Its down drops
+   * `users.revoked_at`, and code from before 0018 has no notion of
+   * revocation, so each of those people could sign in again. Off unless a
+   * caller says so in so many words.
+   */
+  readonly restoresRevokedAccess?: boolean
+}
+
+/**
+ * What a revert would silently undo that its down file cannot refuse on
+ * its own — a shipped down file is never edited (§10), so the refusal lives
+ * here, keyed by the version whose down does the damage. Each answers a
+ * sentence when the revert must stop, or null.
+ */
+const DOWN_GUARDS: readonly {
+  readonly version: string
+  readonly allowedBy: keyof MigrateDownOptions
+  readonly check: (driver: MigrationDriver, m: Migration, reverting: readonly Migration[]) => Promise<string | null>
+}[] = [
+  {
+    version: '0018',
+    allowedBy: 'restoresRevokedAccess',
+    check: async (driver, m, reverting) => {
+      // A revert that goes on to 0001 drops the users table itself: nobody
+      // is let back in, because nobody is left. (Each migration is its own
+      // transaction, so a down that fails part way is a broken database the
+      // operator is already looking at, with the failing step named.)
+      if (reverting.some((r) => r.version === '0001')) return null
+      const [row] = await driver.select<{ n: number }>(
+        'SELECT count(*)::int AS n FROM users WHERE revoked_at IS NOT NULL',
+      )
+      const n = row?.n ?? 0
+      if (n === 0) return null
+      return (
+        `Reverting ${m.version}_${m.name} drops users.revoked_at, and ${n} ${n === 1 ? 'user has' : 'users have'} ` +
+        `revoked access. Code from before ${m.version} has no notion of revocation, so ${n === 1 ? 'they' : 'each of them'} ` +
+        `could request a sign-in link and sign in again. Older code keeps out only an address with no users row, so ` +
+        `remove or re-address ${n === 1 ? 'that row' : 'those rows'} first, or pass ${RESTORES_REVOKED_ACCESS_FLAG} ` +
+        `to revert anyway. Nothing was reverted.`
+      )
+    },
+  },
+]
+
 /**
  * Roll back the most recent `steps` migrations, newest first.
  * `steps: 'all'` unwinds to an empty schema.
+ *
+ * Every guard on the way down is asked BEFORE anything is reverted, so a
+ * refusal leaves the database exactly where it was rather than half way.
  */
 export async function migrateDown(
   driver: MigrationDriver,
   migrations: Migration[],
   steps: number | 'all' = 1,
   log: (msg: string) => void = () => {},
+  options: MigrateDownOptions = {},
 ): Promise<string[]> {
   await ensureLedger(driver)
   const rows = await applied(driver)
@@ -275,6 +328,14 @@ export async function migrateDown(
     })
     .sort((a, b) => b.version.localeCompare(a.version))
     .slice(0, steps === 'all' ? undefined : steps)
+
+  for (const m of toUndo) {
+    for (const guard of DOWN_GUARDS) {
+      if (guard.version !== m.version || options[guard.allowedBy] === true) continue
+      const refusal = await guard.check(driver, m, toUndo)
+      if (refusal !== null) throw new Error(refusal)
+    }
+  }
 
   const undone: string[] = []
   for (const m of toUndo) {
