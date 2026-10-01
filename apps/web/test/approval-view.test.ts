@@ -9,7 +9,7 @@
  * never one keypress: `a` arms, Enter on the same card approves, anything
  * else disarms (§2.4 — a stray key must never be an outbound message).
  */
-import type { SendFacts, SendRefusalCode } from '@agency/core'
+import { TEMPLATE_CHANNELS, type SendFacts, type SendRefusalCode } from '@agency/core'
 import { decideGathered } from '@agency/db/queries'
 import { describe, expect, it } from 'vitest'
 import {
@@ -18,7 +18,7 @@ import {
   addressedByLabel, addressedByOf, approvability, approveBlock, approveFootnote, approvedMessage, campaignToCheck,
   candidateLine, queueNoSenderNote,
   checkedUnderLabel, decisionView, draftEvidenceFrom, draftTitle, evidenceHeading, evidenceLine, evidenceNote, keyAction,
-  nextFocus, smsCandidates, templateLine, uncheckedDecision,
+  TEMPLATE_CHANNEL_NAMES, nextFocus, smsCandidates, templateLine, uncheckedDecision,
   type Approvability, type CandidateDecision, type DraftTemplate,
 } from '../src/lib/approval-view'
 
@@ -640,10 +640,71 @@ describe('an SMS draft’s card', () => {
     expect(smsCandidates('sms', null, people)).toEqual(people)
   })
 
+  it('offers only the person it was rendered for on WhatsApp too, as approveDraft does', () => {
+    // `approveDraft` refuses `rendered_for_another` on every template channel.
+    const people = [{ id: 'a' }, { id: 'b' }]
+    expect(smsCandidates('whatsapp', 'a', people)).toEqual([{ id: 'a' }])
+    // The client-safe restatement is core's set, member for member.
+    expect([...TEMPLATE_CHANNEL_NAMES].sort()).toEqual([...TEMPLATE_CHANNELS].sort())
+    for (const channel of TEMPLATE_CHANNELS) expect(smsCandidates(channel, 'a', people)).toEqual([{ id: 'a' }])
+  })
+
   it('blocks approving words the operator would not deliver, and says to draft again', () => {
     const block = approveBlock({ code: 'template_mismatch', words: 'not its registered template', reason: 'x', humanCanResolve: false })
     expect(block).toContain('the operator would not deliver it')
     expect(block).toContain('draft it again from an active registered template')
+  })
+})
+
+/**
+ * On SMS and WhatsApp there is nobody else to choose: the template's slots
+ * were filled for one person, `smsCandidates` offers only them, and
+ * `approveDraft` refuses anyone else (`rendered_for_another`). The blocks
+ * said "choose someone else" all the same. Round 4, finding [22].
+ */
+describe('a blocked draft on a template channel', () => {
+  const ONLY_THEM = 'Its template was filled in for this one person, so it cannot go to anyone else.'
+
+  it('never says "choose someone else", for any rule nobody may approve past', () => {
+    for (const channel of ['sms', 'whatsapp']) {
+      for (const [code, resolvable] of Object.entries(SEND_CODES)) {
+        const block = approveBlock(refusal(code, resolvable), channel)
+        if (resolvable) {
+          expect(block).toBeNull()
+          continue
+        }
+        expect(block).toContain('Approving is pointless')
+        expect(block).not.toMatch(/someone else/)
+      }
+    }
+  })
+
+  it('says to deny it, and where a text to somebody else is drafted', () => {
+    expect(approveBlock(refusal('suppressed', false), 'sms')).toBe(
+      'Approving is pointless: on the suppression list, and nobody may approve past that — the worker would refuse it. ' +
+        `Deny the draft. ${ONLY_THEM} A text to somebody else is drafted from their own row on /contacts (Draft SMS).`,
+    )
+    // Nothing here drafts a WhatsApp message, so nothing points anywhere.
+    expect(approveBlock(refusal('consent_revoked', false), 'whatsapp')).toBe(
+      'Approving is pointless: declined, or replied, and nobody may approve past that — the worker would refuse it. ' +
+        `Deny the draft. ${ONLY_THEM}`,
+    )
+  })
+
+  it('says a paused person’s draft waits for the pause to be lifted — never to deny it, never anyone else', () => {
+    const block = approveBlock(refusal('paused', false), 'sms')
+    expect(block).toBe(
+      'Approving is pointless: contact paused, and nobody may approve past a pause — the worker would refuse it. ' +
+        `The rule below says what lifts it; the draft can wait here until then. ${ONLY_THEM}`,
+    )
+    expect(block).not.toMatch(/deny/i)
+  })
+
+  it('leaves the email and LinkedIn blocks as they were, with or without the channel', () => {
+    for (const channel of [undefined, 'email', 'linkedin']) {
+      expect(approveBlock(refusal('suppressed', false), channel)).toContain('Deny the draft, or choose someone else.')
+      expect(approveBlock(refusal('paused', false), channel)).toContain('the draft can wait here until then, or choose someone else.')
+    }
   })
 })
 
