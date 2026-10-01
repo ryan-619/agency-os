@@ -13,6 +13,9 @@ name: Production
 #   deploy   — build and deploy the chosen ref to Vercel production
 #   release  — migrate, THEN deploy, then wait for /api/health?strict=1 to
 #              report the ref's migration — DEPLOYING.md, "migrate FIRST"
+#   worker   — deploy apps/agent to Fly.io (fly.toml), one machine that never
+#              stops, and point the web app at it (AGENT_URL and a shared
+#              AGENT_INTERNAL_TOKEN, set on Vercel and redeployed)
 #
 # Secrets (Settings → Secrets and variables → Actions):
 #   VERCEL_TOKEN             deploy and release. Also how the database URL is
@@ -22,18 +25,24 @@ name: Production
 #                            Vercel's DATABASE_URL is marked Sensitive, which
 #                            `vercel pull` never returns
 #   VERCEL_ORG_ID, VERCEL_PROJECT_ID, VERCEL_TEAM   optional; without them
-#                            the project `agency-os` is linked on the token's
-#                            default team
+#                            the project `agency-os` is found under every
+#                            scope the token reaches
+#   FLY_API_TOKEN            worker: a Fly ORG token. The worker also needs
+#                            PRODUCTION_DATABASE_URL (Neon's DIRECT string),
+#                            and takes any of ANTHROPIC_API_KEY, SECRETS_KEY,
+#                            SMTP_*, MAIL_FROM, IMAP_*, SLACK_WEBHOOK_URL,
+#                            UNSUBSCRIBE_SECRET, DOVESOFT_API_KEY and
+#                            DOVESOFT_ENTITY_ID that are set as secrets
 
 on:
   workflow_dispatch:
     inputs:
       action:
-        description: 'status, migrate, deploy or release'
+        description: 'status, migrate, deploy, release or worker'
         required: true
         default: status
         type: choice
-        options: [status, migrate, deploy, release]
+        options: [status, migrate, deploy, release, worker]
       confirm:
         description: 'For anything but status, type the action again'
         required: false
@@ -67,10 +76,13 @@ jobs:
           TOKEN_VARIABLE: ${{ vars.VERCEL_TOKEN != '' }}
           DB_SECRET: ${{ secrets.PRODUCTION_DATABASE_URL != '' }}
           DB_VARIABLE: ${{ vars.PRODUCTION_DATABASE_URL != '' }}
+          FLY_SECRET: ${{ secrets.FLY_API_TOKEN != '' }}
+          FLY_VARIABLE: ${{ vars.FLY_API_TOKEN != '' }}
         run: |
           echo "VERCEL_TOKEN            secret: $TOKEN_SECRET  variable: $TOKEN_VARIABLE"
           echo "PRODUCTION_DATABASE_URL secret: $DB_SECRET  variable: $DB_VARIABLE"
-          if [ "$TOKEN_VARIABLE" = true ] || [ "$DB_VARIABLE" = true ]; then
+          echo "FLY_API_TOKEN           secret: $FLY_SECRET  variable: $FLY_VARIABLE"
+          if [ "$TOKEN_VARIABLE" = true ] || [ "$DB_VARIABLE" = true ] || [ "$FLY_VARIABLE" = true ]; then
             echo "::error::A credential is saved as a Variable, which is shown in plain text. Delete it there and add it under Secrets instead."
             exit 1
           fi
@@ -87,6 +99,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci
+      - name: Install flyctl
+        if: inputs.action == 'worker'
+        uses: superfly/flyctl-actions/setup-flyctl@master
       - name: ${{ inputs.action }}
         env:
           ACTION: ${{ inputs.action }}
@@ -95,4 +110,26 @@ jobs:
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
           VERCEL_TEAM: ${{ secrets.VERCEL_TEAM }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_ORG: ${{ secrets.FLY_ORG }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_WORKSPACE_ID: ${{ secrets.ANTHROPIC_WORKSPACE_ID }}
+          AGENT_MODEL: ${{ secrets.AGENT_MODEL }}
+          SECRETS_KEY: ${{ secrets.SECRETS_KEY }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_SECURE: ${{ secrets.SMTP_SECURE }}
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          IMAP_HOST: ${{ secrets.IMAP_HOST }}
+          IMAP_PORT: ${{ secrets.IMAP_PORT }}
+          IMAP_USER: ${{ secrets.IMAP_USER }}
+          IMAP_PASSWORD: ${{ secrets.IMAP_PASSWORD }}
+          IMAP_SECURE: ${{ secrets.IMAP_SECURE }}
+          IMAP_MAILBOX: ${{ secrets.IMAP_MAILBOX }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          UNSUBSCRIBE_SECRET: ${{ secrets.UNSUBSCRIBE_SECRET }}
+          DOVESOFT_API_KEY: ${{ secrets.DOVESOFT_API_KEY }}
+          DOVESOFT_ENTITY_ID: ${{ secrets.DOVESOFT_ENTITY_ID }}
         run: tools/production.sh "$ACTION"

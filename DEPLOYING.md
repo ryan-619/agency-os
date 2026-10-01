@@ -540,6 +540,21 @@ nothing looks broken because `/readyz` answers fine on a machine that was
 just woken up. `auto_stop_machines = "off"` and `min_machines_running = 1`
 are the load-bearing lines.
 
+**From GitHub, with no credential on a laptop:** Actions → Production → Run
+workflow, action `worker`, confirm `worker`. It needs `FLY_API_TOKEN` (a Fly
+ORG token, on an org with a payment method) and `PRODUCTION_DATABASE_URL`
+(Neon's direct string — a `-pooler` host is turned into the direct one) as
+Actions secrets, beside `VERCEL_TOKEN`. It creates the app (or reuses one
+named from `fly.toml`'s `app`, suffixed when that global name is taken),
+imports the secrets over stdin, deploys one machine with `--ha=false`, waits
+for `/readyz`, and — when either side lacks it — generates a shared
+`AGENT_INTERNAL_TOKEN`, sets it and `AGENT_URL` on Vercel and redeploys the
+web app, then waits for `/api/health` to report the worker `live`. Any of
+`ANTHROPIC_API_KEY`, `SECRETS_KEY`, `SMTP_*`, `MAIL_FROM`, `IMAP_*`,
+`SLACK_WEBHOOK_URL`, `UNSUBSCRIBE_SECRET`, `DOVESOFT_API_KEY` and
+`DOVESOFT_ENTITY_ID` set as Actions secrets is passed to the worker too;
+`WEB_PUBLIC_URL` is set to the site. By hand, the same steps:
+
 ```bash
 fly launch --no-deploy --copy-config     # once; keeps this fly.toml
 fly secrets set DATABASE_URL='...'       # the DIRECT, unpooled string

@@ -4,6 +4,8 @@
 #   tools/production.sh status    which migrations production has applied
 #   tools/production.sh migrate   apply what is pending, then status
 #   tools/production.sh deploy    build and deploy this checkout to Vercel prod
+#   tools/production.sh worker    deploy apps/agent to Fly.io (fly.toml) and
+#                                 point the web app at it
 #   tools/production.sh release   migrate, THEN deploy, then check /api/health
 #                                 reports this checkout's migration — the order
 #                                 DEPLOYING.md requires ("migrate FIRST"). With
@@ -140,6 +142,125 @@ verify() {
   die "$SITE did not report migration $want within five minutes."
 }
 
+# --- the worker, on Fly.io -------------------------------------------------
+#
+# One app, ONE machine that never stops (fly.toml's header says why), its
+# secrets imported from this run's environment over stdin and never echoed,
+# then the web app pointed at it. The internal token is generated here and
+# written to both sides only when either lacks it, so a re-run keeps it.
+
+APP=
+fly_app() {
+  [ -n "${FLY_API_TOKEN:-}" ] || die "The FLY_API_TOKEN secret is not set (an ORG token: fly.io → Tokens)."
+  export FLY_API_TOKEN
+  local want existing first_error
+  want=$(sed -n 's/^app = "\(.*\)"/\1/p' fly.toml)
+  existing=$(flyctl apps list --json | node -e '
+    let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
+      const want = process.argv[1]
+      const names = (JSON.parse(s || "[]") || []).map((a) => a.Name ?? a.name ?? a.ID ?? a.id).filter(Boolean)
+      const hit = names.find((n) => n === want) ?? names.find((n) => n.startsWith(want + "-"))
+      if (hit) console.log(hit)
+    })' "$want") || die "Could not list Fly apps with this token."
+  if [ -n "$existing" ]; then
+    APP=$existing
+    echo "fly: app $APP"
+    return 0
+  fi
+  if first_error=$(flyctl apps create "$want" --org "${FLY_ORG:-personal}" 2>&1); then
+    APP=$want
+  else
+    # Fly app names are global: somebody else may hold this one.
+    APP="$want-$(openssl rand -hex 3)"
+    flyctl apps create "$APP" --org "${FLY_ORG:-personal}" >/dev/null 2>&1 || {
+      echo "first attempt: $first_error"
+      die "Could not create a Fly app. FLY_API_TOKEN must be an ORG token, and the org needs a payment method."
+    }
+  fi
+  echo "fly: created app $APP"
+}
+
+fly_secret_names() {
+  flyctl secrets list --app "$APP" --json | node -e '
+    let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
+      for (const x of JSON.parse(s || "[]") || []) console.log(x.Name ?? x.name)
+    })'
+}
+
+worker() {
+  fly_app
+  database_url
+  vercel_ids
+  local names lines="" token=""
+  names=$(fly_secret_names)
+  add() { lines+="$1=$2"$'\n'; }
+  add DATABASE_URL "$(cat "$DB_FILE")"
+  add WEB_PUBLIC_URL "$SITE"
+  local wire=false
+  if ! grep -qx AGENT_INTERNAL_TOKEN <<<"$names" \
+    || ! node tools/vercel-env.mjs has AGENT_INTERNAL_TOKEN \
+    || ! node tools/vercel-env.mjs has AGENT_URL; then
+    token=$(openssl rand -hex 32)
+    echo "::add-mask::$token"
+    add AGENT_INTERNAL_TOKEN "$token"
+    wire=true
+  fi
+  # Everything optional, only when this run was handed it.
+  local n
+  for n in ANTHROPIC_API_KEY ANTHROPIC_WORKSPACE_ID AGENT_MODEL SECRETS_KEY \
+    SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASSWORD SMTP_SECURE MAIL_FROM \
+    IMAP_HOST IMAP_PORT IMAP_USER IMAP_PASSWORD IMAP_SECURE IMAP_MAILBOX \
+    SLACK_WEBHOOK_URL UNSUBSCRIBE_SECRET DOVESOFT_API_KEY DOVESOFT_ENTITY_ID; do
+    if [ -n "${!n:-}" ]; then add "$n" "${!n}"; fi
+  done
+  printf '%s' "$lines" | flyctl secrets import --app "$APP" --stage >/dev/null
+  echo "fly: secrets staged: $(printf '%s' "$lines" | cut -d= -f1 | tr '\n' ' ')"
+
+  flyctl deploy --app "$APP" --config fly.toml --remote-only --ha=false
+  flyctl scale count 1 --app "$APP" --yes >/dev/null
+  worker_ready
+
+  if $wire; then
+    VALUE="https://$APP.fly.dev" node tools/vercel-env.mjs set AGENT_URL encrypted
+    VALUE="$token" node tools/vercel-env.mjs set AGENT_INTERNAL_TOKEN sensitive
+    # A new deployment is what picks the variables up.
+    deploy
+    verify
+  fi
+  worker_seen
+}
+
+worker_ready() {
+  local code=""
+  for _ in $(seq 1 30); do
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "https://$APP.fly.dev/readyz" || true)
+    if [ "$code" = 200 ]; then
+      echo "worker: https://$APP.fly.dev/readyz answers 200"
+      return 0
+    fi
+    sleep 10
+  done
+  die "The worker's /readyz answered ${code:-nothing} for five minutes: flyctl logs --app $APP"
+}
+
+# The web app reads the worker's heartbeat row, not its URL: "live" there is
+# the proof the two share a database.
+worker_seen() {
+  local status=""
+  for _ in $(seq 1 30); do
+    status=$(curl -fsS --max-time 15 "$SITE/api/health" | node -e '
+      let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
+        try { console.log(JSON.parse(s).worker?.status ?? "") } catch { console.log("") }
+      })' || true)
+    if [ "$status" = live ]; then
+      echo "live: $SITE/api/health reports the worker live"
+      return 0
+    fi
+    sleep 10
+  done
+  die "$SITE/api/health did not report the worker live within five minutes (last: ${status:-nothing})."
+}
+
 # What production says it has applied, from its own health check — needs no
 # credential at all.
 health_status() {
@@ -171,5 +292,6 @@ case "$ACTION" in
     verify
     ;;
   verify) verify ;;
+  worker) worker ;;
   *) die "unknown action: $ACTION" ;;
 esac
