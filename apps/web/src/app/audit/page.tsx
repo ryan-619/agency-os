@@ -181,10 +181,13 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
         </summary>
         <ul>
           <li>
-            <strong>A deal moved automatically has no deal line of its own.</strong> A send moving it to
-            contacted, a reply moving it to replied and a booking moving it to meeting are recorded inside
-            <code>send.sent</code>, <code>contact.replied</code> and <code>meeting.booked</code>. Filtering to
-            Deals shows the moves people made on the board.
+            <strong>A deal moved automatically has a line of its own, from System</strong>, beside the{' '}
+            <code>send.sent</code>, <code>contact.replied</code>, <code>meeting.booked</code> or{' '}
+            <code>proposal.generated</code> line that caused it — so one event is two lines, and filtering to
+            Deals shows both the board&apos;s moves and the automatic ones. Three moves have no deal line: a
+            stage the agent set with <code>update_deal</code> (its line is filed under the chat), a proposal
+            accepted as won (its <code>proposal.accepted</code> line), and any automatic move made before this
+            release.
           </li>
           <li>
             <strong>An agent&apos;s approval appears twice.</strong> Once when a person decides it here, and
@@ -274,8 +277,9 @@ export default async function AuditPage({ searchParams }: { searchParams: Promis
         </div>
         {subjectId ? (
           <p className="muted" style={{ fontSize: 12.5, margin: '8px 0 0' }}>
-            Only the lines whose subject is <code>{subjectId.slice(0, 8)}</code>. A deal moved by a send, a
-            reply or a booking is recorded under that message, contact or meeting instead.{' '}
+            Only the lines whose subject is <code>{subjectId.slice(0, 8)}</code>. For a deal, that includes the
+            moves a send, a reply, a booking or a proposal made; what caused each is a line about that message,
+            contact, meeting or proposal.{' '}
             <a href={query({ subjectId: '' })}>Drop this filter</a>
           </p>
         ) : null}
