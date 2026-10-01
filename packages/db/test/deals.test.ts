@@ -277,6 +277,93 @@ describe('deals', () => {
   })
 
   /**
+   * `advanceDeal` reads the open deal and then writes it, and under READ
+   * COMMITTED another session can commit in between: a booking moving the
+   * deal to meeting, or a person closing it lost on the board. The rules —
+   * forward only, open deals only — are in the UPDATE's own WHERE, and the
+   * audit row names the stage the UPDATE actually replaced.
+   *
+   * PGlite is one connection, so two sessions cannot interleave for real.
+   * `afterFirstDealRead` runs the other session's write right after the
+   * first read of `deals` returns — exactly where its commit would land.
+   * Review round 3, finding [11].
+   */
+  describe('a move that lands between the read and the write', () => {
+    let restore: (() => void) | null = null
+    afterEach(() => {
+      restore?.()
+      restore = null
+    })
+
+    const afterFirstDealRead = (between: () => Promise<unknown>): void => {
+      const pg = test.pg
+      const original = pg.query.bind(pg)
+      let fired = false
+      pg.query = (async (...args: Parameters<typeof pg.query>) => {
+        const out = await original(...args)
+        if (!fired && /^\s*select\b[\s\S]*\bfrom "deals"/i.test(String(args[0]))) {
+          fired = true
+          await between()
+        }
+        return out
+      }) as typeof pg.query
+      restore = () => {
+        pg.query = original
+      }
+    }
+
+    const stageNow = async (id: string) =>
+      (await db.select().from(schema.deals).where(eq(schema.deals.id, id)))[0]!
+
+    const advances = async () =>
+      (await db.select().from(schema.auditLog)).filter((a) => a.action === 'deal.advanced').map((a) => a.detail)
+
+    it('does not knock back a deal a concurrent move took further', async () => {
+      const { deal } = await advanceDeal(db, { orgId, companyId, to: 'contacted' })
+      afterFirstDealRead(() => db.update(schema.deals).set({ stage: 'meeting' }).where(eq(schema.deals.id, deal.id)))
+
+      const r = await advanceDeal(db, { orgId, companyId, to: 'replied' })
+
+      expect(r.outcome).toBe('unchanged')
+      expect(r.deal.stage).toBe('meeting')
+      expect((await stageNow(deal.id)).stage).toBe('meeting')
+      // Nothing moved, so nothing says it did.
+      expect(await advances()).toEqual([])
+    })
+
+    it('does not give a deal closed in between an open stage', async () => {
+      const { deal } = await advanceDeal(db, { orgId, companyId, to: 'contacted' })
+      afterFirstDealRead(() =>
+        setDealStage(db, { orgId, dealId: deal.id, stage: 'lost', lostReason: 'went with a competitor' }),
+      )
+
+      const r = await advanceDeal(db, { orgId, companyId, to: 'replied' })
+
+      const closed = await stageNow(deal.id)
+      expect(closed.stage).toBe('lost')
+      expect(closed.closedAt).not.toBeNull()
+      // The event is still recorded somewhere true: the closed deal is a
+      // closed deal, and a reply after a close opens a new one — what the two
+      // would do one after the other.
+      expect(r.deal.id).not.toBe(deal.id)
+      expect(r.outcome).toBe('created')
+      expect(r.deal.stage).toBe('replied')
+      expect(await advances()).toEqual([])
+    })
+
+    it('records the stage it actually replaced, not the one it read', async () => {
+      const { deal } = await advanceDeal(db, { orgId, companyId, to: 'contacted' })
+      afterFirstDealRead(() => db.update(schema.deals).set({ stage: 'replied' }).where(eq(schema.deals.id, deal.id)))
+
+      const r = await advanceDeal(db, { orgId, companyId, to: 'meeting' })
+
+      expect(r.outcome).toBe('advanced')
+      expect(r.deal.stage).toBe('meeting')
+      expect(await advances()).toEqual([{ companyId, from: 'replied', to: 'meeting' }])
+    })
+  })
+
+  /**
    * `deals.next_action_at` existed since 0003 and nothing wrote it. A column
    * nobody can set teaches a shape the product does not have.
    */
