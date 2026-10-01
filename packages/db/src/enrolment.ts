@@ -123,14 +123,19 @@ export async function enrolCampaign(
       message: `${campaign.name} is marked done, so nothing is enrolled into it. Set it back to draft or active first.`,
     }
   }
-  // §2.1: a campaign is cold outreach, and cold is email and LinkedIn only.
-  // `campaignInput` offers nothing else, but the column's CHECK allows five
-  // channels, and a row written some other way must not become cold SMS here.
+  // §2.1: enrolment is cold outreach, and cold is email and LinkedIn only.
+  // `campaignInput` also offers SMS (0019) — a campaign every SMS is filed
+  // under, never one enrolment fills — and the column's CHECK allows five
+  // channels, so a row on any other must not become cold SMS here. The
+  // sentence for an SMS campaign says where its messages ARE written, or
+  // the refusal points nowhere.
   if (campaign.channel !== 'email' && campaign.channel !== 'linkedin') {
     return {
       ok: false,
       reason: 'campaign_channel_unsupported',
-      message: `${campaign.name} is on ${campaign.channel}, which is not a cold channel. Enrolment writes email and LinkedIn drafts only.`,
+      message:
+        `${campaign.name} is on ${campaign.channel}, which is not a cold channel. Enrolment writes email and LinkedIn drafts only.` +
+        (campaign.channel === 'sms' ? ' SMS is drafted per person with Draft SMS on /contacts.' : ''),
     }
   }
   const channel: EnrolChannel = campaign.channel
