@@ -5,6 +5,7 @@ import { deployment } from '@/lib/deployment'
 import { SignInForm } from '@/components/signin-form'
 
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 /**
  * Sign in by magic link. There is no signup: the address must already belong

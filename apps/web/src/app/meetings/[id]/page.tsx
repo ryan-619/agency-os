@@ -25,6 +25,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
  * as "invitation" to anyone who has not been told otherwise.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 /** Beside the download link, verbatim. */
 const ICS_NOTE = 'Adds this meeting to your own calendar. Nobody is invited by this file — send the invitation from your calendar.'

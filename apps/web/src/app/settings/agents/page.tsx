@@ -20,6 +20,7 @@ import { icpForOrg } from '@/lib/queries'
  * job, and the failure surfaces as a confusing answer rather than an error.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export default async function AgentsPage() {
   const session = await auth()

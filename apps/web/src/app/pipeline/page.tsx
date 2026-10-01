@@ -28,6 +28,7 @@ import { icpForOrg } from '@/lib/queries'
  * states the thresholds from `STAGE_ROT_DAYS` rather than repeating them.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 const CLOSED_SHOWN_FOR_DAYS = 60
 const DUE_WITHIN_MS = 24 * 3_600_000

@@ -21,6 +21,7 @@ import { inZone } from '@/lib/format'
 import { companyByDomain, icpForOrg, scanWithFindings } from '@/lib/queries'
 
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 function evidenceLines(evidence: unknown): Array<[string, string]> {
   if (!evidence || typeof evidence !== 'object') return []

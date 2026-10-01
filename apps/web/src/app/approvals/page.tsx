@@ -39,6 +39,7 @@ import { DraftQueue, type DraftView } from '@/components/outreach/drafts'
  * the send path, which runs again at the moment of sending.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 export const revalidate = 0
 
 /**
