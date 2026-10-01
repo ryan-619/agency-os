@@ -267,7 +267,8 @@ export async function dispatchTouch(
     }
   }
 
-  const decision = decideSend(facts.facts)
+  // r4: worded for what made evidence stale — aged or superseded.
+  const decision = decideGathered(facts)
 
   if (!decision.allowed) {
     if (decision.code === 'needs_approval') {
@@ -586,7 +587,11 @@ async function gatherFacts(
   db: AgencyDb,
   touch: TouchRow,
   now: Date,
-): Promise<{ facts: SendFacts; recipient: string } | { missing: string }> {
+): Promise<
+  // r4: the evidence halves ride along, for `decideGathered`'s wording.
+  | { facts: SendFacts; recipient: string; evidenceAged: boolean; evidenceSuperseded: boolean }
+  | { missing: string }
+> {
   if (!touch.campaignId) {
     // Every outbound message carries a campaign, because the campaign is
     // where the cap and the quiet hours live. A draft without one is a draft
@@ -758,6 +763,15 @@ export async function sendFactsFor(
        * written for another one — `channelMismatch` says what that means.
        */
       campaignChannel: Channel
+      /**
+       * The two halves of `facts.evidenceStale` (r4, review round 3,
+       * finding 4): the scan behind the words is past its deadline now
+       * (`evidenceAged`), or a newer SUCCESSFUL scan of the company has
+       * superseded it (`evidenceSuperseded`). Either refuses the words;
+       * `decideGathered` words the refusal by which it was.
+       */
+      evidenceAged: boolean
+      evidenceSuperseded: boolean
     }
   | { missing: string }
 > {
@@ -832,8 +846,14 @@ export async function sendFactsFor(
       ),
     )
 
-  const evidenceStale =
-    args.evidenceAsOf === null ? false : await evidenceIsStale(db, orgId, row.contact.companyId, args.evidenceAsOf, now)
+  // r4 (review round 3, finding 4): aged OR superseded. The words quote one
+  // scan; a newer successful scan of the company may say a gap they name is
+  // closed, and only the latest is quoted in anything outbound — the rule
+  // `quotableFindings` and the share link keep, which the sender did not.
+  const evidence =
+    args.evidenceAsOf === null
+      ? { aged: false, superseded: false }
+      : await evidenceState(db, orgId, row.contact.companyId, args.evidenceAsOf, now)
 
   /**
    * A paused contact — they replied, a teammate is holding them, or an
@@ -857,6 +877,8 @@ export async function sendFactsFor(
     pausedReason,
     consentRecorded,
     campaignChannel,
+    evidenceAged: evidence.aged,
+    evidenceSuperseded: evidence.superseded,
     facts: {
       channel,
       recipient,
@@ -871,7 +893,7 @@ export async function sendFactsFor(
       consent: consentRecorded,
       paused,
       ...(paused ? { pausedFor: pauseReasonClass(row.contact.pausedReason) } : {}),
-      evidenceStale,
+      evidenceStale: evidence.aged || evidence.superseded,
       recipientTimeZone: row.contact.timeZone ?? row.companyTimeZone ?? null,
       quietStart: row.campaign.quietStart,
       quietEnd: row.campaign.quietEnd,
@@ -887,11 +909,13 @@ export async function sendFactsFor(
 
 /**
  * Whether the evidence words written at `writtenAt` could have quoted is
- * past its re-verification deadline at `now` (§2.2).
+ * past its re-verification deadline at `now` (`aged`), or has been
+ * superseded by a newer SUCCESSFUL scan of the company (`superseded`) —
+ * §2.2, each a reason the words are no longer known to be true.
  *
  * The evidence is the latest `ok` scan of the company at or before the
  * moment of writing; with none, no scan could have been quoted, and there
- * is nothing to be stale. The threshold is the active ICP's
+ * is nothing to be stale or superseded. The threshold is the active ICP's
  * `freshness.stale_after_days`, read the way every other reader of it does
  * — `staleAfterDaysOf`, which gives §2.2's default when there is no profile,
  * it will not parse, or the value is not a positive number (`isStale` throws
@@ -903,14 +927,23 @@ export async function sendFactsFor(
  * The `Date` beside the id is the fallback only for a row that is gone by
  * the time this runs (another org's id included), which is the moment the
  * caller last read it as.
+ *
+ * Superseded (r4, review round 3, finding 4) is asked in the SAME statement,
+ * against that scan's STORED `ran_at` and with the scan excluded by id —
+ * never against its `ran_at` read back as a millisecond `Date`, which
+ * matched the scan itself and made every proposal superseded by its own
+ * scan (`scanSuperseded` in proposal-shares.ts, round 2). A newer scan that
+ * did not reach the site observed nothing and supersedes nothing. The outer
+ * table is named `scans` in the raw SQL on purpose: an unqualified column
+ * inside the subquery would bind to `newer`.
  */
-async function evidenceIsStale(
+async function evidenceState(
   db: AgencyDb,
   orgId: string,
   companyId: string,
   writtenAt: StoredWords | Date,
   now: Date,
-): Promise<boolean> {
+): Promise<{ readonly aged: boolean; readonly superseded: boolean }> {
   const atOrBefore =
     writtenAt instanceof Date
       ? lte(schema.scans.ranAt, writtenAt)
@@ -919,7 +952,14 @@ async function evidenceIsStale(
           ${writtenAt.writtenAt.toISOString()}::timestamptz
         )`
   const [scan] = await db
-    .select({ ranAt: schema.scans.ranAt })
+    .select({
+      ranAt: schema.scans.ranAt,
+      superseded: sql<boolean>`EXISTS (
+        SELECT 1 FROM scans newer
+         WHERE newer.org_id = scans.org_id AND newer.company_id = scans.company_id
+           AND newer.ok AND newer.id <> scans.id AND newer.ran_at > scans.ran_at
+      )`,
+    })
     .from(schema.scans)
     .where(
       and(
@@ -931,8 +971,40 @@ async function evidenceIsStale(
     )
     .orderBy(desc(schema.scans.ranAt))
     .limit(1)
-  if (!scan) return false
-  return isStale(scan.ranAt, await staleAfterDays(db, orgId), now)
+  if (!scan) return { aged: false, superseded: false }
+  return { aged: isStale(scan.ranAt, await staleAfterDays(db, orgId), now), superseded: scan.superseded === true }
+}
+
+/**
+ * `decideSend` over gathered facts, with a `stale_evidence` refusal worded
+ * for what made the words stale (r4, review round 3, finding 4).
+ *
+ * `decideSend` knows one evidence fact, `evidenceStale`, and words it as a
+ * scan past its deadline. Words quoting a scan a newer one has superseded
+ * are refused with the same code — nobody may approve past it, and a new
+ * draft from the latest scan resolves it, exactly as for aged evidence —
+ * but "past its re-verification deadline" would be false about a scan three
+ * days old, so the sentence says what happened. Aged AND superseded keeps
+ * the deadline sentence, the plainer of two true reasons. The sender and
+ * every dry run (`previewSend`) decide through this, so they cannot word
+ * one refusal two ways.
+ */
+export function decideGathered(gathered: {
+  readonly facts: SendFacts
+  readonly evidenceAged: boolean
+  readonly evidenceSuperseded: boolean
+}): SendDecision {
+  const decision = decideSend(gathered.facts)
+  if (decision.allowed || decision.code !== 'stale_evidence') return decision
+  if (gathered.evidenceAged || !gathered.evidenceSuperseded) return decision
+  return {
+    ...decision,
+    reason:
+      'A newer scan of this company has reached the site since the scan these words quote, and only the ' +
+      'latest successful scan is quoted in anything outbound (§2.2), so what they say may no longer be ' +
+      'true. Nothing was sent, and approving does not make them current. Draft the message again from ' +
+      'the latest scan.',
+  }
 }
 
 async function staleAfterDays(db: AgencyDb, orgId: string): Promise<number> {
