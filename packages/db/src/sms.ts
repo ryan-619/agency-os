@@ -25,7 +25,7 @@ import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
 import { addSuppression } from './campaigns.js'
-import { looksLikeOptOut, pauseContactOverriding, recordInboundReply, type InboundLog } from './outreach.js'
+import { looksLikeOptOut, pauseContact, pauseContactOverriding, recordInboundReply, type InboundLog } from './outreach.js'
 import { previewSend } from './send-preview.js'
 import { isUniqueViolation } from './pg-errors.js'
 
@@ -463,8 +463,9 @@ export type InboundSmsOutcome =
        * `unreadable_number`: the sender's number is not E.164 (the provider
        * adapter must hand it over as `+<country><number>`).
        * `no_contact`: no contact has it. `ambiguous`: more than one contact
-       * does, so nothing says whose text it is. `duplicate`: this message id
-       * was recorded before, for a contact who is gone now.
+       * does, and nothing narrows it to one (`whoseText`), so nothing says
+       * whose text it is — each of them was paused instead. `duplicate`: this
+       * message id was recorded before, for a contact who is gone now.
        */
       readonly why: 'unreadable_number' | 'no_contact' | 'ambiguous' | 'duplicate'
       /** The text read as an opt-out (`smsOptOut` or `looksLikeOptOut`). */
@@ -487,26 +488,37 @@ export type InboundSmsOutcome =
  * belongs to, is the FALLBACK: where a text from a number no contact holds
  * is filed. Then:
  *
- *  - EXACTLY ONE contact: the reply is recorded through `recordInboundReply`,
- *    the same function an email reply goes through — an inbound `sms` touch
- *    with its kind, the contact paused, what was queued for them cancelled,
- *    the deal moved forward to `replied`, and an opt-out (the SMS keyword
- *    reader `smsOptOut`, or the prose reader `looksLikeOptOut`) written as a
- *    PHONE suppression with source `reply`, or the loud
- *    `opt_out_not_recorded` path when it cannot be. One set of rules.
- *  - NONE, or MORE THAN ONE: nothing is filed under a guessed person — the
- *    text is dropped and audited `sms.inbound_unmatched` (ids and counts,
- *    never the number or the words) in every org involved, as an email
- *    reply from an address two orgs hold is dropped. But an OPT-OUT is not
- *    dropped: a phone suppression is keyed by the number, not the person,
- *    so it is written in every org whose contacts carry the number (or in
- *    `orgId`, when no contact does) — the person at that number asked us to
- *    stop, whoever they are on file as. Where it cannot be written, the
- *    loud path runs.
+ *  - EXACTLY ONE contact — or several, of whom exactly one is whose text
+ *    it is by the evidence (`whoseText`: the one this system TEXTED at that
+ *    number, preferring `orgId`'s when several orgs did): the reply is
+ *    recorded through `recordInboundReply`, the same function an email
+ *    reply goes through — an inbound `sms` touch with its kind, the contact
+ *    paused, what was queued for them cancelled, the deal moved forward to
+ *    `replied`, and an opt-out (the SMS keyword reader `smsOptOut`, or the
+ *    prose reader `looksLikeOptOut`) written as a PHONE suppression with
+ *    source `reply`, or the loud `opt_out_not_recorded` path when it cannot
+ *    be. One set of rules. A STOP is also suppressed in every OTHER org
+ *    whose contacts hold the number, as below.
+ *  - NONE, or SEVERAL that nothing narrows to one: nothing is filed under a
+ *    guessed person — no inbound row is written, and `sms.inbound_unmatched`
+ *    is audited (ids and counts, never the number or the words) in every
+ *    org involved, as an email reply from an address two orgs hold is
+ *    dropped. But what needs no attribution is done (review round 5): each
+ *    of the several is PAUSED `replied <ISO>` and what was queued, awaiting
+ *    approval or approved for them is cancelled, in their own org — the
+ *    reply came from their number, so an approved text to any of them must
+ *    not go on the next tick while a person works out whose it was. It used
+ *    to pause nobody. And an OPT-OUT is not dropped: a phone suppression is
+ *    keyed by the number, not the person, so it is written in every org
+ *    whose contacts carry the number (or in `orgId`, when no contact does)
+ *    — the person at that number asked us to stop, whoever they are on file
+ *    as. Where it cannot be written, the loud path runs.
  *
  * Deduplicated by `providerMessageId`: a provider's retry of a message
  * already recorded writes nothing (0019's unique index settles a race
- * between two deliveries). Never throws on a text it cannot place.
+ * between two deliveries). Never throws on a text it cannot place; a
+ * database fault is thrown, so the caller answers 500 and the provider
+ * retries.
  */
 export async function recordInboundSms(
   db: AgencyDb,
@@ -575,11 +587,13 @@ export async function recordInboundSms(
     )
     .limit(50)
   const matches = candidates.filter((c) => c.phone !== null && normalisePhone(c.phone) === e164)
+  const whose = matches.length === 1 ? { only: matches[0]!, several: [] } : await whoseText(db, matches, e164, args.orgId ?? null)
 
-  if (matches.length === 1) {
-    const only = matches[0]!
+  if (whose.only) {
+    const only = whose.only
+    let r: Awaited<ReturnType<typeof recordInboundReply>>
     try {
-      const r = await recordInboundReply(db, {
+      r = await recordInboundReply(db, {
         orgId: only.orgId,
         contactId: only.id,
         channel: 'sms',
@@ -590,20 +604,6 @@ export async function recordInboundSms(
         now,
         log,
       })
-      return {
-        matched: 'contact',
-        orgId: only.orgId,
-        contactId: only.id,
-        touchId: r.touchId,
-        duplicate: false,
-        paused: r.paused,
-        suppressed: r.suppressed,
-        cancelled: r.cancelled,
-        replyKind: r.replyKind,
-        optOutNotRecorded: r.optOutNotRecorded,
-        companyId: r.companyId,
-        companyDomain: r.companyDomain,
-      }
     } catch (err) {
       // Two deliveries of one message raced past the read above; the unique
       // index let one insert, and the insert is `recordInboundReply`'s FIRST
@@ -614,35 +614,184 @@ export async function recordInboundSms(
       }
       throw err
     }
+    // A STOP is keyed by the number, not the person: another org whose
+    // contact holds it was told to stop too, whoever the text is filed
+    // under (the rule below). Filing it under one contact by the evidence
+    // must not take the suppression away from the org it would have reached
+    // had nothing narrowed the match.
+    const elsewhere = optOut ? [...new Set(matches.filter((m) => m.orgId !== only.orgId).map((m) => m.orgId))] : []
+    const recorded = await suppressInEvery(db, log, elsewhere, matches, e164, now)
+    for (const orgId of elsewhere) {
+      await auditUnmatched(db, orgId, {
+        why: 'ambiguous',
+        optOut,
+        contacts: matches.filter((m) => m.orgId === orgId).length,
+        suppressed: recorded.get(orgId) === true,
+      })
+    }
+    return {
+      matched: 'contact',
+      orgId: only.orgId,
+      contactId: only.id,
+      touchId: r.touchId,
+      duplicate: false,
+      paused: r.paused,
+      suppressed: r.suppressed,
+      cancelled: r.cancelled,
+      replyKind: r.replyKind,
+      optOutNotRecorded: r.optOutNotRecorded || elsewhere.some((o) => recorded.get(o) !== true),
+      companyId: r.companyId,
+      companyDomain: r.companyDomain,
+    }
   }
 
-  // Nobody, or more than one person: file nothing under a guess.
+  // Nobody, or several people nothing narrows to one: file nothing under a
+  // guess — but hold every one of the several first, which needs no guess.
+  // Before the suppression below, so an opt-out that cannot be written
+  // still overwrites this reason with its own (`optOutLost`). A fault here
+  // throws: nothing was suppressed yet, so the caller's loud path for a
+  // STOP whose recording failed is the truth, and the provider retries.
+  const held = new Map<string, { paused: number; cancelled: number }>()
+  for (const orgId of new Set(whose.several.map((m) => m.orgId))) {
+    held.set(orgId, await holdEach(db, orgId, whose.several.filter((m) => m.orgId === orgId).map((m) => m.id), now))
+  }
   const orgs = matches.length === 0 ? (args.orgId ? [args.orgId] : []) : [...new Set(matches.map((m) => m.orgId))]
   const why = matches.length === 0 ? 'no_contact' : 'ambiguous'
-  /** Per org: whether the opt-out's phone suppression was written there. */
-  const recorded = new Map<string, boolean>()
   if (optOut && orgs.length === 0) {
     // No contact anywhere and no org named: there is nowhere to record it.
     await optOutLost(db, log, { orgId: null, contactId: null, why: 'no_org', now })
   }
-  for (const orgId of optOut ? orgs : []) {
-    const added = await suppressPhone(db, orgId, e164, now)
-    recorded.set(orgId, added.ok)
-    if (added.ok) continue
-    const inOrg = matches.filter((m) => m.orgId === orgId)
-    if (inOrg.length === 0) await optOutLost(db, log, { orgId, contactId: null, why: added.why, now })
-    for (const m of inOrg) await optOutLost(db, log, { orgId, contactId: m.id, why: added.why, now })
-  }
+  /** Per org: whether the opt-out's phone suppression was written there. */
+  const recorded = await suppressInEvery(db, log, optOut ? orgs : [], matches, e164, now)
   for (const orgId of orgs) {
+    const hold = held.get(orgId)
     await auditUnmatched(db, orgId, {
       why,
       optOut,
       contacts: matches.filter((m) => m.orgId === orgId).length,
+      // Counts only: how many of this org's holders were paused by this
+      // text, and how many of their messages it cancelled.
+      ...(why === 'ambiguous' ? { paused: hold?.paused ?? 0, cancelledQueued: hold?.cancelled ?? 0 } : {}),
       ...(optOut ? { suppressed: recorded.get(orgId) === true } : {}),
     })
   }
   const everywhere = orgs.length > 0 && orgs.every((o) => recorded.get(o) === true)
   return none(why, optOut && everywhere, optOut && !everywhere)
+}
+
+/** A contact whose phone is the number a text came from. */
+interface Holder {
+  readonly id: string
+  readonly orgId: string
+}
+
+/**
+ * Whose text it is, when several contacts hold the number it came from —
+ * as far as the evidence goes, and no further (review round 5).
+ *
+ * The evidence is what this system SENT: a contact it texted at this number
+ * (an outbound SMS that went, `sent`, to a recipient that reads as this
+ * E.164) is somebody who could be answering; one it never texted is not
+ * known to be. So the candidates narrow to those it texted, and when they
+ * sit in several orgs, to the one in `fallbackOrgId` (`DOVESOFT_ORG_ID`,
+ * the org the account that texted them belongs to) if exactly one is
+ * there. Exactly one left is `only`, and the reply is filed under them.
+ *
+ * Anything else is `several`, and filed under nobody: the narrowed list
+ * when two or more were texted, every holder when nobody was — a contact
+ * on file twice with an SMS drafted and approved but not yet sent, say. No
+ * org is preferred then: with no text to answer, the deployment's org is
+ * no evidence at all (a number held in two orgs is ambiguous even when one
+ * of them is `DOVESOFT_ORG_ID`, the round-4 rule).
+ */
+async function whoseText(
+  db: AgencyDb,
+  holders: readonly Holder[],
+  e164: string,
+  fallbackOrgId: string | null,
+): Promise<{ only: Holder | null; several: readonly Holder[] }> {
+  if (holders.length === 0) return { only: null, several: [] }
+  const sent = await db
+    .selectDistinct({ contactId: schema.touches.contactId, recipient: schema.touches.recipient })
+    .from(schema.touches)
+    .where(
+      and(
+        inArray(schema.touches.contactId, holders.map((h) => h.id)),
+        eq(schema.touches.channel, 'sms'),
+        eq(schema.touches.direction, 'out'),
+        eq(schema.touches.status, 'sent'),
+      ),
+    )
+  const textedIds = new Set(
+    sent.filter((s) => s.recipient !== null && normalisePhone(s.recipient) === e164).map((s) => s.contactId),
+  )
+  const texted = holders.filter((h) => textedIds.has(h.id))
+  if (texted.length === 1) return { only: texted[0]!, several: [] }
+  if (texted.length > 1 && fallbackOrgId) {
+    const inOrg = texted.filter((h) => h.orgId === fallbackOrgId)
+    if (inOrg.length === 1) return { only: inOrg[0]!, several: [] }
+  }
+  return { only: null, several: texted.length > 1 ? texted : holders }
+}
+
+/**
+ * Hold each of several people a text could be from, in one org and one
+ * transaction: paused `replied <ISO>` — the reason a reply writes, kept
+ * when they are already paused for another (`pauseContact`) — and their
+ * queued, awaiting-approval and approved messages cancelled, on every
+ * channel, as a reply cancels them (`consent_revoked`). Counts back.
+ */
+async function holdEach(
+  db: AgencyDb,
+  orgId: string,
+  contactIds: readonly string[],
+  now: Date,
+): Promise<{ paused: number; cancelled: number }> {
+  return db.transaction(async (transaction) => {
+    const tx = transaction as unknown as AgencyDb
+    let paused = 0
+    for (const contactId of contactIds) {
+      if (await pauseContact(tx, orgId, contactId, `replied ${now.toISOString()}`, now)) paused++
+    }
+    const cancelled = await tx
+      .update(schema.touches)
+      .set({ status: 'refused', refusalCode: 'consent_revoked' })
+      .where(
+        and(
+          eq(schema.touches.orgId, orgId),
+          inArray(schema.touches.contactId, [...contactIds]),
+          eq(schema.touches.direction, 'out'),
+          inArray(schema.touches.status, ['queued', 'awaiting_approval', 'approved']),
+        ),
+      )
+      .returning({ id: schema.touches.id })
+    return { paused, cancelled: cancelled.length }
+  })
+}
+
+/**
+ * The phone suppression in each of these orgs, and the loud path where it
+ * cannot be written — for every holder of the number in that org, or for
+ * the org alone when none is. Per org: whether it was written.
+ */
+async function suppressInEvery(
+  db: AgencyDb,
+  log: InboundLog,
+  orgs: readonly string[],
+  holders: readonly Holder[],
+  e164: string,
+  now: Date,
+): Promise<Map<string, boolean>> {
+  const recorded = new Map<string, boolean>()
+  for (const orgId of orgs) {
+    const added = await suppressPhone(db, orgId, e164, now)
+    recorded.set(orgId, added.ok)
+    if (added.ok) continue
+    const inOrg = holders.filter((m) => m.orgId === orgId)
+    if (inOrg.length === 0) await optOutLost(db, log, { orgId, contactId: null, why: added.why, now })
+    for (const m of inOrg) await optOutLost(db, log, { orgId, contactId: m.id, why: added.why, now })
+  }
+  return recorded
 }
 
 /** An inbound SMS already recorded under this message id, as the outcome a redelivery gets. */
