@@ -70,6 +70,9 @@ function notReading(w: WorkerStatusLike): string | null {
  * report, or null when it could not be read (most often: 0018, which creates
  * the table, is not applied).
  */
+/** An SMS reply (0019) reaches this deployment through DoveSoft's webhook, with or without a worker. */
+const TEXTS_STILL_ARRIVE = 'texts a contact sends back, a STOP included, still arrive through DoveSoft’s webhook'
+
 export function recorders(live: Deployment, w: WorkerStatusLike | null): Absent {
   let sending: string | null
   let replies: string | null
@@ -77,13 +80,21 @@ export function recorders(live: Deployment, w: WorkerStatusLike | null): Absent 
   if (w === null) {
     sending = live.worker ? null : `${UNREAD_UNCONFIGURED}.`
     replies =
-      live.worker || live.inbound === 'webhook' ? null : `${UNREAD_UNCONFIGURED}, and no inbound webhook is configured.`
+      live.worker || live.inbound === 'webhook'
+        ? null
+        : live.smsInbound
+          ? `${UNREAD_UNCONFIGURED}, and no inbound email webhook is configured; ${TEXTS_STILL_ARRIVE}.`
+          : `${UNREAD_UNCONFIGURED}, and no inbound webhook is configured.`
     agent = live.worker ? null : 'This deployment is not configured to reach the worker, so no chat turn from here raises an approval.'
   } else {
     const quiet = notSending(w)
     sending = quiet ? `${quiet}, so nothing is being sent now.` : null
     const deaf = live.inbound === 'webhook' ? null : notReading(w)
-    replies = deaf ? `${deaf} and no inbound webhook is configured, so no reply is arriving now.` : null
+    replies = !deaf
+      ? null
+      : live.smsInbound
+        ? `${deaf} and no inbound email webhook is configured, so no email reply is arriving now; ${TEXTS_STILL_ARRIVE}.`
+        : `${deaf} and no inbound webhook is configured, so no reply is arriving now.`
     agent = agentReachable(live, w)
       ? null
       : !live.worker

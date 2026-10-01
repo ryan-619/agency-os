@@ -103,14 +103,17 @@ export function workerLine(report: HeartbeatReport | null, errorName?: string): 
 /** What a heartbeat says the worker was doing, as words. Never which credential it uses. */
 export function workerModes(report: HeartbeatReport | null): string | null {
   if (report === null || report.status === 'never' || report.status === 'not_configured') return null
+  // `outreach` describes the MAILBOX only; SMS is its own field (0019), and
+  // a worker with DoveSoft and no mailbox sends texts while its mail is off.
   const outreach: Record<string, string> = {
-    disabled: 'outreach off',
-    'send-only': 'sending, not reading a mailbox',
-    'send-and-receive': 'sending and reading a mailbox',
-    'receive-only': 'reading a mailbox, not sending',
+    disabled: 'email outreach off',
+    'send-only': 'sending email, not reading a mailbox',
+    'send-and-receive': 'sending email and reading a mailbox',
+    'receive-only': 'reading a mailbox, not sending email',
   }
   const parts = [
     report.outreach ? outreach[report.outreach] ?? report.outreach : null,
+    report.sms === 'on' ? 'texts through DoveSoft' : report.sms === 'off' ? 'SMS off' : null,
     report.chat === 'enabled' ? 'chat on' : report.chat === 'disabled' ? 'chat off (no model credential)' : null,
   ].filter((p): p is string => p !== null)
   return parts.length > 0 ? `At its last heartbeat it reported: ${parts.join('; ')}.` : null
@@ -281,8 +284,20 @@ export function sendingAnswer(report: HeartbeatReport | null): { tone: Tone; tex
         text: `Nothing is sending now: the worker's last heartbeat was ${report.ageSeconds === null ? 'unknown' : ago(report.ageSeconds)}. On Fly, check that the machine was not scaled to zero.`,
       }
     case 'live':
+      if (report.outreach === 'disabled' && report.sms === 'on') {
+        return {
+          tone: 'ok',
+          text: 'A worker is alive and sends approved SMS through DoveSoft. Its email outreach is disabled, so no email is sent and no mailbox is read; its mail settings live on its own host.',
+        }
+      }
       if (report.outreach === 'disabled') {
         return { tone: 'warn', text: 'A worker is alive but reports outreach disabled, so it sends nothing. Its mail settings live on its own host.' }
+      }
+      if (report.outreach === 'receive-only' && report.sms === 'on') {
+        return {
+          tone: 'ok',
+          text: 'A worker is alive: it reads a mailbox and sends approved SMS through DoveSoft, but reports that it does not send email.',
+        }
       }
       if (report.outreach === 'receive-only') {
         return { tone: 'warn', text: 'A worker is alive and reads a mailbox, but reports that it does not send.' }

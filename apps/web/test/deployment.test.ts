@@ -35,10 +35,22 @@ describe('flagsFrom', () => {
       worker: false,
       mailIsLocalSink: false,
       inbound: 'none',
+      smsInbound: false,
       cron: false,
       slack: false,
       unsubscribe: false,
     })
+  })
+
+  /**
+   * DoveSoft's webhook brings texts in (0019), and nothing said about
+   * `inbound` — Message-IDs, addresses, a mailbox — is true of it, so it is
+   * its own fact and never makes `inbound` read 'webhook'.
+   */
+  it('reports SMS replies apart from the email webhook', () => {
+    const d = flagsFrom({ ...BARE, DOVESOFT_WEBHOOK_SECRET: 'd'.repeat(32) })
+    expect(d.smsInbound).toBe(true)
+    expect(d.inbound).toBe('none')
   })
 
   it('needs BOTH the worker address and the token before it claims a worker', () => {

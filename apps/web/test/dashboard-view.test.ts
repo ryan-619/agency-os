@@ -334,6 +334,17 @@ describe('honestyBullets', () => {
       expect(ids({ ...BARE, worker: true }, { ...LIVE, outreach: 'send-only' })).toContain('inbound-none')
     })
 
+    it('says only texts arrive when DoveSoft’s webhook is the one way in (0019)', () => {
+      const sms = { ...BARE, smsInbound: true }
+      expect(ids(sms, NO_WORKER)).toContain('inbound-sms-only')
+      expect(ids(sms, NO_WORKER)).not.toContain('inbound-none')
+      expect(bullet(sms, NO_WORKER, 'inbound-sms-only').rest).toBe(
+        'No worker is connected and no inbound email webhook is configured, so an email reply reaches nothing. ' +
+          'Texts a contact sends back, a STOP included, arrive through DoveSoft’s webhook.',
+      )
+      expect(bullet({ ...sms, inbound: 'webhook' }, NO_WORKER, 'inbound-webhook').rest).toContain('arrive through DoveSoft’s webhook')
+    })
+
     it('says nothing can learn of a reply, and why, when neither exists', () => {
       expect(bullet(BARE, NO_WORKER, 'inbound-none').rest).toBe(
         'No worker is connected and no inbound webhook is configured, so no reply can reach the inbox.',

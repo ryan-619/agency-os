@@ -48,6 +48,14 @@ export interface Deployment {
    * refuses everything is the claim this module exists to prevent.
    */
   readonly inbound: 'none' | 'webhook'
+  /**
+   * `DOVESOFT_WEBHOOK_SECRET` is set, so texts a contact sends back — a STOP
+   * included — reach this deployment through DoveSoft's webhook (0019). Its
+   * own fact rather than a third `inbound` value, because everything said
+   * about `inbound` is about EMAIL: Message-IDs, addresses, a mailbox.
+   * Optional so a literal that predates 0019 reads as false.
+   */
+  readonly smsInbound?: boolean
   /** The cron routes have a secret to check, so a scheduled job can run. */
   readonly cron: boolean
   /** A Slack webhook is configured, so a notification has somewhere to go. */
@@ -77,6 +85,7 @@ export function flagsFrom(
     | 'CRON_SECRET'
     | 'SLACK_WEBHOOK_URL'
     | 'UNSUBSCRIBE_SECRET'
+    | 'DOVESOFT_WEBHOOK_SECRET'
   >,
 ): Deployment {
   const resend = Boolean(e.RESEND_WEBHOOK_SECRET && e.RESEND_API_KEY)
@@ -84,6 +93,7 @@ export function flagsFrom(
     worker: Boolean(e.AGENT_URL && e.AGENT_INTERNAL_TOKEN),
     mailIsLocalSink: LOCAL_MAIL.test(e.SMTP_HOST.trim()),
     inbound: e.INBOUND_WEBHOOK_SECRET || resend ? 'webhook' : 'none',
+    smsInbound: Boolean(e.DOVESOFT_WEBHOOK_SECRET),
     cron: Boolean(e.CRON_SECRET),
     slack: Boolean(e.SLACK_WEBHOOK_URL),
     unsubscribe: Boolean(e.UNSUBSCRIBE_SECRET),
@@ -114,8 +124,9 @@ export function nothingWillSendNote(d: Deployment): string | null {
  * such, for the reason `nothingWillSendNote` gives.
  */
 export function noRepliesReadNote(d: Deployment): string | null {
-  return d.worker || d.inbound === 'webhook'
-    ? null
+  if (d.worker || d.inbound === 'webhook') return null
+  return d.smsInbound
+    ? 'No worker is configured on this deployment and no email webhook is set up, so nothing here reads email replies; texts a contact sends back, a STOP included, still arrive through DoveSoft’s webhook. Only a worker running against this database elsewhere could read email — /settings/deployment shows whether one is.'
     : 'No worker is configured on this deployment and no inbound webhook is set up, so nothing here reads replies. Only a worker running against this database elsewhere could — /settings/deployment shows whether one is.'
 }
 

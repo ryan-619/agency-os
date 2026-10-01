@@ -172,7 +172,7 @@ export function agentReachable(d: Deployment, w: WorkerStatusLike): boolean {
 
 /** Can a reply reach this deployment at all? A reading worker, or a webhook. */
 function repliesArrive(d: Deployment, w: WorkerStatusLike): boolean {
-  return workerReceives(w) || d.inbound === 'webhook'
+  return workerReceives(w) || d.inbound === 'webhook' || d.smsInbound === true
 }
 
 /**
@@ -522,20 +522,33 @@ function liveWorkerDoing(w: WorkerStatusLike): string {
 }
 
 function inboundBullet(d: Deployment, w: WorkerStatusLike): HonestyBullet {
+  // Texts a contact sends back come through DoveSoft's webhook (0019), apart
+  // from everything below, which is about EMAIL replies.
+  const texts = d.smsInbound ? ' Texts a contact sends back, a STOP included, arrive through DoveSoft’s webhook.' : ''
   if (d.inbound === 'webhook') {
     return {
       id: 'inbound-webhook',
       lead: 'Replies can arrive through an inbound webhook.',
       rest:
         'A provider posts them here, so a reply pauses its contact and moves the deal — and one that says stop suppresses the address — even with no worker running.' +
-        (workerReceives(w) ? ' The worker reads the mailbox as well.' : ''),
+        (workerReceives(w) ? ' The worker reads the mailbox as well.' : '') +
+        texts,
     }
   }
   if (workerReceives(w)) {
     return {
       id: 'inbound-worker',
       lead: 'Replies are read from the mailbox by the worker.',
-      rest: 'No inbound webhook is configured, so a reply reaches this deployment only while the worker is running.',
+      rest: `No inbound email webhook is configured, so an email reply reaches this deployment only while the worker is running.${texts}`,
+    }
+  }
+  if (d.smsInbound) {
+    return {
+      id: 'inbound-sms-only',
+      lead: 'Only texts can arrive here.',
+      rest:
+        `${capital(notReadingBecause(w) ?? 'no mailbox is being read')} and no inbound email webhook is configured, so an email reply reaches nothing.` +
+        texts,
     }
   }
   return {

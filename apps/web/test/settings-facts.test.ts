@@ -105,7 +105,40 @@ describe('a retired worker', () => {
   })
 
   it('still says what it reported at its last heartbeat', () => {
-    expect(workerModes(retired)).toBe('At its last heartbeat it reported: sending and reading a mailbox; chat on.')
+    expect(workerModes(retired)).toBe('At its last heartbeat it reported: sending email and reading a mailbox; chat on.')
+  })
+})
+
+describe('a worker that sends SMS (0019)', () => {
+  // `outreach` is the MAILBOX; `detail.sms` is DoveSoft. A worker with no
+  // mailbox and DoveSoft on sends texts, and must not read as sending nothing.
+  const smsRow = (outreach: string, sms: 'on' | 'off') => ({
+    lastTickAt: ago(30), outreach, chat: 'enabled', detail: { intervalMs: 15_000, sms },
+  })
+
+  it('does not say "sends nothing" when only its mail is off', () => {
+    const a = sendingAnswer(heartbeatReport(smsRow('disabled', 'on'), true, NOW))
+    expect(a.tone).toBe('ok')
+    expect(a.text).toContain('sends approved SMS through DoveSoft')
+    expect(a.text).not.toContain('sends nothing')
+    expect(workerModes(heartbeatReport(smsRow('disabled', 'on'), true, NOW))).toBe(
+      'At its last heartbeat it reported: email outreach off; texts through DoveSoft; chat on.',
+    )
+  })
+
+  it('still says "sends nothing" when mail and SMS are both off', () => {
+    const a = sendingAnswer(heartbeatReport(smsRow('disabled', 'off'), true, NOW))
+    expect(a.tone).toBe('warn')
+    expect(a.text).toContain('sends nothing')
+    expect(workerModes(heartbeatReport(smsRow('disabled', 'off'), true, NOW))).toBe(
+      'At its last heartbeat it reported: email outreach off; SMS off; chat on.',
+    )
+  })
+
+  it('says a receive-only worker with SMS on sends texts, not email', () => {
+    const a = sendingAnswer(heartbeatReport(smsRow('receive-only', 'on'), true, NOW))
+    expect(a.tone).toBe('ok')
+    expect(a.text).toContain('does not send email')
   })
 })
 
