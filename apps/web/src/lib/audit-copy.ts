@@ -474,10 +474,13 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   'draft.approved': (c) => `approved a draft ${own(CHANNEL_NOUN, word(c.d, 'channel')) ?? 'message'} to a contact at ${c.co}`,
   'draft.denied': (c) => {
     const note = text(c.d, 'note', 80)
-    // A deny on words quoting an aged-out scan is recorded as stale_evidence,
-    // which lets enrolment draft them again after a re-scan; say so.
+    // A deny on words quoting a scan that aged out OR that a newer scan
+    // superseded is recorded as stale_evidence, which enrolment does not
+    // count against a new draft. The detail does not say which, and "a
+    // re-scan lets it" is false of the second — the re-scan happened, and
+    // re-enrolment drafts again straight away — so the words fit both.
     const stale = word(c.d, 'refusalCode') === 'stale_evidence'
-    return `denied a draft about ${c.co}${stale ? ' (its evidence was stale — a re-scan lets it be drafted again)' : ''}${
+    return `denied a draft about ${c.co}${stale ? ' (its evidence was stale — it can be drafted again from a current scan)' : ''}${
       note ? `: ${quoted(note)}` : ''
     }`
   },
@@ -495,9 +498,17 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   'contact.opt_out_not_recorded': (c) =>
     `could not record an opt-out from a contact at ${c.co} — it is NOT on the suppression list; follow up by hand`,
   'contact.created': (c) => `added a contact at ${c.co}`,
+  // Two writers. The contacts route, a person's reason, naming the reply's
+  // pause it replaced by CLASS (`replacedPauseFor`) — answering that reply no
+  // longer resumes them. And `denyDraft`, putting a reply's pause back when
+  // the answer that lifted it was denied (`inboundTouchId`); its reason is
+  // the system's own, so the sentence says it instead of quoting it.
   'contact.paused': (c) => {
+    if (has(c.d, 'inboundTouchId')) return `paused a contact at ${c.co} — the answer to their reply was denied`
     const reason = text(c.d, 'reason', 80)
-    return `paused a contact at ${c.co}${reason ? `: ${quoted(reason)}` : ''}${flag(c.d, 'alreadyPaused') ? ' (already paused)' : ''}`
+    return `paused a contact at ${c.co}${reason ? `: ${quoted(reason)}` : ''}${flag(c.d, 'alreadyPaused') ? ' (already paused)' : ''}${
+      word(c.d, 'replacedPauseFor') === 'replied' ? ', replacing the pause their reply caused' : ''
+    }`
   },
   // Two writers: the contacts route (a person pressing Resume) and the inbox,
   // which resumes only the pause a reply caused and records its CLASS.

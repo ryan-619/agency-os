@@ -55,6 +55,13 @@ const line = (action: string, detail: unknown = {}, over: Partial<AuditLine> = {
   ...over,
 })
 
+/** What `denyDraft` writes when it puts back the pause a reply caused (`repauseForDeniedAnswer`). */
+const DENIED_ANSWER_PAUSE: Record<string, unknown> = {
+  reason: 'their reply is unanswered again: the answer to it was denied',
+  alreadyPaused: false,
+  inboundTouchId: SUBJECT,
+}
+
 const people: Record<string, string> = { [ORG_USER]: 'Priya', [OTHER_USER]: 'Sam' }
 const lookups = { company: COMPANY, person: (id: string) => people[id] ?? null }
 
@@ -108,7 +115,9 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'contact.replied': { channel: 'email', paused: true, cancelledQueued: 2, suppressed: false, deal: 'advanced:replied' },
   'contact.opt_out_not_recorded': { touchId: SUBJECT, channel: 'email', why: 'unparseable' },
   'contact.created': { companyId: SUBJECT, source: 'manual', hasTimeZone: true },
-  'contact.paused': { reason: 'asked for Q1', alreadyPaused: false },
+  // The contacts route's shape, over a reply's own pause. `denyDraft` writes
+  // `{ reason, alreadyPaused, inboundTouchId }` (DENIED_ANSWER_PAUSE below).
+  'contact.paused': { reason: 'asked for Q1', alreadyPaused: false, replacedPauseFor: 'replied' },
   // The inbox's shape; the contacts route writes `{ pausedFor }` alone.
   'contact.resumed': { reason: 'answering their reply from the inbox', inboundTouchId: SUBJECT, pausedFor: 'replied' },
   'contact.timezone_set': { timeZone: 'Europe/Amsterdam' },
@@ -314,6 +323,50 @@ describe('sentenceFor', () => {
     const route = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/app/api/contacts/[id]/route.ts'), 'utf8')
     expect(route).toContain('pausedFor: pauseReasonClass(contact.pausedReason)')
     expect(route).not.toContain('hadReason')
+  })
+
+  /**
+   * `denyDraft` records `stale_evidence` for words that quoted an AGED scan
+   * and for words a newer scan SUPERSEDED, and its detail does not say
+   * which. "A re-scan lets it be drafted again" is false of the second —
+   * the re-scan happened, and re-enrolment drafts again straight away — so
+   * the sentence says what is true of both.
+   */
+  it('words a deny on stale evidence so it is true whether the scan aged or was superseded', () => {
+    const s = sentenceFor(line('draft.denied', { note: 'denied', refusalCode: 'stale_evidence' }), lookups)
+    expect(s).toBe('denied a draft about rentman.io (its evidence was stale — it can be drafted again from a current scan): “denied”')
+    expect(s).not.toContain('re-scan')
+    const writer = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../packages/db/src/outreach.ts'), 'utf8')
+    expect(writer).toContain('detail: { note: row.decisionNote, refusalCode: row.refusalCode }')
+  })
+
+  /**
+   * Two writers pause a contact with something to add. The contacts route,
+   * over a reply's own pause, replaces it (`replacedPauseFor: 'replied'`) —
+   * so answering the reply no longer resumes them. And `denyDraft`, when the
+   * answer that lifted a reply's pause is denied, puts it back
+   * (`inboundTouchId`). Both said only "paused a contact".
+   */
+  it('says when a pause replaced the one a reply caused, and when a denied answer put it back', () => {
+    expect(sentenceFor(line('contact.paused', WRITTEN['contact.paused']), lookups)).toBe(
+      'paused a contact at rentman.io: “asked for Q1”, replacing the pause their reply caused',
+    )
+    expect(sentenceFor(line('contact.paused', DENIED_ANSWER_PAUSE), lookups)).toBe(
+      'paused a contact at rentman.io — the answer to their reply was denied',
+    )
+    // Only a reply's pause is named: a class nobody writes here says nothing.
+    expect(sentenceFor(line('contact.paused', { reason: 'asked for Q1', replacedPauseFor: 'manual' }), lookups)).toBe(
+      'paused a contact at rentman.io: “asked for Q1”',
+    )
+    expect(sentenceFor(line('contact.paused', { reason: 'asked for Q1', alreadyPaused: false }), lookups)).toBe(
+      'paused a contact at rentman.io: “asked for Q1”',
+    )
+    const here = dirname(fileURLToPath(import.meta.url))
+    const route = readFileSync(resolve(here, '../src/app/api/contacts/[id]/route.ts'), 'utf8')
+    expect(route).toContain('replacedPauseFor: r.replaced')
+    const outreach = readFileSync(resolve(here, '../../../packages/db/src/outreach.ts'), 'utf8')
+    expect(outreach).toContain(`reason: '${String(DENIED_ANSWER_PAUSE.reason)}'`)
+    expect(outreach).toContain('inboundTouchId: answer.answersTouchId')
   })
 
   it('says when a reclassification paused somebody and cancelled what was queued', () => {
@@ -624,7 +677,7 @@ describe('credentials never reach a sentence', () => {
     const dsn = 'postgres://app:hunter2@db.internal:5432/agency'
     expect(sentenceFor(line('draft.denied', { note: dsn }), lookups)).toBe('denied a draft about rentman.io')
     expect(sentenceFor(line('draft.denied', { note: 'old scan', refusalCode: 'stale_evidence' }), lookups)).toBe(
-      'denied a draft about rentman.io (its evidence was stale — a re-scan lets it be drafted again): “old scan”',
+      'denied a draft about rentman.io (its evidence was stale — it can be drafted again from a current scan): “old scan”',
     )
     expect(sentenceFor(line('draft.denied', { refusalCode: 'needs_approval' }), lookups)).toBe('denied a draft about rentman.io')
     expect(sentenceFor(line('campaign.created', { name: dsn }), lookups)).not.toContain('hunter2')
