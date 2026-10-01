@@ -14,8 +14,9 @@
  * database rather than from a buffer the worker may have lost.
  */
 import { randomUUID } from 'node:crypto'
-import { query, type Options } from '@anthropic-ai/claude-agent-sdk'
+import type { McpServerConfig, Options } from '@anthropic-ai/claude-agent-sdk'
 import type { ChatEvent, ChatEventBody, TurnEndReason } from '@agency/core'
+import { openQuery } from '../runtime/open-query.js'
 import { mapSdkMessage, type MapContext } from './map-sdk.js'
 
 export interface TurnDeps {
@@ -53,6 +54,13 @@ export interface TurnDeps {
 export interface TurnRequest {
   readonly text: string
   readonly options: Options
+  /**
+   * The connectors, handed to the CLI over its control channel before the
+   * prompt (`openQuery`) rather than in `options.mcpServers`, which the SDK
+   * writes onto the CLI's argv with their credentials. Absent or empty when
+   * there is nothing to hand over.
+   */
+  readonly mcpServers?: Readonly<Record<string, McpServerConfig>>
   readonly abort: AbortController
   /** Wall clock for the whole turn. Must exceed the approval TTL. */
   readonly timeoutMs: number
@@ -236,7 +244,8 @@ export function startTurn(deps: TurnDeps, req: TurnRequest): RunningTurn {
 
       emit({ kind: 'turn_started', userMessageId: randomUUID() })
 
-      for await (const message of query({ prompt: req.text, options: req.options })) {
+      const messages = openQuery({ prompt: req.text, options: req.options, mcpServers: req.mcpServers, log: deps.log })
+      for await (const message of messages) {
         for (const body of mapSdkMessage(message, mapCtx)) {
           if (body.kind === 'error') explained = true
           if (body.kind === 'turn_finished') {

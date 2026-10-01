@@ -240,7 +240,7 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
       // only thing that crosses the boundary, so this is not a way to learn
       // that one belongs to somebody else.
       if (!row) return { ok: false, tools: [], message: 'That connector no longer exists.' }
-      return probeConnector(db, row, secretsKey, credential, process.cwd(), log)
+      return probeConnector(db, row, secretsKey, credential, process.cwd(), log, env.CLAUDE_CODE_PATH)
     },
     interrupt: (turnId) => {
       const turn = running.get(turnId)
@@ -532,6 +532,7 @@ async function beginTurn(args: {
     {
       text: req.text,
       options: runtime.options,
+      mcpServers: runtime.mcpServers,
       abort: runtime.abort,
       timeoutMs: env.AGENT_TURN_TIMEOUT_MINUTES * 60_000,
     },
