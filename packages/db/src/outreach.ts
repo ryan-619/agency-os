@@ -96,7 +96,27 @@ export interface MessageProvider {
      * satisfies the interface by ignoring them.
      */
     readonly headers?: Readonly<Record<string, string>>
+    /**
+     * 0019: the registration an SMS or WhatsApp message was checked against
+     * — the DLT template id and header (or Meta's template name and the WABA
+     * number) the operator compares the words with. Read by `dispatchTouch`
+     * from the row the message names, never from a caller, and present on
+     * every `TEMPLATE_CHANNELS` message that reaches a provider. A provider
+     * for those channels refuses (throws) without it; email and LinkedIn
+     * providers ignore it.
+     */
+    readonly template?: MessageTemplateRegistration
   }): Promise<{ readonly providerId: string }>
+}
+
+/** What a provider is told about the template a message was rendered from (0019). */
+export interface MessageTemplateRegistration {
+  /** DLT's content-template id (`tempid`), or Meta's template name. */
+  readonly externalId: string
+  /** The DLT header (`senderid`), or the WABA number. */
+  readonly senderId: string
+  readonly category: string
+  readonly language: string
 }
 
 export interface SendRequest {
@@ -453,6 +473,28 @@ export async function dispatchTouch(
   }
   Object.assign(headers, opts.headersFor?.(touch) ?? {})
 
+  // 0019: the registration the words were checked against, for the
+  // provider to name (DLT's `tempid` and `senderid`). `decideSend` has just
+  // refused a template-channel message with none, and 0019's RESTRICT keeps
+  // the row; a miss here is refused `no_template` all the same, never sent
+  // bare.
+  const template = TEMPLATE_CHANNELS.has(touch.channel as Channel)
+    ? await registrationFor(db, touch)
+    : undefined
+  if (template === null) {
+    await settle(db, touch.id, { status: 'refused', refusalCode: 'no_template', recipient: facts.recipient })
+    return {
+      touchId: touch.id,
+      decision: {
+        allowed: false,
+        code: 'no_template',
+        reason: 'The registered template this message names could not be read a moment ago. Nothing was sent.',
+        humanCanResolve: false,
+      },
+      sent: false,
+    }
+  }
+
   let providerId: string
   try {
     const sent = await provider.send({
@@ -460,6 +502,7 @@ export async function dispatchTouch(
       subject: touch.subject ?? '',
       body: touch.body ?? '',
       headers,
+      ...(template ? { template } : {}),
     })
     providerId = sent.providerId
   } catch (err) {
@@ -705,6 +748,32 @@ async function templateFactsFor(
     matches: matchesTemplate(words.body ?? '', row.body),
     category: row.category as TemplateCategory,
   }
+}
+
+/**
+ * The registration a template-channel message names, as its provider is told
+ * it (0019), or null when the row names none this org holds on this
+ * channel. Active or not: `decideSend` has already judged that.
+ */
+async function registrationFor(db: AgencyDb, touch: TouchRow): Promise<MessageTemplateRegistration | null> {
+  if (!touch.templateId) return null
+  const [row] = await db
+    .select({
+      externalId: schema.messageTemplates.externalId,
+      senderId: schema.messageTemplates.senderId,
+      category: schema.messageTemplates.category,
+      language: schema.messageTemplates.language,
+    })
+    .from(schema.messageTemplates)
+    .where(
+      and(
+        eq(schema.messageTemplates.id, touch.templateId),
+        eq(schema.messageTemplates.orgId, touch.orgId),
+        eq(schema.messageTemplates.channel, touch.channel),
+      ),
+    )
+    .limit(1)
+  return row ?? null
 }
 
 /**

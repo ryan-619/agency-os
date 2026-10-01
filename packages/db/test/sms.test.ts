@@ -17,18 +17,24 @@ import { eq } from 'drizzle-orm'
 import {
   approveDraft, dispatchTouch, pauseReasonClass, previewSend, recordInboundSms, recordSmsDelivery, schema, smsDraft,
   templatesSetActive,
-  type AgencyDb, type InboundLog, type MessageProvider,
+  type AgencyDb, type InboundLog, type MessageProvider, type MessageTemplateRegistration,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
 
-function smsProvider(): MessageProvider & { sent: { to: string; body: string }[] } {
+function smsProvider(): MessageProvider & {
+  sent: { to: string; body: string }[]
+  registrations: (MessageTemplateRegistration | undefined)[]
+} {
   const sent: { to: string; body: string }[] = []
+  const registrations: (MessageTemplateRegistration | undefined)[] = []
   return {
     name: 'dovesoft-test',
     channels: ['sms'],
     sent,
+    registrations,
     async send(m) {
       sent.push({ to: m.to, body: m.body })
+      registrations.push(m.template)
       return { providerId: `ds-${sent.length}` }
     },
   }
@@ -219,6 +225,11 @@ describe('SMS (0019)', () => {
       const r = await dispatchTouch(db, provider, row, { now: NOON_IST })
       expect(r.sent).toBe(true)
       expect(provider.sent).toEqual([{ to: PHONE, body: 'Hi Priya, your call with Acme is at 3pm. Reply STOP to opt out.' }])
+      // The provider is told the registered pair the operator scrubs against
+      // (DLT's tempid and senderid), read from the row — never a caller's say-so.
+      expect(provider.registrations).toEqual([
+        { externalId: '1107160000000012345', senderId: 'ACMEIN', category: 'service_explicit', language: 'en' },
+      ])
       const stored = await touch(row.id)
       expect(stored).toMatchObject({ status: 'sent', providerId: 'ds-1', deliveryStatus: null })
     })
