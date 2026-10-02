@@ -2284,6 +2284,58 @@ export function addressKeyOf(address: string | null | undefined, channel: Channe
 }
 
 /**
+ * The contacts of this org who ARE the sender of a reply filed under
+ * somebody else (review round 8, [2]): those whose address key on the
+ * channel is the From's (`addressKeyOf` — never the domain, which a
+ * colleague shares), the filed contact excepted. Ordered by id, so two
+ * writers holding several people take them in one order.
+ *
+ * Read by `recordInboundReply` beside the contact row, BEFORE anything that
+ * may fail, so a reply rolled back by a fault still names them on its
+ * rolled-back line — and the caller's loud path holds them by id, with
+ * nothing read again from a database that just failed. In a savepoint: a
+ * lookup that fails holds nobody and says so (`said`), and the reply still
+ * records. LinkedIn has no inbound path, and no address here to compare.
+ */
+async function contactsAtTheAddress(
+  tx: AgencyDb,
+  args: { readonly orgId: string; readonly filedUnder: string; readonly channel: Channel; readonly from: string },
+  said: (message: string, fields: Readonly<Record<string, unknown>>) => void,
+): Promise<string[]> {
+  const key = addressKeyOf(args.from, args.channel)
+  if (key === null || args.channel === 'linkedin') return []
+  try {
+    const near = await tx.transaction((sp) =>
+      (sp as unknown as AgencyDb)
+        .select({ id: schema.contacts.id, email: schema.contacts.email, phone: schema.contacts.phone })
+        .from(schema.contacts)
+        .where(
+          and(
+            eq(schema.contacts.orgId, args.orgId),
+            sql`${schema.contacts.id} <> ${args.filedUnder}`,
+            args.channel === 'email'
+              ? sql`lower(btrim(${schema.contacts.email})) = ${key}`
+              : sql`btrim(${schema.contacts.phone}) = ${key}`,
+          ),
+        )
+        .orderBy(asc(schema.contacts.id)),
+    )
+    // The key the reply's own reading compares (`replyIsFromTheContact`),
+    // in the same code: the SQL above only narrows.
+    return near
+      .filter((c) => addressKeyOf(args.channel === 'email' ? c.email : c.phone, args.channel) === key)
+      .map((c) => c.id)
+  } catch (err) {
+    said('a stop from another address could not be matched to the contacts who hold it', {
+      contactId: args.filedUnder,
+      orgId: args.orgId,
+      error: err instanceof Error ? err.name : 'UnknownError',
+    })
+    return []
+  }
+}
+
+/**
  * Hold everybody in this org who IS the sender of a stop that could not be
  * recorded, when the reply was filed under somebody else (review round 8,
  * [2]).
@@ -2293,9 +2345,8 @@ export function addressKeyOf(address: string | null | undefined, channel: Channe
  * SENDER's. And then nothing held the sender: a second contact here at the
  * address that asked to stop, with an approved message, was sent it on the
  * next tick — §2.1's "must never fall through to sending", broken for the
- * one person who asked. So each contact of the org whose address key on the
- * channel is the From's (`addressKeyOf`, never the domain) is held as an
- * opt-out nobody recorded, which is what it is:
+ * one person who asked. So each of them (`contactsAtTheAddress`) is held as
+ * an opt-out nobody recorded, which is what it is:
  *
  *  - paused over any earlier reason (`pauseContactOverriding`, the reason
  *    every such path writes, class `opt_out_not_recorded`), which no Resume
@@ -2317,18 +2368,15 @@ async function holdTheSender(
   tx: AgencyDb,
   args: {
     readonly orgId: string
-    readonly filedUnder: string
+    readonly senders: readonly string[]
     readonly channel: Channel
-    readonly from: string
     readonly touchId: string
     readonly why: string
     readonly now: Date
   },
   said: (message: string, fields: Readonly<Record<string, unknown>>) => void,
 ): Promise<number> {
-  const key = addressKeyOf(args.from, args.channel)
-  if (key === null || args.channel === 'linkedin') return 0
-  const failed = (step: string, contactId: string | null, err: unknown): void =>
+  const failed = (step: string, contactId: string, err: unknown): void =>
     said('an opt-out that was not recorded could not hold the contact at the address that asked to stop', {
       touchId: args.touchId,
       contactId,
@@ -2337,39 +2385,8 @@ async function holdTheSender(
       error: err instanceof Error ? err.name : 'UnknownError',
     })
 
-  let senders: string[]
-  try {
-    const near = await tx.transaction((sp) =>
-      (sp as unknown as AgencyDb)
-        .select({
-          id: schema.contacts.id,
-          email: schema.contacts.email,
-          phone: schema.contacts.phone,
-        })
-        .from(schema.contacts)
-        .where(
-          and(
-            eq(schema.contacts.orgId, args.orgId),
-            sql`${schema.contacts.id} <> ${args.filedUnder}`,
-            args.channel === 'email'
-              ? sql`lower(btrim(${schema.contacts.email})) = ${key}`
-              : sql`btrim(${schema.contacts.phone}) = ${key}`,
-          ),
-        )
-        .orderBy(asc(schema.contacts.id)),
-    )
-    // The key the reply's own reading compares (`replyIsFromTheContact`),
-    // in the same code: the SQL above only narrows.
-    senders = near
-      .filter((c) => addressKeyOf(args.channel === 'email' ? c.email : c.phone, args.channel) === key)
-      .map((c) => c.id)
-  } catch (err) {
-    failed('find', null, err)
-    return 0
-  }
-
   let held = 0
-  for (const contactId of senders) {
+  for (const contactId of args.senders) {
     try {
       const paused = await tx.transaction((sp) =>
         pauseContactOverriding(
@@ -2572,6 +2589,11 @@ export async function recordInboundReply(
   // reading again from a database that just failed. Null when the fault
   // came before that read: unknown, which every reader holds as before.
   let fromIsContact: boolean | null = null
+  // Whoever IS the sender of a stop filed under somebody else, when they are
+  // contacts here (`contactsAtTheAddress`, review round 8): read beside the
+  // contact, before anything that may fail, so the rolled-back line can
+  // name them too and the caller holds them by id.
+  let senders: string[] = []
   let recorded: Awaited<ReturnType<typeof recordInboundReply>>
   try {
     recorded = await db.transaction(async (transaction) => {
@@ -2592,6 +2614,13 @@ export async function recordInboundReply(
       const companyId = contactRows[0]?.companyId ?? null
       const companyDomain = contactRows[0]?.companyDomain ?? null
       if (contactRows[0]) fromIsContact = replyIsFromTheContact(from, args.channel, contactRows[0])
+      if (optedOut && fromIsContact === false) {
+        senders = await contactsAtTheAddress(
+          tx,
+          { orgId: args.orgId, filedUnder: args.contactId, channel: args.channel, from },
+          (message, fields) => said.push({ message, fields }),
+        )
+      }
 
       const inserted = await tx
         .insert(schema.touches)
@@ -2746,7 +2775,7 @@ export async function recordInboundReply(
             fromIsContact === false
               ? await holdTheSender(
                   tx,
-                  { orgId: args.orgId, filedUnder: args.contactId, channel: args.channel, from, touchId, why, now },
+                  { orgId: args.orgId, senders, channel: args.channel, touchId, why, now },
                   (message, fields) => said.push({ message, fields }),
                 )
               : 0
@@ -2825,6 +2854,10 @@ export async function recordInboundReply(
         // is a colleague's stop filed under them, and the caller must not
         // hold THEM as an opt-out nobody recorded. Null: not known.
         fromIsContact,
+        // And, for a colleague's stop, the contacts here who ARE the sender
+        // (review round 8): the ones the caller holds as the opt-out nobody
+        // recorded, by id. Ids only, never the address.
+        ...(fromIsContact === false ? { senderContactIds: senders } : {}),
         why: err instanceof Error ? err.name : 'UnknownError',
       })
     }
