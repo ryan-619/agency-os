@@ -558,7 +558,11 @@ export async function handleDoveSoftDlr(
  *    redelivery by a hash of its id alone, so every retry held every holder
  *    again — undoing a teammate's Resume and cancelling drafts written
  *    since — and wrote another set of rows. 200 after the alarms, and the
- *    error line says the missing suppression is a person's to record;
+ *    error line says the missing suppression is a person's to record. Only
+ *    where contacts hold the number, or no org is named (review round 10):
+ *    a STOP from a number NO contact holds, filed in `DOVESOFT_ORG_ID`'s
+ *    org, keeps its 500 with no id too, because its retry holds nobody and
+ *    only writes the suppression;
  *
  *  and for both of those, when the text was a STOP that nobody recorded,
  *  the `opt_out_not_recorded` alarm is AWAITED before the answer, with no
@@ -734,7 +738,15 @@ export async function handleDoveSoftMo(
     // cancelled, and another set of rows — on every retry while a write kept
     // failing. Answered 200 once the alarms have gone, and the line says
     // what is left to a person.
-    if (mo.providerMessageId === null) {
+    //
+    // Only where that is what a retry would do (review round 10, [5]): a
+    // STOP from a number NO contact holds is held under nobody, so its retry
+    // holds and releases nobody and only re-attempts the suppression in the
+    // deployment's org — the write a 200 gave up on for good. It keeps the
+    // 500 below. With no org named either, a retry has nowhere to write, so
+    // it is answered 200 as before.
+    const retryOnlyRecords = outcome.why === 'no_contact' && deps.orgId !== null
+    if (mo.providerMessageId === null && !retryOnlyRecords) {
       deps.log.error('OPT-OUT NOT RECORDED — a STOP from a number no single contact holds could not be suppressed, and the push carried no message id, so a redelivery could not be told from a new text: it was answered 200, and what is missing must be recorded by hand', {
         why: outcome.why,
         orgConfigured: deps.orgId !== null,
