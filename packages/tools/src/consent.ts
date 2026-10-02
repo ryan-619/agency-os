@@ -18,7 +18,7 @@
 import { z } from 'zod'
 import { and, eq, sql } from 'drizzle-orm'
 import { normaliseEmail, type PauseReasonClass } from '@agency/core'
-import { consentLedgerFor, findCompanyByDomain, previewSend, type ConsentLedger } from '@agency/db'
+import { consentLedgerFor, findCompanyByDomain, isSharedNumberOptOutPause, previewSend, type ConsentLedger } from '@agency/db'
 import * as schema from '@agency/db/schema'
 import { normaliseDomain } from '@agency/scanner'
 import { bounded, fail, ok, type AgencyToolSpec, type ToolContext, type ToolOutcome } from './spec.js'
@@ -77,6 +77,16 @@ function pauseWords(pausedFor: PauseReasonClass, reason: string | null, channel:
         `paused: they unsubscribed (${why}). That is their opt-out — do not suggest resuming them. ${noApprove}`
       )
     case 'opt_out_not_recorded':
+      // A shared number's holder (review round 8): a text from a number they
+      // share asked to stop, maybe not theirs, and recording the NUMBER is
+      // what lets a person lift it — never "they asked to stop".
+      if (isSharedNumberOptOutPause(reason)) {
+        return (
+          `paused: a text from a phone number they share with another contact asked to stop, and it could not be ` +
+          `recorded (${why}). It may not have been them. A person records the number on /suppressions; then the ` +
+          `pause can be lifted on /contacts. Until then do not suggest resuming them. ${noApprove}`
+        )
+      }
       return (
         `paused: they asked to stop, and the opt-out could not be recorded (${why}), so there is no suppression ` +
         'row yet. A person must first record the opt-out by hand on /suppressions — do not suggest resuming ' +

@@ -188,6 +188,21 @@ describe('the consent tools', () => {
       expect(out.summary).not.toMatch(/not a refusal/)
     })
 
+    /**
+     * Review round 8: a text from a number several contacts share asked to
+     * stop and could not be recorded. The holder may never have sent it, so
+     * the tool never says THEY asked; recording the number is what lets a
+     * person lift the pause.
+     */
+    it('words a shared number’s holder as a holder, never as the one who asked', async () => {
+      const out = await pausedAs('opt-out not recorded: a text from a number they share, 2026-09-15T11:00:00.000Z (record_failed)')
+      expect(out.data).toMatchObject({ facts: { pausedFor: 'opt_out_not_recorded' } })
+      expect(out.summary).toMatch(/a text from a phone number they share with another contact asked to stop/)
+      expect(out.summary).toMatch(/records the number on \/suppressions/)
+      expect(out.summary).toMatch(/do not suggest resuming them/)
+      expect(out.summary).not.toMatch(/they asked to stop/)
+    })
+
     it('never suggests resuming an erasure that did not finish — it says to complete it', async () => {
       const out = await pausedAs('erasure requested 2026-09-15; not completed (unreadable_phone)')
       expect(out.data).toMatchObject({ facts: { pausedFor: 'erasure' } })
