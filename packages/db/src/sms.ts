@@ -17,7 +17,7 @@
  * that decides an opt-out.
  */
 import { createHash } from 'node:crypto'
-import { and, eq, inArray, sql } from 'drizzle-orm'
+import { and, eq, inArray, sql, type SQL } from 'drizzle-orm'
 import {
   normalisePhone, pauseReasonClass, renderTemplate, smsOptOut,
   type ReplyKind, type SendDecision, type SendRefusalCode,
@@ -616,7 +616,10 @@ export type InboundSmsOutcome =
  *    (`sharedNumberOptOutReason`), with a row the inbox does not read as
  *    their own opt-out, and eased to the ordinary hold by the delivery that
  *    finds the number suppressed in their org — DoveSoft's retry, which the
- *    caller asks for (`releaseSharedNumberHolds`).
+ *    caller asks for, or any later text from the number once a person has
+ *    recorded it (`releaseSharedNumberHolds`, review round 9). Never over a
+ *    stronger pause, or one that is somebody's decision (review round 9):
+ *    those stand, and the audit row lists the holder all the same.
  *  - NONE, or SEVERAL that nothing narrows to one: nothing is filed under a
  *    guessed person — no inbound row is written, and `sms.inbound_unmatched`
  *    is audited (ids and counts, never the number or the words) in every
@@ -742,10 +745,12 @@ export async function recordInboundSms(
     const recorded = await suppressInEvery(db, log, optOut ? elsewhere : [], holders, e164, now, null)
     // Where the number is suppressed now, a holder an earlier delivery of
     // this STOP left held hard — it could not record it — is eased to the
-    // ordinary hold (review round 8): the retry is what records it.
+    // ordinary hold (review round 8): the retry is what records it. And so
+    // by any later text from the number, whatever it says, where the number
+    // has been suppressed since — by a person, say (review round 9).
     const released = optOut
       ? await releaseSharedNumberHolds(db, log, elsewhere.filter((o) => written(recorded, o)), others, now)
-      : new Map<string, number>()
+      : await releaseWhereSuppressed(db, log, others, e164, now)
     // A row in each org whose contacts were held: who, by counts, and that
     // the text was filed under somebody — another contact here, or a contact
     // in another org.
@@ -900,10 +905,11 @@ export async function recordInboundSms(
   const recorded = await suppressInEvery(db, log, optOut ? orgs : [], holders, e164, now, null)
   // A holder an earlier, faulted delivery left held hard (no messageHash
   // row was written then, so this is not a redelivery to the check above)
-  // is eased where the number is suppressed now (review round 8).
+  // is eased where the number is suppressed now (review round 8) — by this
+  // STOP, or by anybody since, for a text that is not one (review round 9).
   const released = optOut
     ? await releaseSharedNumberHolds(db, log, orgs.filter((o) => written(recorded, o)), holders, now)
-    : new Map<string, number>()
+    : await releaseWhereSuppressed(db, log, holders, e164, now)
   for (const orgId of orgs) {
     const hold = held.get(orgId)
     await auditUnmatched(db, orgId, {
@@ -1032,11 +1038,71 @@ export function isSharedNumberOptOutPause(reason: string | null | undefined): bo
   return reason !== null && reason !== undefined && SHARED_NUMBER_OPT_OUT.test(reason)
 }
 
+const SHARED_NUMBER_HOLD = /^held: a text came from a number another contact also holds, \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/
+
+/** Is this pause `sharedNumberHoldReason`'s — the ordinary hold — and nothing else's? */
+function isSharedNumberHoldPause(reason: string): boolean {
+  return SHARED_NUMBER_HOLD.test(reason)
+}
+
+/**
+ * A `contact.opt_out_not_recorded` row about a shared number's STOP
+ * (`sharedNumberOptOutLost`) that lists this contact among its holders. The
+ * row is the one record of which contacts held a number whose STOP could
+ * not be recorded in their org: a holder whose own pause was stronger, or
+ * somebody's to keep, kept it (review round 9), and the row names them all
+ * the same. Read in the org's own slice of the log.
+ */
+function sharedNumberHolderRow(orgId: string, contactId: string): SQL | undefined {
+  return and(
+    eq(schema.auditLog.orgId, orgId),
+    eq(schema.auditLog.action, 'contact.opt_out_not_recorded'),
+    sql`${schema.auditLog.detail}->>'sharedNumber' = 'true'`,
+    sql`${schema.auditLog.detail}->'holders' @> ${JSON.stringify([contactId])}::jsonb`,
+  )
+}
+
+/** `sharedNumberHolderRow` as a predicate on another statement: such a row exists. */
+export function sharedNumberHolderRowExists(orgId: string, contactId: string): SQL {
+  return sql`EXISTS (SELECT 1 FROM ${schema.auditLog} WHERE ${sharedNumberHolderRow(orgId, contactId)})`
+}
+
+/**
+ * Whether this contact holds a number a STOP came from that could not be
+ * recorded in their org — the hard hold's shape on their pause, or a row
+ * that lists them (`sharedNumberHolderRow`) — AND their phone, the number
+ * they held, has no phone suppression in the org today. While it does,
+ * nothing that would let a text go to that number may happen to them:
+ * Resume refuses whatever paused them, and their phone may not be changed
+ * or cleared (`contactsUpdate`), because the hold is lifted by the number's
+ * suppression and a contact who no longer held it could never be resumed
+ * (review round 9).
+ *
+ * The rows do not carry the number (§2.3): the contact's phone is what
+ * names it, and it cannot move while this holds.
+ */
+export async function heldForUnrecordedSharedNumber(
+  db: AgencyDb,
+  orgId: string,
+  contact: { readonly id: string; readonly phone: string | null; readonly pausedReason: string | null },
+): Promise<boolean> {
+  if (!isSharedNumberOptOutPause(contact.pausedReason)) {
+    const named = await db.select({ id: schema.auditLog.id }).from(schema.auditLog).where(sharedNumberHolderRow(orgId, contact.id)).limit(1)
+    if (named.length === 0) return false
+  }
+  const e164 = contact.phone ? normalisePhone(contact.phone) : null
+  if (!e164) return true
+  return (await unsuppressedIn(db, [orgId], e164)).length > 0
+}
+
 /**
  * Ease the holders a STOP left held hard (`sharedNumberOptOutReason`), in
  * every one of these orgs — each one where the number's phone suppression
  * exists now — to the ordinary hold, `sharedNumberHoldReason`, which Resume
- * lifts (review round 8). Per org: how many were eased, where any were.
+ * lifts (review round 8). Per org: how many were eased, where any were. Run
+ * on every delivery that is not a redelivery: a STOP's, where it is written,
+ * and any other text's, where it already is (`releaseWhereSuppressed`,
+ * review round 9).
  *
  * Only that exact shape is replaced, read under the rows' locks and named in
  * the UPDATE (`pauseContact`'s `replacing`): a teammate's pause, an
@@ -1099,6 +1165,39 @@ async function releaseEach(db: AgencyDb, orgId: string, contactIds: readonly str
     }
     return n
   })
+}
+
+/**
+ * `releaseSharedNumberHolds` for a text that did not ask to stop (review
+ * round 9): in every org of these holders where the number's phone
+ * suppression exists today. Only a STOP eased them before, so "the next text
+ * from the number" — which RESUME_SHARED_NUMBER promises, once a person has
+ * recorded the number — eased nobody unless it was another STOP.
+ * Best-effort, like the release: a read that faults leaves them held hard,
+ * the conservative direction, and says so; the text itself is recorded
+ * either way.
+ */
+async function releaseWhereSuppressed(
+  db: AgencyDb,
+  log: InboundLog,
+  holders: readonly Holder[],
+  e164: string,
+  now: Date,
+): Promise<Map<string, number>> {
+  const orgs = orgsOf(holders)
+  if (orgs.length === 0) return new Map()
+  let missing: string[]
+  try {
+    missing = await unsuppressedIn(db, orgs, e164)
+  } catch (err) {
+    log.error('whether a shared number is suppressed could not be read, so contacts held while its opt-out was not recorded stay held', {
+      channel: 'sms',
+      orgs,
+      error: faultName(err),
+    })
+    return new Map()
+  }
+  return releaseSharedNumberHolds(db, log, orgs.filter((o) => !missing.includes(o)), holders, now)
 }
 
 /** The hold row's word on the hard holds it eased (review round 8): a count, never a reason. */
@@ -1578,12 +1677,22 @@ async function optOutLost(
 /**
  * The loud path for the contacts in one org who HOLD a number whose STOP
  * could not be recorded there, other than the contact it was filed under
- * (review round 8): each paused OVER any earlier reason — a hold anyone
- * could lift would let a teammate text the number that said STOP — with
- * `sharedNumberOptOutReason`, which Resume refuses until the number is
- * suppressed and a delivery eases it (`releaseSharedNumberHolds`); ONE
- * `contact.opt_out_not_recorded` row for the org, which the compliance page
- * and the digest count; and an `OPT-OUT NOT RECORDED` line.
+ * (review round 8): each paused with `sharedNumberOptOutReason`, which
+ * Resume refuses until the number is suppressed and a delivery eases it
+ * (`releaseSharedNumberHolds`); ONE `contact.opt_out_not_recorded` row for
+ * the org, which the compliance page and the digest count; and an `OPT-OUT
+ * NOT RECORDED` line.
+ *
+ * Paused over no pause, a reply's, the ordinary hold or an earlier hard
+ * hold of this shape — a pause anyone could lift by answering a reply or
+ * pressing Resume would let a teammate text the number that said STOP — and
+ * over nothing else (review round 9, `holdHard`). It used to write over ANY
+ * earlier reason: a holder's own unrecorded opt-out, or an erasure that had
+ * not finished, became this releasable shape, the retry eased it, and their
+ * email went. Those, an unsubscribe's and a teammate's pause stand; the
+ * row still lists the holder, and Resume refuses any pause of a holder it
+ * lists while the number is unrecorded (`heldForUnrecordedSharedNumber`).
+ * `paused` counts the pauses written, so `contacts - paused` stood.
  *
  * The row never names them as its subject or as `detail.contactId`: the
  * inbox reads a row that does as THAT contact's own opt-out nobody
@@ -1609,7 +1718,7 @@ async function sharedNumberOptOutLost(
   let paused = 0
   for (const contactId of args.contactIds) {
     try {
-      if (await pauseContactOverriding(db, args.orgId, contactId, sharedNumberOptOutReason(args.now, args.why), args.now)) paused++
+      if (await holdHard(db, args.orgId, contactId, sharedNumberOptOutReason(args.now, args.why), args.now)) paused++
     } catch (err) {
       log.error('an opt-out that was not recorded could not pause the contact', {
         contactId,
@@ -1639,6 +1748,39 @@ async function sharedNumberOptOutLost(
     contactIds: [...args.contactIds],
     sharedNumber: true,
     why: args.why,
+  })
+}
+
+/**
+ * `sharedNumberOptOutLost`'s pause for one holder, in its own transaction:
+ * the reason read under the row's lock (`FOR NO KEY UPDATE`, as `holdEach`
+ * reads it — the lock every writer of `paused_reason` conflicts with, and
+ * not one an FK check's key-share waits on), and the hard hold written only
+ * over no pause, a reply's (`replied <ISO>`), the ordinary hold
+ * (`sharedNumberHoldReason`) or an earlier hard hold — each named EXACTLY in
+ * the UPDATE (`pauseContact`'s `replacing`). Anything else stands: a
+ * contact's own unrecorded opt-out and an unfinished erasure already hold
+ * them harder than this (Resume refuses both outright), and an unsubscribe's
+ * or a teammate's pause is somebody's decision, which Resume does not lift
+ * while the number is unrecorded (`heldForUnrecordedSharedNumber`). One contact
+ * per transaction, as each was its own write before: a fault on one leaves
+ * the others' pauses written.
+ */
+async function holdHard(db: AgencyDb, orgId: string, contactId: string, reason: string, now: Date): Promise<boolean> {
+  return db.transaction(async (transaction) => {
+    const tx = transaction as unknown as AgencyDb
+    const [current] = await tx
+      .select({ pausedAt: schema.contacts.pausedAt, pausedReason: schema.contacts.pausedReason })
+      .from(schema.contacts)
+      .where(and(eq(schema.contacts.orgId, orgId), eq(schema.contacts.id, contactId)))
+      .for('no key update')
+    if (!current) return false
+    if (current.pausedAt === null) return pauseContact(tx, orgId, contactId, reason, now)
+    const was = current.pausedReason
+    if (was === null || !(pauseReasonClass(was) === 'replied' || isSharedNumberHoldPause(was) || isSharedNumberOptOutPause(was))) {
+      return false
+    }
+    return pauseContact(tx, orgId, contactId, reason, now, { replacing: was })
   })
 }
 

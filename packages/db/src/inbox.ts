@@ -68,7 +68,7 @@ import type { AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
 import { looksLikeOptOut, pauseContact, replyIsFromTheContact, resumeContact, type TouchRow } from './outreach.js'
 import { previewSend } from './send-preview.js'
-import { isSharedNumberOptOutPause } from './sms.js'
+import { heldForUnrecordedSharedNumber, isSharedNumberOptOutPause } from './sms.js'
 
 /** A group on the inbox: a stored kind, or the rows nobody has classified. */
 export type InboxKindFilter = ReplyKind | 'unclassified'
@@ -1182,20 +1182,42 @@ const RESUME_NOT_RECORDED =
  * A holder of a shared number whose STOP could not be recorded
  * (`sharedNumberOptOutReason` in sms.ts): they may never have sent it, so the
  * sentence does not say they asked — and recording the NUMBER is what lifts it.
+ * "The next text from the number" is any text, since review round 9: only a
+ * STOP eased the hold before (`releaseWhereSuppressed` in sms.ts).
  */
 const RESUME_SHARED_NUMBER =
   'A text from a number this contact shares asked to stop, and it could not be recorded — this pause holds everyone ' +
   'who holds the number until it is. Record the number on /suppressions (it is in the provider’s inbound log); ' +
   'then this pause can be lifted, or the next text from the number lifts it to an ordinary hold. Nothing was changed.'
 
+/**
+ * The same holder, paused by something else that stood — a teammate's hold,
+ * an unsubscribe — which the hard hold no longer writes over (review round
+ * 9). That pause is theirs to lift as ever, but not while the number is
+ * unrecorded: a text to it could go the moment it was.
+ */
+const RESUME_SHARED_NUMBER_KEPT =
+  'A text from a number this contact shares asked to stop, and it could not be recorded. Until it is, nobody who ' +
+  'holds the number can be resumed, whatever paused them. Record the number on /suppressions (it is in the ' +
+  'provider’s inbound log), then resume them. Nothing was changed.'
+
 const RESUME_ERASURE =
   'This person asked to be erased, and the erasure did not complete — this pause is what holds them until it does. ' +
   'An owner finishes it with Erase… on /contacts. Nothing was changed.'
 
-const RESUME_UNRECORDED_OPT_OUT =
-  'This person asked to stop — by unsubscribing, asking to be erased, or in a reply — and no suppression row matches ' +
-  'their addresses: the audit log says the opt-out could not be recorded, or a reply of theirs read as an opt-out ' +
-  'matches no suppression row. Record it by hand on /suppressions first. Nothing was changed.'
+/**
+ * A contact's own unrecorded opt-out, and what is still to be recorded for
+ * it: the address it was about (review round 9), named by what it is and
+ * never by its value.
+ */
+function resumeUnrecordedOptOut(record: readonly string[]): string {
+  const what = record.length <= 1 ? (record[0] ?? 'it') : `${record.slice(0, -1).join(', ')} and ${record[record.length - 1]}`
+  return (
+    'This person asked to stop — by unsubscribing, asking to be erased, or in a reply — and the opt-out could not be ' +
+    'recorded: the audit log says so, or a reply of theirs read as an opt-out matches no suppression row. Record ' +
+    `${what} on /suppressions first: a suppression on another of their addresses does not record it. Nothing was changed.`
+  )
+}
 
 /** `NOT_RECORDED_ANOTHER_ADDRESS`, for Resume: the address to record is the sender's (review round 8). */
 const RESUME_UNRECORDED_ANOTHER_ADDRESS =
@@ -1292,28 +1314,35 @@ export async function contactResumeByHand(
     if (!contact.pausedAt) return { ok: false, reason: 'not_paused', message: RESUME_NOT_PAUSED } as const
 
     const pausedFor = pauseReasonClass(contact.pausedReason)
+    const sharedHard = isSharedNumberOptOutPause(contact.pausedReason)
+    if (pausedFor === 'opt_out_not_recorded' && !sharedHard) {
+      return { ok: false, reason: 'opt_out_not_recorded', message: RESUME_NOT_RECORDED } as const
+    }
+    if (pausedFor === 'erasure') return { ok: false, reason: 'erasure', message: RESUME_ERASURE } as const
     // A shared number's holder (review round 8, the follow-up r9-sms named):
     // held hard while the number's STOP is unrecorded, and released once a
     // person has recorded the number — a hand-recorded number with no later
     // text from it left them refused for good, the lockout round 8 removed
-    // for a retry. The contact's own unrecorded opt-out is unchanged below.
-    if (pausedFor === 'opt_out_not_recorded' && isSharedNumberOptOutPause(contact.pausedReason)) {
-      const numberKeys = contact.phone ? (suppressionKeysFor(contact.phone, 'sms') ?? []) : []
-      if (numberKeys.length === 0 || !(await anySuppressed(tx, args.orgId, numberKeys))) {
-        return { ok: false, reason: 'opt_out_not_recorded', message: RESUME_SHARED_NUMBER } as const
-      }
-    } else if (pausedFor === 'opt_out_not_recorded') {
-      return { ok: false, reason: 'opt_out_not_recorded', message: RESUME_NOT_RECORDED } as const
+    // for a retry. And a holder whose own pause stood instead (review round
+    // 9: the hard hold no longer writes over a teammate's or an
+    // unsubscribe's): theirs to lift as ever, once the number is recorded.
+    if (await heldForUnrecordedSharedNumber(tx, args.orgId, contact)) {
+      return { ok: false, reason: 'opt_out_not_recorded', message: sharedHard ? RESUME_SHARED_NUMBER : RESUME_SHARED_NUMBER_KEPT } as const
     }
-    if (pausedFor === 'erasure') return { ok: false, reason: 'erasure', message: RESUME_ERASURE } as const
-    // Their own unrecorded opt-out is ended by a suppression on any of their
-    // addresses. A colleague's only by one on the reply's own From — the
-    // rows `unrecordedOptOut` found unmatched — never on the contact's
-    // (review round 8): recording the contact's address unlocked this Resume
-    // and left the person who asked unrecorded.
+    // Their own unrecorded opt-out is ended only by a suppression on the key
+    // it was about (review round 9): the channel its audit row names, the
+    // address their reply came from, or every address of theirs for an
+    // erasure — never by a key of another channel, which let a NUMBER's
+    // suppression end an EMAIL opt-out. A colleague's only by one on the
+    // reply's own From — the rows `unrecordedOptOut` found unmatched — never
+    // on the contact's (review round 8): recording the contact's address
+    // unlocked this Resume and left the person who asked unrecorded.
     const unrecorded = await unrecordedOptOut(tx, args.orgId, contact)
-    if (unrecorded?.own && !(await anySuppressed(tx, args.orgId, everyKeyOf(contact)))) {
-      return { ok: false, reason: 'opt_out_not_recorded', message: RESUME_UNRECORDED_OPT_OUT } as const
+    if (unrecorded?.own) {
+      const record = await ownOptOutStillToRecord(tx, args.orgId, contact)
+      if (record.length > 0) {
+        return { ok: false, reason: 'opt_out_not_recorded', message: resumeUnrecordedOptOut(record) } as const
+      }
     }
     if (unrecorded?.fromAnotherAddress) {
       return { ok: false, reason: 'opt_out_not_recorded', message: RESUME_UNRECORDED_ANOTHER_ADDRESS } as const
@@ -1333,18 +1362,158 @@ export async function contactResumeByHand(
   })
 }
 
-/** Every suppression key the contact's own addresses produce, on every channel. */
-function everyKeyOf(contact: {
+/** One address an opt-out was about: its suppression keys, any of which records it, and what to call it. */
+interface OptOutAddress {
+  readonly label: string
+  readonly keys: readonly { readonly kind: string; readonly value: string }[]
+}
+
+/** What each channel's address on a contact is called, in a sentence that never holds the value. */
+const ADDRESS_WORDS: Record<Channel, string> = {
+  email: 'their email address',
+  linkedin: 'their LinkedIn profile',
+  sms: 'their phone number',
+  voice: 'their phone number',
+  whatsapp: 'their phone number',
+}
+
+/** The contact's own address on a channel, when it can be read. */
+function ownAddressOn(
+  channel: Channel,
+  contact: { readonly email: string | null; readonly phone: string | null; readonly linkedinUrl: string | null },
+): OptOutAddress[] {
+  const keys = suppressionKeysFor(addressFor(channel, contact), channel)
+  return keys && keys.length > 0 ? [{ label: ADDRESS_WORDS[channel], keys }] : []
+}
+
+/** Every address of theirs, one per channel's field — what an erasure records. */
+function everyAddressOf(contact: {
   readonly email: string | null
   readonly phone: string | null
   readonly linkedinUrl: string | null
-}): { readonly kind: string; readonly value: string }[] {
-  const keys: { kind: string; value: string }[] = []
-  for (const channel of CHANNELS) {
-    const address = addressFor(channel, contact)
-    if (address) keys.push(...(suppressionKeysFor(address, channel) ?? []))
+}): OptOutAddress[] {
+  return (['email', 'sms', 'linkedin'] as const).flatMap((channel) => ownAddressOn(channel, contact))
+}
+
+/** A stored address on a channel — a reply's From, the address a message went to — when it can be read. */
+function storedAddress(channel: Channel, value: string | null, label: string): OptOutAddress[] {
+  const keys = value ? suppressionKeysFor(value, channel) : null
+  return keys && keys.length > 0 ? [{ label, keys }] : []
+}
+
+const FROM_WORDS = 'the address their reply came from (shown on /inbox)'
+const SENT_TO_WORDS = 'the address the message they unsubscribed from went to'
+const UNREADABLE_WORDS = 'the address it was about, which can no longer be read from their record'
+
+/**
+ * What a contact's OWN unrecorded opt-out still needs recorded before Resume
+ * may lift their pause (review round 9): one entry per address with no
+ * suppression row in the org, by what it is. Empty when every one is on the
+ * list.
+ *
+ * Each opt-out is about the key it was asked on, and is recorded by a
+ * suppression on THAT key — one on another channel's key records nothing
+ * (any key of the contact's ended it, so a number's suppression ended an
+ * email opt-out, and the email went):
+ *
+ *  - a `contact.opt_out_not_recorded` row: its channel (`detail.channel`) —
+ *    the address the reply it names came from, and the contact's own
+ *    address on that channel; with no channel, every address of theirs;
+ *  - an `unsubscribe.not_recorded` row: the address the message went to,
+ *    and the contact's own email;
+ *  - a `contact.erasure_failed` row: every address of theirs — an erasure
+ *    keeps a suppression on each;
+ *  - an opted-out reply of theirs no suppression matches (the second reading
+ *    `unrecordedOptOut` makes): the address it came from, or, unreadable,
+ *    their own address on its channel.
+ *
+ * An opt-out none of whose addresses can be read is never recorded here,
+ * and says so: nothing on the list could be shown to match it. A
+ * colleague's opted-out reply is not theirs, and is judged apart.
+ */
+async function ownOptOutStillToRecord(
+  db: AgencyDb,
+  orgId: string,
+  contact: {
+    readonly id: string
+    readonly email: string | null
+    readonly phone: string | null
+    readonly linkedinUrl: string | null
+  },
+): Promise<string[]> {
+  const optOuts: OptOutAddress[][] = []
+  const recipientOf = async (touchId: string): Promise<string | null> => {
+    const [t] = await db
+      .select({ recipient: schema.touches.recipient })
+      .from(schema.touches)
+      .where(and(eq(schema.touches.orgId, orgId), eq(schema.touches.id, touchId)))
+      .limit(1)
+    return t?.recipient ?? null
   }
-  return keys
+
+  const rows = await db
+    .select({
+      action: schema.auditLog.action,
+      subjectType: schema.auditLog.subjectType,
+      subjectId: schema.auditLog.subjectId,
+      detail: schema.auditLog.detail,
+    })
+    .from(schema.auditLog)
+    .where(
+      and(
+        eq(schema.auditLog.orgId, orgId),
+        inArray(schema.auditLog.action, OPT_OUT_NOT_RECORDED_ACTIONS),
+        or(
+          and(eq(schema.auditLog.subjectType, 'contact'), eq(schema.auditLog.subjectId, contact.id)),
+          sql`${schema.auditLog.detail}->>'contactId' = ${contact.id}`,
+        ),
+      ),
+    )
+  for (const row of rows) {
+    const detail = (row.detail ?? {}) as Record<string, unknown>
+    const touchId = typeof detail['touchId'] === 'string' ? detail['touchId'] : row.subjectType === 'touch' ? row.subjectId : null
+    if (row.action === 'contact.erasure_failed') {
+      optOuts.push(everyAddressOf(contact))
+    } else if (row.action === 'unsubscribe.not_recorded') {
+      optOuts.push([...storedAddress('email', touchId ? await recipientOf(touchId) : null, SENT_TO_WORDS), ...ownAddressOn('email', contact)])
+    } else {
+      const channel = (CHANNELS as readonly unknown[]).includes(detail['channel']) ? (detail['channel'] as Channel) : null
+      if (channel === null) {
+        optOuts.push(everyAddressOf(contact))
+      } else {
+        optOuts.push([...storedAddress(channel, touchId ? await recipientOf(touchId) : null, FROM_WORDS), ...ownAddressOn(channel, contact)])
+      }
+    }
+  }
+
+  const optedOut = await db
+    .select({ channel: schema.touches.channel, from: schema.touches.recipient })
+    .from(schema.touches)
+    .where(
+      and(
+        eq(schema.touches.orgId, orgId),
+        eq(schema.touches.contactId, contact.id),
+        eq(schema.touches.direction, 'in'),
+        eq(schema.touches.replyKind, 'opted_out'),
+      ),
+    )
+  for (const r of optedOut) {
+    const channel = (CHANNELS as readonly string[]).includes(r.channel) ? (r.channel as Channel) : null
+    if (channel === null) {
+      optOuts.push(everyAddressOf(contact))
+      continue
+    }
+    const from = storedAddress(channel, r.from, FROM_WORDS)
+    if (from.length > 0 && !replyIsFromTheContact(r.from, channel, contact)) continue
+    optOuts.push(from.length > 0 ? from : ownAddressOn(channel, contact))
+  }
+
+  const record = new Set<string>()
+  for (const addresses of optOuts) {
+    if (addresses.length === 0) record.add(UNREADABLE_WORDS)
+    for (const a of addresses) if (!(await anySuppressed(db, orgId, a.keys))) record.add(a.label)
+  }
+  return [...record]
 }
 
 export type ContactPauseOutcome =
