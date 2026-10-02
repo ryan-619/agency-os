@@ -3879,7 +3879,7 @@ absent.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 6368 tests in 214 files: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice + the 0018 release + DoveSoft SMS (0019) + ten review rounds
+npm test                 # 6405 tests in 214 files: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice + the 0018 release + DoveSoft SMS (0019) + ten review rounds
 npx vitest run --maxWorkers=1 --minWorkers=1   # the same suite on a machine short of memory
 npm run build            # packages, then the Next app
 
@@ -4003,9 +4003,9 @@ process, keeps the finished data directory, and hands each test a COPY via
 a new instance rather than attaching to one. Measured: the whole suite went
 from **290s to 97s** single-worker, with the same tests passing, and
 `apps/voice` alone from 9.8s to 4.4s. The suite has grown several times
-over since: at 0019, after DoveSoft and ten review rounds, it is 6,368
-tests in 214 files, and the full single-worker run at `5168c17` took
-1,471 s — every test green. (At 0018 it was 4,246 in 154 and took 1,088 s.)
+over since: at 0019, after DoveSoft and ten review rounds, it is 6,405
+tests in 214 files, and the full single-worker run at `aa77b37` took
+1,501 s — every test green. (At 0018 it was 4,246 in 154 and took 1,088 s.)
 
 `freshDb()` remains and `migrations.test.ts` and `schema-parity.test.ts`
 still use it — a test about applying migrations cannot start from a database
