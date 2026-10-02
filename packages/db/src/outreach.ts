@@ -52,6 +52,10 @@ import { addSuppression } from './campaigns.js'
 // Review round 5: a raced duplicate delivery is not an opt-out lost.
 import { isUniqueViolation } from './pg-errors.js'
 import { advanceDeal } from './deals.js'
+// Review round 10, [2]: whether a pause is one Resume refuses until a shared
+// number's unrecorded STOP is recorded — the gate's own answer, asked here
+// so the sender and every dry run word the refusal alike.
+import { heldForUnrecordedSharedNumber } from './sms.js'
 
 export type TouchRow = typeof schema.touches.$inferSelect
 
@@ -889,8 +893,9 @@ async function gatherFacts(
   touch: TouchRow,
   now: Date,
 ): Promise<
-  // r4: the evidence halves ride along, for `decideGathered`'s wording.
-  | { facts: SendFacts; recipient: string; evidenceAged: boolean; evidenceSuperseded: boolean }
+  // r4: the evidence halves ride along, for `decideGathered`'s wording —
+  // and, review round 10, the shared-number hold.
+  | { facts: SendFacts; recipient: string; evidenceAged: boolean; evidenceSuperseded: boolean; sharedNumberHold: boolean }
   | { missing: string }
 > {
   if (!touch.campaignId) {
@@ -1159,6 +1164,17 @@ export async function sendFactsFor(
        */
       evidenceAged: boolean
       evidenceSuperseded: boolean
+      /**
+       * Whether they are paused AND Resume refuses to lift that pause until
+       * a shared number's STOP is recorded (`heldForUnrecordedSharedNumber`,
+       * the gate's own question, review round 10, [2]): a holder of a number
+       * whose STOP could not be recorded in their org, whose own pause — a
+       * teammate's, an unsubscribe's — stood instead of the hold, and so
+       * reads as any pause of its class, which a person lifts with Resume.
+       * Asked only of a paused contact: it is about what lifts a pause.
+       * `decideGathered` words the `paused` refusal by it.
+       */
+      sharedNumberHold: boolean
     }
   | { missing: string }
 > {
@@ -1256,6 +1272,8 @@ export async function sendFactsFor(
    */
   const paused = row.contact.pausedAt !== null
   const pausedReason = paused ? row.contact.pausedReason ?? 'paused' : null
+  // Review round 10, [2]: one read, for a paused contact only.
+  const sharedNumberHold = paused && (await heldForUnrecordedSharedNumber(db, orgId, row.contact))
 
   // 0019: the registered template behind THESE words, on SMS and WhatsApp.
   // The caller's words, else the stored message the evidence question names.
@@ -1280,6 +1298,7 @@ export async function sendFactsFor(
     campaignChannel,
     evidenceAged: evidence.aged,
     evidenceSuperseded: evidence.superseded,
+    sharedNumberHold,
     facts: {
       channel,
       recipient,
@@ -1390,13 +1409,27 @@ async function evidenceState(
  * the deadline sentence, the plainer of two true reasons. The sender and
  * every dry run (`previewSend`) decide through this, so they cannot word
  * one refusal two ways.
+ *
+ * And a `paused` refusal of a shared number's holder whose own pause stood
+ * (`sharedNumberHold`, review round 10, [2]): `pausedSentence` words the
+ * pause by its class — "until a person resumes them there" for a teammate's
+ * — while Resume refuses it until the number is recorded. The sentence says
+ * so after the class's own. Not for the classes whose sentence already says
+ * to record something rather than resume (an unrecorded opt-out, the
+ * shared-number hold's own shape among them) or to finish an erasure.
  */
 export function decideGathered(gathered: {
   readonly facts: SendFacts
   readonly evidenceAged: boolean
   readonly evidenceSuperseded: boolean
+  readonly sharedNumberHold?: boolean
 }): SendDecision {
   const decision = decideSend(gathered.facts)
+  if (!decision.allowed && decision.code === 'paused') {
+    const pausedFor = gathered.facts.pausedFor ?? 'other'
+    if (!gathered.sharedNumberHold || pausedFor === 'opt_out_not_recorded' || pausedFor === 'erasure') return decision
+    return { ...decision, reason: `${decision.reason} ${SHARED_NUMBER_HOLD_SENTENCE}` }
+  }
   if (decision.allowed || decision.code !== 'stale_evidence') return decision
   if (gathered.evidenceAged || !gathered.evidenceSuperseded) return decision
   return {
@@ -1408,6 +1441,15 @@ export function decideGathered(gathered: {
       'the latest scan.',
   }
 }
+
+/**
+ * What `decideGathered` adds to a `paused` refusal of a shared number's
+ * holder whose own pause stood (review round 10, [2]). It never says they
+ * asked — they may have sent nothing — and names what Resume waits for.
+ */
+export const SHARED_NUMBER_HOLD_SENTENCE =
+  'A text from a number they share also asked to stop, and it could not be recorded — they may not have sent it — ' +
+  'so Resume is refused until the number is recorded on /suppressions.'
 
 async function staleAfterDays(db: AgencyDb, orgId: string): Promise<number> {
   return staleAfterDaysOf((await activeIcpProfile(db, orgId))?.definition)

@@ -1100,6 +1100,12 @@ function held(d: unknown, one: string, many: string): string {
  * and the next text DoveSoft delivers from it after that (its retry of this
  * one included) makes it an ordinary hold Resume lifts — except for a holder
  * whose own pause stood (`kept`, review round 9), which no text changes.
+ *
+ * Which retry comes depends on why (review round 10, [6]): a recording that
+ * failed is answered 500 whatever the push carried, so DoveSoft retries it;
+ * a suppression that failed is answered 500 only when the push carried a
+ * message id — without one its retry could not be told from a new text, so
+ * it is answered 200 and no retry comes.
  */
 function sharedNumberOptOut(d: unknown): string {
   const n = num(d, 'contacts') ?? 1
@@ -1121,10 +1127,11 @@ function sharedNumberOptOut(d: unknown): string {
       ? ''
       : `; ${k === n ? (n === 1 ? 'they were' : 'all of them were') : `${k} of them ${k === 1 ? 'was' : 'were'}`} already held by a ` +
         'pause of their own, which stands — no text changes it, and Resume lifts it, where Resume may, only once the number is recorded'
+  const retry = word(d, 'why') === 'record_failed' ? 'its retry of this one included' : 'its retry of this one included, where the push carried a message id'
   return (
     `could not record an opt-out texted from a number ${holds} — ${why}. ` +
     'They are not treated as the one who asked, but are held until it is recorded: Resume is refused until then, ' +
-    'and the next text DoveSoft delivers from the number after that — its retry of this one included — makes it an ' +
+    `and the next text DoveSoft delivers from the number after that — ${retry} — makes it an ` +
     `ordinary hold that Resume lifts${kept}${unpaused}`
   )
 }

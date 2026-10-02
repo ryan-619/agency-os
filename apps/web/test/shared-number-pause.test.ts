@@ -25,7 +25,8 @@ import {
   isSharedNumberOptOutPause as dbIsSharedNumberOptOutPause, sharedNumberHoldReason, sharedNumberOptOutReason,
 } from '@agency/db/queries'
 import {
-  SHARED_NUMBER_HOLDER_NOTE, SHARED_NUMBER_HOLDER_WORDS, isSharedNumberOptOutPause, offersResume, resumeOfferFor,
+  SHARED_NUMBER_HOLDER_NOTE, SHARED_NUMBER_HOLDER_WORDS, SHARED_NUMBER_LABEL, isSharedNumberOptOutPause, offersResume,
+  resumeOfferFor,
 } from '../src/lib/shared-number-pause'
 
 const read = (path: string): string => readFileSync(fileURLToPath(new URL(path, import.meta.url)), 'utf8')
@@ -104,6 +105,26 @@ describe('what a row offers for a pause', () => {
     expect(offersResume('erasure')).toBe(false)
   })
 
+  /**
+   * Review round 10, [2]: a holder whose own pause — a teammate's, an
+   * unsubscribe's — stood instead of the hold has that pause's shape. Read
+   * by the shape alone it got a plain Resume the route refused; with the
+   * database's answer (`consentLedgerFor`'s `sharedNumberHold`) it gets the
+   * holder's words. The contact's own unrecorded opt-out and an unfinished
+   * erasure are still no Resume at all.
+   */
+  it('offers a holder whose own pause stood Resume once the number is recorded, from the database’s answer', () => {
+    const held = (reason: string) => resumeOfferFor(pauseReasonClass(reason), reason, true)
+    for (const reason of ['on leave (by sam@agency.test)', 'unsubscribed 2026-09-15T11:00:00.000Z', 'waiting on legal', sharedNumberHoldReason(AT)]) {
+      expect(held(reason), reason).toBe('record_number')
+      expect(resumeOfferFor(pauseReasonClass(reason), reason, false), reason).toBe('resume')
+    }
+    expect(held(SHARED)).toBe('record_number')
+    expect(held('opt-out not recorded: reply 2026-09-15T12:00:00.000Z (record_failed)')).toBe('opt_out_not_recorded')
+    expect(held('erasure requested 2026-09-15; not completed (Error)')).toBe('erasure')
+    expect(resumeOfferFor(null, null, true)).toBeNull()
+  })
+
   it('offers Resume for every other pause, and nothing for nobody paused', () => {
     for (const reason of [sharedNumberHoldReason(AT), 'replied 2026-09-15T12:00:00.000Z', 'checking (by a@b.test)']) {
       expect(offer(reason), reason).toBe('resume')
@@ -146,7 +167,10 @@ describe('every screen that renders the pause with a Resume button', () => {
   const ledger = code(read('../src/components/contacts/ledger.tsx'))
 
   it('/contacts decides the buttons through resumeOfferFor, and offers Resume for a holder', () => {
-    expect(ledger).toMatch(/const offer = resumeOfferFor\(pausedFor, r\.pausedReason\)/)
+    // With the database's answer beside the shape (review round 10, [2]).
+    expect(ledger).toMatch(/const offer = resumeOfferFor\(pausedFor, r\.pausedReason, r\.sharedNumberHold\)/)
+    const page = code(read('../src/app/contacts/page.tsx'))
+    expect(page).toMatch(/sharedNumberHold: ledger\.sharedNumberHold,/)
     expect(ledger).toMatch(/offer === 'record_number' \? \(\s*<span className="muted" style=\{\{ fontSize: 12 \}\}>\s*<SharedNumberHolderNote \/>/)
     // One Resume button, rendered for the holder as for any pause a person may lift.
     expect(ledger).toMatch(/\{offersResume\(offer\) \? \(\s*<button[^>]*onClick=\{\(\) => void patch\(r\.id, \{ action: 'resume', pausedReason: r\.pausedReason \}\)\}>\s*Resume/)
@@ -163,8 +187,49 @@ describe('every screen that renders the pause with a Resume button', () => {
   ])('%s says what lifts a holder’s pause beside its Resume', (_where, path, reason) => {
     const src = code(read(path))
     expect(src).toContain("import { SharedNumberHolderNote } from '@/components/shared-number-note'")
-    expect(src).toContain("import { isSharedNumberOptOutPause } from '@/lib/shared-number-pause'")
+    // Named among the module's imports — the screens below import the number's label from it too.
+    expect(src).toMatch(/import \{[^}]*\bisSharedNumberOptOutPause\b[^}]*\} from '@\/lib\/shared-number-pause'/)
     expect(src).toMatch(new RegExp(`isSharedNumberOptOutPause\\(${reason.replace(/\./g, '\\.')}\\) \\? \\(\\s*<(div|span)[^>]*>\\s*<SharedNumberHolderNote />`))
     expect(src).toMatch(/action: 'resume'/)
+  })
+})
+
+/**
+ * Review round 10, [7]: /suppressions and /inbox told a holder's reader to
+ * record "the number" and showed none — a holder imported with a phone and
+ * no email was a bare id on /suppressions, and an /inbox row carried no
+ * phone at all. Each now says who the person is and shows the number on
+ * their record beside the note; /suppressions can fill it into its form.
+ */
+describe('the screens that list a holder without their record show the number the note asks for', () => {
+  it('labels the number without calling it theirs alone, or saying they asked', () => {
+    expect(SHARED_NUMBER_LABEL).toBe('The number they share:')
+  })
+
+  it('/suppressions names every paused person, and shows a holder’s number with a way to fill it in', () => {
+    const src = code(read('../src/components/outreach/suppressions.tsx'))
+    // Every row: the name, then an address — the phone when there is no email, the id only when there is neither.
+    expect(src).toMatch(/<strong>\{p\.name\}<\/strong> <code>\{p\.email \?\? p\.phone \?\? p\.id\}<\/code>/)
+    expect(src).not.toContain('<code>{p.email ?? p.id}</code>')
+    // A holder's row: the note, then the number, then the button that fills the form.
+    expect(src).toMatch(
+      /isSharedNumberOptOutPause\(p\.pausedReason\) \? \(\s*<div[^>]*>\s*<SharedNumberHolderNote \/>\s*\{p\.phone \? \(\s*<div[^>]*>\s*\{SHARED_NUMBER_LABEL\} <code>\{p\.phone\}<\/code>/,
+    )
+    expect(src).toMatch(/setKind\('phone'\)\s*setValue\(p\.phone \?\? ''\)/)
+    // It fills the form a person submits, and adds nothing itself.
+    const fill = src.slice(src.indexOf("setKind('phone')"), src.indexOf('Fill it in above'))
+    expect(fill).not.toMatch(/\badd\(|fetch\(/)
+    const page = code(read('../src/app/suppressions/page.tsx'))
+    expect(page).toMatch(/name: \[p\.firstName, p\.lastName\]\.filter\(Boolean\)\.join\(' '\) \|\| '\(no name recorded\)'/)
+    expect(page).toMatch(/phone: p\.phone,/)
+  })
+
+  it('/inbox carries the contact’s phone and shows it beside a holder’s note', () => {
+    const src = code(read('../src/components/inbox/queue.tsx'))
+    expect(src).toMatch(
+      /isSharedNumberOptOutPause\(row\.contact\.pausedReason\) \? \(\s*<span[^>]*>\s*<SharedNumberHolderNote \/>\s*\{row\.contact\.phone \? \([\s\S]{0,200}?\{SHARED_NUMBER_LABEL\} <code>\{row\.contact\.phone\}<\/code>/,
+    )
+    const page = code(read('../src/app/inbox/page.tsx'))
+    expect(page).toMatch(/phone: r\.contact\.phone,/)
   })
 })

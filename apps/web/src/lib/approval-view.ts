@@ -43,6 +43,13 @@ export interface CandidateDecision {
    * "re-scan".
    */
   readonly evidenceSuperseded?: true
+  /**
+   * A `paused` refusal of a shared number's holder whose own pause stood:
+   * Resume refuses it until the number is recorded (`previewSend`'s
+   * `sharedNumberHold`, review round 10, [2]). Present only when true, and
+   * `approveBlock` says what lifts it — the number recorded first.
+   */
+  readonly sharedNumberHold?: true
 }
 
 /**
@@ -67,10 +74,16 @@ const SEND_NOW_WORDS = 'nothing stops it right now'
  */
 const SUPERSEDED_REASON = /^A newer scan of this company has reached the site since the scan these words quote\b/
 
-/** A `previewSend` decision in the words the card shows. */
-export function decisionView(d: PreviewDecision): CandidateDecision {
+/**
+ * A `previewSend` decision in the words the card shows. `facts` is the
+ * preview's own facts beside it — `SendPreviewFacts` is assignable — for
+ * the one fact the decision's code cannot carry: a pause Resume refuses
+ * until a shared number is recorded (review round 10, [2]).
+ */
+export function decisionView(d: PreviewDecision, facts?: { readonly sharedNumberHold?: boolean }): CandidateDecision {
   if (d.allowed) return { code: 'send_now', words: SEND_NOW_WORDS, humanCanResolve: true, reason: null }
   const view = { code: d.code, words: refusalWords(d.code), humanCanResolve: d.humanCanResolve, reason: d.reason }
+  if (d.code === 'paused' && facts?.sharedNumberHold === true) return { ...view, sharedNumberHold: true }
   return d.code === 'stale_evidence' && SUPERSEDED_REASON.test(d.reason) ? { ...view, evidenceSuperseded: true } : view
 }
 
@@ -135,6 +148,11 @@ export function candidateLine(decision: CandidateDecision | null): string {
  * them, and `approveDraft` refuses anyone else (`rendered_for_another`). So
  * neither the paused block nor the default one says "choose someone else"
  * there. Round 4, finding [22]. Without a channel the email words stand.
+ *
+ * A pause Resume refuses until a shared number is recorded
+ * (`sharedNumberHold`, review round 10, [2]) says so in the block itself:
+ * the person reading it is about to go and resume them, and Resume would
+ * answer 409 until the number is on /suppressions.
  */
 export function approveBlock(decision: CandidateDecision | null, channel?: string): string | null {
   if (decision === null || decision.humanCanResolve) return null
@@ -155,6 +173,7 @@ export function approveBlock(decision: CandidateDecision | null, channel?: strin
   if (decision.code === 'paused') {
     return (
       `Approving is pointless: ${decision.words}, and nobody may approve past a pause — the worker would refuse it. ` +
+      (decision.sharedNumberHold ? `${SHARED_NUMBER_HOLD_BLOCK} ` : '') +
       (onlyThem
         ? `The rule below says what lifts it; the draft can wait here until then. ${FILLED_FOR_ONE}`
         : 'The rule below says what lifts it; the draft can wait here until then, or choose someone else.')
@@ -189,6 +208,11 @@ export function approveBlock(decision: CandidateDecision | null, channel?: strin
 export const TEMPLATE_CHANNEL_NAMES: ReadonlySet<string> = new Set(['sms', 'whatsapp'])
 
 const FILLED_FOR_ONE = 'Its template was filled in for this one person, so it cannot go to anyone else.'
+
+/** What a shared number's holder waits for (review round 10, [2]). Never that they asked. */
+const SHARED_NUMBER_HOLD_BLOCK =
+  'A text from a number they share asked to stop and could not be recorded — they may not have sent it — so they ' +
+  'cannot be resumed until the number is recorded on /suppressions.'
 
 // ---------------------------------------------------------------------------
 // Which campaign the decisions were computed under

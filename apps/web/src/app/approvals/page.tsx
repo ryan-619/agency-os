@@ -191,7 +191,7 @@ export default async function ApprovalsPage() {
       const preview = await previewSend(db, {
         orgId: user.orgId, contactId: w.contactId, campaignId: w.campaignId, now, writtenAt: w.writtenAt,
       })
-      return [k, preview.ok ? decisionView(preview.decision) : uncheckedDecision(preview.message)] as const
+      return [k, preview.ok ? decisionView(preview.decision, preview.facts) : uncheckedDecision(preview.message)] as const
     } catch (err) {
       // Named, never the driver's message (it can carry the DSN — §2.3).
       const name = err instanceof Error ? err.name : 'UnknownError'

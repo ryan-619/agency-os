@@ -65,7 +65,10 @@ export default async function SuppressionsPage() {
         sources={[...Object.values(SUPPRESSION_SOURCE_WORDS), UNRECORDED_SOURCE]}
         paused={paused.map((p) => ({
           id: p.id,
+          // Who they are, on every row (review round 10, [7]) — /contacts' own fallback.
+          name: [p.firstName, p.lastName].filter(Boolean).join(' ') || '(no name recorded)',
           email: p.email,
+          phone: p.phone,
           pausedAt: p.pausedAt ? p.pausedAt.toISOString() : null,
           pausedReason: p.pausedReason,
         }))}

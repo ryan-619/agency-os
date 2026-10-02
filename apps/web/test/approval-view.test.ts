@@ -9,6 +9,8 @@
  * never one keypress: `a` arms, Enter on the same card approves, anything
  * else disarms (§2.4 — a stray key must never be an outbound message).
  */
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { TEMPLATE_CHANNELS, type SendFacts, type SendRefusalCode } from '@agency/core'
 import { decideGathered } from '@agency/db/queries'
 import { describe, expect, it } from 'vitest'
@@ -232,6 +234,71 @@ describe('a draft whose scan a newer one superseded', () => {
     expect(other.evidenceSuperseded).toBeUndefined()
     expect(approveBlock(other)).toContain('nobody may approve past a pause')
     expect(decisionView({ allowed: true, code: 'send_now' })).not.toHaveProperty('evidenceSuperseded')
+  })
+})
+
+/**
+ * Review round 10, [2]: a shared number's holder whose own pause — a
+ * teammate's — stood instead of the hold. The rule beside the card said "a
+ * person resumes them there", and the block "the rule below says what lifts
+ * it", while Resume refuses until the number is recorded. `previewSend`'s
+ * facts carry the gate's answer, `sharedNumberHold`; the page hands them to
+ * `decisionView`, and the sentence comes from the real `decideGathered`.
+ */
+describe('a paused holder of a shared number whose STOP could not be recorded', () => {
+  const FACTS: SendFacts = {
+    channel: 'email',
+    recipient: 'bina@acme.example',
+    suppressed: false,
+    consent: null,
+    paused: true,
+    pausedFor: 'manual',
+    evidenceStale: false,
+    template: null,
+    recipientTimeZone: 'Asia/Kolkata',
+    quietStart: '21:00',
+    quietEnd: '08:00',
+    sentToday: 0,
+    dailyCap: 25,
+    campaignStatus: 'active',
+    autoSend: false,
+    approvedByHuman: true,
+    now: new Date('2026-09-30T06:30:00Z'),
+  }
+  const view = (sharedNumberHold: boolean): CandidateDecision => {
+    const d = decideGathered({ facts: FACTS, evidenceAged: false, evidenceSuperseded: false, sharedNumberHold })
+    if (d.allowed) throw new Error('a paused contact must be refused')
+    expect(d.code).toBe('paused')
+    return decisionView(d, { sharedNumberHold })
+  }
+
+  it('says in the block and the rule beside it that the number is recorded before they can be resumed', () => {
+    const d = view(true)
+    expect(d.sharedNumberHold).toBe(true)
+    expect(d.reason).toMatch(/until a person resumes them there\. .*Resume is refused until the number is recorded on \/suppressions\.$/)
+    expect(approveBlock(d)).toBe(
+      'Approving is pointless: contact paused, and nobody may approve past a pause — the worker would refuse it. ' +
+        'A text from a number they share asked to stop and could not be recorded — they may not have sent it — so ' +
+        'they cannot be resumed until the number is recorded on /suppressions. The rule below says what lifts it; ' +
+        'the draft can wait here until then, or choose someone else.',
+    )
+    expect(approveBlock(d)).not.toMatch(/they asked to stop|deny/i)
+    expect(approveBlock(d, 'sms')).toContain('cannot be resumed until the number is recorded on /suppressions. The rule below')
+    expect(approveBlock(d, 'sms')).not.toContain('choose someone else')
+  })
+
+  it('says nothing of the kind for any other pause, or a fact the page did not pass', () => {
+    const d = view(false)
+    expect(d).not.toHaveProperty('sharedNumberHold')
+    expect(d.reason).not.toMatch(/suppressions/)
+    expect(approveBlock(d)).toBe(approveBlock(refusal('paused', false)))
+    // Only on a pause: the fact means nothing beside another refusal.
+    expect(decisionView({ allowed: false, code: 'suppressed', reason: 'x', humanCanResolve: false }, { sharedNumberHold: true })).not.toHaveProperty('sharedNumberHold')
+  })
+
+  it('is handed the preview’s facts by the page', () => {
+    const page = readFileSync(fileURLToPath(new URL('../src/app/approvals/page.tsx', import.meta.url)), 'utf8')
+    expect(page).toContain('decisionView(preview.decision, preview.facts)')
   })
 })
 
