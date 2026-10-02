@@ -241,7 +241,9 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'template.imported': { channel: 'sms', imported: 2, alreadyPresent: 0, skipped: 2, refused: 5 },
   'sms.drafted': { contactId: SUBJECT, campaignId: SUBJECT, templateId: SUBJECT },
   'sms.delivery_unmatched': { why: 'unknown_id', status: 'delivered' },
-  'sms.inbound_unmatched': { why: 'ambiguous', optOut: true, contacts: 2, suppressed: true, paused: 2, cancelledQueued: 1 },
+  'sms.inbound_unmatched': {
+    why: 'ambiguous', optOut: true, contacts: 2, suppressed: true, paused: 2, cancelledQueued: 1, messageHash: 'a'.repeat(64),
+  },
   'sms.dlr_unreadable': { why: 'missing_fields', missing: ['messageid'] },
   'sms.inbound_unreadable': { why: 'missing_fields', missing: ['from', 'text'] },
   'contact.bounced': { code: '5.1.1', cancelledQueued: 1, touchId: SUBJECT },
@@ -441,10 +443,10 @@ describe('sentenceFor', () => {
       'refused an SMS to a contact at rentman.io: not its registered template; nothing was sent',
     )
     expect(say('sms.inbound_unmatched')).toBe(
-      'received a text from a number more than one contact has, so it was filed under nobody; 2 contacts holding the number were paused and 1 queued message cancelled; it asked to stop, and the number was put on the suppression list',
+      'received a text from a number more than one contact has, so it was filed under nobody; both contacts holding the number were paused and 1 queued message cancelled; it asked to stop, and the number was put on the suppression list',
     )
     expect(say('sms.inbound_unmatched', { why: 'ambiguous', paused: 1, cancelledQueued: 0 })).toBe(
-      'received a text from a number more than one contact has, so it was filed under nobody; the contact holding the number was paused',
+      'received a text from a number more than one contact has, so it was filed under nobody; a contact holding the number was paused',
     )
     expect(say('sms.inbound_unmatched', { why: 'no_contact', optOut: true, suppressed: false })).toContain('NOT on the suppression list')
     expect(say('sms.delivery_unmatched')).toBe('received a delivery report for an SMS this system did not send; nothing was changed')
@@ -471,6 +473,70 @@ describe('sentenceFor', () => {
     expect(alarm({ why: 'no_contact', optOut: true, contacts: 0, suppressed: false })).toBe(true)
     expect(alarm(WRITTEN['sms.inbound_unmatched']!)).toBe(false)
     expect(alarm({ why: 'no_contact', optOut: false, contacts: 0 })).toBe(false)
+  })
+
+  /**
+   * Review round 6, finding [21]. The held clause said nothing when every
+   * holder was already paused although their messages were cancelled; it
+   * called one of several "the contact holding the number"; and the row a
+   * text filed under a contact leaves in ANOTHER org read "filed under
+   * nobody". Each writer's row is worded for what it did.
+   */
+  describe('a text from a shared number (sms.inbound_unmatched)', () => {
+    const say = (d: Record<string, unknown>) => sentenceFor(line('sms.inbound_unmatched', d, { actor: 'system' }), lookups)
+    const NOBODY = 'received a text from a number more than one contact has, so it was filed under nobody'
+
+    it('says what was cancelled when every holder was already paused', () => {
+      expect(say({ why: 'ambiguous', optOut: false, contacts: 2, paused: 0, cancelledQueued: 3 })).toBe(
+        `${NOBODY}; 3 queued messages to the contacts holding the number were cancelled (already paused, so not paused again)`,
+      )
+      expect(say({ why: 'ambiguous', optOut: false, contacts: 2, paused: 0, cancelledQueued: 0 })).toBe(NOBODY)
+    })
+
+    it('words one of several as one OF them', () => {
+      expect(say({ why: 'ambiguous', optOut: false, contacts: 2, paused: 1, cancelledQueued: 0 })).toBe(
+        `${NOBODY}; 1 of the 2 contacts holding the number was paused`,
+      )
+      expect(say({ why: 'ambiguous', optOut: false, contacts: 3, paused: 3, cancelledQueued: 2 })).toBe(
+        `${NOBODY}; all 3 contacts holding the number were paused and 2 queued messages cancelled`,
+      )
+      expect(say({ why: 'ambiguous', optOut: false, contacts: 1, paused: 1, cancelledQueued: 0 })).toBe(
+        'received a text from a number more than one contact has, so it was filed under nobody; the contact holding the number was paused',
+      )
+    })
+
+    it('says a text filed under a contact in another organisation was filed there, never under nobody', () => {
+      const elsewhere = say({
+        why: 'ambiguous', optOut: true, contacts: 1, paused: 1, cancelledQueued: 1, filedUnder: 'another_org', suppressed: true,
+      })
+      expect(elsewhere).toBe(
+        'received a text from a number a contact here holds, and filed it under a contact in another organisation that this system had texted; the contact here holding it was paused and 1 queued message cancelled; it asked to stop, and the number was put on the suppression list',
+      )
+      expect(elsewhere).not.toContain('filed under nobody')
+      expect(say({ why: 'ambiguous', optOut: true, contacts: 2, filedUnder: 'another_org', suppressed: false, paused: 0, cancelledQueued: 0 })).toBe(
+        'received a text from a number 2 contacts here hold, and filed it under a contact in another organisation that this system had texted; it asked to stop, and the number is NOT on the suppression list — follow up by hand',
+      )
+      expect(isAlarm(line('sms.inbound_unmatched', { optOut: true, filedUnder: 'another_org', suppressed: false }, { actor: 'system' }))).toBe(true)
+    })
+
+    it('says a twin in the same org was held beside the contact it was filed under', () => {
+      expect(say({ why: 'ambiguous', optOut: false, contacts: 1, paused: 1, cancelledQueued: 1, filedUnder: 'another_contact' })).toBe(
+        'received a text from a number more than one contact here holds, and filed it under the one this system had texted; the other contact holding it was paused and 1 queued message cancelled',
+      )
+    })
+
+    it('says a redelivery paused nobody again, and what it wrote', () => {
+      expect(say({ why: 'ambiguous', optOut: true, contacts: 1, redelivered: true, suppressed: true, messageHash: 'b'.repeat(64) })).toBe(
+        'received again a text from a number more than one contact has, which it had filed under nobody; nobody was paused again; it asked to stop, and the number was put on the suppression list',
+      )
+      expect(say({ why: 'ambiguous', optOut: true, contacts: 1, filedUnder: 'another_org', redelivered: true, suppressed: true })).toBe(
+        'received again a text from a number a contact here holds, which it had filed under a contact in another organisation; it asked to stop, and the number was put on the suppression list',
+      )
+    })
+
+    it('never shows the message hash', () => {
+      expect(say(WRITTEN['sms.inbound_unmatched']!)).not.toContain('aaaa')
+    })
   })
 
   /**
