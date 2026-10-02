@@ -747,8 +747,8 @@ const NOT_RECORDED =
 const NOT_RECORDED_ANOTHER_ADDRESS =
   'A reply from another address on this thread asked to stop, and no suppression row matches that address. Record ' +
   'THAT address — the reply’s From, shown on /inbox — on /suppressions, never this contact’s: they are not treated ' +
-  'as the one who asked. Until it is recorded, nothing is drafted on this thread. Nothing was drafted and nobody was ' +
-  'resumed.'
+  'as the one who asked. Until it is recorded, no answer to this contact is drafted. Nothing was drafted and nobody ' +
+  'was resumed.'
 
 const TEMPLATE_REQUIRED: Readonly<Record<'sms' | 'whatsapp', string>> = {
   sms:

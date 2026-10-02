@@ -2276,8 +2276,9 @@ export function replyIsFromTheContact(
 /**
  * The one key an address is suppressed by on its channel — the address
  * itself, normalised (`suppressionKeysFor`), never the domain, which a
- * colleague shares. Null when it cannot be read. Exported for the inbox,
- * which reads an opted-out reply by its own From (review round 8).
+ * colleague shares. Null when it cannot be read. The comparison
+ * `replyIsFromTheContact` makes, and the key `contactsAtTheAddress` finds
+ * the sender by (review round 8).
  */
 export function addressKeyOf(address: string | null | undefined, channel: Channel): string | null {
   return address ? (suppressionKeysFor(address, channel)?.find((k) => k.kind !== 'domain')?.value ?? null) : null

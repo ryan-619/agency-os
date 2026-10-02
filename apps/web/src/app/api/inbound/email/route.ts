@@ -74,7 +74,8 @@ import { inboundEmailNotRecorded, keepingRolledBackOptOut } from './fault'
  * threw also takes the loud path — the contact paused, an audit row and the
  * AWAITED alarm, under the contact the recorder was filing it under
  * (`./fault.ts`); a stop from somebody else in the thread holds that
- * contact only as any reply would, and says whose address to record.
+ * contact only as any reply would, says whose address to record, and holds
+ * the sender as the one who asked when they are a contact here too.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'

@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { When } from '@/components/when'
 import { answerElsewhere, answersByTemplate, channelLabel, contactsLinkFor, matchedByWords } from '@/components/inbox/channel'
-import { optedOutNote, optedOutWarning } from '@/components/inbox/opted-out'
+import { optedOutNote, optedOutWarning, type OptedOutRow } from '@/components/inbox/opted-out'
 import {
   ANSWER_BODY_MAX, ANSWER_SUBJECT_MAX, HUMAN_REPLY_KINDS, INBOX_GROUP_LABELS, RECLASSIFY_HINT, answerIsLive,
   answerStateWords, answerSubject, type InboxGroup,
@@ -82,7 +82,7 @@ export interface InboxCampaignChoice {
 type Drafted = { readonly lines: readonly string[] }
 
 /** What `opted-out.ts` reads off a row to say whose stop it was. */
-function stopOf(row: InboxRowView) {
+function stopOf(row: InboxRowView): OptedOutRow {
   return { fromIsContact: row.fromIsContact, from: row.from, contactName: row.contact?.name ?? null, suppressed: row.suppressed }
 }
 
