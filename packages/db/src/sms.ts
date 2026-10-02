@@ -19,12 +19,13 @@
 import { createHash } from 'node:crypto'
 import { and, eq, inArray, sql } from 'drizzle-orm'
 import {
-  normalisePhone, renderTemplate, smsOptOut,
+  normalisePhone, pauseReasonClass, renderTemplate, smsOptOut,
   type ReplyKind, type SendDecision, type SendRefusalCode,
 } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
+import { auditSuppressionAdded } from './audit.js'
 import { addSuppression } from './campaigns.js'
 import { looksLikeOptOut, pauseContact, pauseContactOverriding, recordInboundReply, type InboundLog } from './outreach.js'
 import { previewSend } from './send-preview.js'
@@ -448,15 +449,87 @@ export interface SmsOptOutLost {
   readonly contactId: string | null
 }
 
+/** A contact, and the org it is in: whose a text was being filed as. */
+export interface SmsContactRef {
+  readonly orgId: string
+  readonly contactId: string
+}
+
+/**
+ * Thrown by `recordInboundSms` for a STOP whose recording FAILED after it had
+ * started writing (review round 7) — never for any other text, which is
+ * thrown as the fault itself. A route's "recording failed before anything
+ * was written … nobody was paused" would be false of it, so it carries what
+ * the recorder did:
+ *
+ *  - `filingUnder`: the contact the evidence said it was from, when there was
+ *    one — the caller's to audit, pause and alarm, as for the line
+ *    `recordInboundReply` writes when it rolls a reply back. Null when it was
+ *    being filed under nobody.
+ *  - `optOutNotRecordedIn`: every OTHER org whose contacts hold the number
+ *    and which has no suppression of it, where the loud path has ALREADY run
+ *    for each of those contacts (paused saying the opt-out was not recorded,
+ *    audited, logged) — an alarm each, naming one of them. The filed
+ *    contact's org is never listed: its alarm is the filed contact's.
+ *  - `heldIn`: the orgs whose holders this delivery held before the fault,
+ *    for a log line that says so.
+ *
+ * `fault` is the class of what failed, never its message: drizzle's quotes
+ * every bound parameter, the number and the words among them, and nothing
+ * here carries the original error.
+ */
+export class SmsOptOutNotRecorded extends Error {
+  override readonly name = 'SmsOptOutNotRecorded'
+  constructor(
+    readonly fault: string,
+    readonly filingUnder: SmsContactRef | null,
+    readonly optOutNotRecordedIn: readonly SmsOptOutLost[],
+    readonly heldIn: readonly string[],
+  ) {
+    super(`a text that asked to stop could not be recorded (${fault})`)
+  }
+}
+
+/**
+ * Thrown by `recordInboundSms` when a REDELIVERY of a text it had already
+ * recorded faulted while finishing it — re-attempting a suppression the first
+ * delivery could not write (review round 7). The first delivery recorded the
+ * text, its pause and any suppression it could, and raised the alarm for any
+ * it could not; so this is neither "nothing was written" nor a new opt-out
+ * to be loud about. It names the text: the contact it was filed under, or
+ * null for one filed under nobody. `fault` is a class, as above.
+ */
+export class SmsRedeliveryIncomplete extends Error {
+  override readonly name = 'SmsRedeliveryIncomplete'
+  constructor(
+    readonly fault: string,
+    readonly orgId: string | null,
+    readonly contactId: string | null,
+  ) {
+    super(`a redelivered text could not be finished (${fault})`)
+  }
+}
+
+/** The CLASS of a fault — never its message (see `SmsOptOutNotRecorded`). */
+function faultName(err: unknown): string {
+  return err instanceof Error ? err.name : 'UnknownError'
+}
+
 export type InboundSmsOutcome =
   | {
       readonly matched: 'contact'
       readonly orgId: string
       readonly contactId: string
       readonly touchId: string
-      /** True when this message id had already been recorded, so nothing was written this time. */
+      /**
+       * True when this message id had already been recorded: nobody is held
+       * or paused again and the stored row is not touched. For a STOP, a
+       * phone suppression the first delivery could not write is written now
+       * where it is still missing (`finishRedelivered`), and nothing else.
+       */
       readonly duplicate: boolean
       readonly paused: boolean
+      /** The number is suppressed in the org this was filed under — written now, or on a duplicate by the redelivery that found it missing. */
       readonly suppressed: boolean
       readonly cancelled: number
       readonly replyKind: ReplyKind
@@ -465,10 +538,12 @@ export type InboundSmsOutcome =
        * the org it was filed under — could NOT be written: already audited
        * `contact.opt_out_not_recorded`, logged `OPT-OUT NOT RECORDED` and
        * the contact paused saying so. A caller with a way to reach a person
-       * raises the alarm. False on a duplicate. Another org's failure is
-       * never folded in here (review round 6): it is `optOutNotRecordedIn`,
-       * because an alarm naming this contact, whose number IS suppressed,
-       * sent the person following up to the one org that was fine.
+       * raises the alarm. On a duplicate, true only when this redelivery
+       * re-attempted the suppression the first could not write and it failed
+       * again (review round 7). Another org's failure is never folded in here
+       * (review round 6): it is `optOutNotRecordedIn`, because an alarm
+       * naming this contact, whose number IS suppressed, sent the person
+       * following up to the one org that was fine.
        */
       readonly optOutNotRecorded: boolean
       /** Every OTHER org whose contacts hold the number where the STOP could not be suppressed — an alarm each. */
@@ -527,10 +602,14 @@ export type InboundSmsOutcome =
  *    the number, in any org, is held (`holdEach`, review round 6) — a twin
  *    row in the same org, or another org's contact, would otherwise keep an
  *    approved text to the person who just replied — and a STOP is also
- *    suppressed in every other org whose contacts hold the number. When the
- *    filed contact's own suppression could not be written, the others in
- *    their org take the loud path with them: the one suppression row would
- *    have covered them too.
+ *    suppressed in every other org whose contacts hold the number. Both come
+ *    BEFORE the reply is recorded (review round 7): neither needs the reply
+ *    row, and a recording that throws must not leave another org's holder
+ *    with nothing but a hold a teammate can lift. When the filed contact's
+ *    own suppression could not be written, the others in their org take the
+ *    loud path with them: the one suppression row would have covered them
+ *    too — and so they do when recording the STOP threw, which rolled that
+ *    row back with the reply (`SmsOptOutNotRecorded`).
  *  - NONE, or SEVERAL that nothing narrows to one: nothing is filed under a
  *    guessed person — no inbound row is written, and `sms.inbound_unmatched`
  *    is audited (ids and counts, never the number or the words) in every
@@ -553,11 +632,19 @@ export type InboundSmsOutcome =
  * find, so its `sms.inbound_unmatched` rows carry a hash of the message id
  * (`messageHash`), and a redelivery that finds one holds nobody again
  * (review round 6). Either kind of redelivery of a STOP writes a phone
- * suppression it finds missing, in the orgs it was owed to: a function cut
- * off after the reply committed, or a suppression whose write failed, is
- * finished by the provider's retry. Never throws on a text it cannot place;
- * a database fault is thrown, so the caller answers 500 and the provider
- * retries.
+ * suppression it finds missing, in the orgs it was owed to — the filed
+ * contact's own included (review round 7): a suppression whose write failed
+ * is finished by the provider's retry, which the caller asks for by
+ * answering 500 to an outcome that reports one (`optOutNotRecorded`,
+ * `optOutNotRecordedIn`).
+ *
+ * Never throws on a text it cannot place; a database fault is thrown, so
+ * the caller answers 500 and the provider retries — as the fault itself
+ * when nothing about the text had been written yet, and otherwise as what
+ * it is (review round 7): `SmsOptOutNotRecorded` for a STOP whose holds or
+ * whose reply failed after something was written, the loud path already run
+ * for every holder it left unrecorded; `SmsRedeliveryIncomplete` for a
+ * redelivery that faulted while finishing what the first delivery recorded.
  */
 export async function recordInboundSms(
   db: AgencyDb,
@@ -619,8 +706,8 @@ export async function recordInboundSms(
   }
 
   // Seen before. The kind comes off the stored row, never from re-reading;
-  // and a STOP's suppressions in the other orgs holding the number are
-  // finished if the first delivery did not get to them (review round 6).
+  // and a STOP's suppressions the first delivery could not write are
+  // finished (review rounds 6 and 7).
   if (messageId) {
     const dup = await findInbound(db, messageId)
     if (dup) return finishRedelivered(db, log, dup, e164, now)
@@ -630,11 +717,39 @@ export async function recordInboundSms(
   const only = holders.length === 1 ? holders[0]! : await whoseText(db, holders, e164)
 
   if (only) {
+    const filingUnder: SmsContactRef = { orgId: only.orgId, contactId: only.id }
     // Everybody else holding the number is held FIRST, before the reply is
     // recorded: once it is, a redelivery is a duplicate that holds nobody,
     // so a function cut off between the two must not have skipped this.
     const others = holders.filter((h) => h.id !== only.id)
-    const held = await holdEachOrg(db, others, now)
+    const held = await holdOrSayWhy(db, log, others, now, optOut ? { filingUnder } : null)
+    // A STOP is keyed by the number, not the person: another org whose
+    // contact holds it was told to stop too, whoever the text is filed
+    // under. Filing it under one contact by the evidence must not take the
+    // suppression away from the org it would have reached had nothing
+    // narrowed the match. Written BEFORE the reply, with each of those
+    // orgs' rows (review round 7): neither needs the reply row, and a reply
+    // that threw on every delivery left another org's holder with nothing
+    // but a hold a teammate could lift — no suppression, no row, no alarm.
+    const elsewhere = orgsOf(others).filter((o) => o !== only.orgId)
+    const recorded = await suppressInEvery(db, log, optOut ? elsewhere : [], holders, e164, now)
+    // A row in each org whose contacts were held: who, by counts, and that
+    // the text was filed under somebody — another contact here, or a contact
+    // in another org.
+    const auditHeld = async (orgId: string, suppressed: boolean): Promise<void> => {
+      const hold = held.get(orgId)
+      await auditUnmatched(db, orgId, {
+        why: 'ambiguous',
+        optOut,
+        contacts: others.filter((m) => m.orgId === orgId).length,
+        paused: hold?.paused ?? 0,
+        cancelledQueued: hold?.cancelled ?? 0,
+        ...replacedOf(hold),
+        filedUnder: orgId === only.orgId ? 'another_contact' : 'another_org',
+        ...(optOut ? { suppressed } : {}),
+      })
+    }
+    if (optOut) for (const orgId of elsewhere) await auditHeld(orgId, recorded.get(orgId) === true)
     let r: Awaited<ReturnType<typeof recordInboundReply>>
     try {
       r = await recordInboundReply(db, {
@@ -656,7 +771,17 @@ export async function recordInboundSms(
         const dup = await findInbound(db, messageId)
         if (dup) return dup
       }
-      throw err
+      if (!optOut) throw err
+      // The reply rolled back, and with it this org's one suppression row,
+      // which would have covered the twins here too: they take the loud
+      // path now, as they do when that row alone could not be written —
+      // left with the hold, a teammate could lift it and text the number
+      // that said STOP (review round 7). The filed contact is the caller's,
+      // from the error, as from the line `recordInboundReply` just wrote.
+      for (const twin of others.filter((h) => h.orgId === only.orgId)) {
+        await optOutLost(db, log, { orgId: only.orgId, contactId: twin.id, why: 'record_failed', now })
+      }
+      throw new SmsOptOutNotRecorded(faultName(err), filingUnder, lostIn(elsewhere, recorded, holders), [...held.keys()])
     }
     // The one suppression row in this org covers every contact here holding
     // the number, so when it could not be written they share the loud path:
@@ -668,27 +793,9 @@ export async function recordInboundSms(
         await optOutLost(db, log, { orgId: only.orgId, contactId: twin.id, why: 'suppression_failed', now })
       }
     }
-    // A STOP is keyed by the number, not the person: another org whose
-    // contact holds it was told to stop too, whoever the text is filed
-    // under (the rule below). Filing it under one contact by the evidence
-    // must not take the suppression away from the org it would have reached
-    // had nothing narrowed the match.
-    const elsewhere = orgsOf(others).filter((o) => o !== only.orgId)
-    const recorded = await suppressInEvery(db, log, optOut ? elsewhere : [], holders, e164, now)
-    // A row in each org whose contacts were held: who, by counts, and that
-    // the text was filed under somebody — another contact here, or a contact
-    // in another org.
     for (const orgId of orgsOf(others)) {
-      const hold = held.get(orgId)
-      await auditUnmatched(db, orgId, {
-        why: 'ambiguous',
-        optOut,
-        contacts: others.filter((m) => m.orgId === orgId).length,
-        paused: hold?.paused ?? 0,
-        cancelledQueued: hold?.cancelled ?? 0,
-        filedUnder: orgId === only.orgId ? 'another_contact' : 'another_org',
-        ...(optOut ? { suppressed: orgId === only.orgId ? r.suppressed : recorded.get(orgId) === true } : {}),
-      })
+      if (optOut && orgId !== only.orgId) continue
+      await auditHeld(orgId, orgId === only.orgId ? r.suppressed : recorded.get(orgId) === true)
     }
     return {
       matched: 'contact',
@@ -720,7 +827,14 @@ export async function recordInboundSms(
   // the first time, the reason DoveSoft was answered 500 and retried.
   if (messageHash && orgs.length > 0 && (await filedUnderNobodyBefore(db, orgs, messageHash))) {
     if (!optOut) return none('duplicate')
-    const missing = await unsuppressedIn(db, orgs, e164)
+    let missing: string[]
+    try {
+      missing = await unsuppressedIn(db, orgs, e164)
+    } catch (err) {
+      // Recorded once already — held, suppressed where it could be, alarmed
+      // where it could not: never "nothing was written" (review round 7).
+      throw new SmsRedeliveryIncomplete(faultName(err), null, null)
+    }
     const recorded = await suppressInEvery(db, log, missing, holders, e164, now)
     for (const orgId of missing) {
       await auditUnmatched(db, orgId, {
@@ -739,9 +853,11 @@ export async function recordInboundSms(
   // Hold every one of the several first, which needs no guess. Before the
   // suppression below, so an opt-out that cannot be written still
   // overwrites this reason with its own (`optOutLost`). A fault here
-  // throws: nothing was suppressed yet, so the caller's loud path for a
-  // STOP whose recording failed is the truth, and the provider retries.
-  const held = await holdEachOrg(db, holders, now)
+  // throws, so the provider retries: as itself when nothing was held yet,
+  // and for a STOP as `SmsOptOutNotRecorded`, every holder having taken the
+  // loud path — a hold that committed in one org before another's faulted
+  // is not "nobody was paused" (review round 7).
+  const held = await holdOrSayWhy(db, log, holders, now, optOut ? { filingUnder: null } : null)
   if (optOut && orgs.length === 0) {
     // No contact anywhere and no org named: there is nowhere to record it.
     await optOutLost(db, log, { orgId: null, contactId: null, why: 'no_org', now })
@@ -756,7 +872,7 @@ export async function recordInboundSms(
       contacts: holders.filter((m) => m.orgId === orgId).length,
       // Counts only: how many of this org's holders were paused by this
       // text, and how many of their messages it cancelled.
-      ...(why === 'ambiguous' ? { paused: hold?.paused ?? 0, cancelledQueued: hold?.cancelled ?? 0 } : {}),
+      ...(why === 'ambiguous' ? { paused: hold?.paused ?? 0, cancelledQueued: hold?.cancelled ?? 0, ...replacedOf(hold) } : {}),
       ...(optOut ? { suppressed: recorded.get(orgId) === true } : {}),
       // The redelivery check above reads it: a hash, never the id itself.
       ...(messageHash ? { messageHash } : {}),
@@ -845,16 +961,30 @@ export function sharedNumberHoldReason(now: Date): string {
   return `held: a text came from a number another contact also holds, ${now.toISOString()}`
 }
 
+/** What `holdEach` did in one org: counts. */
+interface Held {
+  readonly paused: number
+  readonly cancelled: number
+  /** Of `paused`, how many were paused by a reply of theirs, whose pause the hold REPLACED. */
+  readonly replaced: number
+}
+
+/** The hold row's word on a reply's pause it replaced (review round 7): its CLASS and a count, never the reason. */
+function replacedOf(hold: Held | undefined): Record<string, unknown> {
+  return hold && hold.replaced > 0 ? { replacedPauseFor: 'replied', replacedPauses: hold.replaced } : {}
+}
+
 /**
  * Hold contacts a text could be from, org by org: `holdEach` per org, one
- * transaction each. Counts back per org.
+ * transaction each, each org's counts set in `held` as it commits — so a
+ * caller whose later org faulted still knows which committed.
  */
 async function holdEachOrg(
   db: AgencyDb,
   holders: readonly Holder[],
   now: Date,
-): Promise<Map<string, { paused: number; cancelled: number }>> {
-  const held = new Map<string, { paused: number; cancelled: number }>()
+  held: Map<string, Held> = new Map(),
+): Promise<Map<string, Held>> {
   for (const orgId of orgsOf(holders)) {
     held.set(orgId, await holdEach(db, orgId, holders.filter((m) => m.orgId === orgId).map((m) => m.id), now))
   }
@@ -862,26 +992,89 @@ async function holdEachOrg(
 }
 
 /**
+ * `holdEachOrg`, and for a STOP (`stop` given) a fault part way through it
+ * is never a bare fault (review round 7). The holds are one transaction per
+ * org, so an org's may have committed before the next one's faulted — and a
+ * caller that read the fault as "nothing was written … nobody was paused"
+ * said something false of the first, whose holders kept a `held:` pause
+ * anyone could lift while nothing anywhere recorded that their number had
+ * said STOP. No suppression has been written yet (they come after the
+ * holds), so EVERY holder takes the loud path — paused saying the opt-out
+ * was not recorded, audited, logged — and the fault is thrown as
+ * `SmsOptOutNotRecorded`: the contact it was being filed under, if any,
+ * for the caller to take the same path for and alarm; every other org, for
+ * an alarm each; and which orgs' holds had committed.
+ */
+async function holdOrSayWhy(
+  db: AgencyDb,
+  log: InboundLog,
+  holders: readonly Holder[],
+  now: Date,
+  stop: { readonly filingUnder: SmsContactRef | null } | null,
+): Promise<Map<string, Held>> {
+  const held = new Map<string, Held>()
+  try {
+    return await holdEachOrg(db, holders, now, held)
+  } catch (err) {
+    if (!stop) throw err
+    for (const h of holders) await optOutLost(db, log, { orgId: h.orgId, contactId: h.id, why: 'record_failed', now })
+    const filedIn = stop.filingUnder?.orgId ?? null
+    throw new SmsOptOutNotRecorded(
+      faultName(err),
+      stop.filingUnder,
+      lostIn(orgsOf(holders).filter((o) => o !== filedIn), new Map(), holders),
+      [...held.keys()],
+    )
+  }
+}
+
+/**
  * Hold each of several people a text could be from, in one org and one
- * transaction: paused `sharedNumberHoldReason` — kept when they are already
- * paused for another reason (`pauseContact`) — and their queued,
+ * transaction: paused `sharedNumberHoldReason`, and their queued,
  * awaiting-approval and approved messages cancelled, on every channel,
  * refused `paused`: a hold, which `REFUSALS_A_CORRECTION_RESOLVES` lets a
  * draft be written again once a person lifts it. Never `consent_revoked`,
  * the recipient's own no, which enrolment reads as a refusal for good — of
  * somebody who may have sent nothing (review round 6). Counts back.
+ *
+ * A person already paused keeps their reason (`pauseContact`) — except the
+ * pause a reply of theirs caused (`replied <ISO>`), which the hold REPLACES
+ * (review round 7), as a teammate's Pause does (`contactPauseByHand`):
+ * /inbox ends a reply's own pause when the reply is answered, so a holder
+ * left with it was resumed by answering an old email while a person was
+ * still working out whose this text was. The reasons are read under the
+ * rows' locks, and the one replaced is named EXACTLY in the UPDATE.
  */
 async function holdEach(
   db: AgencyDb,
   orgId: string,
   contactIds: readonly string[],
   now: Date,
-): Promise<{ paused: number; cancelled: number }> {
+): Promise<Held> {
   return db.transaction(async (transaction) => {
     const tx = transaction as unknown as AgencyDb
+    // Contact before touch, the one lock order; by id, so two holds of
+    // overlapping people wait rather than deadlock.
+    const current = await tx
+      .select({ id: schema.contacts.id, pausedAt: schema.contacts.pausedAt, pausedReason: schema.contacts.pausedReason })
+      .from(schema.contacts)
+      .where(and(eq(schema.contacts.orgId, orgId), inArray(schema.contacts.id, [...contactIds])))
+      .orderBy(schema.contacts.id)
+      .for('update')
+    const replyPause = new Map(
+      current
+        .filter((c) => c.pausedAt !== null && pauseReasonClass(c.pausedReason) === 'replied')
+        .map((c) => [c.id, c.pausedReason ?? ''] as const),
+    )
     let paused = 0
+    let replaced = 0
     for (const contactId of contactIds) {
-      if (await pauseContact(tx, orgId, contactId, sharedNumberHoldReason(now), now)) paused++
+      const replacing = replyPause.get(contactId)
+      const opts = replacing === undefined ? {} : { replacing }
+      if (await pauseContact(tx, orgId, contactId, sharedNumberHoldReason(now), now, opts)) {
+        paused++
+        if (replacing !== undefined) replaced++
+      }
     }
     const cancelled = await tx
       .update(schema.touches)
@@ -895,7 +1088,7 @@ async function holdEach(
         ),
       )
       .returning({ id: schema.touches.id })
-    return { paused, cancelled: cancelled.length }
+    return { paused, cancelled: cancelled.length, replaced }
   })
 }
 
@@ -950,13 +1143,19 @@ async function unsuppressedIn(db: AgencyDb, orgs: readonly string[], e164: strin
 
 /**
  * A text recorded before — what a redelivery gets. For a STOP filed under a
- * contact, the phone suppression in every OTHER org holding the number is
- * written where it is missing (review round 6): those writes come after the
- * reply commits, so a function cut off between the two left them undone,
- * and the retry that would have finished them answered "duplicate" before
- * it got there. Nobody is held or paused again, and the stored row is not
- * touched; a suppression already present is not written twice, and neither
- * is its audit row.
+ * contact, the phone suppression is written wherever it is still missing:
+ * in every OTHER org holding the number (review round 6), and in the org it
+ * was filed under (review round 7). Each is a write the first delivery
+ * could not make — it took the loud path for it, and the caller answered
+ * 500 so that this retry would come. Nobody is held or paused again, and
+ * the stored row is not touched; a suppression already present is not
+ * written twice, and neither is its audit row. Where one fails again, the
+ * loud path runs again and the outcome says so, as the first delivery's
+ * did.
+ *
+ * A fault while finishing is `SmsRedeliveryIncomplete`, never the fault
+ * itself: the text was recorded the first time, so a caller must not say
+ * it was not (review round 7).
  */
 async function finishRedelivered(
   db: AgencyDb,
@@ -966,21 +1165,45 @@ async function finishRedelivered(
   now: Date,
 ): Promise<InboundSmsOutcome> {
   if (dup.matched !== 'contact' || dup.replyKind !== 'opted_out') return dup
-  const holders = await holdersOf(db, e164)
-  const missing = await unsuppressedIn(db, orgsOf(holders).filter((o) => o !== dup.orgId), e164)
-  if (missing.length === 0) return dup
-  const recorded = await suppressInEvery(db, log, missing, holders, e164, now)
-  for (const orgId of missing) {
-    await auditUnmatched(db, orgId, {
-      why: 'ambiguous',
-      optOut: true,
-      contacts: holders.filter((m) => m.orgId === orgId).length,
-      filedUnder: 'another_org',
-      redelivered: true,
-      suppressed: recorded.get(orgId) === true,
-    })
+  try {
+    const found = await holdersOf(db, e164)
+    // The contact it was filed under answered from this number, whatever
+    // their record says now: their org is owed the suppression, and their
+    // name is the one its loud path takes.
+    const holders = found.some((h) => h.id === dup.contactId) ? found : [{ id: dup.contactId, orgId: dup.orgId }, ...found]
+    const missing = await unsuppressedIn(db, orgsOf(holders), e164)
+    if (missing.length === 0) return { ...dup, suppressed: true }
+    const recorded = await suppressInEvery(db, log, missing, holders, e164, now)
+    for (const orgId of missing) {
+      if (orgId === dup.orgId) {
+        // The filed org's own: the row a person reads it was written by,
+        // beside the `contact.opt_out_not_recorded` the first delivery left.
+        if (recorded.get(orgId) === true) {
+          await appendAudit(db, auditSuppressionAdded({
+            orgId, actor: 'system', alreadyPresent: false, kind: 'phone', value: e164, reason: stopReason(now),
+          })).catch(() => {})
+        }
+        continue
+      }
+      await auditUnmatched(db, orgId, {
+        why: 'ambiguous',
+        optOut: true,
+        contacts: holders.filter((m) => m.orgId === orgId).length,
+        filedUnder: 'another_org',
+        redelivered: true,
+        suppressed: recorded.get(orgId) === true,
+      })
+    }
+    const own = !missing.includes(dup.orgId) || recorded.get(dup.orgId) === true
+    return {
+      ...dup,
+      suppressed: own,
+      optOutNotRecorded: !own,
+      optOutNotRecordedIn: lostIn(missing.filter((o) => o !== dup.orgId), recorded, holders),
+    }
+  } catch (err) {
+    throw new SmsRedeliveryIncomplete(faultName(err), dup.orgId, dup.contactId)
   }
-  return { ...dup, optOutNotRecordedIn: lostIn(missing, recorded, holders) }
 }
 
 /** An inbound SMS already recorded under this message id, as the outcome a redelivery gets. */
@@ -1057,6 +1280,11 @@ async function filedUnderNobodyBefore(db: AgencyDb, orgs: readonly string[], mes
   return rows.length > 0
 }
 
+/** The reason a text's phone suppression is stored with — `recordInboundReply`'s words. */
+function stopReason(now: Date): string {
+  return `replied asking to stop, ${now.toISOString().slice(0, 10)}`
+}
+
 /**
  * The phone suppression an SMS opt-out writes, with the reason CLASS when it
  * cannot be: a THROW is what a database fault does and `{ ok: false }` what
@@ -1074,7 +1302,7 @@ async function suppressPhone(
       orgId,
       kind: 'phone',
       value: phone,
-      reason: `replied asking to stop, ${now.toISOString().slice(0, 10)}`,
+      reason: stopReason(now),
       source: 'reply',
     })
     return added.ok ? { ok: true } : { ok: false, why: 'unparseable_number' }
