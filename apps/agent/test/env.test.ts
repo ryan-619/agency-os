@@ -10,6 +10,7 @@
  *
  * `.env.example` itself is replayed by `env-example.test.ts`.
  */
+import { readFileSync } from 'node:fs'
 import { describe, it, expect } from 'vitest'
 import { loadEnv } from '../src/env.js'
 
@@ -235,5 +236,44 @@ describe('SLACK_WEBHOOK_URL', () => {
     }
     expect(message).toMatch(/SLACK_WEBHOOK_URL/)
     expect(message).not.toContain('secret-token')
+  })
+})
+
+/**
+ * Not only the variables whose blank used to refuse: EVERY one but the two
+ * required ones reads a blank as unset. A blank `IMAP_SECURE=` read as
+ * `false` — plaintext — where an absent one reads as `true`, and a blank
+ * numeric default coerced to 0 and was refused at boot.
+ *
+ * The names are read from the schema's source rather than listed here, so a
+ * variable added next year is covered without anybody remembering this test.
+ */
+describe('every variable but the required ones', () => {
+  const REQUIRED = Object.keys(BASE)
+  const source = readFileSync(new URL('../src/env.ts', import.meta.url), 'utf8')
+  const NAMES = [...source.slice(source.indexOf('z.object({')).matchAll(/^ {2}([A-Z][A-Z0-9_]*): z\b/gm)].map(
+    (m) => m[1] as string,
+  )
+  const OPTIONAL = NAMES.filter((n) => !REQUIRED.includes(n))
+  const read = (vars: Record<string, string>) => load(vars) as unknown as Record<string, unknown>
+
+  it('is read from the schema, and is not vacuous', () => {
+    expect(NAMES).toEqual(expect.arrayContaining([...REQUIRED, 'IMAP_SECURE', 'AGENT_PORT', 'OUTREACH_BOUNCE_PAUSE_PCT']))
+    expect(OPTIONAL.length).toBeGreaterThan(40)
+  })
+
+  it.each(OPTIONAL)('%s: blank or whitespace parses exactly as absent', (name) => {
+    const absent = read({})[name]
+    expect(read({ [name]: '' })[name]).toEqual(absent)
+    expect(read({ [name]: '   ' })[name]).toEqual(absent)
+  })
+
+  it('IMAP_SECURE blank is the secure default, as absent is — not plaintext', () => {
+    expect(load({ IMAP_SECURE: '' }).IMAP_SECURE).toBe(true)
+    expect(load({ IMAP_SECURE: 'false' }).IMAP_SECURE).toBe(false)
+  })
+
+  it.each(REQUIRED)('%s blank is still refused, and named', (name) => {
+    expect(() => load({ [name]: '' })).toThrow(new RegExp(name))
   })
 })

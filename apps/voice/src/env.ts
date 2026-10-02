@@ -7,6 +7,12 @@ import { z } from 'zod'
  * blank URL, uuid or enum here stopped the service booting over a feature
  * nobody had turned on. Blank still means what unset means: with no
  * `VOICE_PUBLIC_URL` every webhook is refused.
+ *
+ * Every entry but DATABASE_URL goes through it, so a blank takes the default
+ * everywhere — a blank `VOICE_MODEL=` or `VOICE_LANGUAGE=` is the default,
+ * not a model or a language called `''`. `test/env.test.ts` reads the names
+ * from this file and checks each one; every entry keeps `.optional()` or
+ * `.default(` on the line that names it, as the worker's do.
  */
 const blankIsUnset = (v: unknown): unknown => (typeof v === 'string' && v.trim() === '' ? undefined : v)
 
@@ -20,13 +26,13 @@ const blankIsUnset = (v: unknown): unknown => (typeof v === 'string' && v.trim()
  * it never does is answer or place a call it cannot verify came from Twilio.
  */
 const schema = z.object({
-  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  NODE_ENV: z.preprocess(blankIsUnset, z.enum(['development', 'test', 'production']).default('development')),
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
-  DATABASE_POOL_MAX: z.coerce.number().int().positive().max(100).default(4),
-  VOICE_PORT: z.coerce.number().int().positive().default(3003),
+  DATABASE_POOL_MAX: z.preprocess(blankIsUnset, z.coerce.number().int().positive().max(100).default(4)),
+  VOICE_PORT: z.preprocess(blankIsUnset, z.coerce.number().int().positive().default(3003)),
   /** Loopback by default; compose sets 0.0.0.0 (see the agent worker's AGENT_BIND). */
-  VOICE_BIND: z.string().min(1).default('127.0.0.1'),
-  LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+  VOICE_BIND: z.preprocess(blankIsUnset, z.string().min(1).default('127.0.0.1')),
+  LOG_LEVEL: z.preprocess(blankIsUnset, z.enum(['debug', 'info', 'warn', 'error']).default('info')),
 
   /**
    * The origin Twilio reaches this service at — `https://voice.example.com`.
@@ -38,10 +44,10 @@ const schema = z.object({
   VOICE_PUBLIC_URL: z.preprocess(blankIsUnset, z.string().url().optional()),
 
   /** Twilio. Unset means every webhook is refused and nothing is dialled. */
-  TWILIO_ACCOUNT_SID: z.string().optional(),
-  TWILIO_AUTH_TOKEN: z.string().optional(),
+  TWILIO_ACCOUNT_SID: z.preprocess(blankIsUnset, z.string().optional()),
+  TWILIO_AUTH_TOKEN: z.preprocess(blankIsUnset, z.string().optional()),
   /** The number calls and texts come from, E.164. */
-  TWILIO_FROM_NUMBER: z.string().optional(),
+  TWILIO_FROM_NUMBER: z.preprocess(blankIsUnset, z.string().optional()),
 
   /**
    * Which org answers the phone. One org is seeded (§12), so this is
@@ -51,8 +57,8 @@ const schema = z.object({
   VOICE_ORG_ID: z.preprocess(blankIsUnset, z.string().uuid().optional()),
 
   /** Where a warm handoff goes: a TaskRouter workflow, or a person's number. */
-  TASKROUTER_WORKFLOW_SID: z.string().optional(),
-  VOICE_HANDOFF_NUMBER: z.string().optional(),
+  TASKROUTER_WORKFLOW_SID: z.preprocess(blankIsUnset, z.string().optional()),
+  VOICE_HANDOFF_NUMBER: z.preprocess(blankIsUnset, z.string().optional()),
   /** The team member a handoff is recorded against (`calls.handoff_to_user_id`). */
   VOICE_HANDOFF_USER_EMAIL: z.preprocess(blankIsUnset, z.string().email().optional()),
 
@@ -64,13 +70,13 @@ const schema = z.object({
    * around it (opt-out and handoff are detected on the caller's words, not
    * left to the model).
    */
-  ANTHROPIC_API_KEY: z.string().optional(),
-  VOICE_MODEL: z.string().default('claude-haiku-4-5-20251001'),
+  ANTHROPIC_API_KEY: z.preprocess(blankIsUnset, z.string().optional()),
+  VOICE_MODEL: z.preprocess(blankIsUnset, z.string().default('claude-haiku-4-5-20251001')),
 
   /** TTS/STT choices, passed through to `<ConversationRelay>`. */
-  VOICE_LANGUAGE: z.string().default('en-US'),
-  VOICE_TTS_PROVIDER: z.string().optional(),
-  VOICE_TTS_VOICE: z.string().optional(),
+  VOICE_LANGUAGE: z.preprocess(blankIsUnset, z.string().default('en-US')),
+  VOICE_TTS_PROVIDER: z.preprocess(blankIsUnset, z.string().optional()),
+  VOICE_TTS_VOICE: z.preprocess(blankIsUnset, z.string().optional()),
 
   /**
    * The single-shot model for call summaries (§5.5).
@@ -89,22 +95,20 @@ const schema = z.object({
    * the agency's hardware, and guessing would turn §5.5's rule off for the
    * deployment that needs it most.
    */
-  OLLAMA_IS_LOCAL: z
-    .string()
-    .optional()
-    .transform((v) => v === undefined || !['false', '0', 'no'].includes(v.toLowerCase())),
-  OPENAI_API_KEY: z.string().optional(),
+  OLLAMA_IS_LOCAL: z.preprocess(blankIsUnset, z.string().optional()).transform(
+    (v) => v === undefined || !['false', '0', 'no'].includes(v.toLowerCase()),
+  ),
+  OPENAI_API_KEY: z.preprocess(blankIsUnset, z.string().optional()),
   /**
    * Accepts that a call transcript may be sent to a third-party model.
    * Off unless somebody turned it on (§5.5).
    */
-  LLM_ALLOW_REMOTE_LEAD_DATA: z
-    .string()
-    .optional()
-    .transform((v) => v !== undefined && ['true', '1', 'yes'].includes(v.toLowerCase())),
+  LLM_ALLOW_REMOTE_LEAD_DATA: z.preprocess(blankIsUnset, z.string().optional()).transform(
+    (v) => v !== undefined && ['true', '1', 'yes'].includes(v.toLowerCase()),
+  ),
 
   /** Hard ceiling on one call, in seconds. A stuck session ends. */
-  VOICE_MAX_CALL_SECONDS: z.coerce.number().int().positive().default(900),
+  VOICE_MAX_CALL_SECONDS: z.preprocess(blankIsUnset, z.coerce.number().int().positive().default(900)),
 })
 
 export type Env = z.infer<typeof schema>

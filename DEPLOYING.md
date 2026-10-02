@@ -175,7 +175,9 @@ Never set `VERCEL_ENV` — the platform does, and the cron routes read it.
 Every one fails closed: unset, its feature is off, the screens that depend on
 it say so, and nothing else changes. All three processes — the web app here,
 the worker and the voice service on their own hosts — read a BLANK value as
-unset, so a copied `.env.example` cannot stop any of them booting; a present
+unset (in the web app, every variable in this table but `RESCAN_BATCH_SIZE`,
+which refuses a blank: leave it out or give it a number), so a copied
+`.env.example` cannot stop any of them booting; a present
 value of the wrong shape is refused at boot, with a message that names the
 variable and never the value.
 

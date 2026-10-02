@@ -4561,14 +4561,21 @@ features nobody had turned on. In the web app `CRON_SECRET`,
 `RESEND_API_KEY`, `DOVESOFT_WEBHOOK_SECRET`, `DOVESOFT_ORG_ID` and
 `INBOUND_WEBHOOK_SECRET` are wrapped in
 `z.preprocess(blankIsUnset, …)`; a present short value is still refused. The
-worker does the same for `UNSUBSCRIBE_SECRET`, `WEB_PUBLIC_URL`,
-`SLACK_WEBHOOK_URL`, `LLM_PROVIDER`, `LLM_MODEL`, `AGENT_MODEL`,
-`OLLAMA_BASE_URL`, the three `DOVESOFT_*` (a blank `DOVESOFT_BASE_URL` is
-DoveSoft's own API) and
-`OUTREACH_BOUNCE_PAUSE_PCT` — a blank threshold is its default, 5, never 0,
-which would pause a campaign on its first bounce — and the voice service for
-`VOICE_PUBLIC_URL`, `VOICE_ORG_ID`, `VOICE_HANDOFF_USER_EMAIL`,
-`LLM_PROVIDER`, `LLM_MODEL` and `OLLAMA_BASE_URL` (§3). The Slack host
+worker and the voice service wrap EVERY entry but the required ones
+(`DATABASE_URL`, and the worker's `AGENT_INTERNAL_TOKEN`) — the base's
+`UNSUBSCRIBE_SECRET`, `WEB_PUBLIC_URL`, `SLACK_WEBHOOK_URL`, `LLM_*` and the
+three `DOVESOFT_*` (a blank `DOVESOFT_BASE_URL` is DoveSoft's own API) among
+them — so a blank takes the default everywhere: a blank
+`OUTREACH_BOUNCE_PAUSE_PCT` is 5, never 0, which would pause a campaign on its
+first bounce; a blank `IMAP_SECURE` is TLS, where it had read as `false`; a
+blank `LLM_MODEL`, `AGENT_MODEL` or `VOICE_MODEL` is no model rather than one
+called `''`; and a blank port or pool size is its default rather than a
+refused 0 (§3). Each app's `test/env.test.ts` reads the variable names from
+the schema's source and checks blank against absent for every one, so a
+variable added later is covered without being listed. The web app's schema
+is narrower — a blank `AGENT_URL`, `AGENT_INTERNAL_TOKEN` or numeric variable
+is still refused at boot, loudly, and `.env.example` gives each a value or
+says to generate one. The Slack host
 refinement is hoisted into a const so its schema entry sits on one line,
 because `packages/db/test/deployment.test.ts` reads `env.ts` line by line
 and took a multi-line entry for a REQUIRED variable.
