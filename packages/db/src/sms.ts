@@ -1692,7 +1692,9 @@ async function optOutLost(
  * email went. Those, an unsubscribe's and a teammate's pause stand; the
  * row still lists the holder, and Resume refuses any pause of a holder it
  * lists while the number is unrecorded (`heldForUnrecordedSharedNumber`).
- * `paused` counts the pauses written, so `contacts - paused` stood.
+ * `paused` still counts the holders held once it has run — by this pause,
+ * or by one of theirs that stood, which `kept` counts apart — so a shortfall
+ * is still a write that failed, for a person to pause by hand.
  *
  * The row never names them as its subject or as `detail.contactId`: the
  * inbox reads a row that does as THAT contact's own opt-out nobody
@@ -1716,9 +1718,12 @@ async function sharedNumberOptOutLost(
 ): Promise<void> {
   if (args.contactIds.length === 0) return
   let paused = 0
+  let kept = 0
   for (const contactId of args.contactIds) {
     try {
-      if (await holdHard(db, args.orgId, contactId, sharedNumberOptOutReason(args.now, args.why), args.now)) paused++
+      const held = await holdHard(db, args.orgId, contactId, sharedNumberOptOutReason(args.now, args.why), args.now)
+      if (held !== 'not_held') paused++
+      if (held === 'kept') kept++
     } catch (err) {
       log.error('an opt-out that was not recorded could not pause the contact', {
         contactId,
@@ -1739,6 +1744,7 @@ async function sharedNumberOptOutLost(
       sharedNumber: true,
       contacts: args.contactIds.length,
       paused,
+      ...(kept > 0 ? { kept } : {}),
       holders: [...args.contactIds],
     },
   }).catch(() => {})
@@ -1766,7 +1772,13 @@ async function sharedNumberOptOutLost(
  * per transaction, as each was its own write before: a fault on one leaves
  * the others' pauses written.
  */
-async function holdHard(db: AgencyDb, orgId: string, contactId: string, reason: string, now: Date): Promise<boolean> {
+async function holdHard(
+  db: AgencyDb,
+  orgId: string,
+  contactId: string,
+  reason: string,
+  now: Date,
+): Promise<'paused' | 'kept' | 'not_held'> {
   return db.transaction(async (transaction) => {
     const tx = transaction as unknown as AgencyDb
     const [current] = await tx
@@ -1774,13 +1786,16 @@ async function holdHard(db: AgencyDb, orgId: string, contactId: string, reason: 
       .from(schema.contacts)
       .where(and(eq(schema.contacts.orgId, orgId), eq(schema.contacts.id, contactId)))
       .for('no key update')
-    if (!current) return false
-    if (current.pausedAt === null) return pauseContact(tx, orgId, contactId, reason, now)
+    if (!current) return 'not_held'
     const was = current.pausedReason
-    if (was === null || !(pauseReasonClass(was) === 'replied' || isSharedNumberHoldPause(was) || isSharedNumberOptOutPause(was))) {
-      return false
-    }
-    return pauseContact(tx, orgId, contactId, reason, now, { replacing: was })
+    const over =
+      current.pausedAt === null
+        ? {}
+        : was !== null && (pauseReasonClass(was) === 'replied' || isSharedNumberHoldPause(was) || isSharedNumberOptOutPause(was))
+          ? { replacing: was }
+          : null
+    if (over === null) return 'kept'
+    return (await pauseContact(tx, orgId, contactId, reason, now, over)) ? 'paused' : 'not_held'
   })
 }
 

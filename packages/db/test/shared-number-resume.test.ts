@@ -218,10 +218,10 @@ describe('a holder’s stronger pause, and the key an own opt-out was about (rev
     await sharedStopNotRecorded()
     expect(await reasonOf(x)).toBe(own)
     // The org's one row still lists X among the number's holders, and says
-    // how many the loud path paused: none — X was already held harder.
+    // X is held — by their own pause, which stood (`kept`).
     const [row] = await db.select().from(schema.auditLog).where(eq(schema.auditLog.action, 'contact.opt_out_not_recorded'))
       .then((rows) => rows.filter((r) => (r.detail as Record<string, unknown>)['sharedNumber'] === true))
-    expect(row?.detail).toMatchObject({ contacts: 1, paused: 0, holders: [x] })
+    expect(row?.detail).toMatchObject({ contacts: 1, paused: 1, kept: 1, holders: [x] })
 
     // DoveSoft's retry records the number; X's pause is not "eased".
     expect(await redeliver()).toMatchObject({ duplicate: true, suppressed: true })
