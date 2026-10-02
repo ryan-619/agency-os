@@ -125,9 +125,13 @@ describe('what a holder is told', () => {
 
   /** contactResumeByHand lifts it once a phone suppression matches the holder's number — the route's own check. */
   it('is right about what lifts it', () => {
+    // Resume refuses a holder only while the number they hold is unrecorded:
+    // inbox.ts asks sms.ts, which reads the phone suppression in their org.
     const inbox = read('../../../packages/db/src/inbox.ts')
     expect(inbox).toContain('isSharedNumberOptOutPause(contact.pausedReason)')
-    expect(inbox).toContain("suppressionKeysFor(contact.phone, 'sms')")
+    expect(inbox).toContain('heldForUnrecordedSharedNumber(tx, args.orgId, contact)')
+    const sms = read('../../../packages/db/src/sms.ts')
+    expect(sms).toMatch(/export async function heldForUnrecordedSharedNumber\([\s\S]*?normalisePhone\(contact\.phone\)[\s\S]*?unsuppressedIn\(db, \[orgId\], e164\)/)
   })
 
   it('is rendered with the suppression list as a link', () => {

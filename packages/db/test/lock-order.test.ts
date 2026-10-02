@@ -178,4 +178,14 @@ describe('contact before touch', () => {
     // Easing touches no message at all.
     expect(body('async function releaseEach(', sms)).not.toContain('schema.touches')
   })
+
+  it('the holders’ loud path locks one holder at a time FOR NO KEY UPDATE, and touches no message (review round 9)', () => {
+    const hard = body('async function holdHard(', sms)
+    expect(hard.indexOf('.from(schema.contacts)')).toBeGreaterThan(-1)
+    expect(hard.indexOf(".for('no key update')")).toBeGreaterThan(hard.indexOf('.from(schema.contacts)'))
+    expect(hard).not.toContain(".for('update')")
+    expect(hard.match(/\.for\(/g)).toHaveLength(1)
+    expect(hard).not.toContain('schema.touches')
+    expect(hard).not.toContain('pauseContactOverriding')
+  })
 })

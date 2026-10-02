@@ -720,6 +720,15 @@ describe('sentenceFor', () => {
       /; only 1 of the 3 could be paused — pause the rest by hand$/,
     )
     expect(say({ channel: 'sms', why: 'Error', sharedNumber: true, contacts: 2, paused: 0 })).toMatch(/; none of them could be paused — pause them by hand$/)
+    // A holder whose own pause stood (review round 9) is not eased by a text.
+    expect(say({ channel: 'sms', why: 'record_failed', sharedNumber: true, contacts: 2, paused: 2, kept: 1 })).toMatch(
+      /lifts; 1 of them was already held by a pause of their own, which stands — no text changes it, and Resume lifts it, where Resume may, only once the number is recorded$/,
+    )
+    expect(say({ channel: 'sms', why: 'record_failed', sharedNumber: true, contacts: 1, paused: 1, kept: 1 })).toMatch(/lifts; they were already held by a pause of their own/)
+    expect(say({ channel: 'sms', why: 'Error', sharedNumber: true, contacts: 2, paused: 2, kept: 2 })).toMatch(/lifts; all of them were already held by a pause of their own/)
+    expect(say({ channel: 'sms', why: 'Error', sharedNumber: true, contacts: 3, paused: 2, kept: 2 })).toMatch(
+      /lifts; 2 of them were already held by a pause of their own, which stands — .*; only 2 of the 3 could be paused — pause the rest by hand$/,
+    )
     // Never the asker's sentence, the subject-less one, or a holder's id.
     const words = say({ channel: 'sms', why: 'record_failed', sharedNumber: true, contacts: 1, paused: 1, holders: [SUBJECT] })
     expect(words).not.toContain('from a contact at')

@@ -1098,7 +1098,8 @@ function held(d: unknown, one: string, many: string): string {
  * of them — they may have sent nothing — and what holds them, and what ends
  * it, is: Resume is refused until the number is on the suppression list,
  * and the next text DoveSoft delivers from it after that (its retry of this
- * one included) makes it an ordinary hold Resume lifts.
+ * one included) makes it an ordinary hold Resume lifts — except for a holder
+ * whose own pause stood (`kept`, review round 9), which no text changes.
  */
 function sharedNumberOptOut(d: unknown): string {
   const n = num(d, 'contacts') ?? 1
@@ -1111,11 +1112,20 @@ function sharedNumberOptOut(d: unknown): string {
       : 'the number is NOT on the suppression list; record it by hand on /suppressions, from their record'
   const unpaused =
     p >= n ? '' : p <= 0 ? '; none of them could be paused — pause them by hand' : `; only ${p} of the ${n} could be paused — pause the rest by hand`
+  // A holder already held by a pause of their own keeps it (review round 9):
+  // no text eases it, and Resume lifts it — where Resume may — only once the
+  // number is recorded. `kept` counts them, and `paused` includes them.
+  const k = Math.min(num(d, 'kept') ?? 0, n)
+  const kept =
+    k <= 0
+      ? ''
+      : `; ${k === n ? (n === 1 ? 'they were' : 'all of them were') : `${k} of them ${k === 1 ? 'was' : 'were'}`} already held by a ` +
+        'pause of their own, which stands — no text changes it, and Resume lifts it, where Resume may, only once the number is recorded'
   return (
     `could not record an opt-out texted from a number ${holds} — ${why}. ` +
     'They are not treated as the one who asked, but are held until it is recorded: Resume is refused until then, ' +
     'and the next text DoveSoft delivers from the number after that — its retry of this one included — makes it an ' +
-    `ordinary hold that Resume lifts${unpaused}`
+    `ordinary hold that Resume lifts${kept}${unpaused}`
   )
 }
 
