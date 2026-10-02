@@ -789,12 +789,151 @@ describe('the SMS opt-out reader', () => {
     expect(smsOptOut(text)).toBe(false)
   })
 
+  /**
+   * Review round 8, finding [4]: the capital-STOP reading took any text ending in a capital STOP as
+   * an opt-out unless a negation, an article or one of five place words came right before it. So
+   * "NON STOP", a question typed without its "?", and a place such as "Metro STOP" each wrote an
+   * opted_out reply — never clearable — and a phone suppression in every org holding the number.
+   * Each is one clause with no break before STOP, so only that reading ever saw them.
+   */
+  it.each([
+    // "non stop" is everyday Indian English, and in any case; the hyphenated form was already prose.
+    'Our team monitors it NON STOP',
+    'Working NON STOP 🙏',
+    'We run 24/7 non STOP',
+    'OUR SERVERS RUN NON STOP',
+    'We work Non STOP',
+    'Is this a non-STOP flight',
+    // A question with no question mark: the clause STOP ends opens with a wh-word, or with an
+    // auxiliary or a modal and its subject.
+    'Why STOP',
+    'WHY STOP',
+    'Who said STOP',
+    'Can I STOP',
+    'When does it STOP',
+    'Should I STOP',
+    'Shall we STOP',
+    'Which STOP',
+    'Is it ok to STOP',
+    'Do you sell STOP',
+    'How do I STOP',
+    'How to STOP',
+    'Can we STOP',
+    'Should I reply STOP',
+    'Can I STOP NOW',
+    'Hi. Why STOP',
+    '🤔 Why STOP',
+    'Ok, when does it STOP',
+    // A place, a determiner or a possessive before it makes STOP a noun.
+    'Sure, I am at the Metro STOP',
+    'REACHED METRO STOP',
+    'Meet me at Metro STOP',
+    'Wait at the railway station STOP',
+    'Get down at Thane rly STOP',
+    'Is this a railway STOP',
+    'Waiting at the train STOP',
+    'Meet at the tram STOP',
+    'I am at the bus terminal STOP',
+    'Reached the depot STOP',
+    'Waiting at the signal STOP',
+    'Near the toll STOP',
+    'Get off at the final STOP',
+    'It is only the first STOP',
+    'The train halts at every STOP',
+    'Get off at each STOP',
+    'We are your ONE STOP',
+    'I am at your STOP',
+    'This is my STOP',
+    'Yes please send me the details FULL STOP',
+    // "stop by", "stop in", "stop over" and "stop off" are a visit, not a footer keyword and a token.
+    'Sure, I’ll STOP BY',
+    'I can STOP BY',
+    'Got it, will STOP BY',
+    'Can you STOP BY',
+    'Happy to STOP IN',
+    'We will STOP OVER',
+    'I can STOP OFF',
+  ])('does not read %j as an opt-out — NON STOP, a question, a place or a visit (round 8)', (text) => {
+    expect(smsOptOut(text)).toBe(false)
+  })
+
+  /**
+   * What the round 8 fix keeps. A question refuses only the bare word STOP, which a question can end
+   * in ("Why STOP"); the keywords that exist only to leave a list are read whatever comes before
+   * them ("How do I UNSUBSCRIBE" asks for exactly that), and so is STOP with ALL or a short code. A
+   * question that ends before the keyword ends in a command: one addressed to the sender, ending in
+   * "you", "me", "us", "my number", "this" or the texts — a request ("Can you STOP") or a complaint ("When
+   * will you STOP", "Why are you texting me STOP") — one asking who is texting ("Who is this STOP"),
+   * and "how many times". "No STOP" and "Do STOP" are commands, so "no" and an auxiliary alone
+   * refuse nothing, and the whole-message and clause readings are unchanged ("Why? Stop").
+   */
+  it.each([
+    'Can you STOP',
+    'Could you please STOP',
+    'Will you STOP',
+    'Can u pls STOP',
+    'CAN YOU STOP',
+    'Can you STOP NOW',
+    'Why don’t you STOP',
+    'why dont you just STOP',
+    'who is this STOPALL',
+    'Who is this STOP',
+    'WHO IS THIS STOP',
+    'who are you STOP',
+    'Whos this STOP',
+    'What is this STOP',
+    'Who is this STOP ACMEIN',
+    'When will you STOP',
+    'Why won’t you STOP',
+    'Why did you STOP',
+    'Why are you texting me STOP',
+    'Why do you keep messaging us STOP',
+    'Why are you sending me messages STOP',
+    'Why do you keep texting STOP',
+    'When do the messages STOP',
+    'Why so much spam STOP',
+    'Who sent this STOP',
+    'Why do you send these STOP',
+    'How many times do I have to say STOP',
+    'How many times STOP',
+    'What is this nonsense STOP',
+    'Who gave you my number STOP',
+    'How did you get this number STOP',
+    'How do I UNSUBSCRIBE',
+    'Can I OPT OUT',
+    'How to UNSUB',
+    'Why STOPALL',
+    'Can I STOP ALL',
+    'How do I STOP 56161',
+    'No STOP',
+    'Do STOP',
+    'Why? Stop',
+    'Why? STOP',
+    'Who is this? Wrong number STOP',
+    'Not interested STOP',
+    'No thanks STOP 56161',
+    'Wrong number STOP',
+    'Please do STOP',
+    'make it STOP',
+    'I want you to STOP',
+    'Make this STOP',
+    'Stop',
+    'Who is this? Stop texting me',
+  ])('reads %j as an opt-out — a request, a whole question, or a keyword only a list has (round 8)', (text) => {
+    expect(smsOptOut(text)).toBe(true)
+  })
+
   it('reads a long text in linear time — the capital-STOP reading adds no backtracking', () => {
     const long = `${'word '.repeat(3000)}STOP`
     const started = performance.now()
     expect(smsOptOut(long)).toBe(true)
     expect(smsOptOut(`${'a'.repeat(16_000)} STOP`)).toBe(true)
     expect(smsOptOut(`${'A'.repeat(16_000)}STOP`)).toBe(false)
+    // Round 8's question reading reads the last clause's words once, each test on a bounded few.
+    expect(smsOptOut(`Why ${'word '.repeat(3000)}STOP`)).toBe(false)
+    expect(smsOptOut(`Can you ${'please '.repeat(2500)}STOP`)).toBe(true)
+    expect(smsOptOut(`${'u please '.repeat(1800)}STOP`)).toBe(true)
+    expect(smsOptOut(`${'why, '.repeat(3000)}why STOP`)).toBe(false)
     expect(performance.now() - started).toBeLessThan(500)
   })
 })
