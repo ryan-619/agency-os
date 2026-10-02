@@ -26,6 +26,16 @@
  * every claim `failed` and then re-paused; the inbox's answer
  * (`replyQueueDraft`) and its reclassify locked the REPLY row and then the
  * contact. Each now takes the person first.
+ *
+ * Review round 8, [6]: the lock STRENGTH matters too. `holdEach` (sms.ts)
+ * read a shared number's holders `FOR UPDATE` — the one row lock that
+ * conflicts with the `FOR KEY SHARE` a foreign-key check takes — so
+ * `approveDraft` re-pointing an email draft from one holder to another
+ * (it holds the draft, and its FK check waits on the new holder) deadlocked
+ * with a text from their number (the hold holds the holder, and its cancel
+ * waits on the draft). Reproduced on Postgres 16: 40P01. Both of sms.ts's
+ * holder locks are `FOR NO KEY UPDATE` now, which every writer of
+ * `paused_reason` (an UPDATE of non-key columns) still conflicts with.
  */
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
@@ -35,6 +45,7 @@ const read = (path: string) => readFileSync(fileURLToPath(new URL(path, import.m
 const src = read('../src/outreach.ts')
 const inbox = read('../src/inbox.ts')
 const reconcile = read('../../../apps/agent/src/boot/reconcile.ts')
+const sms = read('../src/sms.ts')
 
 /** The body of one top-level function, comments stripped, so a comment naming a call cannot satisfy the test. */
 function body(signature: string, file = src): string {
@@ -146,5 +157,25 @@ describe('contact before touch', () => {
     const repause = body('export async function repauseForUnansweredReply(')
     expect(repause.indexOf(".for('update')")).toBeGreaterThan(-1)
     expect(repause.indexOf(".for('update')")).toBeLessThan(repause.indexOf("'reply.answer_drafted'"))
+  })
+
+  it('a shared number’s holders are locked FOR NO KEY UPDATE, never FOR UPDATE, in id order, before their messages', () => {
+    for (const signature of ['async function holdEach(', 'async function releaseEach(']) {
+      const fn = body(signature, sms)
+      const contacts = fn.indexOf('.from(schema.contacts)')
+      expect(contacts, signature).toBeGreaterThan(-1)
+      const order = fn.indexOf('.orderBy(schema.contacts.id)', contacts)
+      expect(order, signature).toBeGreaterThan(contacts)
+      expect(fn.indexOf(".for('no key update')", order), signature).toBeGreaterThan(order)
+      // The one lock that waits on an FK check's key-share is gone, and no
+      // other strength stands in for it.
+      expect(fn, signature).not.toContain(".for('update')")
+      expect(fn.match(/\.for\(/g), signature).toHaveLength(1)
+    }
+    // The hold cancels its holders' messages only after it holds them.
+    const hold = body('async function holdEach(', sms)
+    expect(hold.indexOf('.update(schema.touches)')).toBeGreaterThan(hold.indexOf(".for('no key update')"))
+    // Easing touches no message at all.
+    expect(body('async function releaseEach(', sms)).not.toContain('schema.touches')
   })
 })
