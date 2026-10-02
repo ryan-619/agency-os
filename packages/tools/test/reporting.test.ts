@@ -15,6 +15,7 @@ import { z } from 'zod'
 import type { Principal } from '@agency/core'
 import { SEED_DIR, advanceDeal, notesAdd, tasksCreate, type AgencyDb } from '@agency/db'
 import * as schema from '@agency/db/schema'
+import { eq } from 'drizzle-orm'
 import { migratedDb, type TestDb } from '../../db/test/helpers.js'
 import {
   getCompanyTimeline, getComplianceSummary, getPipelineMetrics, searchCrm, type AgencyToolSpec, type ToolContext,
@@ -225,6 +226,81 @@ describe('the reporting tools', () => {
       }
     })
 
+    /**
+     * Review round 5, [10]. /tasks shows a LinkedIn message's words only once
+     * Start has handed them over, and withholds them again while the step is
+     * open and its re-check refuses — and the company page follows the same
+     * rule (`linkedinThreadWithheld`). This low-risk read printed the first
+     * line of every touch, so an approved opener to somebody since
+     * suppressed on LinkedIn reached the model whole, for a teammate to copy
+     * into LinkedIn past every rule Start would run.
+     */
+    describe('a LinkedIn message /tasks would not show', () => {
+      const linkedin = async () => {
+        const [campaign] = await db
+          .insert(schema.campaigns)
+          .values({ orgId, name: 'LinkedIn openers', channel: 'linkedin', status: 'active', autoSend: false, dailyCap: 20 })
+          .returning({ id: schema.campaigns.id })
+        const [jo] = await db
+          .insert(schema.contacts)
+          .values({ orgId, companyId, firstName: 'Jo', linkedinUrl: 'https://www.linkedin.com/in/jo-bloggs', timeZone: 'Europe/London' })
+          .returning({ id: schema.contacts.id })
+        return { campaignId: campaign!.id, contactId: jo!.id }
+      }
+
+      it('prints its status and never its words before Start has handed them over', async () => {
+        const { campaignId, contactId } = await linkedin()
+        await db.insert(schema.touches).values({
+          orgId, companyId, campaignId, contactId, channel: 'linkedin', direction: 'out', status: 'approved',
+          body: 'Hi Jo — LINKEDIN WORDS NOBODY HAS CHECKED\nsecond line', approvedBy: userId, approvedAt: new Date(),
+        })
+        // Suppressed on LinkedIn since it was approved: Start would refuse it.
+        await db.insert(schema.suppressions).values({ orgId, kind: 'linkedin', value: 'in/jo-bloggs', reason: 'asked', source: 'manual' })
+        const out = await run(getCompanyTimeline, { domain: 'rentman.io' })
+        if (!out.ok) throw new Error(out.message)
+        expect(JSON.stringify(out)).not.toContain('LINKEDIN WORDS')
+        const line = events(out.data).find((e) => e.kind === 'message')!.text
+        expect(line).toMatch(/^linkedin message out, approved — words withheld/)
+        expect(line).not.toContain('first line')
+      })
+
+      it('withholds a handed message whose open step the re-check withholds, and shows one whose step is closed', async () => {
+        const { campaignId, contactId } = await linkedin()
+        const handedAt = new Date(Date.now() - 60_000)
+        const [held] = await db.insert(schema.touches).values({
+          orgId, companyId, campaignId, contactId, channel: 'linkedin', direction: 'out', status: 'sent', sentAt: handedAt,
+          providerId: `human:${userId}`, body: 'HELD WORDS of an open step', approvedBy: userId, approvedAt: handedAt,
+        }).returning({ id: schema.touches.id })
+        await db.insert(schema.tasks).values({ orgId, companyId, touchId: held!.id, kind: 'linkedin_send', title: 'Send a LinkedIn message' })
+        const [done] = await db.insert(schema.touches).values({
+          orgId, companyId, campaignId, contactId, channel: 'linkedin', direction: 'out', status: 'sent', sentAt: handedAt,
+          providerId: `human:${userId}`, body: 'HISTORY WORDS of a closed step', approvedBy: userId, approvedAt: handedAt,
+        }).returning({ id: schema.touches.id })
+        await db.insert(schema.tasks).values({
+          orgId, companyId, touchId: done!.id, kind: 'linkedin_send', title: 'Send a LinkedIn message', doneAt: handedAt, doneBy: userId,
+        })
+        // Paused since: /tasks withholds the open step's words.
+        await db.update(schema.contacts).set({ pausedAt: new Date(), pausedReason: 'held by a teammate' }).where(eq(schema.contacts.id, contactId))
+
+        const out = await run(getCompanyTimeline, { domain: 'rentman.io' })
+        if (!out.ok) throw new Error(out.message)
+        const everything = JSON.stringify(out)
+        expect(everything).not.toContain('HELD WORDS')
+        expect(everything).toContain('HISTORY WORDS of a closed step')
+        const texts = events(out.data).filter((e) => e.kind === 'message').map((e) => e.text)
+        expect(texts.filter((t) => t.includes('words withheld'))).toHaveLength(1)
+        expect(out.summary).toContain('A LinkedIn message’s words are shown only where /tasks would show them')
+      })
+
+      it('still prints an email’s first line', async () => {
+        await plant()
+        const out = await run(getCompanyTimeline, { domain: 'rentman.io' })
+        if (!out.ok) throw new Error(out.message)
+        expect(JSON.stringify(out)).toContain('Hi Priya,')
+        expect(JSON.stringify(out)).not.toContain('words withheld')
+      })
+    })
+
     it('labels a note as somebody’s words, and never as observed', async () => {
       await plant()
       const out = await run(getCompanyTimeline, { domain: 'rentman.io' })
@@ -307,7 +383,9 @@ describe('the reporting tools', () => {
 
     // The two counts a review found under-reporting: a queued auto-send row
     // leaves with nobody looking again, and a failed unsubscribe is an
-    // unrecorded opt-out as much as a failed reply is.
+    // unrecorded opt-out as much as a failed reply is. A message on MISSING
+    // evidence is one the send path does not judge by evidence — the one
+    // kind of listed row that really does go as written.
     it('counts a queued message on missing evidence and an unsubscribe that failed to store', async () => {
       await db.insert(schema.touches).values({ orgId, companyId, channel: 'email', direction: 'out', status: 'queued' })
       await db.insert(schema.auditLog).values({
@@ -317,9 +395,64 @@ describe('the reporting tools', () => {
       if (!out.ok) throw new Error(out.message)
       expect(out.summary).toContain('Opt-outs that failed to store: 1 in the last 30 days, 1 all time.')
       expect(out.summary).toContain(
-        'Outbound messages not yet sent on stale or missing evidence: 1 of 1 not yet sent (must be 0) — 0 awaiting approval; ' +
-          '0 approved, 1 queued and 0 sending, which go with no further look.',
+        'Outbound messages not yet sent on stale or missing evidence: 1 of 1 not yet sent (must be 0) — 0 awaiting approval, ' +
+          '0 approved, 1 queued, 0 sending. 0 were written from a scan that is stale now and are refused at sending ' +
+          '(stale_evidence) — waiting to be refused, or to be re-drafted after a re-scan; 0 were written from a scan a newer ' +
+          'successful scan has superseded, and are refused at sending too (stale_evidence) — waiting to be refused, or to be ' +
+          're-drafted from the latest scan; 1 have no successful scan behind ' +
+          'them or answer a reply, so the send path does not judge them by evidence and they go as written unless another ' +
+          'rule stops them — 1 of those with nobody looking again (approved, queued or sending).',
       )
+    })
+
+    // The round-1 review made the send path refuse, at sending, a message
+    // whose words were written from a scan that is stale now. The summary
+    // said such approved and queued rows "go with no further look" — the
+    // opposite of what the sender does, repeated by the model to a person.
+    it('says a message written from a stale scan is refused at sending, not that it goes unlooked-at', async () => {
+      const [contact] = await db.insert(schema.contacts).values({ orgId, companyId, email: 'p@rentman.io' }).returning({ id: schema.contacts.id })
+      const scanAt = new Date(Date.now() - (staleDays + 6) * DAY)
+      await db.insert(schema.scans).values({ orgId, companyId, ranAt: scanAt, ok: true })
+      for (const status of ['approved', 'queued'] as const) {
+        await db.insert(schema.touches).values({
+          orgId, companyId, contactId: contact!.id, channel: 'email', direction: 'out', status,
+          createdAt: new Date(scanAt.getTime() + DAY),
+          ...(status === 'approved' ? { approvedBy: userId, approvedAt: new Date(scanAt.getTime() + DAY) } : {}),
+        })
+      }
+      const out = await run(getComplianceSummary, {})
+      if (!out.ok) throw new Error(out.message)
+      expect(out.summary).not.toContain('go with no further look')
+      expect(out.summary).toContain('2 were written from a scan that is stale now and are refused at sending (stale_evidence)')
+      expect(out.summary).toContain('0 of those with nobody looking again')
+      expect((out.data as { draftsOnStaleEvidence: Record<string, unknown> }).draftsOnStaleEvidence).toMatchObject({
+        count: 2, refusedAtSending: 2, notJudgedAtSending: 0, notJudgedNoFurtherLook: 0,
+        byWhy: { stale: 2, no_evidence: 0, rescanned_since: 0, superseded: 0 },
+      })
+    })
+
+    // Round 4: the send path refuses words written from a scan that is still
+    // fresh once a newer successful scan exists. Counted, and said apart —
+    // "a scan that is stale now" would be false about them.
+    it('says words a newer scan has superseded are refused at sending too, apart from stale ones', async () => {
+      const [contact] = await db.insert(schema.contacts).values({ orgId, companyId, email: 'p@rentman.io' }).returning({ id: schema.contacts.id })
+      const quoted = new Date(Date.now() - 3 * DAY)
+      await db.insert(schema.scans).values({ orgId, companyId, ranAt: quoted, ok: true })
+      await db.insert(schema.scans).values({ orgId, companyId, ranAt: new Date(Date.now() - DAY), ok: true })
+      await db.insert(schema.touches).values({
+        orgId, companyId, contactId: contact!.id, channel: 'email', direction: 'out', status: 'approved',
+        createdAt: new Date(quoted.getTime() + 3_600_000), approvedBy: userId, approvedAt: new Date(quoted.getTime() + 3_600_000),
+      })
+      const out = await run(getComplianceSummary, {})
+      if (!out.ok) throw new Error(out.message)
+      expect(out.summary).toContain('0 were written from a scan that is stale now and are refused at sending (stale_evidence)')
+      expect(out.summary).toContain(
+        '1 were written from a scan a newer successful scan has superseded, and are refused at sending too (stale_evidence)',
+      )
+      expect((out.data as { draftsOnStaleEvidence: Record<string, unknown> }).draftsOnStaleEvidence).toMatchObject({
+        count: 1, refusedAtSending: 1, notJudgedAtSending: 0,
+        byWhy: { stale: 0, no_evidence: 0, rescanned_since: 0, superseded: 1 },
+      })
     })
 
     it('counts one org only', async () => {

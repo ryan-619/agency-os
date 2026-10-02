@@ -66,6 +66,8 @@ describe('the cookie gate', () => {
     '/api/unsubscribe/abc.def', '/unsubscribe/abc.def',
     '/p/abc', '/api/p/abc/accept',
     '/api/inbound/resend',
+    // DoveSoft's pushes (0019): each route demands DOVESOFT_WEBHOOK_SECRET.
+    '/api/inbound/dovesoft/dlr', '/api/inbound/dovesoft/sms', '/api/inbound/dovesoft/sms?token=x',
   ])('lets a caller with no session reach %s', (path) => {
     const res = proxy(request(path))
     expect(res.status).toBe(200)
@@ -78,6 +80,8 @@ describe('the cookie gate', () => {
     '/contacts', '/inbox', '/tasks', '/audit', '/compliance', '/settings', '/settings/team',
     '/api/search', '/api/export/companies', '/api/meetings/x/ics', '/api/users', '/api/notes', '/api/tasks',
     '/api/proposals/x/share', '/api/contacts/x/erase', '/pipeline/analytics',
+    // The DoveSoft screens and the routes behind them are a member's, not a provider's.
+    '/settings/templates', '/api/templates', '/api/templates/import', '/api/templates/x', '/api/contacts/x/sms',
   ])(
     'sends anonymous traffic on %s to /signin',
     (path) => {

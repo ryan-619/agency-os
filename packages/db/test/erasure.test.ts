@@ -23,6 +23,19 @@ import { migratedDb, type TestDb } from './helpers.js'
 
 const NOON = new Date('2026-09-15T12:00:00.000Z')
 
+/** `appendAudit`'s insert, at a stated moment rather than the engine's `now()`. */
+async function appendAuditAt(db: AgencyDb, entry: Parameters<typeof appendAudit>[1], createdAt: Date): Promise<void> {
+  await db.insert(schema.auditLog).values({
+    orgId: entry.orgId,
+    actor: entry.actor,
+    action: entry.action,
+    subjectType: entry.subjectType ?? null,
+    subjectId: entry.subjectId ?? null,
+    detail: entry.detail ?? {},
+    createdAt,
+  })
+}
+
 function capturingLog(): InboundLog & { lines: { message: string; fields: Record<string, unknown> }[] } {
   const lines: { message: string; fields: Record<string, unknown> }[] = []
   return { lines, error: (message, fields) => void lines.push({ message, fields: { ...fields } }) }
@@ -221,6 +234,13 @@ describe('a contact’s record and their erasure', () => {
      * address and left these rows out; now it carries them, and says so.
      */
     it('carries the audit log’s suppression history for their keys, and says it is kept', async () => {
+      // `audit_log.created_at` is `now()`, and PGlite's clock can hand two
+      // back-to-back writes the same instant; the history's tiebreak is a
+      // random uuid, so the order asserted below needs each row its own
+      // moment. Written as `appendAudit` writes them, with the time given.
+      let second = 0
+      const appendAudit = async (_db: AgencyDb, entry: Parameters<typeof appendAuditAt>[1]) =>
+        appendAuditAt(_db, entry, new Date(Date.UTC(2026, 8, 1, 9, 0, second++)))
       // A person adds her current address, and later an owner removes it.
       const added = await addSuppression(db, { orgId, kind: 'email', value: 'priya@rentman.io', reason: 'asked', source: 'manual' })
       if (!added.ok) throw new Error('not added')

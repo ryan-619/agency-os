@@ -1,4 +1,10 @@
-import type { ReplyKind } from '@agency/core'
+import {
+  slackOptOutNotRecordedPayload,
+  slackPayloadOf,
+  type ReplyKind,
+  type SlackOptOutNotRecordedEvent,
+  type SlackPayload,
+} from '@agency/core'
 import { refusalWords } from './refusal-words'
 
 /**
@@ -27,6 +33,12 @@ import { refusalWords } from './refusal-words'
  * testable as data. The origin is an argument — `env().AUTH_URL`, never the
  * Host header — because the link is what somebody clicks, and a forged host
  * would send them somewhere else.
+ *
+ * One message has a second sender. An opt-out that could not be recorded is
+ * also raised by the worker, for a reply it read over IMAP, so that message
+ * — and the cut at Slack's length limit every message gets — is built by
+ * `packages/core/src/slack-payload.ts`, which both processes call: the
+ * channel reads the same bytes whichever one noticed.
  */
 export type NotificationEvent =
   | {
@@ -38,6 +50,14 @@ export type NotificationEvent =
       replyKind: ReplyKind
       paused: boolean
       suppressed: boolean
+      /**
+       * False when the reply came from another address than the contact it
+       * was filed under — a colleague replying all to our message (review
+       * round 8). Their words, and their stop, are not the contact's, so the
+       * message says "somebody else on the thread" and never "they". Absent,
+       * the message is what it always was. A boolean, never the address.
+       */
+      fromIsContact?: false
     }
   | { kind: 'booking'; orgId: string; meetingId: string; companyDomain: string; needsReview: boolean }
   | { kind: 'deal_closed'; orgId: string; dealId: string; companyDomain: string; stage: 'won' | 'lost' }
@@ -48,15 +68,8 @@ export type NotificationEvent =
       companyDomain: string
       via: 'team' | 'share_link'
     }
-  | {
-      kind: 'opt_out_not_recorded'
-      orgId: string
-      /** The touch the request arrived on: the clicked message, or the inbound reply. */
-      touchId: string
-      contactId: string | null
-      /** Which way the person asked: the unsubscribe link, an erasure, or a reply that said stop. */
-      path: 'unsubscribe' | 'erasure' | 'reply'
-    }
+  /** Built in packages/core: the worker raises it too. */
+  | SlackOptOutNotRecordedEvent
   | { kind: 'worker_silent'; orgId: string; lastTickAt: string | null; ageSeconds: number | null }
   | {
       kind: 'digest'
@@ -71,19 +84,21 @@ export type NotificationEvent =
       refusals24h: readonly { code: string; n: number }[]
       optOutsNotRecorded24h: number
       spend24hUsd: string
-      worker: 'never' | 'live' | 'silent' | 'not_configured'
+      worker: DigestWorkerStatus
+      /** The newest heartbeat's instant, ISO — what a retired worker's line dates it by. */
+      workerLastSeenAt: string | null
+      /**
+       * The bounce auto-pauses this run read, and how many get a
+       * `campaign_paused` notice of their own after this message (at most
+       * the cap). Counts only: the rest are named on /campaigns.
+       */
+      campaignPauses: { found: number; notices: number }
       /** Domains, most rotten first. */
       topRotting: readonly string[]
     }
   | { kind: 'campaign_paused'; orgId: string; campaignId: string; bouncePct: number; threshold: number }
 
-export interface SlackPayload {
-  readonly text: string
-  readonly blocks?: readonly unknown[]
-}
-
-/** Slack refuses a `text` past this; a digest with a long tail is cut, not dropped. */
-const MAX_TEXT = 4000
+export type { SlackPayload }
 
 const REPLY_WORDS: Readonly<Record<ReplyKind, string>> = {
   opted_out: 'asked to stop',
@@ -94,11 +109,26 @@ const REPLY_WORDS: Readonly<Record<ReplyKind, string>> = {
   other: 'a reply',
 }
 
-const WORKER_WORDS: Readonly<Record<'never' | 'live' | 'silent' | 'not_configured', string>> = {
+/** The digest's "Worker:" vocabulary — `heartbeatReportedStatus` in packages/db. */
+type DigestWorkerStatus = 'never' | 'live' | 'silent' | 'not_configured' | 'retired'
+
+const WORKER_WORDS: Readonly<Record<Exclude<DigestWorkerStatus, 'retired'>, string>> = {
   never: 'never seen',
   live: 'live',
   silent: 'SILENT — nothing is sending or reading replies',
   not_configured: 'not configured on this deployment',
+}
+
+/**
+ * A session somebody ran by hand and closed more than a week ago, with no
+ * worker configured: dated by its last heartbeat (the UTC day — the instant
+ * is on /settings/deployment) and not called silent, because nobody is being
+ * alerted about it and the line should not read as an alarm.
+ */
+function workerWords(worker: DigestWorkerStatus, lastSeenAt: string | null): string {
+  if (worker !== 'retired') return WORKER_WORDS[worker]
+  const day = lastSeenAt !== null && /^\d{4}-\d{2}-\d{2}T/.test(lastSeenAt) ? lastSeenAt.slice(0, 10) : null
+  return `retired — ${day ? `last seen ${day}; ` : ''}no worker is configured, so nothing is sending or reading replies`
 }
 
 /**
@@ -129,6 +159,27 @@ export function slackMessage(event: NotificationEvent, origin: string): SlackPay
 
   switch (event.kind) {
     case 'reply': {
+      if (event.fromIsContact === false) {
+        // A colleague's reply, filed under the contact our message went to:
+        // whoever is told to act must not act on the contact (review round 8).
+        lines.push(
+          `Reply from ${displayDomain(event.companyDomain)} — ${
+            event.replyKind === 'opted_out'
+              ? 'somebody else on the thread asked to stop'
+              : `${REPLY_WORDS[event.replyKind]}, from somebody else on the thread`
+          }.`,
+        )
+        if (event.suppressed) {
+          lines.push(
+            'The sender’s address is on the suppression list — do not answer them. The contact it was filed under did not ask to stop: do not suppress them.',
+          )
+        } else if (event.paused) {
+          lines.push('The contact it was filed under is paused, as any reply pauses them, until a person decides.')
+        }
+        lines.push(`touch ${event.touchId} · filed under contact ${event.contactId} · sent by somebody other than the contact`)
+        lines.push(companyLink(event.companyDomain, '/inbox'))
+        break
+      }
       lines.push(`Reply from ${displayDomain(event.companyDomain)} — ${REPLY_WORDS[event.replyKind]}.`)
       if (event.suppressed) {
         lines.push('They asked to stop — do not answer. The address is on the suppression list.')
@@ -164,16 +215,9 @@ export function slackMessage(event: NotificationEvent, origin: string): SlackPay
       lines.push(link(`/proposals/${encodeURIComponent(event.proposalId)}`))
       break
     }
-    case 'opt_out_not_recorded': {
-      lines.push(
-        `OPT-OUT NOT RECORDED. Somebody asked to be left alone through ${
-          event.path === 'unsubscribe' ? 'the unsubscribe link' : event.path === 'reply' ? 'a reply' : 'an erasure request'
-        } and no suppression row could be written. A person has to record it now.`,
-      )
-      lines.push(`touch ${event.touchId} · contact ${event.contactId ?? 'unknown'}`)
-      lines.push(link('/suppressions'))
-      break
-    }
+    case 'opt_out_not_recorded':
+      // The worker posts this one too; one builder, so the bytes are the same.
+      return slackOptOutNotRecordedPayload(event, origin)
     case 'worker_silent': {
       lines.push('Worker silent.')
       lines.push(
@@ -200,8 +244,20 @@ export function slackMessage(event: NotificationEvent, origin: string): SlackPay
       if (event.optOutsNotRecorded24h > 0) {
         lines.push(`NEEDS A PERSON: ${event.optOutsNotRecorded24h} opt-out(s) in the last 24h could not be recorded.`)
       }
+      // Past the cap a pause gets no notice of its own; this line is where the
+      // channel hears there were more. A count and the list page, never a name.
+      const shown = Math.max(0, event.campaignPauses.notices)
+      const more = event.campaignPauses.found - shown
+      if (more > 0) {
+        const campaigns = more === 1 ? 'campaign paused itself' : 'campaigns paused themselves'
+        lines.push(
+          shown > 0
+            ? `Campaign pauses: ${shown} announced below, and ${more} more ${campaigns} — see ${link('/campaigns')}`
+            : `${more} ${campaigns} since the last digest — see ${link('/campaigns')}`,
+        )
+      }
       lines.push(`Agent spend in the last 24h: USD ${event.spend24hUsd}`)
-      lines.push(`Worker: ${WORKER_WORDS[event.worker]}`)
+      lines.push(`Worker: ${workerWords(event.worker, event.workerLastSeenAt)}`)
       if (event.topRotting.length > 0) {
         lines.push(`Rotting first: ${event.topRotting.map(displayDomain).join(', ')}`)
       }
@@ -218,6 +274,6 @@ export function slackMessage(event: NotificationEvent, origin: string): SlackPay
     }
   }
 
-  const text = lines.join('\n')
-  return { text: text.length > MAX_TEXT ? `${text.slice(0, MAX_TEXT - 1)}…` : text }
+  // A digest with a long tail is cut at Slack's limit, not dropped.
+  return slackPayloadOf(lines)
 }

@@ -11,6 +11,7 @@ import { getDb } from '@/lib/db'
 import { listCompaniesForOrg, icpForOrg } from '@/lib/queries'
 
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 function tierClass(tier: string | null, qualified: boolean): string {
   if (!tier) return 'pill'
@@ -90,7 +91,6 @@ export default async function Companies({
   return (
     <Shell
       user={user}
-      orgName={icp?.label ?? 'Agency'}
       current="companies"
       signOut={async () => {
         'use server'

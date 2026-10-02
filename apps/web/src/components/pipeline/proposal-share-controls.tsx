@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { When } from '../when'
-import { SHARE_SHOWN_ONCE } from './proposal-share-copy'
+import { SHARE_SHOWN_ONCE, shareStateLabel, type ShareState } from './proposal-share-copy'
 
 /** One link, as the slot hands it over: ISO strings, and a state decided on the server. */
 export interface ShareRowView {
@@ -13,7 +13,7 @@ export interface ShareRowView {
   readonly revokedAt: string | null
   readonly acceptedAt: string | null
   readonly acceptedByName: string | null
-  readonly state: 'accepted' | 'revoked' | 'expired' | 'live'
+  readonly state: ShareState
   readonly viewCount: number
   readonly firstViewedAt: string | null
   readonly lastViewedAt: string | null
@@ -142,7 +142,7 @@ export function ProposalShareControls({
           </thead>
           <tbody>
             {shares.map((s) => (
-              <tr key={s.id} className={s.state === 'revoked' || s.state === 'expired' ? 'row-stale' : undefined}>
+              <tr key={s.id} className={s.state === 'live' || s.state === 'accepted' ? undefined : 'row-stale'}>
                 <td><When iso={s.createdAt} /></td>
                 <td><When iso={s.expiresAt} /></td>
                 <td className="mono">{s.viewCount}</td>
@@ -158,7 +158,7 @@ export function ProposalShareControls({
                   ) : s.state === 'live' ? (
                     <span className="tag">live</span>
                   ) : (
-                    <span className="tag warn">{s.state}</span>
+                    <span className="tag warn">{shareStateLabel(s.state)}</span>
                   )}
                 </td>
                 <td>

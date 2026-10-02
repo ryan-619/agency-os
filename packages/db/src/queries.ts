@@ -25,6 +25,8 @@ export * from './proposals.js'
 export * from './meetings.js'
 export * from './calls.js'
 export * from './outreach.js'
+// A stop whose recording threw, as the webhooks and the IMAP inbox both read it.
+export * from './inbound-fault.js'
 export * from './send-preview.js'
 export * from './pg-errors.js'
 export * from './contacts-ledger.js'
@@ -53,6 +55,9 @@ export * from './linkedin-step.js'
 export * from './proposal-shares.js'
 export * from './erasure.js'
 export * from './connector-tools.js'
+// DoveSoft (0019): the registered templates, and the SMS draft, delivery and inbound recorders.
+export * from './templates.js'
+export * from './sms.js'
 // NOT './smtp.js'. This subpath exists so the Next app can import queries
 // without dragging in `paths.ts` and the migrations directory (CLAUDE.md §4),
 // and the same logic applies to nodemailer: the web app queues messages, the

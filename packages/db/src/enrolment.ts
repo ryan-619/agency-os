@@ -23,14 +23,16 @@
  * count and what they mean — are pure and live in
  * `packages/core/src/enrolment.ts`. This file gathers the rows and writes the
  * drafts, and says the earlier-row rule twice: once in the read that names a
- * skip, and again in the INSERT's own NOT EXISTS, so a race cannot slip a
- * draft past it.
+ * skip, and again in the INSERT's own NOT EXISTS. That statement runs in a
+ * short transaction under a per-person advisory lock (`insertDraft`), so two
+ * enrolments racing for one person write one draft: the NOT EXISTS alone
+ * could not see the other's uncommitted row.
  */
 import { and, eq, inArray, or, sql } from 'drizzle-orm'
 import {
-  DEFAULT_STALE_AFTER_DAYS, ENROL_IGNORED_REFUSALS, ENROL_LIMIT_DEFAULT, ENROL_LIMIT_MAX, enrolCompanyGate,
+  ENROL_IGNORED_REFUSALS, ENROL_LIMIT_DEFAULT, ENROL_LIMIT_MAX, enrolCompanyGate,
   enrolIgnoredStatuses, enrolPriorScope, enrolPriorSkip, enrolSkipCounts, enrollableContact, enrolmentDraft, isStale,
-  parseIcpDefinition, type EnrolChannel, type EnrolPriorRow, type EnrolSkip, type IcpDefinition,
+  parseIcpDefinition, staleAfterDaysOf, type EnrolChannel, type EnrolPriorRow, type EnrolSkip, type IcpDefinition,
 } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
@@ -121,14 +123,19 @@ export async function enrolCampaign(
       message: `${campaign.name} is marked done, so nothing is enrolled into it. Set it back to draft or active first.`,
     }
   }
-  // §2.1: a campaign is cold outreach, and cold is email and LinkedIn only.
-  // `campaignInput` offers nothing else, but the column's CHECK allows five
-  // channels, and a row written some other way must not become cold SMS here.
+  // §2.1: enrolment is cold outreach, and cold is email and LinkedIn only.
+  // `campaignInput` also offers SMS (0019) — a campaign every SMS is filed
+  // under, never one enrolment fills — and the column's CHECK allows five
+  // channels, so a row on any other must not become cold SMS here. The
+  // sentence for an SMS campaign says where its messages ARE written, or
+  // the refusal points nowhere.
   if (campaign.channel !== 'email' && campaign.channel !== 'linkedin') {
     return {
       ok: false,
       reason: 'campaign_channel_unsupported',
-      message: `${campaign.name} is on ${campaign.channel}, which is not a cold channel. Enrolment writes email and LinkedIn drafts only.`,
+      message:
+        `${campaign.name} is on ${campaign.channel}, which is not a cold channel. Enrolment writes email and LinkedIn drafts only.` +
+        (campaign.channel === 'sms' ? ' SMS is drafted per person with Draft SMS on /contacts.' : ''),
     }
   }
   const channel: EnrolChannel = campaign.channel
@@ -147,7 +154,7 @@ export async function enrolCampaign(
       message: 'There is no readable active ICP profile, so nothing can say which companies qualify or what their gaps mean.',
     }
   }
-  const staleAfter = icp.freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
+  const staleAfter = staleAfterDaysOf(icp)
 
   const [org] = await db.select({ name: schema.orgs.name }).from(schema.orgs).where(eq(schema.orgs.id, args.orgId)).limit(1)
   const agencyName = org?.name ?? ''
@@ -347,13 +354,24 @@ async function priorRows(
  * One draft, written only if the person has no earlier row that counts.
  *
  * The check lives in the INSERT's own SELECT rather than in a read before it,
- * so it is one statement: two people pressing Enrol at once can still both
- * pass (neither sees the other's uncommitted row), which leaves at most one
- * extra draft per person — visible in /approvals and deniable. It is not a
- * constraint on purpose: the table legitimately holds several rows for one
- * pair (`sender.test.ts`'s batch-order test inserts five approved rows for
- * one), and
- * a partial unique index would be a migration this feature does not own.
+ * and the statement runs in a short transaction that first takes
+ * `pg_advisory_xact_lock` on (org, contact, channel). On its own the NOT
+ * EXISTS could not see an uncommitted row, so two enrolments pressed at once
+ * — or two auto-send campaigns on one channel, the case `enrolPriorScope`
+ * exists for — could both insert an opener for the same person, and under
+ * auto-send both are `queued` and go out unread; they never reach
+ * /approvals. Review round 3, finding 10. With the lock, the second INSERT
+ * waits for the first transaction to commit and, under READ COMMITTED,
+ * takes its snapshot after it, so its NOT EXISTS sees the first draft. The
+ * key covers every row that can count for the person: a row of this
+ * campaign is on its channel, and under auto-send the rule reads the
+ * channel. The pattern 0018's other writers use (`claimRescan`,
+ * `usersRevoke`), and one that works through a transaction pooler.
+ *
+ * Not a constraint on purpose: the table legitimately holds several rows for
+ * one pair (`sender.test.ts`'s batch-order test inserts five approved rows
+ * for one), and a partial unique index would be a migration this feature
+ * does not own.
  *
  * It is `enrolPriorSkip`'s rule in SQL, over `priorRows`'s rows: a row
  * counts unless it is `refused` with a code in `ENROL_IGNORED_REFUSALS`, or
@@ -377,23 +395,29 @@ async function insertDraft(
 ): Promise<string | null> {
   const list = (values: readonly string[]) => sql.join(values.map((v) => sql`${v}`), sql`, `)
   const ignoredStatuses = enrolIgnoredStatuses(rule.autoSend)
-  const res: unknown = await db.execute(sql`
-    INSERT INTO touches (org_id, campaign_id, contact_id, company_id, channel, direction, status, subject, body)
-    SELECT ${rule.orgId}::uuid, ${rule.campaignId}::uuid, ${d.contactId}::uuid, ${d.companyId}::uuid,
-           ${rule.channel}, 'out', ${d.status}, ${d.subject}, ${d.body}
-    WHERE NOT EXISTS (
-      SELECT 1 FROM touches t
-       WHERE t.org_id = ${rule.orgId}::uuid
-         AND t.contact_id = ${d.contactId}::uuid
-         AND t.direction = 'out'
-         AND (t.campaign_id = ${rule.campaignId}::uuid${
-           enrolPriorScope(rule.autoSend) === 'channel' ? sql` OR t.channel = ${rule.channel}` : sql``
-         })
-         AND NOT (t.status = 'refused' AND coalesce(t.refusal_code, '') IN (${list(ENROL_IGNORED_REFUSALS)}))${
-           ignoredStatuses.length > 0 ? sql` AND t.status NOT IN (${list(ignoredStatuses)})` : sql``
-         }
+  const res: unknown = await db.transaction(async (tx) => {
+    const t = tx as unknown as AgencyDb
+    await t.execute(
+      sql`SELECT pg_advisory_xact_lock(hashtext('enrol.draft'), hashtext(${`${rule.orgId}:${d.contactId}:${rule.channel}`}))`,
     )
-    RETURNING id`)
+    return t.execute(sql`
+      INSERT INTO touches (org_id, campaign_id, contact_id, company_id, channel, direction, status, subject, body)
+      SELECT ${rule.orgId}::uuid, ${rule.campaignId}::uuid, ${d.contactId}::uuid, ${d.companyId}::uuid,
+             ${rule.channel}, 'out', ${d.status}, ${d.subject}, ${d.body}
+      WHERE NOT EXISTS (
+        SELECT 1 FROM touches t
+         WHERE t.org_id = ${rule.orgId}::uuid
+           AND t.contact_id = ${d.contactId}::uuid
+           AND t.direction = 'out'
+           AND (t.campaign_id = ${rule.campaignId}::uuid${
+             enrolPriorScope(rule.autoSend) === 'channel' ? sql` OR t.channel = ${rule.channel}` : sql``
+           })
+           AND NOT (t.status = 'refused' AND coalesce(t.refusal_code, '') IN (${list(ENROL_IGNORED_REFUSALS)}))${
+             ignoredStatuses.length > 0 ? sql` AND t.status NOT IN (${list(ignoredStatuses)})` : sql``
+           }
+      )
+      RETURNING id`)
+  })
   // node-postgres and PGlite both answer `{ rows }`; an array is accepted too
   // so a driver that returns rows bare cannot read as "nothing inserted".
   const rows = Array.isArray(res) ? res : ((res as { rows?: unknown[] } | null)?.rows ?? [])

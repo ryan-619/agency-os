@@ -102,9 +102,10 @@ export function ConnectorCatalog({
       </p>
       <div className="note">
         <strong>Where a credential goes.</strong> It is encrypted before it is stored and decrypted by the
-        worker at the start of each message. For as long as that message runs it is also on the claude
-        process’s command line on the worker host — the SDK hands every connector’s settings over that
-        way — where anyone who can list processes there can read it.
+        worker at the start of each message, then handed to the claude process over its control channel —
+        never on a command line, where anyone who can list processes on the worker host could read it. A
+        server that runs on the worker host receives it in an environment variable, which that host shows to
+        its own user and to root.
       </div>
       {!secretsConfigured ? (
         <div className="note warn">

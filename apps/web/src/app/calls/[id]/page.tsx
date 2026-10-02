@@ -1,12 +1,11 @@
 import { notFound, redirect } from 'next/navigation'
 import { and, eq } from 'drizzle-orm'
-import { parseIcpDefinition, type TranscriptEntry } from '@agency/core'
+import type { TranscriptEntry } from '@agency/core'
 import { readCall, schema, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { When } from '@/components/when'
 import { getDb } from '@/lib/db'
-import { icpForOrg } from '@/lib/queries'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -20,6 +19,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
  * characterising them, so two people reading this read the same thing.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export default async function CallPage({ params }: { params: Promise<{ id: string }> }) {
   const session = await auth()
@@ -29,7 +29,7 @@ export default async function CallPage({ params }: { params: Promise<{ id: strin
   if (!UUID.test(id)) notFound()
 
   const db = getDb() as unknown as AgencyDb
-  const [call, icpRow] = await Promise.all([readCall(db, user.orgId, id), icpForOrg(user.orgId)])
+  const call = await readCall(db, user.orgId, id)
   if (!call) notFound()
 
   const [company] = call.companyId
@@ -41,21 +41,13 @@ export default async function CallPage({ params }: { params: Promise<{ id: strin
     : []
 
   const transcript = (call.transcript ?? []) as TranscriptEntry[]
-  let orgLabel = 'Agency'
-  if (icpRow) {
-    try {
-      orgLabel = parseIcpDefinition(icpRow.definition).label
-    } catch {
-      orgLabel = 'Agency'
-    }
-  }
   const signOutAction = async () => {
     'use server'
     await signOut({ redirectTo: '/signin' })
   }
 
   return (
-    <Shell user={user} orgName={orgLabel} current="calls" signOut={signOutAction}>
+    <Shell user={user} current="calls" signOut={signOutAction}>
       <p className="crumb"><a href="/calls">← Calls</a></p>
       <h1>
         {company ? (company.name ?? company.domain) : 'Call from an unknown number'}

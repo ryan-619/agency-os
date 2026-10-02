@@ -10,7 +10,10 @@
  *     and whether a call is on record decides what it says about Phase 6;
  *   * each flag moves exactly the bullets tied to it, so a "cannot" is
  *     keyed on the fact it names;
- *   * the worker line has one shape per heartbeat status;
+ *   * the worker line has one shape per heartbeat status, and a RETIRED row
+ *     — a session somebody ran by hand and closed over a week ago, with no
+ *     worker configured — is called what the digest and /api/health call
+ *     it, never "silent";
  *   * a counter whose recorder is absent reads "none recorded" and names
  *     what is missing, never a clean zero;
  *   * the feed speaks the audit page's vocabulary, not a second one.
@@ -21,9 +24,13 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { HEARTBEAT_RETIRED_AFTER_DAYS, heartbeatReport, heartbeatReportedStatus } from '@agency/db/queries'
 import type { Deployment } from '../src/lib/deployment-facts'
+import { slackMessage, type NotificationEvent } from '../src/lib/slack-message'
 import {
+  ICP_OUTREACH_NOTE,
   RESCAN_OVERDUE_HOURS,
+  RETIRED_WORKER_WORDS,
   complianceChecksFailing,
   dealsNeedingALook,
   elapsed,
@@ -35,6 +42,9 @@ import {
   quietFeedNote,
   splitLook,
   workerLine,
+  workerSends,
+  workerSendsSms,
+  workerWord,
   type DashboardFacts,
   type FeedRow,
   type LookCounts,
@@ -54,11 +64,14 @@ const BARE: Deployment = {
   unsubscribe: false,
 }
 
-const NO_WORKER: WorkerStatusLike = { configured: false, status: 'not_configured', lastSeenAt: null, outreach: null, chat: null }
-const NEVER: WorkerStatusLike = { configured: true, status: 'never', lastSeenAt: null, outreach: null, chat: null }
+const NO_WORKER: WorkerStatusLike = {
+  configured: false, status: 'not_configured', retired: false, lastSeenAt: null, outreach: null, chat: null,
+}
+const NEVER: WorkerStatusLike = { configured: true, status: 'never', retired: false, lastSeenAt: null, outreach: null, chat: null }
 const LIVE: WorkerStatusLike = {
   configured: true,
   status: 'live',
+  retired: false,
   lastSeenAt: ago(120),
   outreach: 'send-and-receive',
   chat: 'enabled',
@@ -66,6 +79,12 @@ const LIVE: WorkerStatusLike = {
 const SILENT: WorkerStatusLike = { ...LIVE, status: 'silent', lastSeenAt: ago(3 * 3_600 + 5) }
 /** A worker on Fly writing to this database while this web app has no AGENT_URL. */
 const LIVE_ELSEWHERE: WorkerStatusLike = { ...LIVE, configured: false }
+/**
+ * `./tools/run-worker.sh` run once against this database nine days ago and
+ * closed, on a deployment with no worker configured: `heartbeatReport` keeps
+ * the status `silent` and sets `retired`.
+ */
+const RETIRED: WorkerStatusLike = { ...LIVE, configured: false, status: 'silent', retired: true, lastSeenAt: ago(9 * 86_400) }
 
 const FACTS: DashboardFacts = { now: NOW, lastRescanAt: null, callsOnRecord: 0 }
 
@@ -74,10 +93,15 @@ const SHAPES: readonly { name: string; d: Deployment; w: WorkerStatusLike }[] = 
   { name: 'worker configured, never reported', d: { ...BARE, worker: true }, w: NEVER },
   { name: 'worker live', d: { ...BARE, worker: true }, w: LIVE },
   { name: 'worker silent', d: { ...BARE, worker: true }, w: SILENT },
+  { name: 'worker retired', d: BARE, w: RETIRED },
   { name: 'worker live elsewhere', d: BARE, w: LIVE_ELSEWHERE },
   { name: 'worker live, outreach off', d: { ...BARE, worker: true }, w: { ...LIVE, outreach: 'disabled' } },
   { name: 'worker live, send-only', d: { ...BARE, worker: true }, w: { ...LIVE, outreach: 'send-only' } },
   { name: 'worker live, receive-only', d: { ...BARE, worker: true }, w: { ...LIVE, outreach: 'receive-only' } },
+  { name: 'worker live, mailbox off, SMS on', d: { ...BARE, worker: true }, w: { ...LIVE, outreach: 'disabled', sms: 'on' } },
+  { name: 'worker live, sending and receiving, SMS on', d: { ...BARE, worker: true }, w: { ...LIVE, sms: 'on' } },
+  { name: 'worker live, sending and receiving, SMS off', d: { ...BARE, worker: true }, w: { ...LIVE, sms: 'off' } },
+  { name: 'worker live elsewhere, receive-only, SMS on', d: BARE, w: { ...LIVE_ELSEWHERE, outreach: 'receive-only', sms: 'on' } },
   { name: 'webhook, no worker', d: { ...BARE, inbound: 'webhook' }, w: NO_WORKER },
   {
     name: 'everything configured',
@@ -124,6 +148,10 @@ describe('honestyHeadline', () => {
     expect(honestyHeadline(BARE, NO_WORKER, FACTS).text).toContain('Nothing on this deployment is sending: no worker is connected.')
     expect(honestyHeadline({ ...BARE, worker: true }, NEVER, FACTS).text).toContain('no worker has ever reported in')
     expect(honestyHeadline({ ...BARE, worker: true }, SILENT, FACTS).text).toContain('the worker has gone quiet')
+    expect(honestyHeadline(BARE, RETIRED, FACTS).text).toContain(
+      'Nothing on this deployment is sending: the last worker to report in has retired.',
+    )
+    expect(honestyHeadline(BARE, RETIRED, FACTS).text).not.toMatch(/gone quiet|silent/i)
     expect(honestyHeadline({ ...BARE, worker: true }, { ...LIVE, outreach: 'disabled' }, FACTS).text).toContain(
       'the worker is running with outreach switched off',
     )
@@ -132,6 +160,25 @@ describe('honestyHeadline', () => {
   it('does not warn when a worker is live and sending', () => {
     expect(honestyHeadline({ ...BARE, worker: true }, LIVE, FACTS)).toMatchObject({ tone: 'ok' })
     expect(honestyHeadline(BARE, LIVE_ELSEWHERE, FACTS)).toMatchObject({ tone: 'ok' })
+  })
+
+  /** Texts are sends: the send path runs, checks every rule and records what it refused. */
+  it('does not say nothing is sending while the worker sends texts, whatever its mailbox says', () => {
+    for (const outreach of ['disabled', 'receive-only', null]) {
+      const w = { ...LIVE, outreach, sms: 'on' as const }
+      expect(honestyHeadline({ ...BARE, worker: true }, w, FACTS)).toMatchObject({ tone: 'ok' })
+      expect(workerSends(w)).toBe(true)
+      expect(workerSendsSms(w)).toBe(true)
+    }
+    // Off, or not said, it is the mailbox alone, as before.
+    for (const sms of ['off', null, undefined] as const) {
+      expect(honestyHeadline({ ...BARE, worker: true }, { ...LIVE, outreach: 'disabled', sms }, FACTS).text).toContain(
+        'Nothing on this deployment is sending: the worker is running with outreach switched off.',
+      )
+    }
+    // A silent worker sends nothing, whatever its last row said about SMS.
+    expect(workerSends({ ...SILENT, sms: 'on' })).toBe(false)
+    expect(honestyHeadline({ ...BARE, worker: true }, { ...SILENT, sms: 'on' }, FACTS).text).toContain('the worker has gone quiet')
   })
 })
 
@@ -153,9 +200,24 @@ describe('honestyBullets', () => {
 
   it('says the three things no deployment of this build does, on every shape', () => {
     for (const { d, w } of SHAPES) {
-      expect(ids(d, w)).toEqual(expect.arrayContaining(['no-calls-or-texts', 'no-sourcing', 'no-invitations']))
+      expect(ids(d, w)).toEqual(expect.arrayContaining(['no-calls', 'no-sourcing', 'no-invitations']))
     }
-    expect(text(bullet(BARE, NO_WORKER, 'no-calls-or-texts'))).toMatch(/no code path for either/)
+    expect(text(bullet(BARE, NO_WORKER, 'no-calls'))).toMatch(/no code path for one/)
+  })
+
+  /**
+   * "Nothing here can place a call or send a text. There is no code path for
+   * either" stopped being true with 0019: a text has a code path, the
+   * worker's, through DoveSoft. The bullet keeps the call's "none" and says
+   * where a text goes, on every shape.
+   */
+  it('no longer says there is no code path for a text, and says where one goes', () => {
+    for (const { d, w } of SHAPES) {
+      const said = text(bullet(d, w, 'no-calls'))
+      expect(said).not.toMatch(/send a text|no code path for either/)
+      expect(said).toContain('A text is sent only by the worker, through DoveSoft, from a registered template')
+      expect(said).toContain('never from this page')
+    }
   })
 
   describe('the worker', () => {
@@ -164,10 +226,11 @@ describe('honestyBullets', () => {
       expect(ids({ ...BARE, worker: true }, NEVER)[0]).toBe('worker-never')
       expect(ids({ ...BARE, worker: true }, SILENT)[0]).toBe('worker-silent')
       expect(ids({ ...BARE, worker: true }, LIVE)[0]).toBe('worker-live')
+      expect(ids(BARE, RETIRED)[0]).toBe('worker-retired')
     })
 
     it('never says a worker is running unless one reported in within the threshold', () => {
-      for (const w of [NO_WORKER, NEVER, SILENT]) {
+      for (const w of [NO_WORKER, NEVER, SILENT, RETIRED]) {
         for (const b of honestyBullets({ ...BARE, worker: true }, w, FACTS)) {
           expect(text(b)).not.toMatch(/A worker is running|Chat runs in it|reads the mailbox for replies/)
         }
@@ -178,6 +241,17 @@ describe('honestyBullets', () => {
       expect(bullet({ ...BARE, worker: true }, SILENT, 'worker-silent').rest).toContain('Nothing has reported in for 3 hours.')
     })
 
+    it('calls a retired worker retired, with the digest’s words, and never quiet or silent', () => {
+      const b = bullet(BARE, RETIRED, 'worker-retired')
+      expect(b.lead).toBe('The last worker to report in has retired.')
+      expect(b.rest).toContain(`It was last seen 9 days ago and ${RETIRED_WORKER_WORDS}.`)
+      // A reading of the row, not knowledge of its history: a worker on another
+      // host that died a week ago reads the same.
+      expect(b.rest).toContain('if one is meant to be running elsewhere against this database, it has stopped')
+      expect(text(b)).not.toMatch(/gone quiet|silent/i)
+      expect(ids(BARE, RETIRED)).not.toContain('worker-silent')
+    })
+
     it('says what a live worker said it is doing, and nothing it did not', () => {
       const d = { ...BARE, worker: true }
       expect(bullet(d, LIVE, 'worker-live').rest).toMatch(/sends approved messages.*reads the mailbox/)
@@ -185,6 +259,57 @@ describe('honestyBullets', () => {
       expect(bullet(d, { ...LIVE, outreach: 'receive-only' }, 'worker-live').rest).toContain('is not sending')
       expect(bullet(d, { ...LIVE, outreach: 'disabled' }, 'worker-live').rest).toContain('nothing is sent and no mailbox is read')
       expect(bullet(d, { ...LIVE, chat: 'disabled' }, 'worker-live').rest).toContain('Its chat is switched off.')
+    })
+
+    /**
+     * `outreach` is the MAILBOX. A worker with no SMTP and DoveSoft on wrote
+     * `outreach: 'disabled'` and `sms: 'on'`, and the bullet said "nothing is
+     * sent" while it sent texts.
+     */
+    it('says a worker with its mailbox off and DoveSoft on sends approved SMS, and that email outreach is off', () => {
+      const d = { ...BARE, worker: true }
+      const rest = bullet(d, { ...LIVE, outreach: 'disabled', sms: 'on' }, 'worker-live').rest
+      expect(rest).toContain('It sends approved SMS through DoveSoft, checking every rule again at the moment of sending.')
+      expect(rest).toContain('Its email outreach is switched off: no email is sent and no mailbox is read.')
+      expect(rest).not.toContain('nothing is sent')
+    })
+
+    it('names the texts beside the mail in every other live mailbox mode with DoveSoft on', () => {
+      const d = { ...BARE, worker: true }
+      const say = (outreach: string | null) => bullet(d, { ...LIVE, outreach, sms: 'on' }, 'worker-live').rest
+      expect(say('send-and-receive')).toBe(
+        'It sends approved messages through the one send path — email, and texts through DoveSoft — checking every ' +
+          'rule again at the moment of sending, and reads the mailbox for replies. Chat runs in it.',
+      )
+      expect(say('send-only')).toContain('email, and texts through DoveSoft')
+      expect(say('send-only')).toContain('It is not reading a mailbox.')
+      expect(say('receive-only')).toContain('It sends approved SMS through DoveSoft')
+      expect(say('receive-only')).toContain('It is not sending email: approved emails wait in the queue.')
+      expect(say('receive-only')).not.toMatch(/is not sending:/)
+      expect(say(null)).toContain('It has not said whether it sends email or reads a mailbox.')
+    })
+
+    it('says SMS is off where the worker said so and its mail words could cover texts', () => {
+      const d = { ...BARE, worker: true }
+      const off = (outreach: string) => bullet(d, { ...LIVE, outreach, sms: 'off' }, 'worker-live').rest
+      expect(off('send-and-receive')).toContain('SMS is switched off in it, so an approved text waits in the queue.')
+      expect(off('send-only')).toContain('SMS is switched off in it')
+      // "nothing is sent" and "is not sending" already cover a text.
+      expect(off('disabled')).toBe('Its outreach is switched off: nothing is sent and no mailbox is read. Chat runs in it.')
+      expect(off('receive-only')).not.toContain('SMS')
+    })
+
+    /** A worker from before 0019 wrote nothing about SMS, and sent none: nothing is said about it. */
+    it('says nothing about SMS for a row that does not say, as before', () => {
+      const d = { ...BARE, worker: true }
+      for (const outreach of ['send-and-receive', 'send-only', 'receive-only', 'disabled', null]) {
+        for (const w of [{ ...LIVE, outreach }, { ...LIVE, outreach, sms: null }]) {
+          expect(bullet(d, w, 'worker-live').rest).not.toMatch(/SMS|DoveSoft|text/)
+        }
+      }
+      expect(bullet(d, { ...LIVE, outreach: 'disabled', sms: null }, 'worker-live').rest).toContain(
+        'nothing is sent and no mailbox is read',
+      )
     })
 
     it('says chat is unavailable here when the worker is live but this deployment cannot reach it', () => {
@@ -207,6 +332,17 @@ describe('honestyBullets', () => {
       expect(ids({ ...BARE, worker: true }, LIVE)).toContain('inbound-worker')
       expect(ids({ ...BARE, worker: true }, { ...LIVE, outreach: 'receive-only' })).toContain('inbound-worker')
       expect(ids({ ...BARE, worker: true }, { ...LIVE, outreach: 'send-only' })).toContain('inbound-none')
+    })
+
+    it('says only texts arrive when DoveSoft’s webhook is the one way in (0019)', () => {
+      const sms = { ...BARE, smsInbound: true }
+      expect(ids(sms, NO_WORKER)).toContain('inbound-sms-only')
+      expect(ids(sms, NO_WORKER)).not.toContain('inbound-none')
+      expect(bullet(sms, NO_WORKER, 'inbound-sms-only').rest).toBe(
+        'No worker is connected and no inbound email webhook is configured, so an email reply reaches nothing. ' +
+          'Texts a contact sends back, a STOP included, arrive through DoveSoft’s webhook.',
+      )
+      expect(bullet({ ...sms, inbound: 'webhook' }, NO_WORKER, 'inbound-webhook').rest).toContain('arrive through DoveSoft’s webhook')
     })
 
     it('says nothing can learn of a reply, and why, when neither exists', () => {
@@ -330,6 +466,29 @@ describe('workerLine', () => {
     expect(workerLine(LIVE_ELSEWHERE, NOW).tail).toBe('sending and receiving · chat is not reachable from this deployment')
   })
 
+  it('live: says "texts through DoveSoft" when SMS is on, with the mailbox words saying which half is email', () => {
+    expect(workerLine({ ...LIVE, sms: 'on' }, NOW).tail).toBe('sending and receiving email · texts through DoveSoft · chat on')
+    expect(workerLine({ ...LIVE, outreach: 'send-only', sms: 'on' }, NOW).tail).toBe(
+      'sending email, not reading replies · texts through DoveSoft · chat on',
+    )
+    expect(workerLine({ ...LIVE, outreach: 'receive-only', sms: 'on' }, NOW).tail).toBe(
+      'reading replies, not sending email · texts through DoveSoft · chat on',
+    )
+    expect(workerLine({ ...LIVE, outreach: 'disabled', sms: 'on' }, NOW).tail).toBe(
+      'email outreach switched off · texts through DoveSoft · chat on',
+    )
+    expect(workerLine({ ...LIVE, outreach: 'teleport', sms: 'on' }, NOW).tail).toBe('texts through DoveSoft · chat on')
+  })
+
+  it('live: says "SMS off" only where the mailbox words could be read as covering texts', () => {
+    expect(workerLine({ ...LIVE, sms: 'off' }, NOW).tail).toBe('sending and receiving · SMS off · chat on')
+    expect(workerLine({ ...LIVE, outreach: 'send-only', sms: 'off' }, NOW).tail).toBe('sending, not reading replies · SMS off · chat on')
+    expect(workerLine({ ...LIVE, outreach: 'disabled', sms: 'off' }, NOW).tail).toBe('outreach switched off · chat on')
+    expect(workerLine({ ...LIVE, outreach: 'receive-only', sms: 'off' }, NOW).tail).toBe('reading replies, not sending · chat on')
+    // Not said: as before.
+    expect(workerLine({ ...LIVE, sms: null }, NOW).tail).toBe('sending and receiving · chat on')
+  })
+
   it('live: an outreach value outside the vocabulary is not echoed', () => {
     expect(workerLine({ ...LIVE, outreach: 'teleport' }, NOW).tail).toBe('chat on')
   })
@@ -346,6 +505,120 @@ describe('workerLine', () => {
     expect(l.lead).toBe('Worker silent since')
     expect(l.at).toEqual(SILENT.lastSeenAt)
     expect(l.tail).toBe('3 hours without a heartbeat · approved messages wait and no mailbox is read until it is back')
+  })
+
+  it('retired: last seen when (for the viewer’s zone), and why nothing sends — quiet, never "silent"', () => {
+    expect(workerLine(RETIRED, NOW)).toEqual({
+      tone: 'quiet',
+      lead: 'Worker retired — last seen',
+      at: RETIRED.lastSeenAt,
+      tail: RETIRED_WORKER_WORDS,
+    })
+  })
+})
+
+/**
+ * The grid: every status `heartbeatReport` can produce, retired included,
+ * built by the function the page's data comes from — so a row the digest
+ * calls retired cannot be one the dashboard calls silent.
+ */
+describe('the dashboard and the digest call the worker the same thing', () => {
+  const row = (secondsAgo: number, detail: Record<string, unknown> = {}) => ({
+    lastTickAt: ago(secondsAgo), outreach: 'send-and-receive', chat: 'enabled', detail: { intervalMs: 15_000, ...detail },
+  })
+  const DAY = 86_400
+  const ROWS = [
+    ['no row', null],
+    ['a fresh row', row(30)],
+    ['an hour-old row', row(3_600)],
+    ['a row just inside the retirement horizon', row(HEARTBEAT_RETIRED_AFTER_DAYS * DAY - 60)],
+    ['a row past the retirement horizon', row(HEARTBEAT_RETIRED_AFTER_DAYS * DAY + 60)],
+  ] as const
+  const GRID = ROWS.flatMap(([label, r]) =>
+    [true, false].map((configured) => [`${label}, worker ${configured ? '' : 'not '}configured`, r, configured] as const),
+  )
+
+  it.each(GRID)('%s', (_label, r, configured) => {
+    const report = heartbeatReport(r, configured, NOW)
+    const word = heartbeatReportedStatus(report)
+    expect(workerWord(report)).toBe(word)
+
+    const d = { ...BARE, worker: configured }
+    const line = workerLine(report, NOW)
+    const worker = honestyBullets(d, report, FACTS)[0]!
+    const said = `${line.lead} ${line.tail ?? ''} ${worker.lead} ${worker.rest} ${honestyHeadline(d, report, FACTS).text}`
+    expect(worker.id).toBe(
+      { not_configured: 'worker-none', never: 'worker-never', live: 'worker-live', silent: 'worker-silent', retired: 'worker-retired' }[word],
+    )
+    if (word === 'retired') {
+      expect(line.lead).toBe('Worker retired — last seen')
+      expect(said).not.toMatch(/silent|gone quiet/i)
+      expect(said).toContain(RETIRED_WORKER_WORDS)
+    }
+    if (word === 'silent') expect(line.lead).toBe('Worker silent since')
+  })
+
+  /**
+   * The worker writes `sms` into the row's detail; `heartbeatReport` reads
+   * it and the dashboard words it — over every status and both mailbox
+   * extremes, built by the functions the page's data comes from. A row's SMS
+   * is said only while the worker is live, and never as "nothing is sent".
+   */
+  describe('with what the row says about SMS', () => {
+    const SMS_ROWS = [
+      ['a fresh row', 30],
+      ['an hour-old row', 3_600],
+      ['a row past the retirement horizon', HEARTBEAT_RETIRED_AFTER_DAYS * DAY + 60],
+    ] as const
+    const SMS_GRID = SMS_ROWS.flatMap(([label, age]) =>
+      (['on', 'off', undefined] as const).flatMap((sms) =>
+        (['disabled', 'send-and-receive'] as const).flatMap((outreach) =>
+          [true, false].map(
+            (configured) =>
+              [
+                `${label}, sms ${String(sms)}, mailbox ${outreach}, worker ${configured ? '' : 'not '}configured`,
+                { ...row(age, sms === undefined ? {} : { sms }), outreach },
+                configured,
+                sms ?? null,
+              ] as const,
+          ),
+        ),
+      ),
+    )
+
+    it.each(SMS_GRID)('%s', (_label, r, configured, sms) => {
+      const report = heartbeatReport(r, configured, NOW)
+      expect(report.sms).toBe(sms)
+      const d = { ...BARE, worker: configured }
+      const line = workerLine(report, NOW)
+      const worker = honestyBullets(d, report, FACTS)[0]!
+      const headline = honestyHeadline(d, report, FACTS).text
+      const said = `${line.tail ?? ''} ${worker.rest}`
+      const live = workerWord(report) === 'live'
+      expect(said.includes('texts through DoveSoft') || said.includes('approved SMS through DoveSoft')).toBe(live && sms === 'on')
+      if (live && sms === 'on') {
+        expect(said).not.toContain('nothing is sent')
+        expect(headline).not.toContain('Nothing on this deployment is sending')
+      }
+      if (sms === null) expect(said).not.toMatch(/SMS|DoveSoft/)
+    })
+  })
+
+  it('covers every word, retired included', () => {
+    const words = new Set(GRID.map(([, r, configured]) => heartbeatReportedStatus(heartbeatReport(r, configured, NOW))))
+    expect([...words].sort()).toEqual(['live', 'never', 'not_configured', 'retired', 'silent'])
+  })
+
+  it('says it in the digest’s own words', () => {
+    const digest: NotificationEvent = {
+      kind: 'digest', orgId: '00000000-0000-4000-8000-0000000000aa', pendingApprovals: 0, unhandledReplies: 0,
+      rottingDeals: 0, staleCompanies: 0, neverScanned: 0, dueTasks: 0, overdueTasks: 0, refusals24h: [],
+      optOutsNotRecorded24h: 0, spend24hUsd: '0.00', worker: 'retired', workerLastSeenAt: RETIRED.lastSeenAt!.toISOString(),
+      campaignPauses: { found: 0, notices: 0 }, topRotting: [],
+    }
+    expect(slackMessage(digest, 'https://agency.example').text).toContain(
+      `Worker: retired — last seen 2026-09-21; ${RETIRED_WORKER_WORDS}`,
+    )
   })
 })
 
@@ -412,6 +685,9 @@ describe('needsALook', () => {
       'None recorded: no worker is connected and no inbound webhook is configured, so no reply can arrive here.',
     )
     expect(item(ZERO, { ...BARE, worker: true }, SILENT, 'replies').detail).toMatch(/^None recorded: the worker has gone quiet/)
+    expect(item(ZERO, BARE, RETIRED, 'replies').detail).toBe(
+      'None recorded: the last worker to report in has retired and no inbound webhook is configured, so no reply can arrive here.',
+    )
     expect(item(ZERO, { ...BARE, worker: true }, { ...LIVE, outreach: 'send-only' }, 'replies').detail).toMatch(
       /^None recorded: the worker is not reading a mailbox/,
     )
@@ -421,6 +697,25 @@ describe('needsALook', () => {
     expect(item(ZERO, { ...BARE, inbound: 'webhook' }, NO_WORKER, 'replies').detail).toBeNull()
     expect(item(ZERO, { ...BARE, worker: true }, LIVE, 'replies').detail).toBeNull()
     expect(item(ZERO, { ...BARE, worker: true }, { ...LIVE, outreach: 'receive-only' }, 'replies').detail).toBeNull()
+  })
+
+  it('a zero with only DoveSoft’s webhook names the email half as missing, not a clean zero (0019)', () => {
+    // Texts arrive; email replies cannot. A clean zero would claim both.
+    const sms = { ...BARE, smsInbound: true }
+    expect(item(ZERO, sms, NO_WORKER, 'replies').detail).toBe(
+      'None recorded: no worker is connected and no inbound email webhook is configured, so no email reply can arrive here; ' +
+        'texts still do, through DoveSoft’s webhook.',
+    )
+    expect(item(ZERO, { ...sms, worker: true }, { ...LIVE, outreach: 'send-only' }, 'replies').detail).toMatch(
+      /^None recorded: the worker is not reading a mailbox and no inbound email webhook is configured, so no email reply can arrive here; texts still do/,
+    )
+    expect(item({ ...ZERO, repliesUnhandled: 2 }, sms, NO_WORKER, 'replies').detail).toBe(
+      'No new email replies can arrive: no worker is connected and no inbound email webhook is configured; ' +
+        'texts still do, through DoveSoft’s webhook.',
+    )
+    // Either email recorder makes it a clean zero again, texts or not.
+    expect(item(ZERO, { ...sms, inbound: 'webhook' }, NO_WORKER, 'replies').detail).toBeNull()
+    expect(item(ZERO, { ...sms, worker: true }, LIVE, 'replies').detail).toBeNull()
   })
 
   it('replies waiting with no recorder say no new ones can arrive', () => {
@@ -649,6 +944,32 @@ describe('quietFeedNote', () => {
     expect(quietFeedNote({ ...BARE, worker: true }, SILENT)).toBe(
       'The worker has gone quiet, so no sends or replies appear here.',
     )
+    expect(quietFeedNote(BARE, RETIRED)).toBe(
+      'The last worker to report in has retired, so no sends or replies appear here.',
+    )
+  })
+
+  it('with only DoveSoft’s webhook, says the email half is quiet and texts still arrive (0019)', () => {
+    const sms = { ...BARE, smsInbound: true }
+    expect(quietFeedNote(sms, NO_WORKER)).toBe(
+      'No worker is connected, so no sends or email replies appear here; texts still arrive, through DoveSoft’s webhook.',
+    )
+    expect(quietFeedNote({ ...sms, worker: true }, SILENT)).toBe(
+      'The worker has gone quiet, so no sends or email replies appear here; texts still arrive, through DoveSoft’s webhook.',
+    )
+    expect(quietFeedNote({ ...sms, worker: true }, { ...LIVE, outreach: 'send-only' })).toBe(
+      'The worker is not reading a mailbox and no inbound email webhook is configured, so no email replies appear here; ' +
+        'texts still arrive, through DoveSoft’s webhook.',
+    )
+    expect(quietFeedNote({ ...sms, worker: true }, { ...LIVE, outreach: null })).toBe(
+      'The worker has not said that it sends and no inbound email webhook is configured, so no sends or email replies appear here; ' +
+        'texts still arrive, through DoveSoft’s webhook.',
+    )
+    // An email recorder is there: only the sending half is quiet.
+    expect(quietFeedNote({ ...sms, inbound: 'webhook' }, NO_WORKER)).toBe(
+      'No worker is connected, so no sends appear here; replies still arrive through the inbound webhook.',
+    )
+    expect(quietFeedNote({ ...sms, worker: true }, LIVE)).toBeNull()
   })
 
   it('is silent itself when the worker sends and a reply can arrive', () => {
@@ -701,5 +1022,52 @@ describe('the dashboard page', () => {
 
   it('links the Contacts total to /contacts', () => {
     expect(src).toMatch(/href="\/contacts"><div className="n">\{c\.contacts\}/)
+  })
+
+  /**
+   * CLAUDE.md §4 called this table "the one place left that overstates"
+   * the profile's outreach block: it showed `outreach.channels` and
+   * `max_per_day` under bare "Channels" and "Daily cap" headings, as if the
+   * send path applied them. It applies each CAMPAIGN's channel, cap and
+   * quiet hours, and reads neither value.
+   */
+  describe('the Active ICP table', () => {
+    const table = src.slice(src.indexOf('<h2>Active ICP</h2>'), src.indexOf('<h2>', src.indexOf('<h2>Active ICP</h2>') + 1))
+
+    it('is found, so the checks below read the table and not an empty string', () => {
+      expect(table).toContain('<table>')
+      expect(table).toContain('{dailyCap')
+    })
+
+    it('never heads the profile’s channels or cap as if they were the operative values', () => {
+      expect(table).not.toMatch(/<th>Channels<\/th>|<th>Daily cap<\/th>/)
+      expect(table).toContain('<th>Channels it describes</th>')
+      expect(table).toContain('<th>Daily cap it describes</th>')
+    })
+
+    it('says what the send path applies instead, and links to where those caps live', () => {
+      expect(table).toContain('{ICP_OUTREACH_NOTE}')
+      expect(table).toMatch(/<a href="\/campaigns">/)
+      expect(ICP_OUTREACH_NOTE).toBe(
+        'The channels and daily cap are what this profile describes, not what the send path enforces: each campaign ' +
+          'applies its own channel, daily cap and quiet hours.',
+      )
+    })
+  })
+})
+
+/**
+ * The SMS the dashboard words comes from the worker's own heartbeat:
+ * `senderProvidersFrom` decides it once at boot and the heartbeat's
+ * `detail` carries it. Pinned by source, because the worker cannot be
+ * imported here; a rename there fails this rather than leaving every row
+ * `sms: null` and the dashboard silent about texts that are going.
+ */
+describe('the worker writes what the dashboard reads about SMS', () => {
+  const worker = code(read('../../agent/src/worker.ts'))
+
+  it('puts sms beside halted and lockHeld in the heartbeat’s detail', () => {
+    expect(worker).toContain('detail: { halted: now.halted, lockHeld: now.lockHeld, sms: senders.sms }')
+    expect(worker).toContain("sms: dovesoft.on ? 'on' : 'off',")
   })
 })

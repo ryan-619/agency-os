@@ -13,7 +13,7 @@
 import { readFileSync } from 'node:fs'
 import { Pool } from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
-import { DEFAULT_STALE_AFTER_DAYS, isStale, parseIcpDefinition } from '@agency/core'
+import { isStale, parseIcpDefinition, staleAfterDaysOf } from '@agency/core'
 import { scanDomain } from '@agency/scanner'
 import {
   activeIcpProfile, companyList, importCompanies, markStaleFindings,
@@ -87,7 +87,7 @@ async function main(): Promise<void> {
     }
 
     // Findings age out before anything is scanned, so --stale sees the truth.
-    const staleDays = icp.freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
+    const staleDays = staleAfterDaysOf(icp)
     const marked = await markStaleFindings(db, org.id, staleDays)
     if (marked) console.log(`stale   : marked ${marked} finding(s) older than ${staleDays} days`)
 

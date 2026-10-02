@@ -111,6 +111,10 @@ services:
       INBOUND_WEBHOOK_SECRET: ${INBOUND_WEBHOOK_SECRET:-}
       # To store connector credentials from the UI. The SAME value as the agent's.
       SECRETS_KEY: ${SECRETS_KEY:-}
+      # DoveSoft's delivery reports and inbound texts (/api/inbound/dovesoft/*),
+      # and the org its account belongs to. Sending SMS is the worker's.
+      DOVESOFT_WEBHOOK_SECRET: ${DOVESOFT_WEBHOOK_SECRET:-}
+      DOVESOFT_ORG_ID: ${DOVESOFT_ORG_ID:-}
     ports:
       - '3000:3000'
 
@@ -198,6 +202,10 @@ services:
       WEB_PUBLIC_URL: ${WEB_PUBLIC_URL:-}
       # A campaign whose bounce rate passes this pauses itself. Blank is 5.
       OUTREACH_BOUNCE_PAUSE_PCT: ${OUTREACH_BOUNCE_PAUSE_PCT:-}
+      # The alarm for a reply read over IMAP that said stop and whose
+      # suppression could not be written. The SAME value as the web app's.
+      # The URL is the credential.
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
       # §5.5's reply triage. Blank is the deterministic kind, which is complete.
       # A remote provider also needs LLM_ALLOW_REMOTE_LEAD_DATA: a reply is a
       # named person's words.
@@ -207,6 +215,16 @@ services:
       OLLAMA_IS_LOCAL: ${OLLAMA_IS_LOCAL:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       LLM_ALLOW_REMOTE_LEAD_DATA: ${LLM_ALLOW_REMOTE_LEAD_DATA:-}
+      # SMS through DoveSoft (0019). On only with BOTH the key and the DLT
+      # entity id; either blank means no SMS provider, said once at boot by
+      # name, and approved texts wait in the queue. Every text is still a
+      # registered DLT template a person approved, to somebody who opted in.
+      # The key is a credential: it is sent as a header and logged nowhere.
+      # Blank base URL is DoveSoft's own API; in production it must be https
+      # on a public host, because the key is sent to it.
+      DOVESOFT_API_KEY: ${DOVESOFT_API_KEY:-}
+      DOVESOFT_ENTITY_ID: ${DOVESOFT_ENTITY_ID:-}
+      DOVESOFT_BASE_URL: ${DOVESOFT_BASE_URL:-}
       # Deliberately NOT passed: AGENT_USE_LOCAL_LOGIN (development only — the
       # worker refuses it under NODE_ENV=production), CLAUDE_CODE_PATH (a path
       # on a developer's machine, meaningless inside the image), and
@@ -257,11 +275,32 @@ services:
       VOICE_ORG_ID: ${VOICE_ORG_ID:-}
       TASKROUTER_WORKFLOW_SID: ${TASKROUTER_WORKFLOW_SID:-}
       VOICE_HANDOFF_NUMBER: ${VOICE_HANDOFF_NUMBER:-}
+      # The team member a handoff is recorded against (calls.handoff_to_user_id).
+      VOICE_HANDOFF_USER_EMAIL: ${VOICE_HANDOFF_USER_EMAIL:-}
       VOICE_LANGUAGE: ${VOICE_LANGUAGE:-en-US}
       VOICE_TTS_PROVIDER: ${VOICE_TTS_PROVIDER:-}
       VOICE_TTS_VOICE: ${VOICE_TTS_VOICE:-}
       VOICE_MAX_CALL_SECONDS: ${VOICE_MAX_CALL_SECONDS:-900}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # §5.5's call summary. Blank is the deterministic extractive summary,
+      # which every call gets anyway. The SAME names the agent's reply triage
+      # reads, so one .env line configures both. A remote provider also needs
+      # LLM_ALLOW_REMOTE_LEAD_DATA: a call transcript is a named person's
+      # words. Blank OLLAMA_IS_LOCAL is "local" and blank
+      # LLM_ALLOW_REMOTE_LEAD_DATA is "no" — the service reads a blank as
+      # unset. Note OLLAMA_BASE_URL's default is this container's own
+      # loopback; point it at the Ollama host.
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-}
+      OLLAMA_IS_LOCAL: ${OLLAMA_IS_LOCAL:-}
+      LLM_ALLOW_REMOTE_LEAD_DATA: ${LLM_ALLOW_REMOTE_LEAD_DATA:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Read only for LLM_PROVIDER=anthropic, as the summary model's key.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Deliberately NOT passed: VOICE_MODEL. The schema declares it and
+      # nothing reads it — the scripted policy is the whole conversation —
+      # so a value set here would change nothing.
     ports:
       - '127.0.0.1:3003:3003'
 

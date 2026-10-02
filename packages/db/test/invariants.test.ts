@@ -1418,6 +1418,19 @@ describe('0018 — evidence, consent records and operations', () => {
       )
       expect(rows).toHaveLength(1)
     })
+
+    it('REFUSES a code that is not an RFC 3463 status (0019)', async () => {
+      for (const code of ['bounced', '550', '5.1', '2.0.0', '5.1.1 user unknown', ' 5.1.1', '']) {
+        const msg = await reject(
+          `UPDATE contacts SET email_bounced_at = now(), email_bounce_code = $2 WHERE id = $1`, [contactId, code],
+        )
+        expect(msg, code).toMatch(/contacts_bounce_code_is_rfc3463|contacts_bounce_has_code/)
+      }
+      const rows = await db.driver.select<{ id: string }>(
+        `UPDATE contacts SET email_bounced_at = now(), email_bounce_code = '4.2.2' WHERE id = $1 RETURNING id`, [contactId],
+      )
+      expect(rows).toHaveLength(1)
+    })
   })
 
   describe('meetings.outcome', () => {
@@ -1592,5 +1605,320 @@ describe('0018 — evidence, consent records and operations', () => {
       expect(await expectRejection(() => beat({ worker: 'w-4', booted: 'now()', tick: `now() - interval '1 hour'` })))
         .toContain('worker_heartbeats_beat_after_boot')
     })
+  })
+})
+
+describe('0019 — message templates, and what the operator said', () => {
+  let db: TestDb
+  let orgId: string
+  let userId: string
+  let companyId: string
+  let contactId: string
+  let campaignId: string
+  let smsTemplate: string
+  let waTemplate: string
+  let rivalOrg: string
+  let rivalUser: string
+  let rivalTemplate: string
+
+  beforeAll(async () => {
+    db = await migratedDb()
+    ;[{ id: orgId }] = await db.driver.select<{ id: string }>(`INSERT INTO orgs (name) VALUES ('Agency') RETURNING id`)
+    ;[{ id: userId }] = await db.driver.select<{ id: string }>(
+      `INSERT INTO users (org_id, email, role) VALUES ($1, 'owner@agency.test', 'owner') RETURNING id`, [orgId],
+    )
+    ;[{ id: companyId }] = await db.driver.select<{ id: string }>(
+      `INSERT INTO companies (org_id, domain) VALUES ($1, 'rentman.in') RETURNING id`, [orgId],
+    )
+    ;[{ id: contactId }] = await db.driver.select<{ id: string }>(
+      `INSERT INTO contacts (org_id, company_id, phone) VALUES ($1, $2, '+919876543210') RETURNING id`, [orgId, companyId],
+    )
+    ;[{ id: campaignId }] = await db.driver.select<{ id: string }>(
+      `INSERT INTO campaigns (org_id, name, channel, status) VALUES ($1, 'Reminders', 'sms', 'active') RETURNING id`, [orgId],
+    )
+    ;[{ id: smsTemplate }] = await db.driver.select<{ id: string }>(
+      `INSERT INTO message_templates (org_id, channel, external_id, sender_id, category, body, created_by)
+       VALUES ($1, 'sms', '1107160000000012345', 'ACMEIN', 'service_explicit', 'Hi {#var#}', $2) RETURNING id`,
+      [orgId, userId],
+    )
+    ;[{ id: waTemplate }] = await db.driver.select<{ id: string }>(
+      `INSERT INTO message_templates (org_id, channel, external_id, sender_id, category, body)
+       VALUES ($1, 'whatsapp', 'meeting_reminder', '+919800000000', 'utility', 'Hi {#var#}') RETURNING id`,
+      [orgId],
+    )
+    ;[{ id: rivalOrg }] = await db.driver.select<{ id: string }>(`INSERT INTO orgs (name) VALUES ('Rival') RETURNING id`)
+    ;[{ id: rivalUser }] = await db.driver.select<{ id: string }>(
+      `INSERT INTO users (org_id, email, role) VALUES ($1, 'owner@rival.test', 'owner') RETURNING id`, [rivalOrg],
+    )
+    ;[{ id: rivalTemplate }] = await db.driver.select<{ id: string }>(
+      `INSERT INTO message_templates (org_id, channel, external_id, sender_id, category, body)
+       VALUES ($1, 'sms', '1107160000000099999', 'RIVALS', 'promotional', 'Offer {#var#}') RETURNING id`,
+      [rivalOrg],
+    )
+  })
+  afterAll(async () => { await db.close() })
+
+  const reject = async (sql: string, params: unknown[]) => expectRejection(() => db.driver.select(sql, params))
+
+  /** A template row, with any column overridden by SQL text. */
+  const template = (over: Record<string, string> = {}, params: unknown[] = [orgId]) => {
+    const v = {
+      channel: `'sms'`, provider: `'dovesoft'`, external_id: `'1107160000000000001'`, sender_id: `'ACMEIN'`,
+      category: `'promotional'`, body: `'Hi {#var#}'`, name: 'NULL', language: `'en'`, created_by: 'NULL', ...over,
+    }
+    return db.driver.select<{ id: string }>(
+      `INSERT INTO message_templates (org_id, channel, provider, external_id, sender_id, category, body, name, language, created_by)
+       VALUES ($1, ${v.channel}, ${v.provider}, ${v.external_id}, ${v.sender_id}, ${v.category}, ${v.body}, ${v.name}, ${v.language}, ${v.created_by})
+       RETURNING id`,
+      params,
+    )
+  }
+  let n = 100
+  /** A fresh external id per row, so the unique key is never the constraint under test by accident. */
+  const nextId = () => `'11071600000000${String((n += 1)).padStart(5, '0')}'`
+
+  describe('message_templates', () => {
+    it('accepts an SMS, a WhatsApp and a voice template, each in its own categories', async () => {
+      expect(await template({ external_id: nextId() })).toHaveLength(1)
+      expect(await template({ external_id: `'welcome_v2'`, channel: `'whatsapp'`, sender_id: `'+919800000000'`, category: `'marketing'` })).toHaveLength(1)
+      expect(await template({ external_id: nextId(), channel: `'voice'`, sender_id: `'+911400000000'`, category: `'service_implicit'` })).toHaveLength(1)
+    })
+
+    it('REFUSES a channel, or a provider, nobody defined', async () => {
+      // An unknown channel also has no category list, so either CHECK may be the one reported.
+      expect(await expectRejection(() => template({ external_id: nextId(), channel: `'email'` }))).toMatch(
+        /message_templates_channel_known|message_templates_category_fits_channel/,
+      )
+      expect(await expectRejection(() => template({ external_id: nextId(), provider: `'twilio'` }))).toContain('message_templates_provider_known')
+    })
+
+    it('REFUSES a category from the other channel’s list', async () => {
+      expect(await expectRejection(() => template({ external_id: nextId(), category: `'marketing'` }))).toContain('message_templates_category_fits_channel')
+      expect(
+        await expectRejection(() => template({ external_id: `'x_tpl'`, channel: `'whatsapp'`, sender_id: `'+919800000000'`, category: `'promotional'` })),
+      ).toContain('message_templates_category_fits_channel')
+    })
+
+    it('REFUSES a blank, spaced or over-long template id', async () => {
+      for (const id of [`'  '`, `'1107 1600'`, `'${'1'.repeat(129)}'`]) {
+        expect(await expectRejection(() => template({ external_id: id }))).toContain('message_templates_external_id_shape')
+      }
+    })
+
+    it('REFUSES an SMS header that is not six upper-case letters or digits, and accepts one that is', async () => {
+      for (const h of [`'acmein'`, `'ACME'`, `'ACMEINX'`, `'ACM-IN'`]) {
+        expect(await expectRejection(() => template({ external_id: nextId(), sender_id: h }))).toContain('message_templates_sms_sender_is_a_dlt_header')
+      }
+      expect(await template({ external_id: nextId(), sender_id: `'123456'` })).toHaveLength(1)
+    })
+
+    it('REFUSES a blank sender on any channel', async () => {
+      expect(
+        await expectRejection(() => template({ external_id: `'blank_sender'`, channel: `'whatsapp'`, sender_id: `'  '`, category: `'utility'` })),
+      ).toContain('message_templates_sender_is_not_blank')
+    })
+
+    it('REFUSES a blank or over-long body', async () => {
+      expect(await expectRejection(() => template({ external_id: nextId(), body: `'   '` }))).toContain('message_templates_body_is_not_blank')
+      expect(await expectRejection(() => template({ external_id: nextId(), body: `repeat('x', 4001)` }))).toContain('message_templates_body_is_not_blank')
+    })
+
+    it('REFUSES a blank name or language, and accepts a NULL name', async () => {
+      expect(await expectRejection(() => template({ external_id: nextId(), name: `' '` }))).toContain('message_templates_name_is_bounded')
+      expect(await expectRejection(() => template({ external_id: nextId(), language: `' '` }))).toContain('message_templates_language_is_bounded')
+      expect(await template({ external_id: nextId(), name: `'Reminder'`, language: `'hi'` })).toHaveLength(1)
+    })
+
+    it('REFUSES a second template with the same id on the same channel in one org — and allows it in another', async () => {
+      expect(await expectRejection(() => template({ external_id: `'1107160000000012345'` }))).toMatch(
+        /message_templates_org_channel_external_key|duplicate key/,
+      )
+      expect(await template({ external_id: `'1107160000000012345'` }, [rivalOrg])).toHaveLength(1)
+    })
+
+    it('REFUSES a creator from another org', async () => {
+      expect(await expectRejection(() => template({ external_id: nextId(), created_by: '$2' }, [orgId, rivalUser]))).toContain(
+        'message_templates_creator_is_in_the_same_org',
+      )
+    })
+
+    it('stamps updated_at when a template is switched off', async () => {
+      const [row] = await db.driver.select<{ updated_at: string | null }>(
+        `UPDATE message_templates SET active = false WHERE id = (SELECT id FROM message_templates WHERE org_id = $1 AND channel = 'voice' LIMIT 1) RETURNING updated_at`,
+        [orgId],
+      )
+      expect(row?.updated_at).not.toBeNull()
+    })
+  })
+
+  describe('touches.template_id — the template a message was rendered from', () => {
+    const smsTouch = (status: string, tpl: string | null, channel = 'sms', direction = 'out') =>
+      db.driver.select<{ id: string }>(
+        `INSERT INTO touches (org_id, campaign_id, contact_id, company_id, channel, direction, status, template_id, refusal_code,
+                              approved_by, approved_at, body)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8,
+                 CASE WHEN $7 = 'refused' THEN 'no_template' END,
+                 CASE WHEN $7 = 'approved' THEN $9::uuid END, CASE WHEN $7 = 'approved' THEN now() END, 'Hi Priya')
+         RETURNING id`,
+        [orgId, campaignId, contactId, companyId, channel, direction, status, tpl, userId],
+      )
+
+    it('accepts an outbound SMS naming an SMS template of its own org', async () => {
+      expect(await smsTouch('awaiting_approval', smsTemplate)).toHaveLength(1)
+    })
+
+    it('REFUSES a template of another org', async () => {
+      expect(await expectRejection(() => smsTouch('awaiting_approval', rivalTemplate))).toContain(
+        'touches_template_is_in_the_same_org_and_channel',
+      )
+    })
+
+    it('REFUSES a template of another channel: an SMS cannot be rendered from a WhatsApp template', async () => {
+      expect(await expectRejection(() => smsTouch('awaiting_approval', waTemplate))).toContain(
+        'touches_template_is_in_the_same_org_and_channel',
+      )
+    })
+
+    it.each(['awaiting_approval', 'approved', 'queued', 'sending'])(
+      'REFUSES an outbound SMS in %s that names no template',
+      async (status) => {
+        expect(await expectRejection(() => smsTouch(status, null))).toContain('touches_sms_and_whatsapp_name_a_template')
+      },
+    )
+
+    it('REFUSES an outbound WhatsApp message with no template too', async () => {
+      expect(await expectRejection(() => smsTouch('awaiting_approval', null, 'whatsapp'))).toContain('touches_sms_and_whatsapp_name_a_template')
+    })
+
+    /**
+     * `sent` is reached only from `sending`, which the CHECK binds, so a sent
+     * row without a template is one a revert of 0019 left. Binding `sent`
+     * made every such row un-updatable after a re-apply (review round 4,
+     * [11]; migration-0019-revert.test.ts drives the sequence).
+     */
+    it('accepts a sent SMS with no template — only a revert of 0019 leaves one', async () => {
+      expect(await smsTouch('sent', null)).toHaveLength(1)
+    })
+
+    it('accepts a refused or failed SMS with no template — neither can go out', async () => {
+      expect(await smsTouch('refused', null)).toHaveLength(1)
+      expect(await smsTouch('failed', null)).toHaveLength(1)
+    })
+
+    it('REFUSES re-approving such a row back into a state that can go out', async () => {
+      const [{ id }] = await smsTouch('refused', null)
+      expect(
+        await reject(`UPDATE touches SET status = 'approved', refusal_code = NULL, approved_by = $2, approved_at = now() WHERE id = $1`, [id, userId]),
+      ).toContain('touches_sms_and_whatsapp_name_a_template')
+    })
+
+    it('accepts an inbound SMS, and an email, with no template', async () => {
+      expect(await smsTouch('replied', null, 'sms', 'in')).toHaveLength(1)
+      expect(await smsTouch('awaiting_approval', null, 'email')).toHaveLength(1)
+    })
+
+    it('will not delete a template a message names', async () => {
+      expect(await reject(`DELETE FROM message_templates WHERE id = $1`, [smsTemplate])).toMatch(
+        /touches_template_is_in_the_same_org_and_channel|violates foreign key/,
+      )
+    })
+
+    it('is enforced only from 0019 on: the check is NOT VALID, so stored rows were never re-checked', async () => {
+      const [row] = await db.driver.select<{ convalidated: boolean }>(
+        `SELECT convalidated FROM pg_constraint WHERE conname = 'touches_sms_and_whatsapp_name_a_template'`,
+      )
+      expect(row?.convalidated).toBe(false)
+    })
+  })
+
+  describe('touches.delivery_* — what the operator said', () => {
+    let sent: string
+    beforeAll(async () => {
+      ;[{ id: sent }] = await db.driver.select<{ id: string }>(
+        `INSERT INTO touches (org_id, campaign_id, contact_id, channel, direction, status, template_id, provider_id, sent_at)
+         VALUES ($1, $2, $3, 'sms', 'out', 'sent', $4, 'ds-1', now()) RETURNING id`,
+        [orgId, campaignId, contactId, smsTemplate],
+      )
+    })
+    const set = (cols: string) => db.driver.select<{ id: string }>(`UPDATE touches SET ${cols} WHERE id = $1 RETURNING id`, [sent])
+
+    it('accepts each state with its own evidence', async () => {
+      expect(await set(`delivery_status = 'pending', delivered_at = NULL, delivery_error = NULL`)).toHaveLength(1)
+      expect(await set(`delivery_status = 'failed', delivered_at = NULL, delivery_error = 'UNDELIV'`)).toHaveLength(1)
+      expect(await set(`delivery_status = 'delivered', delivered_at = now(), delivery_error = NULL`)).toHaveLength(1)
+      expect(await set(`delivery_status = NULL, delivered_at = NULL, delivery_error = NULL`)).toHaveLength(1)
+    })
+
+    it('REFUSES a state nobody defined', async () => {
+      expect(await expectRejection(() => set(`delivery_status = 'read'`))).toContain('touches_delivery_status_known')
+    })
+
+    it('REFUSES delivered without its time, and a time without delivered — NULL included', async () => {
+      expect(await expectRejection(() => set(`delivery_status = 'delivered', delivered_at = NULL`))).toContain('touches_delivered_has_its_time')
+      expect(await expectRejection(() => set(`delivery_status = NULL, delivered_at = now()`))).toContain('touches_delivered_has_its_time')
+      expect(await expectRejection(() => set(`delivery_status = 'pending', delivered_at = now()`))).toContain('touches_delivered_has_its_time')
+    })
+
+    it('REFUSES a failure with no reason, and a reason with no failure', async () => {
+      expect(await expectRejection(() => set(`delivery_status = 'failed', delivery_error = NULL`))).toContain('touches_delivery_failure_has_its_reason')
+      expect(await expectRejection(() => set(`delivery_status = NULL, delivery_error = 'UNDELIV'`))).toContain('touches_delivery_failure_has_its_reason')
+    })
+
+    it('REFUSES a blank or over-long reason', async () => {
+      expect(await expectRejection(() => set(`delivery_status = 'failed', delivery_error = '  '`))).toContain('touches_delivery_error_is_bounded')
+      expect(await expectRejection(() => set(`delivery_status = 'failed', delivery_error = repeat('x', 301)`))).toContain('touches_delivery_error_is_bounded')
+    })
+
+    it('REFUSES a delivery state on an inbound row', async () => {
+      const msg = await reject(
+        `INSERT INTO touches (org_id, contact_id, channel, direction, status, delivery_status) VALUES ($1, $2, 'sms', 'in', 'replied', 'pending')`,
+        [orgId, contactId],
+      )
+      expect(msg).toContain('touches_delivery_is_outbound_only')
+    })
+  })
+
+  describe('one inbound SMS, one row', () => {
+    const inbound = (providerId: string, channel = 'sms') =>
+      db.driver.select<{ id: string }>(
+        `INSERT INTO touches (org_id, contact_id, channel, direction, status, provider_id) VALUES ($1, $2, $3, 'in', 'replied', $4) RETURNING id`,
+        [orgId, contactId, channel, providerId],
+      )
+
+    it('accepts one, and REFUSES the same message id again', async () => {
+      expect(await inbound('mo-1')).toHaveLength(1)
+      expect(await expectRejection(() => inbound('mo-1'))).toMatch(/touches_inbound_sms_provider_id_key|duplicate key/)
+    })
+
+    it('leaves inbound email and outbound rows to their own rules', async () => {
+      expect(await inbound('<same@id>', 'email')).toHaveLength(1)
+      expect(await inbound('<same@id>', 'email')).toHaveLength(1)
+    })
+  })
+
+  /**
+   * RESTRICT is checked as each row is deleted, and a whole org going takes
+   * its templates AND the messages that name them in one cascade. This proves
+   * the cascade still completes — the order the database runs it in does not
+   * strand a template behind a message it is about to delete anyway.
+   */
+  it('lets a whole org be deleted with its templates and the messages that name them', async () => {
+    const [{ id: gone }] = await db.driver.select<{ id: string }>(`INSERT INTO orgs (name) VALUES ('Leaving') RETURNING id`)
+    const [{ id: tpl }] = await db.driver.select<{ id: string }>(
+      `INSERT INTO message_templates (org_id, channel, external_id, sender_id, category, body)
+       VALUES ($1, 'sms', '1', 'ACMEIN', 'promotional', 'Hi') RETURNING id`,
+      [gone],
+    )
+    const [{ id: co }] = await db.driver.select<{ id: string }>(
+      `INSERT INTO companies (org_id, domain) VALUES ($1, 'leaving.in') RETURNING id`, [gone],
+    )
+    await db.driver.select(
+      `INSERT INTO touches (org_id, company_id, channel, direction, status, template_id)
+       VALUES ($1, $2, 'sms', 'out', 'awaiting_approval', $3) RETURNING id`,
+      [gone, co, tpl],
+    )
+    await db.driver.select(`DELETE FROM orgs WHERE id = $1 RETURNING id`, [gone])
+    const left = await db.driver.select<{ n: number }>(`SELECT count(*)::int AS n FROM message_templates WHERE org_id = $1`, [gone])
+    expect(left[0]?.n).toBe(0)
   })
 })

@@ -5,7 +5,6 @@ import { Shell } from '@/components/shell'
 import { When } from '@/components/when'
 import { getDb } from '@/lib/db'
 import { activeProfilesNote, icpView, type IcpView } from '@/lib/icp-view'
-import { orgIdentity } from '../org'
 
 /**
  * Settings → ICP: the profile every score is computed against, READ ONLY
@@ -31,7 +30,6 @@ export default async function IcpPage() {
   if (!session?.user) redirect('/signin')
   const user = session.user
 
-  const org = await orgIdentity(user.orgId)
   const rows = await icpProfilesList(getDb() as unknown as AgencyDb, user.orgId)
   const warning = activeProfilesNote(rows)
 
@@ -41,7 +39,7 @@ export default async function IcpPage() {
   }
 
   return (
-    <Shell user={user} orgName={org.name} current="icp" signOut={signOutAction}>
+    <Shell user={user} current="icp" signOut={signOutAction}>
       <p className="crumb"><a href="/settings">Settings</a> /</p>
       <h1>Ideal customer profile</h1>
       <p className="lede">
@@ -186,7 +184,11 @@ function Definition({ v }: { v: IcpView }) {
       <h3 style={{ fontSize: 14, margin: '20px 0 8px' }}>Freshness</h3>
       <p style={{ margin: '0 0 6px' }}>
         A finding is stale after <span className="mono">{v.staleAfterDays}</span> days
-        {v.staleAfterDaysIsDefault ? ' — this profile sets none, so the product default applies' : ''}. Stale
+        {v.staleAfterDaysRefused !== null
+          ? ` — this profile sets ${v.staleAfterDaysRefused}, which is not a positive number of days, so every reader uses the product default`
+          : v.staleAfterDaysIsDefault
+            ? ' — this profile sets none, so the product default applies'
+            : ''}. Stale
         evidence is never quoted in a draft or a proposal until the company is re-scanned.
       </p>
       {v.freshnessNote ? <p className="muted" style={{ fontSize: 13 }}>{v.freshnessNote}</p> : null}

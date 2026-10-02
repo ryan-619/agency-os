@@ -1,12 +1,11 @@
 import { notFound, redirect } from 'next/navigation'
-import { can, parseIcpDefinition } from '@agency/core'
+import { can } from '@agency/core'
 import { briefForMeeting, meetingRescheduleLinks, type AgencyDb, type MeetingLink } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { MeetingActions } from '@/components/pipeline/meeting-actions'
 import { Shell } from '@/components/shell'
 import { getDb } from '@/lib/db'
 import { inZone } from '@/lib/format'
-import { icpForOrg } from '@/lib/queries'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -25,6 +24,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
  * as "invitation" to anyone who has not been told otherwise.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 /** Beside the download link, verbatim. */
 const ICS_NOTE = 'Adds this meeting to your own calendar. Nobody is invited by this file — send the invitation from your calendar.'
@@ -42,9 +42,8 @@ export default async function MeetingBriefPage({ params }: { params: Promise<{ i
   if (!UUID.test(id)) notFound()
 
   const db = getDb() as unknown as AgencyDb
-  const [result, icpRow, links] = await Promise.all([
+  const [result, links] = await Promise.all([
     briefForMeeting(db, user.orgId, id),
-    icpForOrg(user.orgId),
     meetingRescheduleLinks(db, user.orgId, id),
   ])
   if (!result) notFound()
@@ -54,21 +53,13 @@ export default async function MeetingBriefPage({ params }: { params: Promise<{ i
   // route re-checks it in the same UPDATE that writes the outcome.
   const started = meeting.startsAt.getTime() <= Date.now()
 
-  let orgLabel = 'Agency'
-  if (icpRow) {
-    try {
-      orgLabel = parseIcpDefinition(icpRow.definition).label
-    } catch {
-      orgLabel = 'Agency'
-    }
-  }
   const signOutAction = async () => {
     'use server'
     await signOut({ redirectTo: '/signin' })
   }
 
   return (
-    <Shell user={user} orgName={orgLabel} current="pipeline" signOut={signOutAction}>
+    <Shell user={user} current="pipeline" signOut={signOutAction}>
       <p className="crumb"><a href="/pipeline">← Pipeline</a></p>
       <h1>{brief.headline}</h1>
       <p className="lede">

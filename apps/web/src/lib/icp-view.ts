@@ -1,4 +1,4 @@
-import { DEFAULT_STALE_AFTER_DAYS, orderedSignals, parseIcpDefinition, totalWeight } from '@agency/core'
+import { orderedSignals, parseIcpDefinition, staleAfterDaysOf, totalWeight } from '@agency/core'
 
 /**
  * An ICP profile row, reduced to what /settings/icp shows (§2.2).
@@ -81,9 +81,16 @@ export interface IcpView {
   readonly tiers: readonly IcpTierView[]
   readonly scoringNote: string | null
   readonly disqualifiers: readonly IcpDisqualifierView[]
+  /** The threshold every reader uses — `staleAfterDaysOf`'s answer, never the raw value. */
   readonly staleAfterDays: number
-  /** False when the profile sets no freshness and the product default applies. */
+  /** True when the product default applies: the profile sets no freshness, or one no reader can use. */
   readonly staleAfterDaysIsDefault: boolean
+  /**
+   * The value the profile SETS when no reader can use it (`isStale` throws on
+   * anything but a positive number), as written — so the page says the
+   * default applies and why, rather than "stale after 0 days". Null otherwise.
+   */
+  readonly staleAfterDaysRefused: string | null
   readonly freshnessNote: string | null
   readonly firmographics: readonly (readonly [string, string])[]
   readonly outreach: IcpOutreachView | null
@@ -182,8 +189,11 @@ export function icpView(definition: unknown): IcpViewResult {
     ? Object.keys(def.firmographics).sort().map((k) => [k, describeValue(def.firmographics![k])] as const)
     : []
 
-  const stale = def.freshness?.stale_after_days
-  const staleIsSet = typeof stale === 'number' && Number.isFinite(stale)
+  // The threshold every other reader takes, so this page cannot show one
+  // the scorer, the proposal page and the agent are not using.
+  const staleAfterDays = staleAfterDaysOf(def)
+  const set: unknown = def.freshness?.stale_after_days
+  const staleIsSet = set !== undefined && set === staleAfterDays
 
   return {
     ok: true,
@@ -197,8 +207,10 @@ export function icpView(definition: unknown): IcpViewResult {
       tiers,
       scoringNote: typeof def.scoring.note === 'string' ? def.scoring.note : null,
       disqualifiers,
-      staleAfterDays: staleIsSet ? stale : DEFAULT_STALE_AFTER_DAYS,
+      staleAfterDays,
       staleAfterDaysIsDefault: !staleIsSet,
+      // JSON, so a quoted "14" reads as the text it is rather than a number.
+      staleAfterDaysRefused: set === undefined || staleIsSet ? null : JSON.stringify(set),
       freshnessNote: typeof def.freshness?.note === 'string' ? def.freshness.note : null,
       firmographics,
       outreach: outreachView(def.outreach),

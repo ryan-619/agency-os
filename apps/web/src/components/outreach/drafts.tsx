@@ -4,9 +4,10 @@ import { useEffect, useRef, useState } from 'react'
 import { When } from '@/components/when'
 import {
   EVIDENCE_LINES_SHOWN, KEY_HELP, OTHER_CAMPAIGN_NOTE,
-  addressedByLabel, approvability, approveBlock, approveFootnote, candidateLine, checkedUnderLabel,
-  evidenceHeading, evidenceNote, keyAction,
+  addressedByLabel, approvability, approveBlock, approveFootnote, approvedMessage, candidateLine, checkedUnderLabel,
+  draftTitle, evidenceHeading, evidenceNote, keyAction, queueNoSenderNote, templateLine,
   type AddressedBy, type Approvability, type CandidateDecision, type CheckedUnder, type DraftEvidence,
+  type DraftTemplate,
 } from '@/lib/approval-view'
 
 /**
@@ -18,7 +19,11 @@ import {
  * names the recipient and the campaign, and their name goes on the row.
  *
  * Nothing is sent by approving: the worker's next tick re-checks every §2.1
- * rule at the moment of sending. What this card adds is the rule IN VIEW
+ * rule at the moment of sending — and a LinkedIn draft is never the
+ * worker's at all: approved, it is a step on /tasks that a person starts,
+ * the rules are checked then, and they send it from their own account. The
+ * words say which (`approvedMessage`, `approveFootnote`, by the draft's
+ * channel). What this card adds is the rule IN VIEW
  * while the person reads the words — each candidate's `previewSend` answer,
  * from the sender's own fact-gatherer, in `REFUSAL_WORDS` — and the evidence
  * the draft may quote, dated, with §2.2's warning when it is stale. The
@@ -54,6 +59,8 @@ export interface DraftView {
   readonly candidates: readonly DraftCandidate[]
   /** The quotable evidence and its scan's date; null when there is no successful scan. */
   readonly evidence: DraftEvidence | null
+  /** The registered template an SMS draft was rendered from (0019); absent on every other channel. */
+  readonly template?: DraftTemplate | null
 }
 
 export interface CampaignChoice {
@@ -79,10 +86,11 @@ export function DraftQueue({
   campaigns: readonly CampaignChoice[]
   canDecide: boolean
   /**
-   * `nothingWillSendNote()`: null when a worker drains the queue. Set on a
-   * deployment that runs only the web app, where an approved message stays
-   * approved forever — and telling somebody "it will send on the next pass"
-   * would be the product claiming something it did not do.
+   * `nothingWillSendNote()`: null when a worker is configured. Set on a
+   * deployment that is not configured to reach one — and telling somebody
+   * "it will send on the next pass" would be the product claiming something
+   * it does not know. Shown above the queue only while a draft on it is one
+   * a worker would send (`queueNoSenderNote`): LinkedIn is a person's.
    */
   noSenderNote?: string | null
 }) {
@@ -129,11 +137,7 @@ export function DraftQueue({
             outcome: decision === 'approved' ? 'approved' : 'refused',
             message:
               decision === 'approved'
-                ? noSenderNote === null
-                  ? 'Approved. The worker will send it on its next pass — after checking the suppression list, ' +
-                    'consent, quiet hours and the daily cap again. If it lands in quiet hours it waits for morning.'
-                  : 'Approved, and queued. No worker is connected to this deployment, so nothing will send it ' +
-                    'until one is — every rule is still checked at that moment, not now.'
+                ? approvedMessage(draft.channel, noSenderNote)
                 : 'Denied. Nothing was sent, and the note is kept with the draft.',
           },
         }))
@@ -157,7 +161,7 @@ export function DraftQueue({
       busy: busy === d.id,
       contactId: chosen.contactId,
       campaignId: chosen.campaignId,
-      block: approveBlock(decisionFor(d, chosen.contactId)),
+      block: approveBlock(decisionFor(d, chosen.contactId), d.channel),
     })
   }
 
@@ -261,11 +265,13 @@ export function DraftQueue({
     return () => document.removeEventListener('keydown', onKey)
   }, [canDecide])
 
+  const queueNote = queueNoSenderNote(drafts.map((d) => d.channel), noSenderNote)
+
   return (
     <>
-      {noSenderNote ? (
+      {queueNote ? (
         <div className="note note-warn" style={{ marginBottom: 10 }}>
-          {noSenderNote}
+          {queueNote}
         </div>
       ) : null}
       {canDecide ? (
@@ -279,7 +285,7 @@ export function DraftQueue({
           const chosen = choice[d.id] ?? EMPTY
           const forChannel = campaigns.filter((c) => c.channel === d.channel)
           const decision = decisionFor(d, chosen.contactId)
-          const block = chosen.contactId ? approveBlock(decision) : null
+          const block = chosen.contactId ? approveBlock(decision, d.channel) : null
           const note = evidenceNote(d.evidence, d.company !== null)
           const addressed = addressedByLabel(d.addressedBy)
           const companyHref = d.company ? `/companies/${encodeURIComponent(d.company.domain)}` : null
@@ -297,7 +303,7 @@ export function DraftQueue({
               data-draft-card={d.id}
               tabIndex={0}
               role="group"
-              aria-label={`Draft: ${d.subject ?? '(no subject)'}`}
+              aria-label={`Draft: ${draftTitle(d.subject, d.template)}`}
               onFocus={(e) => {
                 if (e.target === e.currentTarget) setFocused(d.id)
               }}
@@ -311,7 +317,7 @@ export function DraftQueue({
               style={{ outline: focused === d.id ? '2px solid var(--accent)' : 'none', outlineOffset: 2 }}
             >
               <div className="approval-head">
-                <strong>{d.subject ?? '(no subject)'}</strong>
+                <strong>{draftTitle(d.subject, d.template)}</strong>
                 <span className="pill">{d.channel}</span>
                 {d.company && companyHref ? (
                   <a href={companyHref} className="muted" style={{ fontSize: 12.5 }}>
@@ -324,6 +330,11 @@ export function DraftQueue({
               </div>
 
               <pre className="mono approval-payload">{d.body ?? ''}</pre>
+              {d.template ? (
+                <p className="hint" style={{ margin: '-4px 0 10px' }}>
+                  {templateLine(d.template)}
+                </p>
+              ) : null}
 
               {/*
                 The evidence BEFORE the decision, so the words are read against
@@ -390,7 +401,7 @@ export function DraftQueue({
                             value={c.id}
                             // Nobody may approve past these, so they are not offered — except
                             // the person the row came addressed to, who must stay visible.
-                            disabled={approveBlock(c.decision) !== null && c.id !== d.contactId}
+                            disabled={approveBlock(c.decision, d.channel) !== null && c.id !== d.contactId}
                           >
                             {c.label} — {candidateLine(c.decision)}
                           </option>
@@ -469,7 +480,7 @@ export function DraftQueue({
                         {block}
                       </span>
                     ) : (
-                      <span className="muted">{approveFootnote(noSenderNote)}</span>
+                      <span className="muted">{approveFootnote(noSenderNote, d.channel)}</span>
                     )}
                   </div>
                 </>

@@ -4,7 +4,6 @@ import { Shell } from '@/components/shell'
 import { deployment } from '@/lib/deployment'
 import { env } from '@/lib/env'
 import { DKIM_DEFAULT_SELECTORS, isDkimSelector, mailFromDomain } from '@/lib/mail-dns'
-import { orgIdentity } from '../org'
 import { MailDnsPanel } from './panel'
 
 /**
@@ -37,7 +36,6 @@ export default async function MailPage({
   const session = await auth()
   if (!session?.user) redirect('/signin')
   const user = session.user
-  const org = await orgIdentity(user.orgId)
 
   const sp = await searchParams
   const raw = typeof sp['dkim'] === 'string' ? sp['dkim'].trim() : ''
@@ -53,7 +51,7 @@ export default async function MailPage({
   }
 
   return (
-    <Shell user={user} orgName={org.name} current="mail" signOut={signOutAction}>
+    <Shell user={user} current="mail" signOut={signOutAction}>
       <p className="crumb"><a href="/settings">Settings</a> /</p>
       <h1>Mail</h1>
       <p className="lede">

@@ -2,6 +2,8 @@
 
 import { useState } from 'react'
 import { When } from '@/components/when'
+import { SharedNumberHolderNote } from '@/components/shared-number-note'
+import { isSharedNumberOptOutPause } from '@/lib/shared-number-pause'
 
 /**
  * The people at a company (PROMPT.md §2.1, §8.4).
@@ -11,6 +13,12 @@ import { When } from '@/components/when'
  * consent is recorded per channel (absence means NO for SMS and voice). The
  * form asks for the timezone and says why; it does not create consent, which
  * is recorded deliberately, one channel at a time, with a source.
+ *
+ * Resume is offered for every pause, and the route refuses, with its
+ * sentence, the ones a person may not lift. A shared number's holder also
+ * reads what lifts theirs (review round 9): a text from a number they share
+ * asked to stop and could not be recorded, so the number goes on the
+ * suppression list first — the words /contacts uses.
  */
 
 export interface ContactView {
@@ -111,7 +119,7 @@ export function ContactsPanel({
                 {canWrite ? (
                   <div className="row-actions">
                     {c.pausedAt ? (
-                      <button type="button" disabled={busy === c.id} onClick={() => void patch(c.id, { action: 'resume' })}>
+                      <button type="button" disabled={busy === c.id} onClick={() => void patch(c.id, { action: 'resume', pausedReason: c.pausedReason })}>
                         Resume
                       </button>
                     ) : (
@@ -168,6 +176,11 @@ export function ContactsPanel({
               {c.pausedAt ? (
                 <div className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
                   Paused: {c.pausedReason} · <When iso={c.pausedAt} />
+                  {isSharedNumberOptOutPause(c.pausedReason) ? (
+                    <div style={{ marginTop: 2 }}>
+                      <SharedNumberHolderNote />
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
 

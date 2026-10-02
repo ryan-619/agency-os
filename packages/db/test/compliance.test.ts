@@ -23,8 +23,8 @@ import {
   complianceDisclosure, complianceDraftsOnStaleEvidence, complianceEvidenceFreshness,
   complianceHumanCanResolve, complianceLateApprovals, complianceOptOutsNotRecorded,
   complianceOptOutsWithoutSuppression, complianceRefusalsByCode, complianceSummary,
-  complianceSuppressionsBySource, DIGEST_OPT_OUT_FAILURES, recordInboundReply, recordUnsubscribe, schema,
-  type AgencyDb,
+  complianceSuppressionsBySource, DIGEST_OPT_OUT_FAILURES, recordInboundReply, recordUnsubscribe, rolledBackOptOutAudit,
+  schema, type AgencyDb,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
 
@@ -73,8 +73,34 @@ describe('the compliance counts', () => {
     return row!.id
   }
 
-  const touch = async (values: Partial<typeof schema.touches.$inferInsert> & { orgId: string; channel: string; direction: string }) =>
-    (await db.insert(schema.touches).values(values).returning({ id: schema.touches.id }))[0]!.id
+  /**
+   * 0019: an outbound SMS or WhatsApp row that can go out names its
+   * template, by CHECK — so a fixture standing for one gets a registered
+   * template of its org and channel, made once per org.
+   */
+  const templates = new Map<string, string>()
+  const templateFor = async (org: string, channel: 'sms' | 'whatsapp'): Promise<string> => {
+    const key = `${org}:${channel}`
+    const known = templates.get(key)
+    if (known) return known
+    const [row] = await db
+      .insert(schema.messageTemplates)
+      .values({
+        orgId: org, channel, externalId: channel === 'sms' ? '1107160000000012345' : 'reminder',
+        senderId: channel === 'sms' ? 'ACMEIN' : '+919800000000', category: channel === 'sms' ? 'service_explicit' : 'utility',
+        body: 'Hi {#var#}',
+      })
+      .returning({ id: schema.messageTemplates.id })
+    templates.set(key, row!.id)
+    return row!.id
+  }
+  const touch = async (values: Partial<typeof schema.touches.$inferInsert> & { orgId: string; channel: string; direction: string }) => {
+    const needsTemplate =
+      (values.channel === 'sms' || values.channel === 'whatsapp') && values.direction === 'out' &&
+      values.status !== 'refused' && values.status !== 'failed' && !values.templateId
+    const templateId = needsTemplate ? await templateFor(values.orgId, values.channel as 'sms' | 'whatsapp') : values.templateId
+    return (await db.insert(schema.touches).values({ ...values, templateId }).returning({ id: schema.touches.id }))[0]!.id
+  }
 
   beforeEach(async () => {
     test = await migratedDb()
@@ -205,7 +231,8 @@ describe('the compliance counts', () => {
      */
     it('agrees with decideSend on every code it can produce', () => {
       const base: SendFacts = {
-        channel: 'email', recipient: 'priya@rentman.io', suppressed: false, consent: null, evidenceStale: false,
+        channel: 'email', recipient: 'priya@rentman.io', suppressed: false, consent: null, paused: false, evidenceStale: false,
+        template: null,
         recipientTimeZone: 'Europe/London', quietStart: '21:00', quietEnd: '08:00',
         sentToday: 0, dailyCap: 25, campaignStatus: 'active', autoSend: true,
         now: new Date('2026-09-15T12:00:00.000Z'),
@@ -216,8 +243,20 @@ describe('the compliance counts', () => {
         suppressed: { suppressed: true },
         bounced: { recipientBounced: true },
         consent_revoked: { consent: { granted: false, source: 'reply' } },
+        paused: { paused: true, pausedFor: 'manual' },
         stale_evidence: { evidenceStale: true },
+        // 0019: an SMS with a granted opt-in, and no template or the wrong words.
+        no_template: { channel: 'sms', recipient: '+14155550100', consent: { granted: true, source: 'form' }, template: null },
+        template_mismatch: {
+          channel: 'sms', recipient: '+14155550100', consent: { granted: true, source: 'form' },
+          template: { active: true, matches: false, category: 'service_implicit' },
+        },
         unknown_timezone: { recipientTimeZone: null },
+        // Review round 5: a promotional SMS to an Indian number read in Denver, whose band never opens.
+        band_never_opens: {
+          channel: 'sms', recipient: '+919876543210', consent: { granted: true, source: 'form' },
+          template: { active: true, matches: true, category: 'promotional' }, recipientTimeZone: 'America/Denver',
+        },
         quiet_hours: { now: new Date('2026-09-15T23:00:00.000Z') },
         daily_cap: { sentToday: 25 },
         campaign_inactive: { campaignStatus: 'paused' },
@@ -538,6 +577,24 @@ describe('the compliance counts', () => {
       const r = await complianceOptOutsNotRecorded(db, orgId, null)
       expect(r.count).toBe(2)
       expect(r.rows.map((x) => x.companyDomain).sort()).toEqual(['never.test', null].sort())
+    })
+
+    /**
+     * Review round 7, [7]: a colleague's stop filed under a contact is
+     * written about the message it answered, never about the contact — so
+     * the inbox does not read it as the contact's own. It is still somebody's
+     * opt-out recorded nowhere, so the page counts it, at the company of the
+     * conversation it arrived in.
+     */
+    it('counts a stop from somebody other than the contact it was filed under, at the company of the message it answered', async () => {
+      const priya = await contact(orgId, fresh, 'priya@fresh.test')
+      const ours = await touch({ orgId, contactId: priya, companyId: fresh, channel: 'email', direction: 'out', status: 'sent', sentAt: ago(2) })
+      await appendAudit(db, rolledBackOptOutAudit({ orgId, contactId: priya, inReplyTo: ours, fromIsContact: false }))
+      const r = await complianceOptOutsNotRecorded(db, orgId, null)
+      expect(r.count).toBe(1)
+      expect(r.rows[0]).toMatchObject({
+        action: 'contact.opt_out_not_recorded', channel: 'email', why: 'record_failed', companyDomain: 'fresh.test',
+      })
     })
 
     it('counts the audit rows inside the window and all time', async () => {

@@ -30,6 +30,15 @@ export function ago(seconds: number): string {
   return unit(Math.floor(s / 86_400), 'day')
 }
 
+/**
+ * Why nothing sends where the newest heartbeat is a retired row: the
+ * digest's words (`workerWords` in `lib/slack-message.ts`) and the
+ * dashboard's (`RETIRED_WORKER_WORDS` in `lib/dashboard-view.ts`), restated
+ * so that this module keeps its type-only imports; `settings-facts.test.ts`
+ * holds the three to one sentence.
+ */
+const RETIRED_WORKER_WORDS = 'no worker is configured, so nothing is sending or reading replies'
+
 export interface WorkerLine {
   readonly tone: Tone
   readonly text: string
@@ -41,6 +50,11 @@ export interface WorkerLine {
  * The worker's heartbeat as one line. `report` is null when it could not be
  * read — most often because migration 0018, which creates the table, is not
  * applied — and `errorName` is the error's class, never its message.
+ *
+ * A retired row (`report.retired`: silent for over a week where no worker is
+ * configured) is called retired, as the digest and /api/health call it —
+ * its `status` stays `silent`, so switching on that alone called the same
+ * row "silent" here and "retired" in the channel.
  */
 export function workerLine(report: HeartbeatReport | null, errorName?: string): WorkerLine {
   if (report === null) {
@@ -51,6 +65,13 @@ export function workerLine(report: HeartbeatReport | null, errorName?: string): 
     }
   }
   const age = report.ageSeconds === null ? '' : ago(report.ageSeconds)
+  if (report.retired) {
+    return {
+      tone: 'plain',
+      text: `Worker retired — last seen ${age || 'over a week ago'}; ${RETIRED_WORKER_WORDS}.`,
+      lastSeenAt: report.lastSeenAt,
+    }
+  }
   switch (report.status) {
     case 'live':
       return {
@@ -82,14 +103,17 @@ export function workerLine(report: HeartbeatReport | null, errorName?: string): 
 /** What a heartbeat says the worker was doing, as words. Never which credential it uses. */
 export function workerModes(report: HeartbeatReport | null): string | null {
   if (report === null || report.status === 'never' || report.status === 'not_configured') return null
+  // `outreach` describes the MAILBOX only; SMS is its own field (0019), and
+  // a worker with DoveSoft and no mailbox sends texts while its mail is off.
   const outreach: Record<string, string> = {
-    disabled: 'outreach off',
-    'send-only': 'sending, not reading a mailbox',
-    'send-and-receive': 'sending and reading a mailbox',
-    'receive-only': 'reading a mailbox, not sending',
+    disabled: 'email outreach off',
+    'send-only': 'sending email, not reading a mailbox',
+    'send-and-receive': 'sending email and reading a mailbox',
+    'receive-only': 'reading a mailbox, not sending email',
   }
   const parts = [
     report.outreach ? outreach[report.outreach] ?? report.outreach : null,
+    report.sms === 'on' ? 'texts through DoveSoft' : report.sms === 'off' ? 'SMS off' : null,
     report.chat === 'enabled' ? 'chat on' : report.chat === 'disabled' ? 'chat off (no model credential)' : null,
   ].filter((p): p is string => p !== null)
   return parts.length > 0 ? `At its last heartbeat it reported: ${parts.join('; ')}.` : null
@@ -121,11 +145,34 @@ export interface DeploymentFact {
 /** Every flag this deployment has, as a sentence — "why does nothing send?" as a page. */
 export function deploymentFacts(i: DeploymentFactInput): readonly DeploymentFact[] {
   const f = i.flags
-  const replyWays = [
-    f.worker ? 'the worker’s mailbox reader' : null,
+  const webhooks = [
     i.inboundJson ? 'the inbound webhook (/api/inbound/email)' : null,
     i.inboundResend ? 'Resend’s inbound webhook (/api/inbound/resend)' : null,
   ].filter((w): w is string => w !== null)
+  // Configuration only, like Sending: a worker on Fly reads its mailbox
+  // against this database whether or not this web half holds its URL, so the
+  // worker's part is the heartbeat's to say. Review round 3, finding [20].
+  const workerPart = f.worker
+    ? 'whether it reads a mailbox is the heartbeat’s question.'
+    : null
+  // Texts a contact sends back — a STOP included — arrive through DoveSoft's
+  // webhook (0019) whatever is true of email, so with it set the line is on
+  // and everything else in it is about EMAIL replies. It said "no reply is
+  // read", off, while the SMS section on the same page listed the URLs texts
+  // arrive at. Round 4, finding [16].
+  const texts = f.smsInbound === true
+  const emailWebhook = texts ? 'inbound email webhook' : 'inbound webhook'
+  let replies: string
+  if (webhooks.length > 0) {
+    replies = `Accepted by ${webhooks.join(' and ')}.${workerPart ? ` A worker is configured too; ${workerPart}` : ''}`
+  } else if (workerPart) {
+    replies = `No ${emailWebhook} is configured. This deployment is configured to reach a worker; ${workerPart}`
+  } else {
+    replies =
+      `No ${emailWebhook} is configured, and this deployment is not configured to reach a worker. Unless the ` +
+      `heartbeat shows one reading a mailbox against this database, no ${texts ? 'email ' : ''}reply is read.`
+  }
+  if (texts) replies += ' Texts a contact sends back, a STOP included, arrive through DoveSoft’s webhook.'
 
   let cron: string
   if (!f.cron) cron = 'Not run: every /api/cron route answers 503 without the secret, so nothing rescans or sends a digest on a schedule.'
@@ -159,12 +206,11 @@ export function deploymentFacts(i: DeploymentFactInput): readonly DeploymentFact
     },
     {
       area: 'Replies',
-      on: replyWays.length > 0,
-      sentence:
-        replyWays.length > 0
-          ? `Read by ${replyWays.join(' and ')}.`
-          : 'Not read on this deployment: no worker reads a mailbox and no inbound webhook is configured, so a reply cannot pause a sequence here.',
-      vars: ['INBOUND_WEBHOOK_SECRET', 'RESEND_WEBHOOK_SECRET', 'RESEND_API_KEY'],
+      on: webhooks.length > 0 || f.worker || texts,
+      sentence: replies,
+      vars: [
+        'AGENT_URL', 'AGENT_INTERNAL_TOKEN', 'INBOUND_WEBHOOK_SECRET', 'RESEND_WEBHOOK_SECRET', 'RESEND_API_KEY', 'DOVESOFT_WEBHOOK_SECRET',
+      ],
     },
     {
       // The web app's SMTP carries sign-in links only. Outreach goes through
@@ -219,6 +265,18 @@ export function sendingAnswer(report: HeartbeatReport | null): { tone: Tone; tex
   if (report === null) {
     return { tone: 'warn', text: 'The heartbeat could not be read, so whether a worker is sending is not known from here.' }
   }
+  if (report.retired) {
+    // Not "check Fly": nothing is configured to be running, so nothing was scaled away.
+    return {
+      tone: 'warn',
+      text:
+        `Nothing sends: ${RETIRED_WORKER_WORDS}. The last worker to report in was last seen ` +
+        `${report.ageSeconds === null ? 'over a week ago' : ago(report.ageSeconds)}; with none configured, a week without a ` +
+        'heartbeat counts as retired — what a worker run by hand and then closed leaves behind — and nobody is alerted ' +
+        'about it. If one is meant to be running elsewhere against this database, it has stopped. The CRM half works ' +
+        'without one; sending, reply detection and chat need the worker (DEPLOYING.md).',
+    }
+  }
   switch (report.status) {
     case 'not_configured':
       return {
@@ -236,15 +294,46 @@ export function sendingAnswer(report: HeartbeatReport | null): { tone: Tone; tex
         text: `Nothing is sending now: the worker's last heartbeat was ${report.ageSeconds === null ? 'unknown' : ago(report.ageSeconds)}. On Fly, check that the machine was not scaled to zero.`,
       }
     case 'live':
+      if (report.outreach === 'disabled' && report.sms === 'on') {
+        return {
+          tone: 'ok',
+          text: 'A worker is alive and sends approved SMS through DoveSoft. Its email outreach is disabled, so no email is sent and no mailbox is read; its mail settings live on its own host.',
+        }
+      }
       if (report.outreach === 'disabled') {
         return { tone: 'warn', text: 'A worker is alive but reports outreach disabled, so it sends nothing. Its mail settings live on its own host.' }
+      }
+      if (report.outreach === 'receive-only' && report.sms === 'on') {
+        return {
+          tone: 'ok',
+          text: 'A worker is alive: it reads a mailbox and sends approved SMS through DoveSoft, but reports that it does not send email.',
+        }
       }
       if (report.outreach === 'receive-only') {
         return { tone: 'warn', text: 'A worker is alive and reads a mailbox, but reports that it does not send.' }
       }
+      if (report.sms === 'on') {
+        return {
+          tone: 'ok',
+          text: 'A worker is alive and reports that it sends. A message that has still not gone out carries its reason on the message: a refusal, quiet hours, the daily cap, or an approval nobody has decided.',
+        }
+      }
+      // The sender leaves a due row on a channel it has no provider for
+      // exactly as it was — no refusal code, no `scheduled_for` — and only
+      // its log says why, so the promise above holds for email and not for
+      // an approved SMS. Still `ok`: email sends, and an agency that never
+      // switched SMS on has nothing waiting. Round 4, finding [17].
       return {
         tone: 'ok',
-        text: 'A worker is alive and reports that it sends. A message that has still not gone out carries its reason on the message: a refusal, quiet hours, the daily cap, or an approval nobody has decided.',
+        text:
+          'A worker is alive and reports that it sends. An email that has still not gone out carries its reason on the ' +
+          'message: a refusal, quiet hours, the daily cap, or an approval nobody has decided. ' +
+          (report.sms === 'off'
+            ? 'A text does not: SMS is off in that worker, so an approved SMS waits with no reason on it — only the ' +
+              'worker’s log says why — until '
+            : 'A text may not: the worker has not said whether it sends SMS (one from before DoveSoft says nothing), ' +
+              'and an approved SMS may wait with no reason on it until ') +
+          'SMS is switched on where the worker runs (DOVESOFT_API_KEY and DOVESOFT_ENTITY_ID on its host).',
       }
   }
 }

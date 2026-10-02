@@ -18,7 +18,9 @@ live instance runs on Vercel and Neon instead, a deliberate departure
 > consent ledger, compliance and audit pages, search and exports, settings,
 > proposal share links, LinkedIn steps a person sends, bounce handling,
 > one-click unsubscribe, a worker heartbeat, and a nightly rescan and Slack
-> digest on Vercel. [PROMPT.md](PROMPT.md) is the full spec.
+> digest on Vercel. Then SMS through DoveSoft, on migration 0019: opt-in only,
+> sent only as DLT-registered templates a person approves, with delivery
+> reports and STOP replies read back. [PROMPT.md](PROMPT.md) is the full spec.
 
 ---
 
@@ -100,7 +102,7 @@ with `curl` and the bearer, as `docker-compose.yml` shows.
 ```bash
 npm install
 npm run typecheck     # packages and tests, strict
-npm test              # 3875 tests, no Docker required
+npm test              # 5243 tests, no Docker required
 npx vitest run --maxWorkers=1 --minWorkers=1   # the same, on a machine short of memory
 ```
 
@@ -129,11 +131,11 @@ which rejects `--env-file`. One file, linked, rather than two that drift.
 | Path | What it is |
 |---|---|
 | `apps/web` | Next.js 16 App Router — UI, BFF routes, Auth.js magic link, two Vercel crons |
-| `apps/agent` | the long-running worker — agent turns over the Agent SDK, the send tick, IMAP reply detection, recovery, a heartbeat |
+| `apps/agent` | the long-running worker — agent turns over the Agent SDK, the send tick (email over SMTP, SMS through DoveSoft), IMAP reply detection, recovery, a heartbeat |
 | `apps/voice` | inbound voice over Twilio ConversationRelay — built, not switched on |
 | `packages/core` | domain logic — pure, no I/O, no framework, no database |
 | `packages/scanner` | the public-surface collector, and the port of the Python engine |
-| `packages/db` | schema, reversible SQL migrations (`0001`–`0018`), typed queries, seed |
+| `packages/db` | schema, reversible SQL migrations (`0001`–`0019`), typed queries, seed |
 | `packages/tools` | the agent's twenty-three typed tools, as plain data |
 | `packages/llm` | the single-shot model clients behind §5.5's seam — optional; lead data stays local by default |
 
@@ -152,7 +154,10 @@ npm run db:migrate -- reset      # down all, then up (refuses in production)
 Every `.up.sql` has a matching `.down.sql` — the migrator refuses to load one
 without the other. It records a checksum over **both halves** of each applied
 migration and **will not run if a shipped migration has been edited**, in
-either direction. Add a new migration instead.
+either direction. Add a new migration instead. A `down` that would revert
+0018 is refused while any user has revoked access — 0018's down drops
+`users.revoked_at`, which would let them sign in again — unless you pass
+`--restores-revoked-access`.
 
 ---
 

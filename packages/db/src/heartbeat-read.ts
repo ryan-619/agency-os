@@ -29,6 +29,13 @@ import type { WorkerHeartbeat } from './schema.js'
 export type HeartbeatOutreach = 'disabled' | 'send-only' | 'send-and-receive' | 'receive-only'
 /** Whether the worker can take a chat turn. Never which credential it uses (§2.3). */
 export type HeartbeatChat = 'enabled' | 'disabled'
+/**
+ * Whether the worker sends SMS through DoveSoft (0019): `on` with both
+ * DOVESOFT_API_KEY and DOVESOFT_ENTITY_ID on its host, `off` otherwise.
+ * Separate from `outreach`, which describes the MAILBOX only — a worker with
+ * no SMTP and DoveSoft on reports `outreach: 'disabled'` and sends texts.
+ */
+export type HeartbeatSms = 'on' | 'off'
 
 /**
  * How long a worker may go unheard before it is called silent, when nothing
@@ -38,6 +45,19 @@ export type HeartbeatChat = 'enabled' | 'disabled'
  * noticed days later as a queue that stopped moving.
  */
 export const HEARTBEAT_SILENT_AFTER_SECONDS = 600
+
+/**
+ * Where NO worker is configured, a silent row older than this is a retired
+ * session rather than a worker that stopped. `./tools/run-worker.sh` run
+ * once against production and closed leaves its row behind, and only a
+ * running worker's own write prunes the table — so without a horizon that
+ * row raised the worker-silent alert every morning forever, the daily noise
+ * that teaches a channel to ignore the one alert that matters. A week,
+ * because a worker that was running and stopped is worth a week of notices
+ * first. The one place this number lives: `workerSilent` on the web reads
+ * it from here.
+ */
+export const HEARTBEAT_RETIRED_AFTER_DAYS = 7
 
 /**
  * How many missed ticks make a worker silent when the row says how often it
@@ -109,19 +129,43 @@ export function heartbeatSilentAfter(row: { readonly detail: unknown } | null): 
   return Math.max(HEARTBEAT_SILENT_AFTER_SECONDS, Math.ceil((intervalMs * MISSED_TICKS) / 1000))
 }
 
+/**
+ * What the row says about SMS, from `detail.sms` — written by
+ * `apps/agent/src/worker.ts` beside `halted` and `lockHeld`, because the
+ * table's `outreach` column and its CHECK predate DoveSoft. Null for no row,
+ * and for a row that does not carry `on` or `off`: a worker from before 0019
+ * wrote nothing, and a value nobody defined is not guessed at.
+ */
+export function heartbeatSms(row: { readonly detail: unknown } | null): HeartbeatSms | null {
+  const detail = row?.detail
+  const sms = typeof detail === 'object' && detail !== null && 'sms' in detail ? (detail as { sms: unknown }).sms : null
+  return sms === 'on' || sms === 'off' ? sms : null
+}
+
 export interface HeartbeatReport {
   /** This web deployment is configured to reach a worker (`deployment().worker`). */
   readonly configured: boolean
   readonly lastSeenAt: Date | null
   readonly ageSeconds: number | null
+  /** The MAILBOX: `HeartbeatOutreach`'s vocabulary. Says nothing about SMS. */
   readonly outreach: string | null
   readonly chat: string | null
+  /** SMS through DoveSoft (`heartbeatSms`); null when the row does not say. */
+  readonly sms: HeartbeatSms | null
   /**
    * `not_configured` only when there is no row AND no worker is configured —
    * a deployment that never meant to run one. A configured deployment with
    * no row is `never`: something should be ticking and nothing ever has.
    */
   readonly status: 'not_configured' | 'never' | 'live' | 'silent'
+  /**
+   * A `silent` row older than `HEARTBEAT_RETIRED_AFTER_DAYS` where no worker
+   * is configured: a session somebody ran by hand and closed. The status
+   * stays `silent`, because nothing is sending and every page that says so
+   * is right; the digest line and /api/health name it `retired`
+   * (`heartbeatReportedStatus`), and nobody is alerted about it.
+   */
+  readonly retired: boolean
 }
 
 /**
@@ -134,12 +178,31 @@ export function heartbeatReport(
   now: Date,
 ): HeartbeatReport {
   const observed = heartbeatStatus(row, now, heartbeatSilentAfter(row))
+  const ageSeconds = heartbeatAge(row, now)
   return {
     configured,
     lastSeenAt: row?.lastTickAt ?? null,
-    ageSeconds: heartbeatAge(row, now),
+    ageSeconds,
     outreach: row?.outreach ?? null,
     chat: row?.chat ?? null,
+    sms: heartbeatSms(row),
     status: observed === 'never' && !configured ? 'not_configured' : observed,
+    // Configured, a stopped worker is silent however long ago it stopped:
+    // somebody meant one to be running. An age that cannot be read is not a week.
+    retired:
+      !configured &&
+      observed === 'silent' &&
+      ageSeconds !== null &&
+      Number.isFinite(ageSeconds) &&
+      ageSeconds > HEARTBEAT_RETIRED_AFTER_DAYS * 86_400,
   }
+}
+
+/** What the digest's "Worker:" line and /api/health call the worker: the report's status, or `retired`. */
+export type HeartbeatReportedStatus = HeartbeatReport['status'] | 'retired'
+
+export function heartbeatReportedStatus(
+  report: Pick<HeartbeatReport, 'status' | 'retired'>,
+): HeartbeatReportedStatus {
+  return report.retired ? 'retired' : report.status
 }

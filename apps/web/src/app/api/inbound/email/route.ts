@@ -1,12 +1,15 @@
 import { NextResponse, after } from 'next/server'
 import { mailSignalInput } from '@agency/core'
-import { handleInboundEmail, type AgencyDb } from '@agency/db/queries'
+import {
+  appendAudit, handleInboundEmail, pauseContact, pauseContactOverriding, type AgencyDb, type InboundOutcome,
+} from '@agency/db/queries'
 import { getDb } from '@/lib/db'
 import { env } from '@/lib/env'
 import { log } from '@/lib/logger'
 import { secretMatches } from '@/lib/secret'
 import { notify } from '@/lib/slack'
 import { optOutNotRecordedNotification, replyNotification } from './notification'
+import { inboundEmailNotRecorded, keepingRolledBackOptOut } from './fault'
 
 /**
  * Inbound email by webhook (PROMPT.md §8.4, "or the provider webhook").
@@ -61,6 +64,18 @@ import { optOutNotRecordedNotification, replyNotification } from './notification
  * not be written. It raises the `opt_out_not_recorded` alarm instead, AWAITED
  * like the unsubscribe and erasure routes' — the answer is still 200, since
  * a retry would be recognised as a duplicate and record nothing more.
+ *
+ * ## A fault while recording
+ *
+ * A dropped connection or a timeout is a 500, so the provider retries — and
+ * it is caught HERE (review round 5): drizzle's error quotes every bound
+ * parameter, the address and the words, and Next logs an escaping error
+ * whole. The line names the fault's class only. A "stop" whose recording
+ * threw also takes the loud path — the contact paused, an audit row and the
+ * AWAITED alarm, under the contact the recorder was filing it under
+ * (`./fault.ts`); a stop from somebody else in the thread holds that
+ * contact only as any reply would, says whose address to record, and holds
+ * the sender as the one who asked when they are a contact here too.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -95,16 +110,37 @@ export async function POST(request: Request): Promise<NextResponse> {
       : []
 
   const signals = mailSignalInput({ headers: o['headers'], dsn: o['dsn'] })
+  const text = typeof o['text'] === 'string' ? o['text'].slice(0, 20_000) : null
 
-  const outcome = await handleInboundEmail(getDb() as unknown as AgencyDb, {
-    from,
-    subject: typeof o['subject'] === 'string' ? o['subject'] : null,
-    text: typeof o['text'] === 'string' ? o['text'].slice(0, 20_000) : null,
-    messageId: typeof o['messageId'] === 'string' ? o['messageId'] : null,
-    references,
-    ...(signals.headers ? { headers: signals.headers } : {}),
-    dsn: signals.dsn,
-  })
+  // The recorder's own lines go to this app's log, as every other line
+  // here does; and a stop it rolled back is kept, because that line is the
+  // one place a fault leaves the org and the contact it was filing under.
+  const recorder = keepingRolledBackOptOut(log)
+  let outcome: InboundOutcome
+  try {
+    outcome = await handleInboundEmail(getDb() as unknown as AgencyDb, {
+      from,
+      subject: typeof o['subject'] === 'string' ? o['subject'] : null,
+      text,
+      messageId: typeof o['messageId'] === 'string' ? o['messageId'] : null,
+      references,
+      ...(signals.headers ? { headers: signals.headers } : {}),
+      dsn: signals.dsn,
+      log: recorder,
+    })
+  } catch (err) {
+    // Never `err` itself into a log line: its message quotes the address
+    // and the words. `inboundEmailNotRecorded` says the class, and AWAITS
+    // the alarm for a stop (`notify` is bounded and never throws).
+    const answer = await inboundEmailNotRecorded(err, { text, rolledBack: recorder.rolledBack() }, {
+      audit: (entry) => appendAudit(getDb() as unknown as AgencyDb, entry),
+      pause: (orgId, contactId, reason, now) => pauseContactOverriding(getDb() as unknown as AgencyDb, orgId, contactId, reason, now),
+      hold: (orgId, contactId, reason, now) => pauseContact(getDb() as unknown as AgencyDb, orgId, contactId, reason, now),
+      alarm: (event) => notify(event),
+      log,
+    })
+    return NextResponse.json(answer.body, { status: answer.status })
+  }
 
   // A reply that said stop and could not be suppressed raises the alarm,
   // AWAITED — never `after()`, which a host without `waitUntil` drops — in

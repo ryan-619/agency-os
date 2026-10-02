@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation'
-import { can, parseIcpDefinition } from '@agency/core'
+import { can } from '@agency/core'
 import {
   CURRENT_KEY_VERSION, credentialsList, listConnectors, secretsKeyFromEnv, type AgencyDb,
 } from '@agency/db/queries'
@@ -10,7 +10,6 @@ import {
 } from '@/components/settings/credentials'
 import { getDb } from '@/lib/db'
 import { agentConfigured } from '@/lib/agent'
-import { icpForOrg } from '@/lib/queries'
 
 /**
  * Settings → Credentials (PROMPT.md §2.3).
@@ -41,16 +40,6 @@ export default async function CredentialsPage() {
     listConnectors(db, user.orgId),
   ])
 
-  const icpRow = await icpForOrg(user.orgId)
-  let orgLabel = 'Agency'
-  if (icpRow) {
-    try {
-      orgLabel = parseIcpDefinition(icpRow.definition).label
-    } catch {
-      orgLabel = 'Agency'
-    }
-  }
-
   const signOutAction = async () => {
     'use server'
     await signOut({ redirectTo: '/signin' })
@@ -75,7 +64,7 @@ export default async function CredentialsPage() {
   }))
 
   return (
-    <Shell user={user} orgName={orgLabel} current="credentials" signOut={signOutAction}>
+    <Shell user={user} current="credentials" signOut={signOutAction}>
       <h1>Credentials</h1>
       <p className="lede">
         Credentials are stored encrypted with <code>SECRETS_KEY</code>; this page never shows a value.

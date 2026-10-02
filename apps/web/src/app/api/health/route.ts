@@ -7,7 +7,7 @@ import {
   parseAppliedMigration,
 } from '@agency/db/schema-version'
 import type { SchemaAgreement } from '@agency/db/schema-version'
-import type { AgencyDb } from '@agency/db/queries'
+import { heartbeatReportedStatus, type AgencyDb, type HeartbeatReportedStatus } from '@agency/db/queries'
 import { getDb } from '@/lib/db'
 import { workerStatus, type WorkerStatus } from '@/lib/worker-status'
 
@@ -59,8 +59,15 @@ import { workerStatus, type WorkerStatus } from '@/lib/worker-status'
  * fix nothing. A heartbeat that cannot be read — 0018 not applied, most
  * likely, which `schema` above will already be saying — is `worker: null`
  * with the error's class, never a 5xx.
+ *
+ * Its `status` is the digest's word for the same row (`heartbeatReportedStatus`):
+ * `retired`, with `retired: true`, where no worker is configured and the
+ * newest heartbeat is more than a week old — a session somebody ran by hand
+ * and closed, whose row nothing will ever prune — rather than `silent`, which
+ * the daily cron alerts on.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 export const revalidate = 0
 
 interface SchemaReport {
@@ -106,8 +113,11 @@ async function appliedMigration(): Promise<string | null> {
   }
 }
 
-/** `WorkerStatus` as JSON: the instant as an ISO string. */
-type WorkerReport = Omit<WorkerStatus, 'lastSeenAt'> & { lastSeenAt: string | null }
+/** `WorkerStatus` as JSON: the instant as an ISO string, and the status as the digest says it. */
+type WorkerReport = Omit<WorkerStatus, 'lastSeenAt' | 'status'> & {
+  lastSeenAt: string | null
+  status: HeartbeatReportedStatus
+}
 
 /**
  * The worker's heartbeat, or null with the reason's class. Swallowed here and
@@ -117,7 +127,7 @@ type WorkerReport = Omit<WorkerStatus, 'lastSeenAt'> & { lastSeenAt: string | nu
 async function workerReport(now: Date): Promise<{ worker: WorkerReport | null; workerError?: string }> {
   try {
     const s = await workerStatus(getDb() as unknown as AgencyDb, now)
-    return { worker: { ...s, lastSeenAt: s.lastSeenAt?.toISOString() ?? null } }
+    return { worker: { ...s, status: heartbeatReportedStatus(s), lastSeenAt: s.lastSeenAt?.toISOString() ?? null } }
   } catch (err) {
     // The class only: a driver error can carry the DSN (§2.3).
     return { worker: null, workerError: err instanceof Error ? err.name : 'UnknownError' }

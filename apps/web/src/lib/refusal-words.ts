@@ -15,7 +15,17 @@
  * not an owner lifting an opt-out. `stale_evidence` is a message whose words
  * quote a scan past its re-verification deadline at the moment of sending
  * (§2.2): nobody may approve past it, and the fix is a re-scan and a new
- * draft.
+ * draft. `paused` is a person held from every campaign — they replied, or a
+ * teammate paused them — and is not their no: nobody approves past it, and
+ * it ends when a person answers the reply or resumes them. It was logged as
+ * `consent_revoked` ("declined, or replied") before it had its own code.
+ * `band_never_opens` is a promotional SMS with no minute it may go — an
+ * Indian number read in a zone whose hours never meet TRAI's band, or a band
+ * the campaign's quiet hours cover — which was stored as `unknown_timezone`
+ * until review round 5, and so read "no timezone on the contact" for a
+ * contact whose zone is Denver. That label is true again of what is left
+ * under it: no zone on the contact or their company, or one this system
+ * does not recognise.
  */
 export const REFUSAL_WORDS: Readonly<Record<string, string>> = {
   unparseable_recipient: 'no usable address',
@@ -23,13 +33,18 @@ export const REFUSAL_WORDS: Readonly<Record<string, string>> = {
   cold_channel_forbidden: 'cold channel not allowed',
   no_consent: 'no opt-in',
   consent_revoked: 'declined, or replied',
+  paused: 'contact paused',
   quiet_hours: 'quiet hours',
   unknown_timezone: 'no timezone on the contact',
+  band_never_opens: 'promotional band never opens for them',
   daily_cap: 'daily cap',
   campaign_inactive: 'campaign paused or not active',
   needs_approval: 'denied by a person',
   bounced: 'address bounced',
   stale_evidence: 'the evidence it quotes is stale',
+  // 0019: an SMS or WhatsApp message the operator would not deliver.
+  no_template: 'no registered template',
+  template_mismatch: 'not its registered template',
 }
 
 /** The words for a code, or the code itself made readable. */

@@ -39,3 +39,8 @@ export * from './rotting.js'
 export * from './analytics.js'
 export * from './kickoff.js'
 export * from './mail-signals.js'
+// Round 3: the inbound paths' one HTML-to-text converter, and the Slack message two processes post.
+export * from './html-text.js'
+export * from './slack-payload.js'
+// DoveSoft (0019): the DLT template rules an Indian SMS is scrubbed against, and the SMS opt-out reader.
+export * from './dlt.js'

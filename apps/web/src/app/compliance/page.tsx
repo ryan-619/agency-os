@@ -11,6 +11,8 @@ import { getDb } from '@/lib/db'
 import { deployment, type Deployment } from '@/lib/deployment'
 import { icpForOrg } from '@/lib/queries'
 import { refusalWords } from '@/lib/refusal-words'
+import { workerStatus, type WorkerStatus } from '@/lib/worker-status'
+import { recorders, workerBanner, type Absent } from './recorders'
 
 /**
  * Compliance (§2.1, §2.2): the questions an auditor asks, as numbers
@@ -26,8 +28,10 @@ import { refusalWords } from '@/lib/refusal-words'
  *
  * §2.2 applied to the auditor's own numbers: a zero only means something if
  * something on this deployment could have recorded a row. So each block
- * names its recorder, reads `deployment()`, and says when that recorder is
- * absent — "none recorded", never "none happened".
+ * names its recorder and says when that recorder is absent — "none
+ * recorded", never "none happened". Whether a worker records is read from
+ * its heartbeat, not from `deployment()` (`./recorders.ts`): a worker on Fly
+ * sends against this database whether or not this web half holds its URL.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -80,8 +84,7 @@ export default async function CompliancePage() {
   // a positive number, and `parseIcpDefinition` does not check it, so an ICP
   // with `stale_after_days: 0` made this page a 500 while the dashboard beside
   // it fell back to the default. Both now fall back, and this page says so.
-  const { icp, unreadable, staleAfterDays: staleDays } = readIcp((await icpForOrg(user.orgId))?.definition)
-  const orgLabel = icp?.label ?? 'Agency'
+  const { unreadable, staleAfterDays: staleDays } = readIcp((await icpForOrg(user.orgId))?.definition)
   const signOutAction = async () => {
     'use server'
     await signOut({ redirectTo: '/signin' })
@@ -89,7 +92,7 @@ export default async function CompliancePage() {
 
   if (!can(principal, 'audit:read')) {
     return (
-      <Shell user={user} orgName={orgLabel} current="compliance" signOut={signOutAction}>
+      <Shell user={user} current="compliance" signOut={signOutAction}>
         <h1>Compliance</h1>
         <div className="note">Your role cannot read the audit counts.</div>
       </Shell>
@@ -98,11 +101,22 @@ export default async function CompliancePage() {
 
   const db = getDb() as unknown as AgencyDb
   const live = deployment()
-  const s = await complianceSummary(db, user.orgId, { staleDays, now: new Date() })
-  const absent = recorders(live)
+  const now = new Date()
+  const s = await complianceSummary(db, user.orgId, { staleDays, now })
+  // The observation. Null when it cannot be read — most often because 0018,
+  // which creates the table, is not applied — and the sentences then fall
+  // back to what is configured, worded as configuration.
+  let worker: WorkerStatus | null = null
+  try {
+    worker = await workerStatus(db, now)
+  } catch {
+    worker = null
+  }
+  const absent = recorders(live, worker)
+  const banner = workerBanner(live, worker)
 
   return (
-    <Shell user={user} orgName={orgLabel} current="compliance" signOut={signOutAction}>
+    <Shell user={user} current="compliance" signOut={signOutAction}>
       <h1>Compliance</h1>
       <p className="lede">
         Every number here is a count of rows, and every count links to its rows. A zero is &apos;none
@@ -116,14 +130,11 @@ export default async function CompliancePage() {
         </div>
       ) : null}
 
-      {live.worker ? null : (
+      {banner ? (
         <div className="note note-warn" style={{ marginBottom: 8 }}>
-          <strong>No agent worker is connected to this deployment.</strong> The send path, the mailbox
-          reader and the agent all run in it, so the counts that only the worker writes — messages sent,
-          most refusals, the agent&apos;s approvals — are counts of what was recorded here, which may be
-          nothing.
+          <strong>{banner.lead}</strong> {banner.rest}
         </div>
-      )}
+      ) : null}
 
       <Disclosure s={s} absent={absent} />
       <OptOuts s={s} absent={absent} />
@@ -155,41 +166,7 @@ export default async function CompliancePage() {
   )
 }
 
-// ---------------------------------------------------------------------------
-// Who records what, on THIS deployment
-// ---------------------------------------------------------------------------
-
-interface Absent {
-  /** Nothing here sends: every "went out" count is of what was recorded here. */
-  readonly sending: string | null
-  /** Nothing here can learn that somebody replied. */
-  readonly replies: string | null
-  /** The one-click link cannot be verified here. */
-  readonly unsubscribe: string | null
-  /** The voice service is a separate process this page cannot see. */
-  readonly voice: string
-  /** The agent raises approvals, and it runs in the worker. */
-  readonly agent: string | null
-}
-
-/**
- * The sentence for each recorder that is missing. Built from `deployment()`
- * — configuration, not health — so it can say "no worker is connected" and
- * never "the worker is fine".
- */
-function recorders(live: Deployment): Absent {
-  return {
-    sending: live.worker ? null : 'No worker is connected, so nothing on this deployment sends.',
-    replies:
-      live.worker || live.inbound === 'webhook'
-        ? null
-        : 'No worker reads a mailbox and no inbound webhook is configured, so no reply can arrive here.',
-    unsubscribe: live.unsubscribe ? null : 'UNSUBSCRIBE_SECRET is not set, so the one-click link is not offered here.',
-    voice:
-      'Calls are written by the voice service, a separate process this page cannot see — and it should not be switched on until A2P 10DLC registration has cleared.',
-    agent: live.worker ? null : 'No worker is connected, so the agent raises no approvals here.',
-  }
-}
+// Who records what, on THIS deployment: `./recorders.ts`, from the heartbeat.
 
 // ---------------------------------------------------------------------------
 // Pieces
@@ -403,29 +380,32 @@ function ColdOptIn({ s, absent }: { s: ComplianceSummary; absent: Absent }) {
 
 function DraftsOnStale({ s }: { s: ComplianceSummary }) {
   const d = s.draftsOnStaleEvidence
-  const answers = d.rows.filter((r) => r.answersReply).length
-  const noLook = d.count - d.byStatus.awaiting_approval
   return (
     <section>
       <h2>Messages waiting to go on stale or missing evidence</h2>
       <Rule>
         §2.2: findings older than {s.freshness.staleDays} days must be re-verified before they appear in any
         outbound draft. Every outbound message not yet sent — awaiting approval, approved and waiting for its
-        moment, queued to send automatically, or being sent — whose company has no successful scan, or whose
-        last one is stale, measured from the scan&apos;s <code>ran_at</code> the way the draft generator
-        measures it. Only the first waits on a person: the other three go with nobody looking at the evidence
-        again. Should be zero for messages written from the scan; an answer to a reply is listed too, tagged,
-        because nothing marks which of its words came from the scan.
+        moment, queued to send automatically, or being sent — whose company has no successful scan, whose
+        last one is stale, or whose words were written from a scan that has gone stale since or that a newer
+        successful scan has superseded, measured from the scan&apos;s <code>ran_at</code>. The send path refuses
+        a message at sending when the scan its words were written from is stale (<code>stale_evidence</code>),
+        whoever approved it, and when a newer successful scan has superseded it: those are waiting to be
+        refused, or to be denied and drafted again from the latest scan. It does not judge by evidence a message
+        with no successful scan behind it, or an answer to a reply — those go as written unless another rule
+        stops them, and only the ones awaiting approval wait on a person. Should be zero; an answer is listed
+        too, tagged, because nothing marks which of its words came from the scan.
       </Rule>
       <div className="cards">
         <Count n={d.count} label="on stale or missing evidence" href="#draft-rows" mustBeZero />
-        <Count n={noLook} label="…of which go with no further look (approved, queued, sending)" href="#draft-rows" />
-        <Count n={answers} label="…of which answers to a reply" href="#draft-rows" />
+        <Count n={d.refusedAtSending} label="…of which refused at sending (stale or superseded evidence) — draft again from a current scan" href="#draft-rows" />
+        <Count n={d.notJudgedAtSending} label="…of which not judged by evidence (no successful scan behind the words, or an answer to a reply)" href="#draft-rows" />
+        <Count n={d.notJudgedNoFurtherLook} label="…of those, go with nobody looking again (approved, queued, sending)" href="#draft-rows" />
         <Count n={d.unsent} label="outbound messages not yet sent" href="/approvals" />
       </div>
       {d.count > 0 ? (
         <table id="draft-rows" style={{ marginTop: 12 }}>
-          <thead><tr><th>Drafted</th><th>Company</th><th>Status</th><th>Evidence</th><th></th></tr></thead>
+          <thead><tr><th>Drafted</th><th>Company</th><th>Status</th><th>Evidence</th><th>At sending</th><th></th></tr></thead>
           <tbody>
             {d.rows.slice(0, ROWS).map((r) => (
               <tr key={r.touchId}>
@@ -433,9 +413,18 @@ function DraftsOnStale({ s }: { s: ComplianceSummary }) {
                 <td><CompanyLink domain={r.domain} /></td>
                 <td>{UNSENT_STATUS_WORDS[r.status]}</td>
                 <td>
-                  {r.why === 'no_evidence' ? 'no successful scan' : <>last good scan <At at={r.lastOkScanAt} /></>}
+                  {r.why === 'no_evidence' ? (
+                    'no successful scan'
+                  ) : r.why === 'rescanned_since' ? (
+                    <>written from the scan of <At at={r.writtenFromScanAt} />; re-scanned <At at={r.lastOkScanAt} /> since</>
+                  ) : r.why === 'superseded' ? (
+                    <>written from the scan of <At at={r.writtenFromScanAt} />, still fresh; superseded by the newer scan of <At at={r.lastOkScanAt} /></>
+                  ) : (
+                    <>last good scan <At at={r.lastOkScanAt} /></>
+                  )}
                   {r.answersReply ? <span className="pill" style={{ marginLeft: 6 }}>answer to a reply</span> : null}
                 </td>
+                <td>{r.refusedAtSending ? 'refused — stale evidence' : 'not judged by evidence'}</td>
                 <td>{r.status === 'awaiting_approval' ? <a href="/approvals">approvals</a> : '—'}</td>
               </tr>
             ))}

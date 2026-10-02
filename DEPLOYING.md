@@ -24,22 +24,27 @@ So on Vercel, with `AGENT_URL` left unset:
 | works with no worker | does not |
 |---|---|
 | companies, findings, scores, scan history and the findings diff | the chat panel (says no worker is connected) |
-| the nightly rescan of never-scanned and stale companies — needs `CRON_SECRET` | sending **email** — the worker's tick is its only sender |
+| the nightly rescan of never-scanned and stale companies — needs `CRON_SECRET` | sending **email** and **SMS** — the worker's tick is their only sender |
 | contacts, the consent ledger, suppressions, contact import, a person's record and erasure | reading replies from a mailbox (IMAP) |
 | the pipeline board and analytics, meetings and their outcomes, `.ics` downloads, briefs | the one-click unsubscribe **header** — the worker writes it into each email it sends |
-| proposals, print and Markdown export, a buyer's share link | voice and SMS (Phase 6: built, deliberately not switched on) |
+| proposals, print and Markdown export, a buyer's share link | inbound voice (Phase 6: built, deliberately not switched on) |
 | the inbox, tasks, notes, compliance, the audit log, search, CSV exports, every settings page | |
 | **LinkedIn steps** — a person sends from their own account, and `/tasks` runs every send rule first | |
 | **replies**, once Resend receiving is set up — `RESEND_WEBHOOK_SECRET` + `RESEND_API_KEY` | |
+| **SMS templates, Draft SMS and approving an SMS**; DoveSoft's **delivery reports and texts sent back** once its webhooks are registered — `DOVESOFT_WEBHOOK_SECRET` (see "SMS through DoveSoft") | |
 | **Slack** notifications and the daily digest — `SLACK_WEBHOOK_URL` (the digest also needs `CRON_SECRET`) | |
 | the public booking page, the unsubscribe page, the buyer's proposal page | |
 
 `apps/web/src/lib/deployment.ts` is what makes that honest rather than silent:
 every screen that would otherwise promise a send asks it first, and says
-plainly that no worker is connected. Its flags are configuration only — is
+plainly that no worker is configured on this deployment, pointing at
+Settings → Deployment. Its flags are configuration only — is
 `AGENT_URL` set, `CRON_SECRET`, `SLACK_WEBHOOK_URL`, `UNSUBSCRIBE_SECRET`, an
-inbound webhook secret — and **Settings → Deployment** shows each by name
-beside what the worker's heartbeat actually says. Leave `AGENT_URL` **unset** —
+inbound webhook secret, the DoveSoft webhook secret — and **Settings →
+Deployment** shows each by name beside what the worker's heartbeat actually
+says. Where a screen says what a worker DID — the dashboard, `/compliance` —
+it reads the heartbeat, not `AGENT_URL`, so a worker on Fly that this
+deployment holds no `AGENT_URL` for still counts as sending. Leave `AGENT_URL` **unset** —
 setting it to something unreachable makes the UI say "unreachable" instead,
 which is a worse lie.
 
@@ -181,10 +186,12 @@ variable and never the value.
 | `CRON_SECRET` | the two daily crons (see "Scheduled jobs on Vercel"). `openssl rand -hex 32`, at least 32 characters, **Production only** | `/api/cron/*` answers 503; nothing is rescanned and no digest is built |
 | `RESCAN_BATCH_SIZE` | companies per org per nightly rescan, 1–20 | `6` |
 | `SLACK_WEBHOOK_URL` | posts to one Slack channel: a recorded reply (not a provider's retry of one), an accepted booking, a deal moved to won or lost on the board, a proposal accepted, an opt-out that could not be recorded, the daily digest, a campaign that paused itself because its addresses bounced (posted by the digest run), a silent worker. Ids, the company's domain and a link — never a name, an address or a body. Must be `https://hooks.slack.com/…`; the URL is the credential and is never logged | nothing is posted; the digest is still recorded in the audit log |
-| `UNSUBSCRIBE_SECRET` | verifying a one-click unsubscribe at `/api/unsubscribe/<token>`. **The same value on the worker**, which mints the links | `/api/unsubscribe` answers 503 — and logs `OPT-OUT NOT RECORDED` for a well-formed token, because a worker holding the secret minted it |
+| `UNSUBSCRIBE_SECRET` | verifying a one-click unsubscribe at `/api/unsubscribe/<token>`. **The same value on the worker**, which mints the links: a link in the right shape that does not verify under this value is a 404, and the first such link on each surface (`/api/unsubscribe`, `/unsubscribe`) in a process is logged at error by path, never the token — the click's line opens `OPT-OUT NOT RECORDED` | `/api/unsubscribe` answers 503 — and logs `OPT-OUT NOT RECORDED` for a well-formed token, because a worker holding the secret minted it |
 | `RESEND_WEBHOOK_SECRET` | replies through Resend (see "Replies through Resend"): the endpoint's `whsec_…` signing secret | `/api/inbound/resend` answers 503 |
 | `RESEND_API_KEY` | the same route's fetch of each received message — a key that can READ received email | `/api/inbound/resend` answers 503 |
 | `SECRETS_KEY` | storing a connector's credential (Settings → Connectors) and re-entering one (Settings → Credentials). **The same value on the worker** | both refuse with 503; Settings → Deployment reads "not set", or "set, not a valid key" |
+| `DOVESOFT_WEBHOOK_SECRET` | DoveSoft's two pushes, a delivery report and a text a contact sends back (see "SMS through DoveSoft"). `openssl rand -hex 32` — hex needs no escaping in a URL; a secret with any other character must be percent-encoded where it stands in `?token=` (a `+` is `%2B`). At least 32 characters | `/api/inbound/dovesoft/dlr` and `/sms` answer 503: no report is recorded, and no text back — a STOP included — reaches this deployment |
+| `DOVESOFT_ORG_ID` | the FALLBACK org (a uuid), and nothing else. A text back is matched against contacts' numbers in every org first, and filed under the one contact anywhere who holds the number — or, when several do, the one this system texted at it, with every other holder paused and their waiting messages cancelled; when it texted none of them or more than one, the text is filed under nobody and every holder is paused. This org decides nothing about a number a contact holds — every org texts through the one DoveSoft account, so a holder here is no evidence of whose text it is. It is where a text from a number NO contact holds is audited and its STOP suppressed, where an unmatched report or an unreadable push is audited, and where the Slack alarm is filed for a STOP that could not be recorded from a number nobody holds or that could not be read, or whose recording failed before the recorder wrote anything or named anybody — any other failed STOP's alarm goes to the org whose contact holds the number | a text from a number no contact holds is logged and filed under no org, and a STOP from it is recorded nowhere: it is answered 500 — 200 when the push carried no message id, whose retry could not be told from a new text — and logged `OPT-OUT NOT RECORDED`, for a person to record by hand, with no Slack alarm — the error line says `alarm: 'not_raised_no_org'` |
 
 **`DATABASE_POOL_MAX=1` matters.** Each serverless instance keeps its own pool,
 and they do not share. At the default of 10, a few concurrent instances
@@ -220,7 +227,7 @@ route in the web app, and neither needs the worker.
 | path | schedule (UTC) | what it does | ceiling |
 |---|---|---|---|
 | `/api/cron/rescan` | `17 3 * * *` | re-scans up to `RESCAN_BATCH_SIZE` companies per org — never-scanned first, then the oldest stale scan — through the same `recordScan` the CLI uses | `maxDuration = 300` |
-| `/api/cron/digest` | `43 6 * * *` | builds the daily digest, posts it to Slack when `SLACK_WEBHOOK_URL` is set, then one notice per campaign that paused itself since the previous digest (at most three), then a separate alert if the worker has gone silent | `maxDuration = 60` |
+| `/api/cron/digest` | `43 6 * * *` | builds the daily digest, posts it to Slack when `SLACK_WEBHOOK_URL` is set, then one notice per campaign that paused itself since the previous run's recorded mark (at most three; the digest counts the rest), then a separate alert if the worker has gone silent (never for a retired row: no worker configured and none heard from in a week) | `maxDuration = 60` |
 
 Both at minutes off the hour, because most schedules run at `:00`.
 
@@ -280,10 +287,17 @@ under "Scheduled rescans" and "Scheduled jobs":
   a `cron.digest` row in the last 20 hours is skipped, and duplicate
   deliveries serialise on a transaction-scoped advisory lock, so one message
   is sent. After the digest it posts one `campaign_paused` notice for each
-  `campaign.auto_paused` row written since the previous digest, at most three
-  — the worker pauses a campaign whose addresses bounce and has no Slack path
-  of its own — and `cron.digest` records `campaignPauses { found, posted }`,
-  so a cut list is counted rather than dropped. A failed Slack post is
+  `campaign.auto_paused` row written since the previous run's recorded mark,
+  at most three — the worker pauses a campaign whose addresses bounce and has
+  no Slack path for it. The mark is `campaignPauses.readThrough`
+  (`{ at, id }`: the last pause read, its stored `created_at` kept as
+  microsecond text rather than a JavaScript `Date`), so every pause is read
+  by exactly one run whatever the web's and the database's clocks say; with
+  no mark in the last seven days a run reads the last 24 hours. `cron.digest`
+  records `campaignPauses { found, posted, readThrough }`, and past the cap
+  the digest itself says "Campaign pauses: N announced below, and M more
+  campaigns paused themselves — see …/campaigns", so a cut list is counted
+  rather than dropped. A failed Slack post is
   recorded and not retried until the next day's run. With no
   `SLACK_WEBHOOK_URL` nothing is fetched and the answer is 200 with
   `posted: false, why: 'no_slack'`.
@@ -305,6 +319,16 @@ digest and any campaign-paused notices, so it is the newest in the channel.
 It is checked
 once a day, because that is how often the cron runs. With no Slack, the
 `cron.digest` row is highlighted in `/audit` instead.
+
+**A heartbeat row where no worker is configured retires after a week.** If
+you ran `./tools/run-worker.sh` once against production and closed it, its
+row stays — only a running worker prunes the table. Where no worker is
+configured, a row more than `HEARTBEAT_RETIRED_AFTER_DAYS` (7) old is
+retired: no alert, and the digest's Worker line reads "retired — last seen
+<date>; no worker is configured, so nothing is sending or reading replies".
+Before that week it alerts every morning, as a worker that stopped should.
+A configured worker (`AGENT_URL` and `AGENT_INTERNAL_TOKEN` set here) never
+retires.
 
 ---
 
@@ -383,8 +407,18 @@ nothing.
 **Its status codes are decisions about retrying.** A message that could not be
 fetched gets 502 and a recording failure 500, so Resend retries both;
 everything the route did read — a non-match, a message with no sender — gets
-200. The generic `/api/inbound/email` answers 200 either way. This one does
-not, because a 2xx for a message nobody read could swallow a "stop".
+200, because a 2xx for a message nobody read could swallow a "stop". The
+generic `/api/inbound/email` keeps the same rule: a recording failure there is
+a 500 too. On both, a reply that said stop and whose recording failed once it
+was matched to a contact also writes a `contact.opt_out_not_recorded` row
+under that contact, pauses them, and raises the Slack opt-out alarm before the
+500 (one that failed before it was matched is logged at error with `alarm:
+'not_raised_unplaced'`), and the error line names the fault's class only,
+never the address or the words. A stop sent by somebody else in the thread — a
+colleague replying all to the message the contact was sent — is not the
+contact's: they are paused only as any reply pauses them, the row is about
+that message, and the alarm names no contact and says to record the address
+the reply came from on `/suppressions`.
 
 Two limits, stated rather than discovered:
 
@@ -393,11 +427,16 @@ Two limits, stated rather than discovered:
   a reply: the From address has to be on exactly one contact across every org.
   On a worker-less deployment nothing sends email, so there is usually no
   outbound Message-ID to match by anyway.
-- **A bounce that arrives this way is never recognised as a bounce.** The
-  receiving API lists attachments without their contents, so the delivery
-  report is unavailable and the contact is not marked bounced. Most reporting
-  servers mark the report `Auto-Submitted`, which files it as an auto-reply
-  that pauses nobody; one that does not is filed as a reply.
+- **A bounce that arrives this way is recognised only as a real report.**
+  When the message's ROOT is `multipart/report` and it lists a
+  `message/delivery-status` attachment, the route fetches that part and the
+  returned copy through the receiving API's attachment endpoint, read to at
+  most 64 KB each under one 10 s deadline, and the contact is marked bounced
+  exactly as the IMAP path would mark them. The attachment's `download_url`
+  is a signed link fetched without the API key and never logged. A part that
+  cannot be read answers 502, so Resend retries. A report that is not one by
+  that rule — nested inside a forwarded message, say — is read as the reply
+  that wraps it.
 
 ## Running the worker on your own machine
 
@@ -407,7 +446,7 @@ before choosing anything else:
 
 | what the worker does | direction | needs a public address? |
 |---|---|---|
-| sends queued outreach | out, to SMTP + Postgres | **no** |
+| sends queued outreach | out, to SMTP (and DoveSoft, for SMS) + Postgres | **no** |
 | detects replies (IMAP) | out | **no** |
 | recovers stuck sends, expires approvals | out | **no** |
 | sweeps expired sign-in links | out | **no** |
@@ -424,17 +463,63 @@ other job is this worker reaching out. So:
 asks for the production connection string at a hidden prompt and runs the
 worker against Neon with **nothing on the machine exposed** — no port open, no
 tunnel, no inbound route. The chat panel keeps saying no worker is connected,
-which is true.
+which is true. It needs Node.js 22 and `npm ci` in the checkout, and builds
+the packages itself before it starts, because they run as compiled JavaScript
+and a `git pull` would otherwise run stale code — before any question is
+asked or any saved answer read, so the build holds no credential, and with
+the lockfile's `node_modules/.bin/tsc` by path, never `npx`, which installs
+whatever the registry holds under that name when no local one exists; the
+worker itself runs under `node_modules/.bin/tsx`. Without either — after
+`npm ci --omit=dev`, or an install under `NODE_ENV=production` — it stops
+and says to run `npm ci`. A pooled `DATABASE_URL` is refused after the
+build, before the worker starts.
 
-It then asks whether to configure **sending** (SMTP) and **reply detection**
-(IMAP), and this is not optional paperwork. The worker treats all of those
-variables as optional and boots cleanly without them, running only the
-recovery jobs: `apps/agent/src/index.ts` gates the sender on
-`SMTP_HOST && MAIL_FROM` and the inbox on
-`IMAP_HOST && IMAP_USER && IMAP_PASSWORD`. Skip both prompts and you get a
-worker that reports itself healthy while approved mail sits in the queue
-forever and no reply is ever read. The boot log's `outreach: <mode>` line is
-the authority — `disabled`, `send-only` or `send-and-receive`.
+**On a Mac it can remember the answers.** At the end of the questions it
+offers to keep them in the login Keychain (service `agency-os-worker`, one
+item per variable), and every later run starts with no questions. Each value
+reaches `security` base64-encoded on its STDIN, never on its command line,
+where `ps` would show it to every user on the machine (§2.3).
+`./tools/run-worker.sh --reconfigure` asks again; `--forget` deletes them. It
+also keeps the Mac from idling to sleep while it runs (`caffeinate -is`; the
+display may sleep, and closing the lid on battery still sleeps it).
+
+Besides the mailbox and SMS, it asks for the web app's public address
+(default `https://myagencyos.in`), the `UNSUBSCRIBE_SECRET` Vercel holds —
+asked only when sending is configured; the worker adds one-click
+unsubscribe headers only with both, and the site verifies the link with its
+own copy, so the two must be the same value, or every unsubscribe from this
+worker's mail is refused (the site logs it once, `OPT-OUT NOT RECORDED`) —
+and an optional Slack webhook for the opt-out alarm. Paste Vercel's value
+at the hidden prompt. Enter keeps the secret saved in the Keychain (on
+`--reconfigure` too), or, with none saved, mails WITHOUT an unsubscribe
+header — a "stop" reply is still read. A new secret is made only when you
+type `new` and then confirm `[y/N]` after a warning that it breaks every
+link already mailed and that Vercel must get the same value; only on a Mac,
+where it goes on the clipboard (never shown) and into the Keychain at once,
+read back to check, even if you do not remember the other answers. Off a
+Mac nothing is made: paste Vercel's value or leave it unset. A saved secret
+survives a `--reconfigure` that turns sending off, and answering `n` at
+"Remember these answers" says the answers saved before are what the next
+run reads, with a warning when they hold a different `UNSUBSCRIBE_SECRET`.
+Port 465 is implicit TLS (Resend's `smtp.resend.com:465`), any other port
+STARTTLS.
+
+It then asks whether to configure **sending** (SMTP), **SMS through
+DoveSoft** and **reply detection** (IMAP), and this is not optional
+paperwork. The worker treats all of those variables as optional and boots
+cleanly without them, running only the recovery jobs:
+`apps/agent/src/worker.ts` gives the sender the mailbox on `SMTP_HOST &&
+MAIL_FROM` and DoveSoft on `DOVESOFT_API_KEY && DOVESOFT_ENTITY_ID`, and
+starts the inbox on `IMAP_HOST && IMAP_USER && IMAP_PASSWORD`. The DoveSoft
+prompt reads the key at a hidden prompt (the PE ID is not a secret), exports
+both into the worker's environment, prints neither back, and leaves SMS off
+unless both are given. Skip the prompts
+and you get a worker that reports itself healthy while approved mail and
+texts sit in the queue forever and no reply is ever read; the script's
+closing summary says `sending`, `sms` and `replies` ON or OFF. The boot
+log's `outreach: <mode>` line is the authority for the mailbox — `disabled`,
+`send-only` or `send-and-receive` — and its `sms: dovesoft on|off` line for
+texts.
 
 Closing the tab stops it. Queued mail then waits for the next run rather than
 being lost — `touches` rows keep their status, and `recoverStuckSends` settles
@@ -444,8 +529,9 @@ anything caught mid-send on the next boot.
 than a correctness one: quiet hours and the daily cap are evaluated at the
 moment of sending, so mail queued for 09:00 while the lid was shut goes out
 when the worker next runs and is re-checked against every §2.1 rule first.
-Nothing is sent that should not be; it is sent later than intended. `caffeinate
--dis ./tools/run-worker.sh` keeps the machine awake for as long as it runs.
+Nothing is sent that should not be; it is sent later than intended. On a
+Mac the script already runs under `caffeinate -is`, so idle sleep is not the
+risk; a lid closed on battery still is.
 
 ### Giving other people access
 
@@ -480,12 +566,15 @@ a database nobody can sign in to yet.
 That is the one feature needing an inbound route, and it changes the picture
 in two ways worth deciding deliberately rather than discovering:
 
-1. **Your machine becomes internet-reachable.** A tunnel
-   (`cloudflared tunnel --url http://127.0.0.1:3002`) publishes the internal
-   API. It is bearer-token gated, and `/livez` and `/readyz` on that port are
-   not — they would answer anyone. Set `AGENT_URL` and the SAME
-   `AGENT_INTERNAL_TOKEN` in Vercel, and note a quick tunnel's URL changes
-   on every restart, so each restart means updating Vercel and redeploying.
+1. **Your machine becomes internet-reachable.** A tunnel publishes the
+   worker's internal API port (3002). It is bearer-token gated, and `/livez`
+   and `/readyz` on that port are not — they would answer anyone, and say
+   nothing usable. Set `AGENT_URL` and the SAME `AGENT_INTERNAL_TOKEN` in
+   Vercel. A Cloudflare quick tunnel (`cloudflared tunnel --url
+   http://127.0.0.1:3002`) needs no account, but its URL changes on every
+   restart, so each restart means updating Vercel and redeploying; an ngrok
+   free STATIC domain never changes, so Vercel is set once — which is what
+   `run-worker.sh` does, below.
 2. **Every teammate's chat turn runs on whatever credential that worker
    holds.** With `ANTHROPIC_API_KEY` that is a bill. With
    `AGENT_USE_LOCAL_LOGIN` it is one person's personal subscription backing a
@@ -496,6 +585,24 @@ in two ways worth deciding deliberately rather than discovering:
 Chat against your own login, on your own machine, against your own data is a
 different thing from that, and is what the local development path is for.
 
+**`run-worker.sh` does it for you through ngrok.** Once, by hand: sign up at
+ngrok.com (free), claim the free static domain under Domains,
+`brew install ngrok`, and `ngrok config add-authtoken <your token>` — that
+token lives in ngrok's own config and the script never asks for it. Then
+`./tools/run-worker.sh --reconfigure` and answer yes to CHAT: it asks for
+the domain and the Anthropic API key (hidden, saved in the Keychain), and,
+the first time, makes an `AGENT_INTERNAL_TOKEN`, puts it on the clipboard
+(after any new unsubscribe secret is pasted — it waits for you) and saves
+it, and tells you to add `AGENT_INTERNAL_TOKEN` (Sensitive) and `AGENT_URL`
+(the domain, `https://…`) in Vercel, then redeploy. Every later run starts
+`ngrok http 127.0.0.1:3002 --url=<domain>` from an EMPTY environment — the
+database URL, the mail passwords and the Anthropic key are never inherited
+by ngrok — and the worker with the key and the saved token, on
+`claude-haiku-4-5` unless `AGENT_MODEL` says otherwise. If ngrok is
+missing, or stops at once (no authtoken, a domain that is not yours), chat
+stays off, the summary says why, and the worker is handed no key; with
+chat off it never is. Ctrl-C or closing the window stops both.
+
 ## The worker, on Fly.io
 
 `fly.toml` at the repo root deploys `apps/agent`. Read its header before
@@ -505,6 +612,141 @@ lock drops, the fifteen-second tick stops, queued mail sits unsent, and
 nothing looks broken because `/readyz` answers fine on a machine that was
 just woken up. `auto_stop_machines = "off"` and `min_machines_running = 1`
 are the load-bearing lines.
+
+**From GitHub, with no credential on a laptop:** Actions → Production → Run
+workflow, action `worker`, confirm `worker`. It needs `FLY_API_TOKEN` (a Fly
+ORG token, on an org with a payment method) and `PRODUCTION_DATABASE_URL`
+as Actions secrets, beside `VERCEL_TOKEN`. `PRODUCTION_DATABASE_URL` must
+already be Neon's DIRECT string — the `-pooler` rewriting applies only to a
+URL read from Vercel, and this action never reads one — and without it the
+run stops, naming it, before anything is created. **It refuses first,
+before anything is created, staged or deployed, unless production's
+database already has the checkout's `EXPECTED_MIGRATION` applied** (read
+with the migrator's `status`): the worker deploys this checkout, and a
+re-wiring redeploys the web app from it, so neither may run ahead of its
+schema. It never migrates — run `release` from the same ref first.
+
+**It runs as two jobs, each on a fresh VM** (review round 8), because a
+step is not a credential boundary (below). **Job 1, `worker (Fly)`,**
+creates the app (or reuses one named from `fly.toml`'s `app`, suffixed when
+that global name is taken), stages the secrets over stdin, deploys one
+machine with `--ha=false` and waits for `/readyz`. It keeps the existing
+`AGENT_INTERNAL_TOKEN` only when Vercel has `AGENT_URL`,
+`AGENT_INTERNAL_TOKEN` and a marker, `AGENT_INTERNAL_TOKEN_WIRED`, equal to
+`<fly app>:<Fly's own digest of AGENT_INTERNAL_TOKEN>`; it then waits for
+`/api/health` to report the worker `live`, and job 2 is skipped. Otherwise
+it generates a new token, stages it on Fly, deploys, and sets `AGENT_URL`
+and `AGENT_INTERNAL_TOKEN` on Vercel and then — after the token, so that
+what is left to record never names a token Vercel does not hold —
+`AGENT_INTERNAL_TOKEN_PENDING`, `<workflow run id>/<fly app>:<digest>`, all
+through `tools/vercel-env.mjs`, our own REST helper, never the Vercel CLI.
+**Job 2, `worker (web redeploy)`** (`worker-web`), redeploys the web app
+only when Vercel holds a pending record of THIS run, waits for
+`/api/health?strict=1`, promotes that record to `AGENT_INTERNAL_TOKEN_WIRED`
+— last — and waits for the worker to show `live`. It is also handed
+`REDEPLOY`, job 1's one output as it arrived (review round 9): when that is
+`true` — job 1 set a new token on Fly and Vercel in this run — and no record
+of this run can be read, the job dies, because the live web app still runs
+on the old token and every call it makes to the worker is refused; run the
+action again. The one exception is a record of a LATER run that the later
+run's own web job has promoted to `AGENT_INTERNAL_TOKEN_WIRED`, which
+`tools/vercel-env.mjs superseded <FROM> <TO>` finds by comparing run ids
+and then the marker (review round 10): that is a re-run of an old run's
+second job after a newer run has wired, and it prints "nothing of this run
+is waiting to be recorded — a later run has wired since (run <id>); the web
+app is not redeployed" and passes. A later run's record is written by that
+run's FIRST job, so it says only that the run set a newer token, not that
+the web app was redeployed with it: while the later run's web job has not
+finished, the job dies with "Workflow run <id> set a newer token and its
+web job has not finished — re-run that run's worker-web job, or the worker
+action. This job deployed and recorded nothing, and until one of them
+finishes the live web app may still run on a token the worker no longer
+accepts." An empty later record (`<run id>/`, Fly gave that run no
+digest), which no web job can promote, passes with `::warning::run <id>
+left AGENT_INTERNAL_TOKEN_PENDING with no digest, so whether its web job
+finished cannot be checked; …` printed before the pass line. The helper
+prints the later run's id, and only that, on stdout whenever FROM holds a
+later run's record (exit 0 or 1), and nothing on stdout on a 2; a call
+without TO exits 2. Both markers are encrypted, readable Vercel
+production variables that hold no secret and that nothing in the app reads.
+A run cut off part-way — Fly re-tokened and
+Vercel not, or Vercel set and never redeployed or never recorded — is
+rewired by the next run rather than read as done, where it used to see only
+that the names existed and go green with every web call to the worker
+refused; and because a record names its run, a re-run of an old run's
+second job never records a newer run's wiring. **The first `worker` run
+from a checkout that writes the marker therefore rotates the token once and
+redeploys the web app**, because no marker exists on Vercel yet. A hand
+edit of `AGENT_INTERNAL_TOKEN` on Fly is noticed (it changes Fly's digest);
+one on Vercel, outside the action, is not. An error from the Vercel API
+while reading the variables stops the run rather than reading as
+"missing" — and since review round 9 so does a request that got no answer
+(a DNS failure, a reset, the 15 s timeout) and an answer cut off mid-body:
+`vercel-env.mjs` exits 2 with `::error::the Vercel API could not be asked
+(<METHOD> <path>): <ErrorClass>`, a network failure's code beside it, or
+"the answer could not be read (it was cut off)", where a rejected request
+used to exit 1, read as "no" — and if Fly reports no digest the run warns,
+the web app is still
+redeployed, nothing is recorded, and the next run rotates again — safe, but
+noisy.
+
+**The marker crosses on Vercel, never as a job output.** GitHub DROPS — it
+does not mask — a job output whose value contains any secret value of its
+job, as a substring and at any length, and job 1 holds `FLY_ORG` (which a
+Fly app name can contain), ports, and `SMTP_SECURE`/`IMAP_SECURE`, which are
+`true` or `false`. So its one output, `redeploy`, is read fail-open: job 2
+runs unless an explicit `false` arrived, and a `false` that was dropped
+costs one extra job, which finds nothing of this run pending and redeploys
+nothing — a dropped output (`''`) still reads the record alone, as
+before. With required reviewers on the `production` environment, a
+`worker` run may ask for approval twice, once per job: both declare
+`environment: production`, so that a secret saved there is seen.
+
+Any of `ANTHROPIC_API_KEY`, `ANTHROPIC_WORKSPACE_ID`, `AGENT_MODEL`,
+`SECRETS_KEY`, `SMTP_*`, `MAIL_FROM`, `IMAP_*`, `SLACK_WEBHOOK_URL`,
+`UNSUBSCRIBE_SECRET`, `DOVESOFT_API_KEY` and `DOVESOFT_ENTITY_ID` set as
+Actions secrets is passed to the worker too; `WEB_PUBLIC_URL` is set to the
+site. Those, and `FLY_API_TOKEN` and `FLY_ORG`, reach only job 1's script
+step. `status`, `migrate`, `deploy` and `release` run in a job that sees
+`PRODUCTION_DATABASE_URL` and the `VERCEL_*` secrets alone, and no longer
+names `FLY_API_TOKEN` even in its visibility check — naming a secret
+anywhere in a job, even in a `!= ''`, sends its value to that job's runner,
+and that job runs the Vercel CLI — so a `FLY_API_TOKEN` saved as a Variable
+is reported by a `worker` run only. Job 2 sees `VERCEL_TOKEN`,
+`VERCEL_ORG_ID`, `VERCEL_PROJECT_ID` and `VERCEL_TEAM` alone, not even the
+database URL — beside them only `REDEPLOY`, a word that is no secret.
+**Only the job boundary contains them.** `tools/production.sh` still
+un-exports every name in `WORKER_ONLY` for the whole run, hands
+flyctl `FLY_API_TOKEN` alone on each call, sends every other secret to Fly
+over stdin, and unsets each but `FLY_API_TOKEN` once
+`flyctl secrets import --stage` succeeds — but un-exporting, `env -u` and
+`unset` keep a secret only out of what a child INHERITS. The environment a
+process was started with stays in `/proc/<pid>/environ`, which any process
+running as the same user can read, so round 7's guard — the Vercel CLI
+(`npx --yes vercel@62.1.0`, installed at run time with no lockfile and
+floating transitive ranges, whose `vercel build` runs the whole web build)
+started under `env -u` for each name, in the very job that held them — kept
+the secrets out of its environment and not out of its reach. So job 1 never
+runs that CLI: every path to it in the `worker` action dies
+(`no_vercel_cli`), and the database URL comes from `PRODUCTION_DATABASE_URL`,
+never `vercel pull`. And the script runs the lockfile's
+`node_modules/.bin/tsc` by path, for every action, never through `npx`,
+which installs a registry package when it finds no local one and assumes
+`--yes` in CI — so job 1 runs no `npx` at all. **Adding a worker secret is
+two edits**: its name in the `worker` job's script-step `env` AND in
+`WORKER_ONLY`, which both builds the staged list and strips — never in
+`worker-web`; `packages/db/test/production-tooling.test.ts` fails when the
+two lists differ or a `WORKER_ONLY` name appears in any other job. Job 2's
+Vercel CLI still holds `VERCEL_TOKEN`, which reaches the project's
+production variables on its own; the further step, not taken because it
+adds a dependency, is to pin the CLI through the lockfile as a
+devDependency and run it from `node_modules/.bin`. The step that installs
+flyctl is pinned to a commit of `superfly/flyctl-actions`
+(`setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1`, its `v1`), never a
+branch or a tag that a push there could move, and flyctl itself to `0.4.111`
+through the action's `version` input — upgrading flyctl is editing that line
+in `.github/workflows/production.yml`. By hand, the same
+steps:
 
 ```bash
 fly launch --no-deploy --copy-config     # once; keeps this fly.toml
@@ -523,10 +765,13 @@ Everything else turns a feature on, and the worker says which at boot.
 | `ANTHROPIC_API_KEY` | chat | `chat_disabled`; **everything else still runs** |
 | `SECRETS_KEY` | connectors with credentials | those connectors are skipped, with a reason |
 | `SMTP_HOST`, `MAIL_FROM`, `SMTP_*` | sending | `outreach: disabled` |
-| `IMAP_HOST`, `IMAP_USER`, `IMAP_PASSWORD` | reply detection | `outreach: send-only` — replies never pause a sequence |
+| `IMAP_HOST`, `IMAP_USER`, `IMAP_PASSWORD` | reply detection: new mail is read as it arrives, and the mailbox again every ten minutes. A message the worker could not record stays unread and is retried — five attempts over about a quarter of an hour — then marked read and logged `INBOUND MESSAGE ABANDONED — handle it by hand`, with only its UID: find it in the mailbox. A reply that asked to stop does not wait for those retries: on its first failure the contact is paused, a `contact.opt_out_not_recorded` row is written and the Slack alarm raised, once per message while the worker runs | `outreach: send-only` — replies never pause a sequence |
 | `UNSUBSCRIBE_SECRET` | the RFC 8058 one-click `List-Unsubscribe` header on every email. **The same value as Vercel's** | no header, and one warn line at boot — `unsubscribe: headers off`, naming the missing variable (logged only when SMTP is configured) |
 | `WEB_PUBLIC_URL` | where that header's link points: the web app's public https origin, e.g. `https://myagencyos.in`. In production the worker **refuses to boot** on a value that is not `https:` on a public multi-label host — RFC 8058 one-click needs an HTTPS URI, and mailbox providers ignore any other | as above — the header needs both |
 | `OUTREACH_BOUNCE_PAUSE_PCT` | the hard-bounce rate past which an email campaign pauses itself — over 30 days, once it has written to at least 20 people. `100` turns it off | `5`. The boot log says `bounce auto-pause: on` |
+| `SLACK_WEBHOOK_URL` | the one alarm the worker raises itself: a reply read over IMAP that said stop and whose suppression could not be written, or whose recording failed outright. **The same value as Vercel's**; set `WEB_PUBLIC_URL` beside it so the message links into the app | the IMAP opt-out failure is still audited and logged `OPT-OUT NOT RECORDED`, the contact paused, and `/compliance` and the next digest count it — it just does not reach the channel in real time |
+| `DOVESOFT_API_KEY`, `DOVESOFT_ENTITY_ID` | sending SMS through DoveSoft — BOTH, or SMS is off (see "SMS through DoveSoft") | approved SMS wait in the queue; the boot log says `sms: dovesoft off` and names the missing variable, at warn when only one is set |
+| `DOVESOFT_BASE_URL` | where DoveSoft's send API is. Leave it unset | DoveSoft's own API. In production the worker **refuses to boot** on a value that is not `https:` on a public multi-label host, because the key is sent to it |
 
 After an automatic pause the bounce window restarts, so a person re-activating
 the campaign is not paused again by the same addresses. A bounce is never a
@@ -536,7 +781,10 @@ corrects it.
 **Each worker writes a heartbeat** — one `worker_heartbeats` row, keyed
 `hostname:pid`, upserted every `OUTREACH_TICK_MS`. A machine Fly has scaled to
 zero therefore shows up as a growing `worker.ageSeconds` in `/api/health`
-rather than as a queue somebody eventually notices has stopped moving.
+rather than as a queue somebody eventually notices has stopped moving. The
+same block carries `outreach` — the MAILBOX only — and `sms` (`on`, `off`,
+or null for a worker from before 0019): a worker with DoveSoft and no SMTP
+reports `"outreach": "disabled"` beside `"sms": "on"`, and it sends texts.
 
 **`DATABASE_URL` must be the DIRECT, non-pooled string.** The worker's
 single-instance lock is session-scoped and does not survive transaction-mode
@@ -549,8 +797,10 @@ vercel env add AGENT_URL production          # https://agency-os-agent.fly.dev
 vercel env add AGENT_INTERNAL_TOKEN production   # the SAME value as above
 ```
 
-and redeploy the web app. Until both are set, every screen that would promise
-a send says no worker is connected, which is the honest state. **Do not set
+and redeploy the web app. Until both are set, chat says no worker is
+connected, and the screens that would promise a send say no worker is
+configured here — while the dashboard and `/compliance`, which read the
+heartbeat, already show the Fly worker sending. **Do not set
 `AGENT_URL` to something unreachable** — the UI then says "unreachable"
 instead of "not configured", which is a worse lie.
 
@@ -579,10 +829,190 @@ is: **the worker on Fly does the deterministic work with no model, and chat
 runs locally against a developer's own login** — which is what a personal
 subscription is for.
 
+## SMS through DoveSoft
+
+**SMS is opt-in only, and it is never automatic.** A text goes only to a
+contact with a GRANTED SMS consent row — absence is no, and a cold SMS is
+refused as `cold_channel_forbidden` whoever approves it — only as the exact
+words of a template registered on DLT with its slots filled, and only after
+a person approves it on `/approvals`. No SMS campaign can auto-send, and
+enrolment refuses an SMS campaign whole: each text is drafted for one person
+with **Draft SMS** on `/contacts`. A STOP texted back is an opt-out, written
+as a phone suppression. Calls and WhatsApp over DoveSoft are not built.
+
+It has two halves, set up in this order:
+
+1. **Register on DLT first.** The entity (its PE ID), the six-character
+   header and each content template are registered on the DLT portal
+   (SmartPing), outside this app. Under TRAI's rules a text that is not a
+   registered template, sent under its registered header, is not delivered.
+2. **Load the templates** at **Settings → Templates** (`/settings/templates`):
+   import the portal's CSV export, or add one by hand. The page records
+   registrations and registers nothing. Only approved rows import, a
+   re-import changes nothing, and an id already stored with different words
+   is refused, never overwritten — DLT issues a new id when a body changes.
+   The file must be UTF-8 — a file that is not is refused whole, and Excel's
+   plain "CSV" is Windows-1252, which fails the moment a body holds a
+   character outside ASCII, so save it as "CSV UTF-8". A template that should
+   stop being used is switched off, never edited. **A link or a call-back
+   number must be in the template's registered fixed text, or in a slot
+   registered for it** (`{#url#}` or `{#urlott#}` for a link, `{#cbn#}` for
+   a number) — TRAI's August 2024 direction, which the operator enforces.
+   Typed into a plain `{#var#}`, alone or joined to the text beside it, a
+   company's bare domain included, the draft is refused with a sentence
+   naming the slot, and the sender refuses the same text again.
+3. **The worker, on Fly** — both, or SMS stays off:
+
+   ```bash
+   fly secrets set DOVESOFT_API_KEY='...'      # the account's API key — a credential
+   fly secrets set DOVESOFT_ENTITY_ID='...'    # the DLT PE ID, digits only
+   ```
+
+   Leave `DOVESOFT_BASE_URL` unset; unset is DoveSoft's own API, and in
+   production the worker refuses to boot on anything that is not `https:` on
+   a public host. The boot log then says `sms: dovesoft on`, and the
+   heartbeat carries `sms: 'on'` — so `/api/health`'s `worker` block reads
+   `"sms": "on"` and the dashboard's worker line says "texts through
+   DoveSoft", even with no SMTP set. With either secret missing it says
+   `sms: dovesoft off` and names the missing variable, and approved texts
+   wait in the queue — never claimed, never lost.
+4. **The web app, on Vercel** (Production, marked sensitive):
+   `DOVESOFT_WEBHOOK_SECRET` (`openssl rand -hex 32`, at least 32
+   characters; hex, because the secret may ride in a URL, where a secret
+   with any other character must be percent-encoded) and
+   `DOVESOFT_ORG_ID` (the org's id: `SELECT id, name FROM orgs` in Neon's
+   SQL editor). Texts are matched against contacts in every org first;
+   `DOVESOFT_ORG_ID` is only the fallback — where a text from a number no
+   contact holds is filed, and its STOP suppressed — and decides nothing
+   about a number somebody holds. Redeploy.
+5. **Register the two webhook URLs with DoveSoft's account manager.**
+   **Settings → Deployment** prints both, built from `AUTH_URL`:
+
+   ```
+   <AUTH_URL>/api/inbound/dovesoft/dlr    delivery reports
+   <AUTH_URL>/api/inbound/dovesoft/sms    texts a contact sends back
+   ```
+
+   Ask for the secret to be sent as the **`x-dovesoft-token` header**. Use
+   `?token=<DOVESOFT_WEBHOOK_SECRET>` on the URL only if DoveSoft cannot send
+   a header: a query string lands in access logs — Vercel's request log, and
+   whatever DoveSoft keeps — where a header does not. A secret that is not
+   hex is percent-encoded there. And ask for the pushes by **POST** (a form
+   or JSON): a GET push of a text puts the sender's number and the words in
+   the URL too, so they land in the same logs. GET is still accepted,
+   because a STOP that cannot arrive is worse. The first refused token on
+   each route is logged once per process, by route name — the line to look
+   for when nothing arrives.
+6. **Send one to yourself.** Create an SMS campaign on `/campaigns` and set
+   it active, record an SMS opt-in on your own contact on `/contacts`, use
+   Draft SMS, and approve it on `/approvals`. The delivery report shows on
+   the company page, in the Conversation panel under the message: "Delivery
+   reported" with the time the report reached this deployment (no time is
+   read from a report, and DoveSoft may send it hours after the handset took
+   the text), "The operator has it; no final delivery report yet.", or "Not
+   delivered" with the operator's reason (stored as
+   `touches.delivery_status`, `delivered_at`, `delivery_error`). Nothing
+   there means no report has arrived. A report naming no message this
+   system sent leaves an `sms.delivery_unmatched` line in `/audit`.
+
+**Confirm three things with DoveSoft before the first real send**, because
+its public documentation does not say them and the code says what it
+assumed: the `mobiles` format (sent as the country code and number with no
+`+`), the field names of its delivery-report and inbound pushes (the routes
+read the common names; one that is missing is a 400 naming the fields that
+DID arrive, never a value), and the shape of the send response (it must
+carry a `messageid`). A failed send is left `failed` and never retried,
+because a request that timed out may still have been accepted: check the
+DoveSoft console before sending it again.
+
+**What the two routes answer.** 503 while `DOVESOFT_WEBHOOK_SECRET` is
+unset, 401 for a wrong token. A delivery report that was read is 200,
+matched or not. A text back filed under one contact is 200 — unless it was a
+STOP that could not be suppressed in that contact's org or in any other org
+whose contacts hold the number: that is 500, after an opt-out alarm for each
+org where it could not be written, so DoveSoft redelivers it, and the
+redelivery — a duplicate, which pauses nobody and announces nothing — writes
+the suppression still missing, alarming and refusing again if it fails
+again. That 500 needs the push to carry a message id, because a redelivery
+is known by its id alone: a push with none would be recorded again as a new
+text on every retry, so it is answered 200 after the same alarms, and the
+error line says what is missing must be recorded by hand — ask DoveSoft to
+send the id with every inbound push. While any STOP is unrecorded, the
+contacts holding the number, other than the one it was filed under, are
+paused with a reason Resume refuses, saying a text from a number they share
+asked to stop — unless a pause of their own already holds them (their own
+unrecorded opt-out, an unfinished erasure, an unsubscribe, a teammate's
+hold), which stands and is counted `kept` on the audit row — except when
+that audit row could not be written, and then a teammate's or an
+unsubscribe's pause is replaced by the hold after all, because the row is
+what held them; Resume then
+refuses whatever paused them until the number is recorded, and until a
+person resumes them after that, paused or not, their phone cannot be moved
+off the number or cleared on `/contacts` — except while their own unrecorded
+opt-out or an unfinished erasure holds them, which Resume never lifts, so
+moving the phone strands nothing. Answering their reply from `/inbox` is
+refused too while the number is unrecorded, because it would resume them. A person's Resume after that ends what the row says about
+them, so a later pause of theirs is an ordinary one. The
+next delivery from the number that finds it suppressed — the retry, or any
+later text, whatever it says — eases the hard hold to an ordinary one, and
+once the number is on `/suppressions` Resume can lift them, all but a kept
+opt-out of their own or an unfinished erasure, which Resume never lifts. A
+payload either route
+cannot read is 400 (413 when larger than 16 KB) — never 200, because an
+unread text might have been a STOP — with an
+`sms.*_unreadable` audit row and an error line, so DoveSoft retries. A STOP
+from a number no single contact holds whose suppression could not be written
+is 500, so it is retried too — with the same exception for a push with no
+message id where contacts hold the number, or where `DOVESOFT_ORG_ID` is
+unset and a retry has nowhere to write it: answered 200 after the alarms,
+because such a text is known on a redelivery by a hash of its id alone, so
+its retry would hold every holder again, or write nowhere. A STOP from a
+number NO contact holds, with `DOVESOFT_ORG_ID` set, stays 500 with or
+without an id (review round 10), because its retry holds nobody and only
+writes the suppression. Every such unplaced STOP, and one from a number
+that cannot be read (400), also raise the Slack opt-out alarm before answering, one in
+each org where it failed, naming a contact there who holds the number and
+linking `/suppressions`. Where nobody holds it, or it could not be read, the
+alarm carries no message, no contact and no number, links `/compliance`, and
+is filed under `DOVESOFT_ORG_ID` — not raised without it. A redelivery of a
+text filed under nobody pauses nobody again; for a STOP it only writes a
+suppression still missing. A fault while recording — a dropped connection, a
+timeout — is 500 on either route, so DoveSoft retries, and the error line
+names the fault's class only, never the number or the words. When the text
+asked to stop and the recorder had already matched the contact, a
+`contact.opt_out_not_recorded` row is written under that contact in their
+org, they are paused, and the alarm names them; each other org where the
+recorder had already paused the contacts holding the number as an opt-out
+not recorded gets an alarm of its own. Only a fault before the recorder
+wrote anything or named anybody writes that row with no contact under
+`DOVESOFT_ORG_ID` and raises the alarm with none, which then tells the
+person to check `/suppressions` first, because an earlier delivery may have
+recorded part of it. A redelivery whose finishing faults is 500 too, with an
+error line and no new row or alarm: the first delivery recorded the STOP and
+alarmed where it could not. A NUL character in a pushed text, id or reason
+(some gateways decode GSM-7's `@` as one) is stored as U+FFFD rather than
+failing every retry.
+
 ## Every deploy after the first: migrate FIRST
 
 The app and the database ship separately here, so the order matters and it is
-always the same one: **apply the migrations, then deploy the app.** A schema
+always the same one: **apply the migrations, then deploy the app.**
+
+**From GitHub, with no credential on any laptop:** Actions → Production → Run
+workflow, ref the release branch, action `release`, confirm `release`
+(`.github/workflows/production.yml`, which runs `tools/production.sh`). It
+needs one Actions secret, `VERCEL_TOKEN` (the project is found under every
+scope the token reaches, `tools/vercel-project.mjs`). The production database
+URL is a Sensitive variable on the Vercel project, which `vercel pull` returns
+as a placeholder, so the release asks Vercel to build the checkout itself with
+`--build-env AGENCY_MIGRATE_ON_BUILD=1`: that one build applies the pending
+migrations before `next build` (`tools/vercel-build-migrate.mjs`, run by
+`build:vercel`), a failed migration fails the build so nothing is deployed,
+and every other build — preview, git-connected, CI — does nothing there and
+says so. The run then waits for `/api/health?strict=1` to report the ref's
+`EXPECTED_MIGRATION`. With a `PRODUCTION_DATABASE_URL` secret (Neon's direct
+string) it migrates from the runner instead, then deploys a prebuilt output.
+`status`, `migrate` and `deploy` run one half each. A schema
 that is ahead of the code is harmless — nothing reads the new column. Code
 that is ahead of the schema is a live error page.
 
@@ -591,27 +1021,56 @@ the suppressions form now offers it; deploying that against a database still
 holding the old CHECK gives an operator an error the moment they try to record
 an opt-out — the worst possible place for one.
 
-**0018 is the current one, and the widest.** It adds `findings.scored`, which
-every company page reads first, and the tables and columns behind `/inbox`,
-`/tasks`, `/contacts` and the dashboard. Code deployed ahead of it boots,
-serves `/signin`, and answers each of those pages with a 500. The release, in
-order — GO-LIVE.md has the same steps as a runbook:
+**0018 and then 0019 are the current pair.** 0018 is the widest: it adds
+`findings.scored`, which every company page reads first, and the tables and
+columns behind `/inbox`, `/tasks`, `/contacts` and the dashboard. 0019 adds
+`message_templates`, `touches.template_id` and the SMS delivery columns,
+which `/approvals`, `/settings/templates`, Draft SMS and the send path's
+template step read. Code deployed ahead of either boots, serves `/signin`,
+and answers those pages with a 500. The code expects 0019
+(`EXPECTED_MIGRATION`); a database still at 0017 takes both, in order, in
+one run. The release, in order — GO-LIVE.md has the same steps as a
+runbook:
 
-1. **Apply 0018 before deploying the code** — `./tools/remote-setup.sh` below,
-   or `npm run db:migrate` against the DIRECT string. `./tools/remote-status.sh`
-   then prints `findings.scored: boolean, nullable=NO   <- 0018 is applied`.
+1. **Apply 0018, then 0019, before deploying the code** —
+   `./tools/remote-setup.sh` below, or `npm run db:migrate` against the
+   DIRECT string; the migrator applies pending migrations in order, each in
+   its own transaction. `./tools/remote-status.sh` then lists
+   `[x] 0018_evidence_consent_records_and_operations` and
+   `[x] 0019_messaging_templates_and_sms` above `up to date`, and prints
+   `findings.scored: boolean, nullable=NO   <- 0018 is applied`, then
+   `touches.template_id: uuid, nullable=YES   <- 0019 is applied` and
+   `0019 table: message_templates`.
 2. **Set only the new variables you want** — every one optional and failing
-   closed: `CRON_SECRET` and `RESCAN_BATCH_SIZE` (the crons), `SLACK_WEBHOOK_URL`,
+   closed: `CRON_SECRET` and `RESCAN_BATCH_SIZE` (the crons), `SLACK_WEBHOOK_URL`
+   (Vercel, and Fly for the worker's IMAP opt-out alarm),
    `UNSUBSCRIBE_SECRET` (Vercel AND Fly, one value) with `WEB_PUBLIC_URL`
    (Fly), `RESEND_WEBHOOK_SECRET` + `RESEND_API_KEY` (replies with no worker),
-   `OUTREACH_BOUNCE_PAUSE_PCT` (Fly), `SECRETS_KEY` (the credentials page). §5
-   and the Fly table above say what each does unset.
+   `OUTREACH_BOUNCE_PAUSE_PCT` (Fly), `SECRETS_KEY` (the credentials page),
+   and for SMS `DOVESOFT_API_KEY` + `DOVESOFT_ENTITY_ID` (Fly) and
+   `DOVESOFT_WEBHOOK_SECRET` + `DOVESOFT_ORG_ID` (Vercel). §5, the Fly table
+   above and "SMS through DoveSoft" say what each does unset.
 3. **If you set `CRON_SECRET`: confirm Fluid Compute is on and the project is on
    Pro** — see "Scheduled jobs on Vercel".
 4. **Deploy.**
 5. **Verify**: `curl -s https://<host>/api/health` reads `schema.state: "ok"`
-   with `applied: "0018"`; open **Settings → Deployment**; and run a cron by
+   with `applied: "0019"`; open **Settings → Deployment**; and run a cron by
    hand with the bearer, then read its `/audit` row.
+
+**Rolling back is refused where it would let people back in.** 0018's down
+drops `users.revoked_at`, and code from before 0018 has no notion of
+revocation, so reverting it would let every offboarded teammate sign in
+again. `npm run db:migrate -- down …` that reaches 0018 is therefore refused,
+naming how many users have revoked access and reverting nothing, unless you
+pass `--restores-revoked-access`; remove or re-address those users' rows
+first. Reverting 0019 alone is not guarded, and its down says what it loses:
+every message template, the link from each SMS to its template, and every
+delivery report. An SMS that could still go out is settled `refused`
+(`no_template`) — or `failed`, if it was caught mid-send — with an `error`
+saying why, since nothing before 0019 can send it. Re-applying 0019 is safe:
+its CHECK binds only messages that can still go out, so every earlier SMS
+stays updatable and its recipient erasable. Roll back the CODE first, then
+the schema — the reverse of the deploy order.
 
 **Existing agents do not pick up the new tool grants.** The seed inserts
 `agent_defs` with `ON CONFLICT (org_id, slug) DO NOTHING`, so re-running it
@@ -661,11 +1120,16 @@ prefer the script.)
 
    Read `worker` in the same answer. `worker.status` is `live`, `silent` (not
    heard from for more than max(600 s, three of the worker's own ticks)),
-   `never` (a worker is configured and none has ever written a row) or
-   `not_configured` (no row, and no `AGENT_URL`/`AGENT_INTERNAL_TOKEN` here);
-   `worker.ageSeconds` is how long ago the newest heartbeat landed. A live row
-   reads `live` even where this deployment has no `AGENT_URL` — a worker
-   writing to the database is an observation, and it beats configuration.
+   `never` (a worker is configured and none has ever written a row),
+   `not_configured` (no row, and no `AGENT_URL`/`AGENT_INTERNAL_TOKEN` here)
+   or `retired` (no worker configured here, and the newest row is more than
+   a week old — a session somebody ran by hand and closed; `worker.retired`
+   is `true`); `worker.ageSeconds` is how long ago the newest heartbeat
+   landed. A live row reads `live` even where this deployment has no
+   `AGENT_URL` — a worker writing to the database is an observation, and it
+   beats configuration. Every surface calls such a row `retired` — the
+   dashboard ("Worker retired — last seen …"), Settings, Settings →
+   Deployment, this endpoint and the digest — and none of them alerts on it.
    `worker: null` with a `workerError` means the table could not be read —
    almost always 0018 not applied, which `schema` will already say. None of
    this changes the status code, not even under `?strict=1`: strict asks
@@ -742,7 +1206,13 @@ laptop that was theoretical. On a public URL it is not:
   it is configured. A GET
   only redirects to the page, because link scanners prefetch, and the page
   records nothing when it loads. Bodies over 1 KB get 413, a bad token a 404
-  with no hint, and no secret a 503.
+  with no hint, and no secret a 503. A token in the right shape that does not
+  verify under the web app's secret — a worker holding a different
+  `UNSUBSCRIBE_SECRET` — still gets that 404, and the first one on each
+  surface in a process is logged at error by path alone, never the token
+  (`OPT-OUT NOT RECORDED — a one-click unsubscribe link in the right shape
+  did not verify…` for the click, a sentence of its own for the page); a
+  wrong secret was silent before.
 - **`/p/<token>` and `/api/p/<token>/accept`** are a buyer's proposal link. The
   page is a read that counts a view — a count and two timestamps, never an IP
   or a user agent, and a mail client's link preview counts too. The accept is
@@ -757,10 +1227,22 @@ laptop that was theoretical. On a public URL it is not:
 - **`/api/inbound/resend`** sits under `/api/inbound`: it refuses everything
   until both Resend variables are set, and verifies the Svix signature before
   it acts on anything.
+- **`/api/inbound/dovesoft/dlr` and `/api/inbound/dovesoft/sms`** sit there
+  too, GET and POST alike: 503 until `DOVESOFT_WEBHOOK_SECRET` is set, 401
+  without it as the `x-dovesoft-token` header or a `token` parameter. With it
+  they can write — the second can pause a contact and put a number on the
+  suppression list, which is why it is never open — and bodies are bounded at
+  16 KB. A GET push carries its fields in the URL: for a text back that is
+  the sender's number and the words.
 
 The platform's own request logs record every request's path, so `/p/<token>`
-and `/unsubscribe/<token>` are in Vercel's logs. A share link can be revoked;
-an unsubscribe token can only ever do the one thing its holder asked for.
+and `/unsubscribe/<token>` are in Vercel's logs — and so is a DoveSoft
+`?token=`, which is why the header is the form to register, and so are a
+GET-pushed text's number and words, which is why POST is the form to ask
+DoveSoft for. A share link can
+be revoked; an unsubscribe token can only ever do the one thing its holder
+asked for; a DoveSoft secret that reached a log is rotated by setting a new
+one in Vercel and with DoveSoft.
 
 CLAUDE.md §4 says rate limiting "belongs at the reverse proxy in front of the
 VPS". On Vercel there is no reverse proxy you control, so that sentence has no

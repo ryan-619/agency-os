@@ -22,13 +22,28 @@ export const SHARE_SHOWN_ONCE =
 export const SHARE_VIEWS_NOTE =
   'A view is one load of the page — the buyer’s, yours, or a link preview a mail client fetched. It says the link was opened, not that a person read it. No address or browser is recorded.'
 
-/** Why the Create button is not offered, in the order the route would refuse. */
+/**
+ * Why the Create button is not offered, in the order the route would refuse
+ * — with one exception. A DRAFT whose evidence is stale, or whose scan a
+ * newer one has superseded, is told so before it is told to mark itself
+ * sent: `shareMint` refuses a sent proposal over either, and nothing makes
+ * a scan current again — a re-scan writes a NEW scan, which supersedes this
+ * one — so "mark it sent first" was advice that could only end in a second
+ * refusal over a proposal now marked sent. Stale before superseded, as the
+ * route orders them for a sent proposal.
+ */
 export function shareCreateBlocked(input: {
   readonly status: string
   readonly evidenceStale: boolean
   /** A newer successful scan of the company exists, so this proposal's is no longer the one quoted. */
   readonly evidenceSuperseded?: boolean
 }): string | null {
+  if (input.status === 'draft' && input.evidenceStale) {
+    return 'Not while the evidence under this proposal is stale: re-verify before it appears in anything outbound. This draft could not be linked even once marked sent: re-scan the company, generate a fresh proposal, mark that one sent, and link it.'
+  }
+  if (input.status === 'draft' && input.evidenceSuperseded) {
+    return 'A newer scan exists — regenerate the proposal. This draft quotes an older scan, so it could not be linked even once marked sent: generate a fresh proposal from the latest scan, mark that one sent, and link it.'
+  }
   if (input.status === 'draft') {
     return 'Mark the proposal as sent first. A link is a copy of what you sent, not the send.'
   }
@@ -45,14 +60,40 @@ export function shareCreateBlocked(input: {
 }
 
 /** A link's state as the team's list shows it. */
+export type ShareState = 'accepted' | 'revoked' | 'expired' | 'stale' | 'superseded' | 'live'
+
+/**
+ * A link's state as the team's list shows it.
+ *
+ * The link's own facts come first — accepted, revoked, expired say what
+ * happened to the LINK. Then the evidence, because the buyer's page and the
+ * accept route re-derive it on every request: a link whose scan has aged out
+ * (the ICP's threshold lowered after minting) or been superseded by a newer
+ * successful scan shows the buyer "being re-verified" and answers Accept
+ * with a 410. Calling that link "live" told the team something the buyer
+ * could not see. `evidence` is required, so a caller cannot forget it; the
+ * order of the two matches `shareCreateBlocked` and the read.
+ */
 export function shareState(
   share: { readonly revokedAt: string | null; readonly expiresAt: string; readonly acceptedAt: string | null },
   now: Date,
-): 'accepted' | 'revoked' | 'expired' | 'live' {
+  evidence: { readonly stale: boolean; readonly superseded: boolean },
+): ShareState {
   if (share.acceptedAt) return 'accepted'
   if (share.revokedAt) return 'revoked'
   if (new Date(share.expiresAt).getTime() <= now.getTime()) return 'expired'
+  if (evidence.stale) return 'stale'
+  if (evidence.superseded) return 'superseded'
   return 'live'
+}
+
+/**
+ * The words in the list's State column. The two evidence states say what
+ * the buyer holding the link sees, in the buyer's own words — "stale" is
+ * the team's, never the buyer's.
+ */
+export function shareStateLabel(state: ShareState): string {
+  return state === 'stale' || state === 'superseded' ? `${state} — the buyer sees “being re-verified”` : state
 }
 
 // ---------------------------------------------------------------------------

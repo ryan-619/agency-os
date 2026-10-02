@@ -18,9 +18,9 @@
  *    one with nothing observed to quote. A draft written anyway would state
  *    something nobody checked, which is §2.2's one rule.
  *  - the person half, mirroring the approvals page's candidate rule: no
- *    usable address on the channel, paused (they replied), a recorded refusal
- *    of the channel, an email address that bounced, and no zone to evaluate
- *    quiet hours in. Each is a message the sender would refuse on sight, so
+ *    usable address on the channel, a recorded refusal of the channel, a
+ *    pause (a reply, or a teammate's hold), an email address that bounced,
+ *    and no zone to evaluate quiet hours in — the send path's own order. Each is a message the sender would refuse on sight, so
  *    drafting it only hands a person something they cannot approve.
  *  - an earlier row for the same person: in this campaign, and — under
  *    auto-send, where nobody reads the words — in any campaign on the same
@@ -47,8 +47,8 @@ export const ENROL_SKIPS = [
   'no_evidence',
   'no_contact',
   'no_address',
-  'paused',
   'declined',
+  'paused',
   'bounced',
   'no_timezone',
   'already_enrolled',
@@ -119,10 +119,13 @@ export function enrollableContact(
   const raw = channel === 'email' ? contact.email : contact.linkedinUrl
   const usable = raw && raw.trim() ? (channel === 'email' ? normaliseEmail(raw) : normaliseLinkedIn(raw)) : null
   if (!usable) return { ok: false, why: 'no_address' }
-  if (contact.pausedAt !== null && contact.pausedAt !== undefined) return { ok: false, why: 'paused' }
+  // A recorded refusal before a pause, as the send path orders them: a
+  // person who declined is reported as having declined, the stronger
+  // statement, even while they are also paused.
   if (contact.consents.some((c) => c.channel === channel && c.granted === false)) {
     return { ok: false, why: 'declined' }
   }
+  if (contact.pausedAt !== null && contact.pausedAt !== undefined) return { ok: false, why: 'paused' }
   // After the consent questions and before the zone, as the send path orders
   // them: somebody who declined is reported as having declined, the reason
   // nobody may approve past, even when their address also bounced.
@@ -156,12 +159,30 @@ export interface EnrolPriorRow {
  *
  * `stale_evidence` is the send path's refusal of words quoting a scan that
  * has aged out; it is listed by name here as the string the row stores.
+ *
+ * `paused` is a hold, not a no: they replied, or a teammate paused them, and
+ * the row was refused while the hold stood. A contact paused NOW is skipped
+ * by `enrollableContact` before any row is read, and lifting a pause is a
+ * person's audited decision (answering the reply, or resuming them) — so once
+ * it is lifted, the refused row stops nothing. Before the send path had its
+ * own code for a pause it logged one as `consent_revoked`, which is read
+ * below as the recipient's own no, and a teammate's hold stopped every later
+ * enrolment for good. Found by review. A reply's own cancel still writes
+ * `consent_revoked`, and that still stops a new draft.
+ *
+ * `band_never_opens` is a promotional SMS whose band has no minute it may go
+ * at the contact's zone or under the campaign's quiet hours — a zone or a
+ * window to correct, like `unknown_timezone`, which it was stored as until
+ * review round 5. Enrolment drafts no SMS, so it meets one only on a row
+ * some other path wrote; it is listed so that row is read as what it is.
  */
 export const REFUSALS_A_CORRECTION_RESOLVES: ReadonlySet<string> = new Set([
   'bounced',
   'unparseable_recipient',
   'unknown_timezone',
+  'band_never_opens',
   'stale_evidence',
+  'paused',
 ])
 
 /**

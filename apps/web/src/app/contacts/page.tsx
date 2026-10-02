@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation'
-import { can, parseIcpDefinition } from '@agency/core'
+import { can } from '@agency/core'
 import {
   consentLedgerFor, contactsLedger, listCampaigns, LEDGER_DEFAULT_LIMIT, type AgencyDb,
 } from '@agency/db/queries'
@@ -8,7 +8,6 @@ import { Shell } from '@/components/shell'
 import { ContactsLedger, type LedgerView } from '@/components/contacts/ledger'
 import { getDb } from '@/lib/db'
 import { deployment, noRepliesReadNote } from '@/lib/deployment'
-import { icpForOrg } from '@/lib/queries'
 import {
   consentStateClass, consentStateLabel, suppressionClass, suppressionLabel, zoneLabel,
 } from '@/lib/consent-view'
@@ -62,22 +61,12 @@ export default async function ContactsPage({
   const limit = LEDGER_DEFAULT_LIMIT
 
   const db = getDb() as unknown as AgencyDb
-  const [rows, campaigns, icpRow] = await Promise.all([
+  const [rows, campaigns] = await Promise.all([
     contactsLedger(db, user.orgId, { q: q || undefined, paused, companyId, limit, offset: (page - 1) * limit }),
     listCampaigns(db, user.orgId),
-    icpForOrg(user.orgId),
   ])
   // One ledger read per person on the page — at most `limit` of them.
   const ledgers = await Promise.all(rows.map((r) => consentLedgerFor(db, user.orgId, r.id)))
-
-  let orgLabel = 'Agency'
-  if (icpRow) {
-    try {
-      orgLabel = parseIcpDefinition(icpRow.definition).label
-    } catch {
-      orgLabel = 'Agency'
-    }
-  }
 
   const views: LedgerView[] = []
   rows.forEach((r, i) => {
@@ -100,6 +89,7 @@ export default async function ContactsPage({
       zoneMissing: !r.timeZone && !r.companyTimeZone,
       pausedAt: r.pausedAt ? r.pausedAt.toISOString() : null,
       pausedReason: r.pausedReason,
+      sharedNumberHold: ledger.sharedNumberHold,
       // The column exists from 0018 and nothing writes it yet; shown only when set.
       emailBouncedAt: r.emailBouncedAt ? r.emailBouncedAt.toISOString() : null,
       emailBounceCode: r.emailBounceCode,
@@ -138,7 +128,7 @@ export default async function ContactsPage({
   }
 
   return (
-    <Shell user={user} orgName={orgLabel} current="contacts" signOut={signOutAction}>
+    <Shell user={user} current="contacts" signOut={signOutAction}>
       <h1>Contacts</h1>
       <p className="lede">
         Every person in the CRM, with what is on record for them: consent per channel — granted, refused, or
@@ -151,7 +141,9 @@ export default async function ContactsPage({
       <div className="note">
         <strong>Paused</strong> means a reply stopped every campaign for that person until somebody resumes
         them; a pause is also set by hand with a reason. {pausedCount > 0 ? `${pausedCount} on this page are paused.` : null}
-        {repliesNote ? <> {repliesNote} Until that changes, nobody here is paused by a reply — only by hand.</> : null}
+        {repliesNote ? <> {repliesNote} As configured, this deployment pauses nobody on an email reply — a worker
+          running elsewhere can, and a text reply through DoveSoft’s webhook does where that is set up;
+          /settings/deployment shows both.</> : null}
       </div>
 
       <form method="get" action="/contacts" style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginTop: 14 }}>

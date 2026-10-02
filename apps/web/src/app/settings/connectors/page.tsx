@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation'
-import { can, CONNECTOR_CATALOG, parseIcpDefinition } from '@agency/core'
+import { can, CONNECTOR_CATALOG } from '@agency/core'
 import {
   connectorToolsState, listConnectors, parseConnectorConfig, secretsKeyFromEnv, type AgencyDb, type ConnectorRow,
 } from '@agency/db/queries'
@@ -9,7 +9,6 @@ import { ConnectorsPanel, type ConnectorView } from '@/components/settings/conne
 import { browserPresets } from '@/components/settings/connector-presets'
 import { getDb } from '@/lib/db'
 import { agentConfigured } from '@/lib/agent'
-import { icpForOrg } from '@/lib/queries'
 
 /**
  * Settings → Connectors (PROMPT.md §6).
@@ -31,6 +30,7 @@ import { icpForOrg } from '@/lib/queries'
  * already made on this side.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export default async function ConnectorsPage() {
   const session = await auth()
@@ -40,23 +40,13 @@ export default async function ConnectorsPage() {
   const db = getDb() as unknown as AgencyDb
   const rows = await listConnectors(db, user.orgId)
 
-  const icpRow = await icpForOrg(user.orgId)
-  let orgLabel = 'Agency'
-  if (icpRow) {
-    try {
-      orgLabel = parseIcpDefinition(icpRow.definition).label
-    } catch {
-      orgLabel = 'Agency'
-    }
-  }
-
   const signOutAction = async () => {
     'use server'
     await signOut({ redirectTo: '/signin' })
   }
 
   return (
-    <Shell user={user} orgName={orgLabel} current="connectors" signOut={signOutAction}>
+    <Shell user={user} current="connectors" signOut={signOutAction}>
       <h1>Connectors</h1>
       <p className="lede">
         Each of these is an MCP server. The agent builds its tool set from the enabled ones at the

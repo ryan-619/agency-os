@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation'
-import { STAGE_ROT_DAYS, can, dealIsOverdue, parseIcpDefinition, rottingState, untouchedLabel } from '@agency/core'
+import { STAGE_ROT_DAYS, can, dealIsOverdue, rottingState, untouchedLabel } from '@agency/core'
 import { eq } from 'drizzle-orm'
 import { dealsDue, listDealsForBoard, listProposals, schema, upcomingMeetings, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
@@ -9,7 +9,6 @@ import { When } from '@/components/when'
 import { deployment } from '@/lib/deployment'
 import { getDb } from '@/lib/db'
 import { inZone } from '@/lib/format'
-import { icpForOrg } from '@/lib/queries'
 
 /**
  * The pipeline (PROMPT.md §8.6).
@@ -28,6 +27,7 @@ import { icpForOrg } from '@/lib/queries'
  * states the thresholds from `STAGE_ROT_DAYS` rather than repeating them.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 const CLOSED_SHOWN_FOR_DAYS = 60
 const DUE_WITHIN_MS = 24 * 3_600_000
@@ -41,7 +41,7 @@ export default async function PipelinePage() {
   const db = getDb() as unknown as AgencyDb
   const now = new Date()
   const cutoff = new Date(now.getTime() - CLOSED_SHOWN_FOR_DAYS * 86_400_000)
-  const [deals, due, team, meetings, proposals, icpRow] = await Promise.all([
+  const [deals, due, team, meetings, proposals] = await Promise.all([
     listDealsForBoard(db, user.orgId),
     dealsDue(db, user.orgId, new Date(now.getTime() + DUE_WITHIN_MS)),
     // The team, for the assign control. Small by definition (§1 calls this a
@@ -52,7 +52,6 @@ export default async function PipelinePage() {
       .orderBy(schema.users.email),
     upcomingMeetings(db, user.orgId, now, 20),
     listProposals(db, user.orgId, 50),
-    icpForOrg(user.orgId),
   ])
 
   const cards: DealCard[] = deals
@@ -89,21 +88,13 @@ export default async function PipelinePage() {
     .map(([stage, days]) => `${stage} ${days}`)
     .join(', ')
 
-  let orgLabel = 'Agency'
-  if (icpRow) {
-    try {
-      orgLabel = parseIcpDefinition(icpRow.definition).label
-    } catch {
-      orgLabel = 'Agency'
-    }
-  }
   const signOutAction = async () => {
     'use server'
     await signOut({ redirectTo: '/signin' })
   }
 
   return (
-    <Shell user={user} orgName={orgLabel} current="pipeline" signOut={signOutAction}>
+    <Shell user={user} current="pipeline" signOut={signOutAction}>
       <h1>Pipeline</h1>
       <p className="lede">
         One card per company something has happened to.{' '}

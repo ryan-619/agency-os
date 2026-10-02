@@ -26,7 +26,7 @@ import { eq } from 'drizzle-orm'
 import { request } from 'node:http'
 import { createServer } from 'node:net'
 import { WebSocket } from 'ws'
-import { schema, type AgencyDb } from '@agency/db'
+import { complianceSuppressionsBySource, schema, type AgencyDb } from '@agency/db'
 import { fakeProvider } from '@agency/llm'
 import type { LlmProvider } from '@agency/core'
 import { migratedDb,type TestDb } from '../../../packages/db/test/helpers.js'
@@ -432,7 +432,35 @@ describe('the voice service, end to end', () => {
       expect(res.status).toBe(200)
       const [sup] = await db.select().from(schema.suppressions)
       expect(sup).toMatchObject({ kind: 'phone', value: THEIR })
+      // 0018's column names the writer. Stored NULL, /compliance counted a
+      // text received today as "unrecorded: written before 0018". The voice
+      // service records the opt-outs its number receives, spoken or texted,
+      // under `voice` — the one value SUPPRESSION_SOURCES gives it.
+      expect(sup!.source).toBe('voice')
+      const counted = await complianceSuppressionsBySource(db, orgId, null)
+      expect(counted.bySource.find((b) => b.source === 'voice')?.n).toBe(1)
+      expect(counted.bySource.find((b) => b.source === 'unrecorded')?.n).toBe(0)
     })
+
+    /**
+     * Review round 5: this handler read texts with the SPOKEN reader alone,
+     * while every other text goes through the SMS readers (0019) — so
+     * STOPALL, UNSUB, CANCEL, END and QUIT texted to the voice number were
+     * left for a human and suppressed nothing. A text is a text. And
+     * nothing the spoken reader caught here is dropped: a DLT footer's
+     * "STOP ALL 56161", "Please stop" and "please stop texting me" are
+     * still opt-outs.
+     */
+    it.each(['STOP ALL 56161', 'STOPALL', 'UNSUB', 'CANCEL', 'END', 'QUIT', 'Please stop', 'please stop texting me'])(
+      'records %j texted to the voice number as an opt-out',
+      async (text) => {
+        await start()
+        const res = await post(service.port, '/sms', { From: THEIR, To: OURS, Body: text })
+        expect(res.status).toBe(200)
+        const rows = await db.select().from(schema.suppressions)
+        expect(rows).toEqual([expect.objectContaining({ kind: 'phone', value: THEIR, source: 'voice' })])
+      },
+    )
 
     it('leaves any other text for a human and answers nothing', async () => {
       await start()

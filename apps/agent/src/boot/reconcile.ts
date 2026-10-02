@@ -34,9 +34,9 @@
  * predicate above is what stops the second boot cancelling the first worker's
  * live turns.
  */
-import { and, eq, lt, sql } from 'drizzle-orm'
+import { and, eq, inArray, lt, sql } from 'drizzle-orm'
 import {
-  appendAudit, appendChatMessage, clearInterruptedTurns, schema,
+  appendAudit, appendChatMessage, clearInterruptedTurns, lockReplyContacts, repauseForUnansweredReply, schema,
   type AgencyDb, type InterruptedTurn,
 } from '@agency/db'
 import type { Logger } from '../logger.js'
@@ -216,31 +216,114 @@ export async function sweepExpired(db: AgencyDb, log: Logger): Promise<number> {
  *
  * Scoped by boot time like everything else here: only a claim older than this
  * process can be one this process did not make.
+ *
+ * An ANSWER to a reply settled here also puts the reply's own pause back
+ * (`repauseForUnansweredReply`, review round 4), in the same transaction:
+ * the inbox resumed the person when the answer was drafted, and an answer
+ * that "may or may not have gone" must not leave them live in every campaign
+ * with their reply possibly unanswered — the conservative direction, under
+ * the helper's own guard (this answer resumed them, nobody resumed them
+ * since, no other answer of theirs is live).
+ *
+ * Contact before touch (review round 6, [13]), the order every writer that
+ * holds a person and their messages takes: the stuck rows are READ, the
+ * people whose answers are among them are locked (`lockReplyContacts`, in
+ * id order), and only then are the rows written. Marking every row first
+ * held each answer's row while the re-pause waited for its person — and an
+ * erasure holds the person while it scrubs that row, so a boot racing an
+ * erasure deadlocked on a real Postgres.
  */
 export async function recoverStuckSends(db: AgencyDb, bootAt: Date, log: Logger): Promise<number> {
   try {
-    const stuck = await db
-      .update(schema.touches)
-      .set({
-        status: 'failed',
-        error: 'The worker restarted while this was being sent. It may or may not have gone; check the mailbox, then re-approve to send it again.',
-      })
-      // `updated_at` is set by a trigger on UPDATE and is NULL until then; the
-      // claim itself is an update, so it is normally set — but a row that
-      // was inserted as `sending` (nothing does, today) would be invisible
-      // to a bare comparison. Coalesce, so "older than the boot" is answered
-      // for every row.
-      .where(
-        and(
-          eq(schema.touches.status, 'sending'),
-          lt(sql`coalesce(${schema.touches.updatedAt}, ${schema.touches.createdAt})`, bootAt),
-        ),
+    return await db.transaction(async (transaction) => {
+      const tx = transaction as unknown as AgencyDb
+      const found = await findStuckRows(tx, bootAt)
+      if (found.length === 0) return 0
+      await lockReplyContacts(
+        tx,
+        found.flatMap((r) => (r.answersTouchId ? [{ orgId: r.orgId, answersTouchId: r.answersTouchId }] : [])),
       )
-      .returning({ id: schema.touches.id })
-    if (stuck.length > 0) log.warn('marked messages the last worker left mid-send as failed', { count: stuck.length })
-    return stuck.length
+      const stuck = await recoverStuckRows(tx, bootAt, found.map((r) => r.id))
+      const now = new Date()
+      for (const row of stuck) {
+        if (!row.answersTouchId) continue
+        await repauseForUnansweredReply(tx, {
+          orgId: row.orgId,
+          answer: { id: row.id, answersTouchId: row.answersTouchId },
+          actor: 'system',
+          because: 'failed',
+          now,
+        })
+      }
+      if (stuck.length > 0) log.warn('marked messages the last worker left mid-send as failed', { count: stuck.length })
+      return stuck.length
+    })
   } catch (err) {
     log.warn('could not recover stuck sends', { error: err instanceof Error ? err.name : 'UnknownError' })
     return 0
   }
+}
+
+/**
+ * What a person reads on a row the last worker left mid-send, by the row's
+ * OWN channel (review round 5). One sentence used to serve every channel —
+ * "check the mailbox, then re-approve to send it again" — and since 0019 the
+ * worker claims SMS rows too: the place a text's fate is recorded is the
+ * DoveSoft console, not a mailbox. And nothing re-approves a `failed` row
+ * (`approveDraft` takes only `awaiting_approval`), so the only way to send it
+ * "again" is a new draft — a second text or a second mail to somebody who may
+ * already have the first. Each sentence names where to look BEFORE that.
+ */
+export const STUCK_SEND_ERRORS = {
+  sms:
+    'The worker restarted while this text was being sent. It may or may not have gone; check the DoveSoft console before drafting it again.',
+  email:
+    'The worker restarted while this was being sent. It may or may not have gone; check the mailbox before drafting it again.',
+  // A LinkedIn row is claimed by a person's Start on /tasks, not by the
+  // worker, and its words reach the screen only in Start's success response,
+  // written after the row says `sent` — so one still `sending` was never
+  // shown here (`LINKEDIN_STEP_STUCK_ERROR`'s reading).
+  linkedin:
+    'Found when the worker restarted: the hand-over of this LinkedIn step never finished, so the message was never shown to anybody here. Check the LinkedIn conversation in case it went some other way before drafting it again.',
+  other:
+    'The worker restarted while this was being sent. It may or may not have gone; check with the provider before drafting it again.',
+} as const
+
+type StuckRow = { id: string; orgId: string; answersTouchId: string | null }
+
+/**
+ * A claim older than this boot. `updated_at` is set by a trigger on UPDATE
+ * and is NULL until then; the claim itself is an update, so it is normally
+ * set — but a row that was inserted as `sending` (nothing does, today)
+ * would be invisible to a bare comparison. Coalesce, so "older than the
+ * boot" is answered for every row.
+ */
+const claimedBefore = (bootAt: Date) =>
+  and(
+    eq(schema.touches.status, 'sending'),
+    lt(sql`coalesce(${schema.touches.updatedAt}, ${schema.touches.createdAt})`, bootAt),
+  )
+
+/** The rows the last worker left mid-send — read, never locked: the people come first. */
+async function findStuckRows(db: AgencyDb, bootAt: Date): Promise<StuckRow[]> {
+  return db
+    .select({ id: schema.touches.id, orgId: schema.touches.orgId, answersTouchId: schema.touches.answersTouchId })
+    .from(schema.touches)
+    .where(claimedBefore(bootAt))
+}
+
+/** Mark those rows `failed` — only while each is still the claim it was read as. */
+async function recoverStuckRows(db: AgencyDb, bootAt: Date, ids: readonly string[]): Promise<StuckRow[]> {
+  return db
+    .update(schema.touches)
+    .set({
+      status: 'failed',
+      error: sql`CASE ${schema.touches.channel}
+        WHEN 'sms' THEN ${STUCK_SEND_ERRORS.sms}
+        WHEN 'email' THEN ${STUCK_SEND_ERRORS.email}
+        WHEN 'linkedin' THEN ${STUCK_SEND_ERRORS.linkedin}
+        ELSE ${STUCK_SEND_ERRORS.other} END`,
+    })
+    .where(and(inArray(schema.touches.id, [...ids]), claimedBefore(bootAt)))
+    .returning({ id: schema.touches.id, orgId: schema.touches.orgId, answersTouchId: schema.touches.answersTouchId })
 }

@@ -1,9 +1,9 @@
 import { NextResponse } from 'next/server'
-import { DEFAULT_STALE_AFTER_DAYS, parseIcpDefinition } from '@agency/core'
+import { staleAfterDaysOf } from '@agency/core'
 import {
   DIGEST_MAX_PAUSE_NOTICES, DIGEST_WINDOW_HOURS, activeIcpProfile, appendAudit, digestCampaignPauses, digestCounts,
-  digestFacts, digestOnce, digestRecord, heartbeatReport, heartbeatSilentAfter, listOrgIds, readLatestHeartbeat,
-  type AgencyDb, type DigestNotPosted, type DigestRecord,
+  digestFacts, digestOnce, digestRecord, heartbeatReport, heartbeatReportedStatus, heartbeatSilentAfter, listOrgIds,
+  readLatestHeartbeat, type AgencyDb, type DigestNotPosted, type DigestRecord,
 } from '@agency/db/queries'
 import { cronRequest } from '@/lib/cron-auth'
 import { getDb } from '@/lib/db'
@@ -27,12 +27,21 @@ import { campaignPausedNotification, digestNotification, workerSilentNotificatio
  * separate message when the worker has gone quiet — a heartbeat that
  * stopped, or none at all where a worker is configured — because that is
  * the one fact that means approved messages are going nowhere, and the
- * worker cannot be the one to say it.
+ * worker cannot be the one to say it. Not, though, for a RETIRED one: with
+ * no worker configured, a heartbeat more than a week old is a session
+ * somebody ran by hand and closed, and nothing will ever prune its row. The
+ * digest's "Worker:" line names it and dates it; an alert about it every
+ * morning forever would teach the channel to ignore the one that matters.
  *
  * And one `campaign_paused` message for each campaign that paused itself
  * because its addresses bounced (`campaign.auto_paused`) since the previous
  * digest, at most `DIGEST_MAX_PAUSE_NOTICES`: the worker pauses it and has
  * no Slack path, so this is where the channel hears that outreach stopped.
+ * Past the cap a pause gets no notice of its own, and the digest — posted
+ * first — says how many more there were and links to /campaigns.
+ * "Since the previous digest" is the mark that run recorded — the stored
+ * `created_at` and id of the last pause it read — never this route's `now`
+ * against the previous row's timestamp, which are two different clocks.
  *
  * ## Once a day, whatever Vercel delivers
  *
@@ -124,6 +133,8 @@ export async function GET(request: Request): Promise<NextResponse> {
     return NextResponse.json({ error: 'failed' }, { status: 500 })
   }
   const report = heartbeatReport(heartbeat, configured, now)
+  // `retired` (no worker configured, and a row over a week old: a closed session) is named, never alerted on.
+  const worker = heartbeatReportedStatus(report)
   const silence = workerSilent(
     { configured, lastSeenAt: heartbeat?.lastTickAt ?? null },
     now,
@@ -139,26 +150,31 @@ export async function GET(request: Request): Promise<NextResponse> {
       const run = await digestOnce(db, orgId, since, async (tx): Promise<Outcome> => {
         const facts = await digestFacts(tx, orgId, { now, staleDays: await staleDaysFor(tx, orgId) })
         const counts = digestCounts(facts)
-        // Before digestRecord: the newest cron.digest row must still be the previous run's.
+        // Before digestRecord: the newest cron.digest row must still be the previous run's, whose mark this reads after.
         const pauses = await digestCampaignPauses(tx, orgId, { now })
-        const base = { orgId, counts, worker: report.status } as const
+        const base = { orgId, counts, worker } as const
 
         if (!slack) {
           await digestRecord(tx, {
             ...base, posted: false, why: 'no_slack', workerAlert: silence.silent ? 'no_slack' : 'not_needed',
-            campaignPauses: { found: pauses.found, posted: 0 },
+            campaignPauses: { found: pauses.found, posted: 0, readThrough: pauses.readThrough },
           })
           return { posted: false, why: 'no_slack', workerSilent: silence.silent }
         }
 
-        const posted = await post(tx, slack, digestNotification({ orgId, facts, worker: report.status }))
+        const posted = await post(tx, slack, digestNotification({
+          orgId, facts, worker, workerLastSeenAt: report.lastSeenAt,
+          // The digest goes first; it says how many pauses the notices after it will not cover.
+          campaignPauses: { found: pauses.found, notices: pauses.pauses.length },
+        }))
         // After the digest, one notice per campaign that paused itself. Inside
         // this transaction, so a second delivery finds the row and says nothing.
         let pausesPosted = 0
         for (const pause of pauses.pauses) {
           if (await post(tx, slack, campaignPausedNotification({ orgId, pause }))) pausesPosted += 1
         }
-        const campaignPauses = { found: pauses.found, posted: pausesPosted }
+        // The mark is recorded whatever Slack did: a notice that failed is counted, not retried tomorrow.
+        const campaignPauses = { found: pauses.found, posted: pausesPosted, readThrough: pauses.readThrough }
         // Last, so the alert is the newest message in the channel.
         let workerAlert: NonNullable<DigestRecord['workerAlert']> = 'not_needed'
         if (silence.silent) {
@@ -226,14 +242,7 @@ async function post(
  * is the only thing the digest reads from it.
  */
 async function staleDaysFor(db: AgencyDb, orgId: string): Promise<number> {
-  const profile = await activeIcpProfile(db, orgId)
-  if (!profile) return DEFAULT_STALE_AFTER_DAYS
-  try {
-    const days = parseIcpDefinition(profile.definition).freshness?.stale_after_days
-    return typeof days === 'number' && Number.isFinite(days) && days > 0 ? days : DEFAULT_STALE_AFTER_DAYS
-  } catch {
-    return DEFAULT_STALE_AFTER_DAYS
-  }
+  return staleAfterDaysOf((await activeIcpProfile(db, orgId))?.definition)
 }
 
 /** The class only. A driver error's message can carry the DSN (§2.3). */

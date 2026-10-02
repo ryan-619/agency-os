@@ -1,0 +1,977 @@
+/**
+ * DLT's rules, one edge at a time (0019).
+ *
+ * The operator scrubs an Indian commercial SMS against its registered
+ * template: the text must be the registered body with each `{#var#}` filled.
+ * A wrong answer here in one direction is a message somebody approved that
+ * never arrives; in the other it is words the regulator never saw. So the
+ * matcher is tested where matchers break — slots at the edges, slots side
+ * by side, literal text that looks like a pattern, and characters JavaScript
+ * counts differently from the operator.
+ */
+import { describe, expect, it } from 'vitest'
+import {
+  DLT_VAR_MAX_CHARS, PROMOTIONAL_WINDOW, isIndianNumber, matchesTemplate, normaliseDltHeader, parseTemplate,
+  parseTemplateCategory, promotionalBand, renderTemplate, smsOptOut, templateCategoriesFor,
+} from '../src/index.js'
+
+describe('parsing a registered body', () => {
+  it('reads literal text and slots in order', () => {
+    const p = parseTemplate('Hi {#var#}, your call is at {#var#}.')
+    expect(p.ok).toBe(true)
+    if (!p.ok) return
+    expect(p.template.slots).toBe(2)
+    expect(p.template.parts).toEqual([
+      { kind: 'text', text: 'Hi ' },
+      { kind: 'slot', variable: 'var' },
+      { kind: 'text', text: ', your call is at ' },
+      { kind: 'slot', variable: 'var' },
+      { kind: 'text', text: '.' },
+    ])
+  })
+
+  it('reads slots at the very start and the very end, with no empty text around them', () => {
+    const p = parseTemplate('{#var#} confirmed {#var#}')
+    expect(p.ok && p.template.parts.map((x) => x.kind)).toEqual(['slot', 'text', 'slot'])
+  })
+
+  it('reads adjacent slots — DLT’s way of carrying more than 30 characters — as two', () => {
+    const p = parseTemplate('Ref {#var#}{#var#}')
+    expect(p.ok && p.template.parts).toEqual([
+      { kind: 'text', text: 'Ref ' },
+      { kind: 'slot', variable: 'var' },
+      { kind: 'slot', variable: 'var' },
+    ])
+  })
+
+  it('reads the kind case-insensitively, and the pre-tagged kinds', () => {
+    const p = parseTemplate('{#VAR#} {#numeric#} {#url#}')
+    expect(p.ok && p.template.parts.filter((x) => x.kind === 'slot')).toEqual([
+      { kind: 'slot', variable: 'var' },
+      { kind: 'slot', variable: 'numeric' },
+      { kind: 'slot', variable: 'url' },
+    ])
+  })
+
+  it('refuses a kind it does not know, rather than guessing it is text or a var', () => {
+    const p = parseTemplate('Hi {#name#}')
+    expect(p.ok).toBe(false)
+    if (!p.ok) {
+      expect(p.reason).toBe('unknown_variable')
+      expect(p.message).toContain('{#name#}')
+    }
+  })
+
+  it('treats what only looks like a placeholder as literal text', () => {
+    const p = parseTemplate('Use {# var #} or {#} or {#var')
+    expect(p.ok && p.template.slots).toBe(0)
+  })
+
+  it('refuses an empty body', () => {
+    expect(parseTemplate('   ').ok).toBe(false)
+  })
+})
+
+describe('rendering', () => {
+  it('fills slots in order', () => {
+    expect(renderTemplate('Hi {#var#}, at {#var#}.', ['Priya', '3pm'])).toEqual({ ok: true, text: 'Hi Priya, at 3pm.' })
+  })
+
+  it('refuses a missing value, naming the slot', () => {
+    const r = renderTemplate('Hi {#var#}, at {#var#}.', ['Priya'])
+    expect(r).toMatchObject({ ok: false, reason: 'missing_var', slot: 2 })
+  })
+
+  it('refuses an extra value', () => {
+    expect(renderTemplate('Hi {#var#}.', ['Priya', 'extra'])).toMatchObject({ ok: false, reason: 'extra_var' })
+  })
+
+  it('refuses a blank value', () => {
+    expect(renderTemplate('Hi {#var#}.', ['   '])).toMatchObject({ ok: false, reason: 'blank_var', slot: 1 })
+  })
+
+  it(`allows exactly ${DLT_VAR_MAX_CHARS} characters and refuses one more`, () => {
+    expect(renderTemplate('{#var#}', ['a'.repeat(DLT_VAR_MAX_CHARS)]).ok).toBe(true)
+    expect(renderTemplate('{#var#}', ['a'.repeat(DLT_VAR_MAX_CHARS + 1)])).toMatchObject({ ok: false, reason: 'var_too_long' })
+  })
+
+  it('counts code points, so thirty emoji or Devanagari letters fit as the operator counts them', () => {
+    const emoji = '🙂'.repeat(DLT_VAR_MAX_CHARS) // 60 UTF-16 units
+    expect(emoji.length).toBe(DLT_VAR_MAX_CHARS * 2)
+    expect(renderTemplate('{#var#}', [emoji]).ok).toBe(true)
+    expect(renderTemplate('नमस्ते {#var#}', ['प्रिया']).ok).toBe(true)
+  })
+
+  it('refuses a link in a plain {#var#}: TRAI requires links whitelisted and in a slot tagged for them', () => {
+    expect(renderTemplate('See {#var#}', ['https://x.co/a'])).toMatchObject({ ok: false, reason: 'var_wrong_kind' })
+    expect(renderTemplate('See {#var#}', ['www.acme.com'])).toMatchObject({ ok: false, reason: 'var_wrong_kind' })
+    expect(renderTemplate('See {#url#}', ['https://x.co/a']).ok).toBe(true)
+  })
+
+  /**
+   * Review round 4: a bare domain, a shortener, a call-back number, or a link split across two
+   * adjacent slots all rendered. DLT needs links and call-back numbers to be part of the registered
+   * template, so the RENDERED text is judged: a link or a phone-number-shaped run that a plain
+   * slot contributes to — alone or joined to the text beside it — is refused.
+   */
+  it.each([
+    ['a shortener', 'Your report: {#var#}', ['tinyurl.com/abc'], 'link'],
+    ['another shortener', 'Your report: {#var#}', ['bit.ly/x'], 'link'],
+    ['a bare domain', 'Your report: {#var#}', ['acme.in'], 'link'],
+    ['a bare domain under a second-level suffix', 'Your report: {#var#}', ['ACME.co.in'], 'link'],
+    ['a WhatsApp click-to-chat link', 'Your report: {#var#}', ['wa.me/919876543210'], 'link'],
+    ['a link split across adjacent slots', 'Hi {#var#}{#var#}, thanks.', ['https:/', '/evil.example/x'], 'link'],
+    ['a domain split across adjacent slots', 'Hi {#var#}{#var#}, thanks.', ['tinyurl', '.com/abc'], 'link'],
+    ['a domain finished by the literal text', 'Visit {#var#}.com/offer today', ['tinyurl'], 'link'],
+    ['a scheme the template does not name', 'See {#var#}', ['ftp://acme/x'], 'link'],
+    ['a call-back number', 'Your report: {#var#}', ['call +91 98765 43210'], 'number'],
+    ['ten bare digits', 'Your report: {#var#}', ['9876543210'], 'number'],
+    ['a landline with its code in brackets', 'Your report: {#var#}', ['(022) 2345 6789'], 'number'],
+    ['a toll-free number with dashes', 'Your report: {#var#}', ['1800-123-4567'], 'number'],
+    ['a number split across adjacent slots', 'Call {#var#} {#var#}', ['98765', '43210'], 'number'],
+    ['a number finished by the literal text', 'Call 98765 {#var#}', ['43210'], 'number'],
+    ['a number in an {#alphanumeric#} slot', 'Ref {#alphanumeric#}', ['9876543210'], 'number'],
+  ])('refuses %s', (_why, body, vars, what) => {
+    const r = renderTemplate(body, vars)
+    expect(r).toMatchObject({ ok: false, reason: 'var_wrong_kind', slot: 1 })
+    if (r.ok) return
+    expect(r.message).toMatch(what === 'link' ? /a link/ : /a phone number/)
+    for (const v of vars) expect(r.message).not.toContain(v)
+    // And the scrub refuses the same text, whatever renders it.
+    const queue = [...vars]
+    const text = body.replace(/\{#[a-z]+#\}/gi, () => queue.shift() ?? '')
+    expect(matchesTemplate(text, body)).toBe(false)
+  })
+
+  it.each([
+    ['an amount', 'Paid Rs. {#var#} today', ['1,200']],
+    ['an amount in lakhs', 'Paid {#var#} today', ['₹1,20,000']],
+    ['an amount with paise', 'Paid Rs {#var#} today', ['123456.78']],
+    ['an amount after the currency', 'Paid {#var#} today', ['Rs 1500000']],
+    ['a date with dashes', 'Your call on {#var#}', ['15-09-2026']],
+    ['a date with dots', 'Your call on {#var#}', ['15.09.2026']],
+    ['an ISO date', 'Your call on {#var#}', ['2026-09-15']],
+    ['a date with slashes', 'Your call on {#var#}', ['15/09/2026']],
+    ['a date and a time', 'Your call on {#var#}', ['15-09-2026 10:30 IST']],
+    ['a time range', 'Your slot is {#var#}', ['10.30-11.30']],
+    ['a short reference', 'Ref {#var#}', ['123456']],
+    ['a reference glued to its prefix', 'Ref {#var#}', ['INV1234567']],
+    ['an honorific with no space', 'Hi {#var#}', ['Dr.Rao']],
+    ['initials', 'Hi {#var#}', ['A.K. Sharma']],
+    ['a version', 'Update {#var#}', ['v2.0.1']],
+    ['a file name', 'See {#var#}', ['report.pdf']],
+    ['an email address', 'Mail {#var#}', ['priya.in@acme.com']],
+    ['a name beside the literal full stop', 'Hi {#var#}.Your call is confirmed.', ['Priya']],
+  ])('does not refuse %s', (_why, body, vars) => {
+    const r = renderTemplate(body, vars)
+    expect(r.ok).toBe(true)
+    expect(r.ok && matchesTemplate(r.text, body)).toBe(true)
+  })
+
+  it('leaves a link or a number that is the template’s own fixed text alone', () => {
+    const body = 'Call 1800 123 4567 or visit https://acme.in/offers, {#var#}.'
+    const r = renderTemplate(body, ['Priya'])
+    expect(r).toEqual({ ok: true, text: 'Call 1800 123 4567 or visit https://acme.in/offers, Priya.' })
+    expect(r.ok && matchesTemplate(r.text, body)).toBe(true)
+  })
+
+  it('lets a slot registered for a link or a number carry one', () => {
+    expect(renderTemplate('See {#url#}', ['https://acme.in/r/123456789']).ok).toBe(true)
+    expect(renderTemplate('Call {#cbn#}', ['+919876543210']).ok).toBe(true)
+    expect(renderTemplate('Order {#numeric#}', ['4058123987']).ok).toBe(true)
+    expect(matchesTemplate('See https://acme.in/r/123456789', 'See {#url#}')).toBe(true)
+    expect(matchesTemplate('Call +919876543210', 'Call {#cbn#}')).toBe(true)
+  })
+
+  it('names the first slot that makes the link, and never the value', () => {
+    const r = renderTemplate('Hi {#var#}, {#var#}{#var#}', ['Priya', 'bit', '.ly/x'])
+    expect(r).toMatchObject({ ok: false, reason: 'var_wrong_kind', slot: 2 })
+  })
+
+  it('holds a pre-tagged slot to its kind', () => {
+    expect(renderTemplate('OTP {#numeric#}', ['12a4'])).toMatchObject({ ok: false, reason: 'var_wrong_kind' })
+    expect(renderTemplate('OTP {#numeric#}', ['1234']).ok).toBe(true)
+    expect(renderTemplate('Call {#cbn#}', ['+919876543210']).ok).toBe(true)
+  })
+
+  it('never puts the value in its message: it may be a person’s name', () => {
+    const r = renderTemplate('{#var#}', ['Priya Raman, who is far too long a name to fit'])
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.message).not.toContain('Priya')
+  })
+
+  it('refuses a template that does not parse', () => {
+    expect(renderTemplate('Hi {#name#}', ['x'])).toMatchObject({ ok: false, reason: 'bad_template' })
+  })
+})
+
+describe('matching a message against its template', () => {
+  it('matches the rendered text', () => {
+    const body = 'Hi {#var#}, your call is at {#var#}.'
+    const r = renderTemplate(body, ['Priya', '3pm IST'])
+    expect(r.ok && matchesTemplate(r.text, body)).toBe(true)
+  })
+
+  it('matches with slots at the start and the end', () => {
+    expect(matchesTemplate('Priya, confirmed for 3pm', '{#var#}, confirmed for {#var#}')).toBe(true)
+  })
+
+  it('matches adjacent slots carrying more than 30 characters between them', () => {
+    const long = 'x'.repeat(45)
+    expect(matchesTemplate(`Ref ${long}`, 'Ref {#var#}{#var#}')).toBe(true)
+    expect(matchesTemplate(`Ref ${'x'.repeat(61)}`, 'Ref {#var#}{#var#}')).toBe(false)
+  })
+
+  it('refuses a filled slot over the limit', () => {
+    expect(matchesTemplate(`Hi ${'a'.repeat(31)}.`, 'Hi {#var#}.')).toBe(false)
+  })
+
+  it('refuses an empty slot, as the renderer does', () => {
+    expect(matchesTemplate('Hi .', 'Hi {#var#}.')).toBe(false)
+  })
+
+  it('treats regular-expression metacharacters in the literal text as themselves', () => {
+    const body = 'Pay $5.00 (incl. tax) [ref*] ^now? {#var#} | a+b \\ end'
+    expect(matchesTemplate('Pay $5.00 (incl. tax) [ref*] ^now? Priya | a+b \\ end', body)).toBe(true)
+    // `.` is a dot, not "any character".
+    expect(matchesTemplate('Pay $5X00 (incl. tax) [ref*] ^now? Priya | a+b \\ end', body)).toBe(false)
+  })
+
+  it('is exact: no folding of case or whitespace, because the operator folds neither', () => {
+    expect(matchesTemplate('hi Priya.', 'Hi {#var#}.')).toBe(false)
+    expect(matchesTemplate('Hi  Priya.', 'Hi {#var#}.')).toBe(true) // the extra space is inside the slot
+    expect(matchesTemplate('Hi Priya. ', 'Hi {#var#}.')).toBe(false)
+  })
+
+  it('refuses edited literal text', () => {
+    expect(matchesTemplate('Hello Priya, your call is at 3pm.', 'Hi {#var#}, your call is at {#var#}.')).toBe(false)
+  })
+
+  it('compares in code points, so a surrogate pair is never split between text and a slot', () => {
+    expect(matchesTemplate('🙂 Priya', '🙂 {#var#}')).toBe(true)
+    expect(matchesTemplate('🙃 Priya', '🙂 {#var#}')).toBe(false)
+    expect(matchesTemplate(`${'🙂'.repeat(30)}!`, '{#var#}!')).toBe(true)
+  })
+
+  it('matches a template with no slots only by its exact text', () => {
+    expect(matchesTemplate('Your meeting is confirmed.', 'Your meeting is confirmed.')).toBe(true)
+    expect(matchesTemplate('Your meeting is confirmed', 'Your meeting is confirmed.')).toBe(false)
+  })
+
+  it('refuses a link smuggled into a plain slot, as the renderer does', () => {
+    expect(matchesTemplate('See https://x.co/a now', 'See {#var#} now')).toBe(false)
+  })
+
+  it('stays fast on a pathological template', () => {
+    const body = Array.from({ length: 12 }, () => '{#var#}').join(' ')
+    const text = Array.from({ length: 12 }, () => 'a a').join(' ') + ' b'
+    const started = Date.now()
+    matchesTemplate(text, body)
+    expect(Date.now() - started).toBeLessThan(1000)
+  })
+
+  it('matches nothing against a template that does not parse', () => {
+    expect(matchesTemplate('Hi x', 'Hi {#name#}')).toBe(false)
+  })
+})
+
+describe('categories and headers', () => {
+  it('folds the spellings an export uses', () => {
+    expect(parseTemplateCategory('Service Implicit', 'sms')).toBe('service_implicit')
+    expect(parseTemplateCategory('service-explicit', 'sms')).toBe('service_explicit')
+    expect(parseTemplateCategory('PROMOTIONAL', 'sms')).toBe('promotional')
+    expect(parseTemplateCategory('Service Explicit (SE)', 'sms')).toBe('service_explicit')
+    expect(parseTemplateCategory('Marketing', 'whatsapp')).toBe('marketing')
+  })
+
+  it('refuses a category from the wrong channel, or none at all — never the nearest guess', () => {
+    expect(parseTemplateCategory('marketing', 'sms')).toBeNull()
+    expect(parseTemplateCategory('promotional', 'whatsapp')).toBeNull()
+    expect(parseTemplateCategory('service', 'sms')).toBeNull()
+    expect(parseTemplateCategory('', 'sms')).toBeNull()
+  })
+
+  it('lists the categories each channel allows, as 0019’s CHECK does', () => {
+    expect(templateCategoriesFor('sms')).toEqual(['promotional', 'transactional', 'service_implicit', 'service_explicit'])
+    expect(templateCategoriesFor('voice')).toEqual(templateCategoriesFor('sms'))
+    expect(templateCategoriesFor('whatsapp')).toEqual(['marketing', 'utility', 'authentication'])
+  })
+
+  it('reads a DLT header as six characters, upper-cased', () => {
+    expect(normaliseDltHeader(' acmein ')).toBe('ACMEIN')
+    expect(normaliseDltHeader('123456')).toBe('123456')
+    expect(normaliseDltHeader('ACME')).toBeNull()
+    expect(normaliseDltHeader('ACMEINX')).toBeNull()
+    expect(normaliseDltHeader('ACM-IN')).toBeNull()
+  })
+})
+
+describe('TRAI’s promotional band', () => {
+  const INDIAN = '+919876543210'
+  const AMERICAN = '+14155550100'
+
+  it('is 10:00 to 21:00 in India', () => {
+    expect(PROMOTIONAL_WINDOW).toMatchObject({ start: 600, end: 1260, zone: 'Asia/Kolkata', hours: '10:00–21:00' })
+  })
+
+  it.each([
+    ['2026-09-15T04:29:59.000Z', false, '2026-09-15T04:30:00.000Z'], // 09:59 IST; it opens at 10:00
+    ['2026-09-15T04:30:00.000Z', true, '2026-09-15T04:31:00.000Z'], //  10:00 IST
+    ['2026-09-15T15:29:00.000Z', true, '2026-09-16T04:30:00.000Z'], //  20:59 IST; 21:00 is shut, so tomorrow
+    ['2026-09-15T15:30:00.000Z', false, '2026-09-16T04:30:00.000Z'], // 21:00 IST — the end is exclusive
+  ])('at %s is open for an Indian number in India: %s', (at, open, next) => {
+    expect(promotionalBand(new Date(at), 'Asia/Kolkata', INDIAN)).toEqual({
+      open, india: true, opensToday: true, nextOpen: new Date(next),
+    })
+  })
+
+  /**
+   * Review round 5, findings [1] and [3]: the band's next opening is a minute the send path can
+   * name, so a sender waits for it rather than coming back an hour later and stepping over a band
+   * half an hour wide.
+   */
+  it('names the next whole minute the band is open, after the current one', () => {
+    // 09:59:59.999 IST: the minute after the current one is 10:00:00 sharp.
+    expect(promotionalBand(new Date('2026-09-15T04:29:59.999Z'), 'Asia/Kolkata', INDIAN)?.nextOpen).toEqual(
+      new Date('2026-09-15T04:30:00.000Z'),
+    )
+    // 23:00 in New York in December: the half hour is 10:00–10:30 there, 15:00 UTC tomorrow.
+    expect(promotionalBand(new Date('2026-12-01T04:00:00.000Z'), 'America/New_York', INDIAN)?.nextOpen).toEqual(
+      new Date('2026-12-01T15:00:00.000Z'),
+    )
+    // Los Angeles in January: 20:30 there, 04:30 UTC.
+    expect(promotionalBand(new Date('2026-01-15T18:00:00.000Z'), 'America/Los_Angeles', INDIAN)?.nextOpen).toEqual(
+      new Date('2026-01-16T04:30:00.000Z'),
+    )
+    // An American number in Los Angeles at 05:00 there waits for 10:00 there, not for India.
+    expect(promotionalBand(new Date('2026-09-15T12:00:00.000Z'), 'America/Los_Angeles', AMERICAN)?.nextOpen).toEqual(
+      new Date('2026-09-15T17:00:00.000Z'),
+    )
+  })
+
+  it('is closed for an Indian number when it is open in India but not where the recipient is', () => {
+    // 11:00 IST is 06:30 in London in September.
+    expect(promotionalBand(new Date('2026-09-15T05:30:00.000Z'), 'Europe/London', INDIAN)).toMatchObject({ open: false, india: true })
+  })
+
+  it('reads TRAI’s band as governing Indian numbers only, however the number is written', () => {
+    expect(isIndianNumber('+919876543210')).toBe(true)
+    expect(isIndianNumber('+91 98765 43210')).toBe(true)
+    expect(isIndianNumber('0091-98765-43210')).toBe(true)
+    expect(isIndianNumber('+14155550100')).toBe(false)
+    expect(isIndianNumber('+9198')).toBe(false) // not a number at all
+    expect(isIndianNumber('9876543210')).toBe(false) // no country code: unknown, not Indian
+  })
+
+  /**
+   * Review round 4: the IST band and 10:00–21:00 in Los Angeles never overlap in September, so a
+   * promotional SMS to an American number could never go — and was deferred as quiet hours for ever.
+   * TRAI's band is the Indian operators'; an American number keeps only its own hours.
+   */
+  it('opens for an American number inside its own 10:00–21:00, whatever the time in India', () => {
+    // 11:00 in Los Angeles is 23:30 in India.
+    expect(promotionalBand(new Date('2026-09-15T18:00:00.000Z'), 'America/Los_Angeles', AMERICAN)).toEqual({
+      open: true, india: false, opensToday: true, nextOpen: new Date('2026-09-15T18:01:00.000Z'),
+    })
+    // 09:59 and 21:00 there are outside it.
+    expect(promotionalBand(new Date('2026-09-15T16:59:00.000Z'), 'America/Los_Angeles', AMERICAN)?.open).toBe(false)
+    expect(promotionalBand(new Date('2026-09-16T04:00:00.000Z'), 'America/Los_Angeles', AMERICAN)?.open).toBe(false)
+  })
+
+  it('counts every quarter-hour of a day in Los Angeles: 44 open for an American number, 0 for an Indian one', () => {
+    const count = (recipient: string): number => {
+      let open = 0
+      for (let q = 0; q < 96; q += 1) {
+        if (promotionalBand(new Date(Date.UTC(2026, 8, 15, 0, q * 15)), 'America/Los_Angeles', recipient)?.open) open += 1
+      }
+      return open
+    }
+    expect(count(AMERICAN)).toBe(44)
+    expect(count(INDIAN)).toBe(0)
+  })
+
+  it('says when the two bands never meet at today’s clocks, and when they do', () => {
+    // Los Angeles on Pacific Daylight Time, and Denver all year: 10:00–21:00 there misses IST’s band.
+    expect(promotionalBand(new Date('2026-09-15T18:00:00.000Z'), 'America/Los_Angeles', INDIAN)).toEqual({
+      open: false, india: true, opensToday: false, nextOpen: null,
+    })
+    expect(promotionalBand(new Date('2026-01-15T18:00:00.000Z'), 'America/Denver', INDIAN)?.opensToday).toBe(false)
+    // On Pacific Standard Time there is half an hour: 20:30–21:00 in Los Angeles is 10:00–10:30 in India.
+    expect(promotionalBand(new Date('2026-01-15T18:00:00.000Z'), 'America/Los_Angeles', INDIAN)?.opensToday).toBe(true)
+    expect(promotionalBand(new Date('2026-01-16T04:45:00.000Z'), 'America/Los_Angeles', INDIAN)).toEqual({
+      open: true, india: true, opensToday: true, nextOpen: new Date('2026-01-16T04:46:00.000Z'),
+    })
+    // New York overlaps, and an American number in Denver always has its own hours.
+    expect(promotionalBand(new Date('2026-09-15T18:00:00.000Z'), 'America/New_York', INDIAN)?.opensToday).toBe(true)
+    expect(promotionalBand(new Date('2026-09-15T18:00:00.000Z'), 'America/Denver', AMERICAN)?.opensToday).toBe(true)
+  })
+
+  it('answers null for a zone the runtime does not know', () => {
+    expect(promotionalBand(new Date(), 'Not/AZone', INDIAN)).toBeNull()
+    expect(promotionalBand(new Date(), 'Not/AZone', AMERICAN)).toBeNull()
+  })
+})
+
+describe('the SMS opt-out reader', () => {
+  it.each(['STOP', 'stop', 'Stop.', ' STOP! ', 'STOPALL', 'stop all', 'UNSUBSCRIBE', 'Cancel', 'END', 'quit', 'OPT OUT', 'opt-out', 'optout'])(
+    'reads %j as an opt-out',
+    (text) => {
+      expect(smsOptOut(text)).toBe(true)
+    },
+  )
+
+  it.each(['STOP 56161', 'stop ACMEIN', 'UNSUBSCRIBE ALL', 'Reply STOP', 'sms stop', 'text STOP 56161'])(
+    'reads the reply-with-keyword form %j as an opt-out',
+    (text) => {
+      expect(smsOptOut(text)).toBe(true)
+    },
+  )
+
+  it.each(['Stop texting me', 'please stop messaging me', "don't text me again", 'Do not SMS me', 'no more texts'])(
+    'reads the SMS-shaped sentence %j as an opt-out',
+    (text) => {
+      expect(smsOptOut(text)).toBe(true)
+    },
+  )
+
+  it('reads full-width letters as letters', () => {
+    expect(smsOptOut('ＳＴＯＰ')).toBe(true)
+  })
+
+  /**
+   * Review round 4: each of these was stored as an ordinary reply — paused, never suppressed, and
+   * resumable by answering it. A missed STOP is the worst error this reader can make.
+   */
+  it.each([
+    'STOP ALL 56161',
+    'stop all ACMEIN',
+    'UNSUBSCRIBE ALL ACMEIN',
+    'unsubscribe all 56161',
+    'STOPALL 56161',
+    'Reply STOP ALL 56161',
+    'STOP 👍',
+    'STOP🙏',
+    'stop 🙅‍♀️',
+    'STOP 👍🏽',
+    'STOP)',
+    'STOP :)',
+    '(STOP)',
+    '"STOP"',
+    '¡STOP!',
+    '¿Stop?',
+    '*STOP*',
+    '👎 STOP',
+    'STOP 56161 🙏',
+    'STOP-56161',
+    'STOP: ACMEIN',
+    'Unsubscribe, ACMEIN',
+    'Opt out!!! 😡😡',
+    'CANCEL 👋',
+  ])('reads %j as an opt-out — punctuation, an emoji or "all" around the keyword', (text) => {
+    expect(smsOptOut(text)).toBe(true)
+  })
+
+  /**
+   * The email reader's whole-message forms, which the SMS recorder ORs with this one — restated so
+   * a decoration it does not strip does not lose them — and the curly apostrophe a phone types.
+   */
+  it.each(['Please stop 🙏', 'Kindly unsubscribe.', 'Remove me :)', 'Opt me out!', 'Don’t text me again 🙏', 'don’t message me', 'Leave me alone 😡'])(
+    'reads %j as an opt-out',
+    (text) => {
+      expect(smsOptOut(text)).toBe(true)
+    },
+  )
+
+  /**
+   * Review round 5, finding [7]: politeness was read only BEFORE the words, so a "please" after
+   * them — and "msg" for "message" — lost the opt-out to both readers. Each of these was stored as
+   * an ordinary reply: paused, never suppressed, and resumable from /contacts.
+   */
+  it.each([
+    'Stop texting me please',
+    'stop messaging me please',
+    'Stop texting me, please.',
+    'Stop texting me. Thanks',
+    'stop sending me msgs pls',
+    'stop msging me',
+    'unsubscribe me please',
+    'Unsubscribe me, thanks!',
+    'no more messages please',
+    'no more msgs pls',
+    'No more SMS plz 🙏',
+    'no more txts thx',
+    'Dont msg me',
+    'dont msg me again please',
+    'Don’t text me again, thank you',
+    'do not msg me',
+    'Remove me from your list',
+    'please remove me from the list, thanks',
+    'Remove me please',
+    'Opt me out please',
+    'Leave me alone please',
+    'Take me off your list please',
+    'stop please',
+    'Please stop, thanks',
+  ])('reads %j as an opt-out — politeness after the words, and "msg" for "message"', (text) => {
+    expect(smsOptOut(text)).toBe(true)
+  })
+
+  it.each([
+    'Don’t stop texting me please',
+    'do not stop messaging me, thanks',
+    'stop by tomorrow please',
+    'stop by tomorrow, thanks',
+    'no more questions, thanks',
+    'text me please',
+    'msg me please',
+    'please send me more msgs',
+    'remove me from the meeting please',
+    'remove me from the invite thanks',
+    'Please cancel 🙏',
+    'cancel please',
+    'end please',
+    'quit please',
+    'stop all the calls please',
+    'thanks',
+    'please',
+  ])('does not read %j as an opt-out — a "please" does not make a sentence one', (text) => {
+    expect(smsOptOut(text)).toBe(false)
+  })
+
+  it.each([
+    'Cancel tomorrow’s call please',
+    'end of day works',
+    'Can we stop by your office on Friday?',
+    'I will stop at 5',
+    'Do not stop, this is great',
+    'quit my job last week, call my colleague',
+    'stoppage',
+    '',
+    // Punctuation and emoji are stripped only from the ENDS: prose is still prose.
+    "Don't stop! 👍",
+    'don’t stop 🙂',
+    'stop by tomorrow 🙂',
+    'Stop by tomorrow?',
+    '(stop by on Friday)',
+    'Please do not stop :)',
+    'All good, stop worrying 😄',
+    'stop all the calls until Monday please',
+    'end of day? 👍',
+    'cancel the 3pm, move it to 4 🙏',
+    '👍',
+    '!!!',
+    'please stop by 🙂',
+    'Please cancel 🙏',
+  ])('does not read %j as an opt-out — the words around it say otherwise', (text) => {
+    expect(smsOptOut(text)).toBe(false)
+  })
+
+  it('does not read null or undefined as anything', () => {
+    expect(smsOptOut(null)).toBe(false)
+    expect(smsOptOut(undefined)).toBe(false)
+  })
+
+  /**
+   * Review round 6, finding [8]: the reader was whole-message only, so a STOP that stood as its own
+   * clause beside another sentence was read by neither reader and stored as an ordinary reply —
+   * paused, never suppressed, and resumable. A clause is what sentence punctuation, a comma or a
+   * line break sets apart; one that is a strong whole-message form on its own is an opt-out.
+   */
+  it.each([
+    'Not interested. Stop',
+    'Stop. Not interested',
+    'Wrong number, stop',
+    'No thanks, stop texting me',
+    'Who is this? Stop texting me',
+    'Not interested\nStop',
+    'Not interested\r\nSTOP 56161',
+    'Wrong person. STOP ACMEIN',
+    'Not my number; please remove me',
+    'Hi. Unsubscribe me please',
+    'We are not looking for this — stop. Thanks',
+    'Who? Stop sending me messages!!',
+    'Not interested. Opt me out 🙏',
+  ])('reads %j as an opt-out — a STOP standing as its own clause', (text) => {
+    expect(smsOptOut(text)).toBe(true)
+  })
+
+  it.each([
+    'stop spamming me',
+    'Stop spamming me!',
+    'remove my number',
+    'Please remove my number',
+    'Remove my number from your list',
+    'stop stop stop',
+    'STOP STOP',
+    'Stop please thank you',
+    'stop pls thanks',
+    'Who is this? Stop spamming me',
+  ])('reads %j as an opt-out — spamming, my number, a repeated stop and chained politeness', (text) => {
+    expect(smsOptOut(text)).toBe(true)
+  })
+
+  /**
+   * A clause alone is read only by the STRONG forms: CANCEL, END and QUIT are opt-outs only as the
+   * whole message, and a keyword's trailing token is a short code or a brand keyword in capitals —
+   * never a word, so "stop worrying" and "stop by" beside another sentence are still prose.
+   */
+  it.each([
+    'Not interested, cancel',
+    'Thanks. End',
+    'No. Quit',
+    'Cancel, please',
+    'All good, stop worrying',
+    'Sure, stop by',
+    'Sure, stop in. Thanks',
+    'Great! Stop by on Friday',
+    'Do not stop, this is great',
+    'Don’t stop. Texting me is fine',
+    'stop by tomorrow, thanks',
+    'No worries, I will stop at 5',
+    'Never stop. Thanks',
+    'please do not stop, thanks',
+    'Remove my number from the invite please',
+    'Remove the 3pm, thanks',
+    'Sounds good. See you then',
+  ])('does not read %j as an opt-out — a clause is read by the strong forms only', (text) => {
+    expect(smsOptOut(text)).toBe(false)
+  })
+
+  /**
+   * Review round 7, finding [5]: a STOP with no punctuation before it — "Not interested STOP", the
+   * commonest shape of all — was missed, as were a colon, a lower-case "stop it" or "unsub me" as a
+   * clause, and the "send" and "this number" phrasings. Each was an ordinary reply: paused, never
+   * suppressed, and resumable.
+   */
+  it.each([
+    'Not interested STOP',
+    'No thanks STOP',
+    'Wrong number STOP',
+    'Not interested: STOP',
+    'Not interested, stop it',
+    'Wrong number, unsub me',
+    "Don't send me messages",
+    'Do not send me sms',
+    'Stop sending me these messages',
+    'Stop messaging this number',
+    'Stop sending sms to this number',
+  ])('reads %j as an opt-out — the round 7 probe', (text) => {
+    expect(smsOptOut(text)).toBe(true)
+  })
+
+  /**
+   * A STOP-family keyword typed in CAPITALS that ENDS the text is its own clause, punctuation or
+   * not — the footer said "Reply STOP", and that is what came back after the sentence. The end may
+   * carry what a whole message may (a footer token, "ALL", a full stop, an emoji, a "thanks").
+   */
+  it.each([
+    'Not interested STOP.',
+    'Not interested STOP!!!',
+    'Not interested STOP 🙏',
+    'Not interested STOP :)',
+    'Not interested STOP thanks',
+    'Not interested STOP, thank you',
+    'Not interested STOP. Thanks!',
+    'Thank you STOP',
+    'I said STOP',
+    'Ok STOP',
+    'Can you STOP',
+    'Not interested STOP NOW',
+    'Not interested STOP 56161',
+    'Not interested STOP ACMEIN',
+    'Wrong person STOP ALL',
+    'who is this STOPALL',
+    'Who is this? Wrong number STOP',
+    'Wrong number UNSUBSCRIBE',
+    'not my number UNSUB',
+    'No thanks OPT OUT',
+    'No thanks OPT-OUT',
+    'No thanks OPTOUT',
+    'Please STOP',
+    'Please do STOP',
+    'make it STOP',
+    'नहीं चाहिए STOP',
+    'नहीं चाहिए STOP ACMEIN',
+    // A text in capitals throughout: the keyword alone, or with a short code, still ends it.
+    'NOT INTERESTED STOP',
+    'WRONG NUMBER STOP 56161',
+  ])('reads %j as an opt-out — a capital STOP ending the text', (text) => {
+    expect(smsOptOut(text)).toBe(true)
+  })
+
+  it.each([
+    'Wrong number, stop it please',
+    'Not interested. Unsub me',
+    'No thanks, unsub',
+    "Don't send me any more messages",
+    'dont send me anymore texts',
+    'Don’t send me msgs again',
+    'do not send me these sms please',
+    'Pls don’t send me smses',
+    'Who is this? Do not send me texts',
+    'stop sending me sms',
+    'Stop sending your messages to this number',
+    'stop sending messages to me',
+    'Stop sending texts to my number',
+    'Stop texting this number',
+    'stop txting my number pls',
+    'Not interested, stop messaging this number',
+    'Not interested :( stop',
+    'Re: Stop',
+  ])('reads %j as an opt-out — a lower-case "stop it" or "unsub me" as a clause, and the "send" and "this number" sentences', (text) => {
+    expect(smsOptOut(text)).toBe(true)
+  })
+
+  /**
+   * Only CAPITALS at the end are read: a lower-case "stop" there is a sentence about stopping. A
+   * negation or an article right before a capital STOP makes it one too, and a question mark after
+   * it makes it a question. CANCEL, END and QUIT never end a text this way. In a text typed in
+   * capitals throughout, a word after STOP is a word ("STOP BY"), so only a short code is read
+   * there.
+   */
+  it.each([
+    'I will stop',
+    "Please don't stop",
+    'Please don’t stop.',
+    'I will stop by at 5',
+    'Please do not stop the service',
+    'Bus stop at 5 STOP? no',
+    'Not interested stop',
+    'can we stop',
+    'This has to stop',
+    "Please don't STOP",
+    'Please do not STOP',
+    'Never STOP',
+    'Don’t ever STOP',
+    'It will never STOP!',
+    'PLEASE DON’T STOP',
+    'Where is the STOP',
+    'meet at the bus STOP',
+    'I AM AT THE BUS STOP',
+    'Is this the last STOP',
+    'I am at Andheri Bus Stop',
+    'Is this your STOP?',
+    'When does it STOP?',
+    'Not interested STOP?',
+    'Not interested CANCEL',
+    'Thanks, see you then END',
+    'I give up QUIT',
+    'OK I WILL STOP BY',
+    'SURE WE CAN STOP IN',
+    'Is this a non-STOP flight',
+    'BUSSTOP',
+    'Not interested in STOPS',
+    'Not interested, STOPPED already',
+  ])('does not read %j as an opt-out — a lower-case stop, a negation, a question or a word after it', (text) => {
+    expect(smsOptOut(text)).toBe(false)
+  })
+
+  it.each([
+    "Don't send me the invoice",
+    "Don't send me messages after 9pm",
+    'Don’t stop sending me messages',
+    'Do not stop sending me texts please',
+    'please send me more messages',
+    'Stop sending me invoices',
+    'stop messaging this number and call my office instead',
+    'Meet at 5:30, stop by the desk',
+    'Re: stop by tomorrow',
+    'https://stop.example',
+    'see http://stop.example/menu',
+    'Time: 5:30',
+    'Note: we will stop at 5',
+    'Sure: stop by on Friday',
+    'Ok, stop worrying',
+    "Fine, don't stop it",
+    'Unsubscribed already, thanks for checking',
+    'Can you stop it from crashing?',
+  ])('does not read %j as an opt-out — the new sentences are anchored, and a colon is only a break', (text) => {
+    expect(smsOptOut(text)).toBe(false)
+  })
+
+  /**
+   * Review round 8, finding [4]: the capital-STOP reading took any text ending in a capital STOP as
+   * an opt-out unless a negation, an article or one of five place words came right before it. So
+   * "NON STOP", a question typed without its "?", and a place such as "Metro STOP" each wrote an
+   * opted_out reply — never clearable — and a phone suppression in every org holding the number.
+   * Each is one clause with no break before STOP, so only that reading ever saw them.
+   */
+  it.each([
+    // "non stop" is everyday Indian English, and in any case; the hyphenated form was already prose.
+    'Our team monitors it NON STOP',
+    'Working NON STOP 🙏',
+    'We run 24/7 non STOP',
+    'OUR SERVERS RUN NON STOP',
+    'We work Non STOP',
+    'Is this a non-STOP flight',
+    // A question with no question mark: the clause STOP ends opens with a wh-word, or with an
+    // auxiliary or a modal and its subject.
+    'Why STOP',
+    'WHY STOP',
+    'Who said STOP',
+    'Can I STOP',
+    'When does it STOP',
+    'Should I STOP',
+    'Shall we STOP',
+    'Which STOP',
+    'Is it ok to STOP',
+    'Do you sell STOP',
+    'How do I STOP',
+    'How to STOP',
+    'Can we STOP',
+    'Should I reply STOP',
+    'Can I STOP NOW',
+    'Hi. Why STOP',
+    '🤔 Why STOP',
+    'Ok, when does it STOP',
+    // A place, a determiner or a possessive before it makes STOP a noun.
+    'Sure, I am at the Metro STOP',
+    'REACHED METRO STOP',
+    'Meet me at Metro STOP',
+    'Wait at the railway station STOP',
+    'Get down at Thane rly STOP',
+    'Is this a railway STOP',
+    'Waiting at the train STOP',
+    'Meet at the tram STOP',
+    'I am at the bus terminal STOP',
+    'Reached the depot STOP',
+    'Waiting at the signal STOP',
+    'Near the toll STOP',
+    'Get off at the final STOP',
+    'It is only the first STOP',
+    'The train halts at every STOP',
+    'Get off at each STOP',
+    'We are your ONE STOP',
+    'I am at your STOP',
+    'This is my STOP',
+    'Yes please send me the details FULL STOP',
+    // "stop by", "stop in", "stop over" and "stop off" are a visit, not a footer keyword and a token.
+    'Sure, I’ll STOP BY',
+    'I can STOP BY',
+    'Got it, will STOP BY',
+    'Can you STOP BY',
+    'Happy to STOP IN',
+    'We will STOP OVER',
+    'I can STOP OFF',
+  ])('does not read %j as an opt-out — NON STOP, a question, a place or a visit (round 8)', (text) => {
+    expect(smsOptOut(text)).toBe(false)
+  })
+
+  /**
+   * Review round 9, finding [0]/[4]: round 8 read an auxiliary or a modal with ANY word after it as
+   * a question, so negative commands and refusals — "Do not disturb STOP", "Am not interested STOP",
+   * among the commonest in Indian SMS and opt-outs in round 7 — were recorded as ordinary replies.
+   * An auxiliary opens a question only with its subject after it, and a wh-word that opens an
+   * exclamation ("What nonsense", "How dare you") ends in the command.
+   */
+  it.each([
+    'Am not interested STOP',
+    'Do not disturb STOP',
+    'Do not contact STOP',
+    'Do not call STOP',
+    'Did not subscribe STOP',
+    'Am busy STOP',
+    'Will not buy STOP',
+    'Was never interested STOP',
+    'Do not message me again STOP',
+    'Dont disturb STOP',
+    'What nonsense STOP',
+    'What the hell STOP',
+    'What a waste STOP',
+    'How dare you STOP',
+    'How annoying STOP',
+  ])('reads %j as an opt-out — a command or a complaint, not a question (round 9)', (text) => {
+    expect(smsOptOut(text)).toBe(true)
+  })
+
+  it.each([
+    'Can I STOP',
+    'Do you sell STOP',
+    'Is it ok to STOP',
+    'Does it STOP',
+    'Will the bus STOP',
+    'Why STOP',
+  ])('still does not read %j as an opt-out — a question with its subject (round 9 keeps round 8)', (text) => {
+    expect(smsOptOut(text)).toBe(false)
+  })
+
+  /**
+   * What the round 8 fix keeps. A question refuses only the bare word STOP, which a question can end
+   * in ("Why STOP"); the keywords that exist only to leave a list are read whatever comes before
+   * them ("How do I UNSUBSCRIBE" asks for exactly that), and so is STOP with ALL or a short code. A
+   * question that ends before the keyword ends in a command: one addressed to the sender, ending in
+   * "you", "me", "us", "my number", "this" or the texts — a request ("Can you STOP") or a complaint ("When
+   * will you STOP", "Why are you texting me STOP") — one asking who is texting ("Who is this STOP"),
+   * and "how many times". "No STOP" and "Do STOP" are commands, so "no" and an auxiliary alone
+   * refuse nothing, and the whole-message and clause readings are unchanged ("Why? Stop").
+   */
+  it.each([
+    'Can you STOP',
+    'Could you please STOP',
+    'Will you STOP',
+    'Can u pls STOP',
+    'CAN YOU STOP',
+    'Can you STOP NOW',
+    'Why don’t you STOP',
+    'why dont you just STOP',
+    'who is this STOPALL',
+    'Who is this STOP',
+    'WHO IS THIS STOP',
+    'who are you STOP',
+    'Whos this STOP',
+    'What is this STOP',
+    'Who is this STOP ACMEIN',
+    'When will you STOP',
+    'Why won’t you STOP',
+    'Why did you STOP',
+    'Why are you texting me STOP',
+    'Why do you keep messaging us STOP',
+    'Why are you sending me messages STOP',
+    'Why do you keep texting STOP',
+    'When do the messages STOP',
+    'Why so much spam STOP',
+    'Who sent this STOP',
+    'Why do you send these STOP',
+    'How many times do I have to say STOP',
+    'How many times STOP',
+    'What is this nonsense STOP',
+    'Who gave you my number STOP',
+    'How did you get this number STOP',
+    'How do I UNSUBSCRIBE',
+    'Can I OPT OUT',
+    'How to UNSUB',
+    'Why STOPALL',
+    'Can I STOP ALL',
+    'How do I STOP 56161',
+    'No STOP',
+    'Do STOP',
+    'Why? Stop',
+    'Why? STOP',
+    'Who is this? Wrong number STOP',
+    'Not interested STOP',
+    'No thanks STOP 56161',
+    'Wrong number STOP',
+    'Please do STOP',
+    'make it STOP',
+    'I want you to STOP',
+    'Make this STOP',
+    'Stop',
+    'Who is this? Stop texting me',
+  ])('reads %j as an opt-out — a request, a whole question, or a keyword only a list has (round 8)', (text) => {
+    expect(smsOptOut(text)).toBe(true)
+  })
+
+  it('reads a long text in linear time — the capital-STOP reading adds no backtracking', () => {
+    const long = `${'word '.repeat(3000)}STOP`
+    const started = performance.now()
+    expect(smsOptOut(long)).toBe(true)
+    expect(smsOptOut(`${'a'.repeat(16_000)} STOP`)).toBe(true)
+    expect(smsOptOut(`${'A'.repeat(16_000)}STOP`)).toBe(false)
+    // Round 8's question reading reads the last clause's words once, each test on a bounded few.
+    expect(smsOptOut(`Why ${'word '.repeat(3000)}STOP`)).toBe(false)
+    expect(smsOptOut(`Can you ${'please '.repeat(2500)}STOP`)).toBe(true)
+    expect(smsOptOut(`${'u please '.repeat(1800)}STOP`)).toBe(true)
+    expect(smsOptOut(`${'why, '.repeat(3000)}why STOP`)).toBe(false)
+    expect(performance.now() - started).toBeLessThan(500)
+  })
+})

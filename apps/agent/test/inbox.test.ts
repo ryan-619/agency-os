@@ -11,8 +11,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
-import { readMailSignals } from '@agency/core'
-import { handleInboundEmail, schema, type AgencyDb } from '@agency/db'
+import { htmlToText, readMailSignals } from '@agency/core'
+import { handleInboundEmail, looksLikeOptOut, schema, type AgencyDb } from '@agency/db'
 import { migratedDb, type TestDb } from '../../../packages/db/test/helpers.js'
 import { parseInbound } from '../src/outreach/inbox.js'
 
@@ -82,6 +82,107 @@ Content-Type: text/html; charset=utf-8`,
       ),
     )
     expect(mail!.text).toBe('Please unsubscribe me.')
+  })
+
+  /**
+   * An HTML-only reply whose HTML is NOT the root of the message. mailparser
+   * converts a root `text/html` to text itself and keeps its lines; for an
+   * HTML part inside a multipart — Outlook's multipart/related (the HTML
+   * beside its signature image), or a multipart/alternative with no plain
+   * part — it leaves `text` empty, and the fallback used to flatten the HTML
+   * to ONE line. `Stop<blockquote>On Mon … wrote: …` became `Stop On Mon …
+   * wrote: …`, which is not a line that IS an opt-out: the contact was
+   * paused and never suppressed. It now goes through the converter the
+   * Resend path uses (`htmlToText` in packages/core), which keeps the lines.
+   */
+  describe('an HTML-only reply below the root', () => {
+    const STOP_HTML =
+      '<div dir="ltr">Stop</div><br><div class="gmail_quote"><div dir="ltr" class="gmail_attr">' +
+      'On Mon, 28 Sept 2026 at 09:00, Agency &lt;outreach@agency.test&gt; wrote:<br></div>' +
+      '<blockquote class="gmail_quote">Hi Priya — we looked at rentman.io from the outside.' +
+      '<br>Reply stop and we will not write again.</blockquote></div>'
+
+    const shapes: [string, string][] = [
+      [
+        'multipart/related (Outlook, with its signature image)',
+        raw(
+          `From: Priya <priya@rentman.io>
+Subject: RE: A gap
+In-Reply-To: <sent-1@agency.test>
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary="R"`,
+          [
+            '--R', 'Content-Type: text/html; charset=utf-8', '', STOP_HTML,
+            '--R', 'Content-Type: image/png', 'Content-ID: <sig@rentman.io>', 'Content-Transfer-Encoding: base64', '', 'iVBORw0KGgo=',
+            '--R--', '',
+          ].join('\r\n'),
+        ),
+      ],
+      [
+        'multipart/alternative with no plain part',
+        raw(
+          `From: priya@rentman.io
+Subject: Re: A gap
+In-Reply-To: <sent-1@agency.test>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="A"`,
+          ['--A', 'Content-Type: text/html; charset=utf-8', '', STOP_HTML, '--A--', ''].join('\r\n'),
+        ),
+      ],
+    ]
+
+    it.each(shapes)('keeps a one-word "Stop" on its own line in %s, so it reads as an opt-out', async (_shape, message) => {
+      const mail = await parseInbound(message)
+      expect(mail!.text?.split('\n')[0]).toBe('Stop')
+      expect(looksLikeOptOut(mail!.text)).toBe(true)
+      // The quote is still marked as a quote, so its "Reply stop" is never read as theirs.
+      expect(mail!.text).toContain('\n> Hi Priya')
+    })
+
+    it.each(shapes)('decodes entities once in %s', async (_shape, message) => {
+      const mail = await parseInbound(message)
+      expect(mail!.text).toContain('Agency <outreach@agency.test> wrote:')
+      expect(mail!.text).not.toContain('&lt;')
+    })
+
+    /** And the same converter as the Resend path, so "stop" means one thing whichever way it arrived. */
+    it.each(shapes)('reads %s exactly as the Resend path reads the same HTML', async (_shape, message) => {
+      const mail = await parseInbound(message)
+      expect(mail!.text).toBe(htmlToText(STOP_HTML))
+    })
+
+    it('does not read a quoted "unsubscribe" below an HTML-only answer as the person’s own words', async () => {
+      const mail = await parseInbound(
+        raw(
+          `From: priya@rentman.io
+Subject: Re
+Content-Type: multipart/alternative; boundary="A"`,
+          ['--A', 'Content-Type: text/html', '', '<p>Sounds good, send the details.</p><blockquote><p>unsubscribe</p></blockquote>', '--A--', ''].join('\r\n'),
+        ),
+      )
+      expect(mail!.text?.split('\n')[0]).toBe('Sounds good, send the details.')
+      expect(looksLikeOptOut(mail!.text)).toBe(false)
+    })
+
+    /** An empty plain part says nothing; the words are in the HTML beside it — the Resend mapping's rule. */
+    it('reads the HTML when the plain part is blank', async () => {
+      const mail = await parseInbound(
+        raw(
+          `From: priya@rentman.io
+Subject: Re
+Content-Type: multipart/alternative; boundary="A"`,
+          ['--A', 'Content-Type: text/plain', '', '   ', '--A', 'Content-Type: text/html', '', STOP_HTML, '--A--', ''].join('\r\n'),
+        ),
+      )
+      expect(looksLikeOptOut(mail!.text)).toBe(true)
+    })
+
+    /** A root text/html was always converted by mailparser, and still is: nothing changes for it. */
+    it('leaves a root text/html to mailparser, which already kept its lines', async () => {
+      const mail = await parseInbound(raw(`From: priya@rentman.io\nSubject: Re\nContent-Type: text/html; charset=utf-8`, STOP_HTML))
+      expect(mail!.text?.split('\n')[0]).toBe('Stop')
+      expect(looksLikeOptOut(mail!.text)).toBe(true)
+    })
   })
 
   it('returns null rather than throwing for a message with no sender', async () => {
@@ -326,31 +427,38 @@ Content-Type: multipart/mixed; boundary="M"`,
  * over: it must reach `recordInboundReply` as the reply it is, and its
  * opt-out must be recorded — not answered with "no contact was changed".
  */
+const NOON = new Date('2026-09-15T12:00:00.000Z')
+
+/** One org, one company, one contact, and the message this system sent them as `<sent-1@agency.test>`. */
+async function seedRentman(db: AgencyDb): Promise<{ orgId: string; contactId: string }> {
+  const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
+  const orgId = org!.id
+  const [company] = await db
+    .insert(schema.companies)
+    .values({ orgId, domain: 'rentman.io', timeZone: 'Europe/London' })
+    .returning({ id: schema.companies.id })
+  const [contact] = await db
+    .insert(schema.contacts)
+    .values({ orgId, companyId: company!.id, email: 'priya@rentman.io', timeZone: 'Europe/London' })
+    .returning({ id: schema.contacts.id })
+  const contactId = contact!.id
+  await db.insert(schema.touches).values({
+    orgId, contactId, companyId: company!.id, channel: 'email', direction: 'out', status: 'sent',
+    recipient: 'priya@rentman.io', sentAt: NOON, providerId: '<sent-1@agency.test>',
+    subject: 'A gap on your security page', body: 'Hello.',
+  })
+  return { orgId, contactId }
+}
+
 describe('an inline-forwarded bounce reaching the recorder', () => {
   let test: TestDb
   let db: AgencyDb
   let contactId: string
-  const NOON = new Date('2026-09-15T12:00:00.000Z')
 
   beforeEach(async () => {
     test = await migratedDb()
     db = drizzle(test.pg, { schema }) as unknown as AgencyDb
-    const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
-    const orgId = org!.id
-    const [company] = await db
-      .insert(schema.companies)
-      .values({ orgId, domain: 'rentman.io', timeZone: 'Europe/London' })
-      .returning({ id: schema.companies.id })
-    const [contact] = await db
-      .insert(schema.contacts)
-      .values({ orgId, companyId: company!.id, email: 'priya@rentman.io', timeZone: 'Europe/London' })
-      .returning({ id: schema.contacts.id })
-    contactId = contact!.id
-    await db.insert(schema.touches).values({
-      orgId, contactId, companyId: company!.id, channel: 'email', direction: 'out', status: 'sent',
-      recipient: 'priya@rentman.io', sentAt: NOON, providerId: '<sent-1@agency.test>',
-      subject: 'A gap on your security page', body: 'Hello.',
-    })
+    ;({ contactId } = await seedRentman(db))
   }, 30_000)
 
   afterEach(async () => {
@@ -373,5 +481,57 @@ describe('an inline-forwarded bounce reaching the recorder', () => {
     expect(person!.pausedAt).not.toBeNull()
     const suppressions = await db.select().from(schema.suppressions)
     expect(suppressions.map((r) => r.value)).toContain('priya@rentman.io')
+  })
+})
+
+/**
+ * The HTML-only "Stop" through `handleInboundEmail`, the way the listener
+ * hands it over. Before, the flattened line paused the contact and wrote no
+ * suppression row: the person who said stop could be written to again the
+ * moment a teammate lifted the pause.
+ */
+describe('an HTML-only "Stop" below the root, reaching the recorder', () => {
+  let test: TestDb
+  let db: AgencyDb
+  let contactId: string
+
+  beforeEach(async () => {
+    test = await migratedDb()
+    db = drizzle(test.pg, { schema }) as unknown as AgencyDb
+    ;({ contactId } = await seedRentman(db))
+  }, 30_000)
+
+  afterEach(async () => {
+    await test?.close()
+  })
+
+  it('suppresses the address, not merely pauses the contact', async () => {
+    const mail = await parseInbound(
+      raw(
+        `From: Priya <priya@rentman.io>
+To: outreach@agency.test
+Subject: RE: A gap on your security page
+Message-ID: <their-3@rentman.io>
+In-Reply-To: <sent-1@agency.test>
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary="R"`,
+        [
+          '--R', 'Content-Type: text/html; charset=utf-8', '',
+          '<div>Stop</div><blockquote>On Mon, 14 Sept 2026, Agency wrote:<br>Hi Priya — we looked at rentman.io from the outside.</blockquote>',
+          '--R', 'Content-Type: image/png', 'Content-ID: <sig@rentman.io>', 'Content-Transfer-Encoding: base64', '', 'iVBORw0KGgo=',
+          '--R--', '',
+        ].join('\r\n'),
+      ),
+    )
+    const outcome = await handleInboundEmail(db, { ...mail!, now: NOON })
+    expect(outcome.matched).toBe('message')
+    if (outcome.matched === 'none') return
+    expect(outcome.replyKind).toBe('opted_out')
+    expect(outcome.suppressed).toBe(true)
+    expect(outcome.paused).toBe(true)
+    const [person] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, contactId))
+    expect(person!.pausedAt).not.toBeNull()
+    const suppressions = await db.select().from(schema.suppressions)
+    expect(suppressions.map((r) => r.value)).toEqual(['priya@rentman.io'])
   })
 })

@@ -35,6 +35,21 @@ export interface CandidateDecision {
   readonly humanCanResolve: boolean
   /** The rule's own sentence, from `decideSend` — null when nothing stops it. */
   readonly reason: string | null
+  /**
+   * A `stale_evidence` refusal because a newer successful scan SUPERSEDED
+   * the one the words quote, not because it aged (r4, `decideGathered`).
+   * Present only when true. The re-scan has happened, so the fix is a new
+   * draft from the latest scan, and `approveBlock` says that instead of
+   * "re-scan".
+   */
+  readonly evidenceSuperseded?: true
+  /**
+   * A `paused` refusal of a shared number's holder whose own pause stood:
+   * Resume refuses it until the number is recorded (`previewSend`'s
+   * `sharedNumberHold`, review round 10, [2]). Present only when true, and
+   * `approveBlock` says what lifts it — the number recorded first.
+   */
+  readonly sharedNumberHold?: true
 }
 
 /**
@@ -47,10 +62,29 @@ export type PreviewDecision =
 
 const SEND_NOW_WORDS = 'nothing stops it right now'
 
-/** A `previewSend` decision in the words the card shows. */
-export function decisionView(d: PreviewDecision): CandidateDecision {
+/**
+ * How `decideGathered` (packages/db, outreach.ts) opens the sentence of a
+ * `stale_evidence` refusal whose scan was superseded rather than aged. The
+ * page hands this file `previewSend`'s decision and nothing else, and the
+ * facts beside it cannot tell aged-and-superseded (worded as the deadline)
+ * from superseded alone — so the sentence the card already shows is what
+ * says which, and the block above it cannot contradict it.
+ * `test/approval-view.test.ts` runs the real `decideGathered`, so a
+ * rewording there fails that test rather than going quiet here.
+ */
+const SUPERSEDED_REASON = /^A newer scan of this company has reached the site since the scan these words quote\b/
+
+/**
+ * A `previewSend` decision in the words the card shows. `facts` is the
+ * preview's own facts beside it — `SendPreviewFacts` is assignable — for
+ * the one fact the decision's code cannot carry: a pause Resume refuses
+ * until a shared number is recorded (review round 10, [2]).
+ */
+export function decisionView(d: PreviewDecision, facts?: { readonly sharedNumberHold?: boolean }): CandidateDecision {
   if (d.allowed) return { code: 'send_now', words: SEND_NOW_WORDS, humanCanResolve: true, reason: null }
-  return { code: d.code, words: refusalWords(d.code), humanCanResolve: d.humanCanResolve, reason: d.reason }
+  const view = { code: d.code, words: refusalWords(d.code), humanCanResolve: d.humanCanResolve, reason: d.reason }
+  if (d.code === 'paused' && facts?.sharedNumberHold === true) return { ...view, sharedNumberHold: true }
+  return d.code === 'stale_evidence' && SUPERSEDED_REASON.test(d.reason) ? { ...view, evidenceSuperseded: true } : view
 }
 
 /**
@@ -96,21 +130,89 @@ export function candidateLine(decision: CandidateDecision | null): string {
  *
  * Stale evidence has its own sentence, because "choose someone else" is no
  * fix for it: every person at the company gets the same words, and the
- * words are what aged.
+ * words are what aged. Denying such a draft records it as `stale_evidence`
+ * (`denyDraft`), which a re-scan resolves, so enrolment can draft them again.
+ * Words whose scan a newer one SUPERSEDED (`evidenceSuperseded`) get a
+ * sentence of their own: the scan may be days old, so "past its deadline"
+ * would be false, and the re-scan is what already happened — the fix is a
+ * new draft from the latest scan.
+ *
+ * A pause has its own too, because "deny the draft" is the wrong advice for
+ * it: a pause is lifted by a person (the rule's own sentence says how, by
+ * what paused them), after which the draft can simply be approved — and a
+ * denial is a person's no, which stops them being drafted on that campaign
+ * again.
+ *
+ * On a template channel (`channel` sms or whatsapp) there is nobody else to
+ * choose: the slots were filled for one person, `smsCandidates` offers only
+ * them, and `approveDraft` refuses anyone else (`rendered_for_another`). So
+ * neither the paused block nor the default one says "choose someone else"
+ * there. Round 4, finding [22]. Without a channel the email words stand.
+ *
+ * A pause Resume refuses until a shared number is recorded
+ * (`sharedNumberHold`, review round 10, [2]) says so in the block itself:
+ * the person reading it is about to go and resume them, and Resume would
+ * answer 409 until the number is on /suppressions.
  */
-export function approveBlock(decision: CandidateDecision | null): string | null {
+export function approveBlock(decision: CandidateDecision | null, channel?: string): string | null {
   if (decision === null || decision.humanCanResolve) return null
+  const onlyThem = channel !== undefined && TEMPLATE_CHANNEL_NAMES.has(channel)
+  if (decision.code === 'stale_evidence' && decision.evidenceSuperseded) {
+    return (
+      `Approving is pointless: ${decision.words} — a newer scan of the company has run since the one it was ` +
+      'written from, and only the latest scan is quoted in anything outbound, so nobody may approve past that. ' +
+      'Deny it, then draft it again from the latest scan.'
+    )
+  }
   if (decision.code === 'stale_evidence') {
     return (
       `Approving is pointless: ${decision.words} — the scan it was written from is past its re-verification ` +
       'deadline, and nobody may approve past that. Deny it, re-scan the company, then draft it again.'
     )
   }
+  if (decision.code === 'paused') {
+    return (
+      `Approving is pointless: ${decision.words}, and nobody may approve past a pause — the worker would refuse it. ` +
+      (decision.sharedNumberHold ? `${SHARED_NUMBER_HOLD_BLOCK} ` : '') +
+      (onlyThem
+        ? `The rule below says what lifts it; the draft can wait here until then. ${FILLED_FOR_ONE}`
+        : 'The rule below says what lifts it; the draft can wait here until then, or choose someone else.')
+    )
+  }
+  // 0019: the WORDS are what the operator would scrub, so another person
+  // gets the same refusal. The fix is a new draft from a registered template.
+  if (decision.code === 'no_template' || decision.code === 'template_mismatch') {
+    return (
+      `Approving is pointless: ${decision.words} — the operator would not deliver it, and nobody may approve past ` +
+      'that. Deny it, then draft it again from an active registered template.'
+    )
+  }
   return (
     `Approving is pointless: ${decision.words}, and nobody may approve past that — the worker would refuse it. ` +
-    'Deny the draft, or choose someone else.'
+    (!onlyThem
+      ? 'Deny the draft, or choose someone else.'
+      : channel === 'sms'
+        ? `Deny the draft. ${FILLED_FOR_ONE} A text to somebody else is drafted from their own row on /contacts (Draft SMS).`
+        // Nothing in the product drafts a WhatsApp message, so nothing is pointed at.
+        : `Deny the draft. ${FILLED_FOR_ONE}`)
   )
 }
+
+/**
+ * The channels whose words are a registered template filled in for one
+ * person — core's `TEMPLATE_CHANNELS` (`packages/core/src/send.ts`),
+ * restated so a client component importing this file does not pull the
+ * domain package into the browser bundle. `approval-view.test.ts` holds the
+ * two to one set.
+ */
+export const TEMPLATE_CHANNEL_NAMES: ReadonlySet<string> = new Set(['sms', 'whatsapp'])
+
+const FILLED_FOR_ONE = 'Its template was filled in for this one person, so it cannot go to anyone else.'
+
+/** What a shared number's holder waits for (review round 10, [2]). Never that they asked. */
+const SHARED_NUMBER_HOLD_BLOCK =
+  'A text from a number they share asked to stop and could not be recorded — they may not have sent it — so they ' +
+  'cannot be resumed until the number is recorded on /suppressions.'
 
 // ---------------------------------------------------------------------------
 // Which campaign the decisions were computed under
@@ -172,6 +274,56 @@ export const OTHER_CAMPAIGN_NOTE =
   'campaign on this channel; quiet hours, the daily cap and the status may not be — the worker checks those at sending.'
 
 // ---------------------------------------------------------------------------
+// The registration an SMS or WhatsApp draft names (0019)
+// ---------------------------------------------------------------------------
+
+/** The template a draft was rendered from, as the card shows it: the registration's ids, never its body. */
+export interface DraftTemplate {
+  /** The DLT template id (or a WhatsApp template's name). */
+  readonly externalId: string
+  /** The DLT header the template is registered with. */
+  readonly senderId: string
+  readonly category: string
+  readonly active: boolean
+}
+
+/** The card's title for a draft with no subject of its own — an SMS has none. */
+export function draftTitle(subject: string | null, template: DraftTemplate | null | undefined): string {
+  if (subject) return subject
+  return template ? `From template ${template.externalId}` : '(no subject)'
+}
+
+/**
+ * The line under an SMS draft's words: what the operator will check them
+ * against. A template switched off since is said to be, because the send
+ * path refuses a draft from it (`no_template`) — the card's own block says
+ * what to do about that.
+ */
+export function templateLine(t: DraftTemplate): string {
+  return (
+    `Rendered from DLT template ${t.externalId}, header ${t.senderId}, ${t.category.replace(/_/g, ' ')}` +
+    (t.active ? '. The operator delivers it only as these exact words.' : ' — switched off since this was drafted.')
+  )
+}
+
+/**
+ * The people an SMS draft can be approved to: the one it was rendered for.
+ * Its `{#var#}` slots were filled for that person — their name, their
+ * company — so the same words to somebody else would be the right template
+ * with the wrong values. An email draft keeps everyone at its company.
+ * WhatsApp is a template channel too, and `approveDraft` refuses anyone else
+ * on it (`rendered_for_another`), so it is narrowed the same way.
+ */
+export function smsCandidates<T extends { readonly id: string }>(
+  channel: string,
+  contactId: string | null,
+  people: readonly T[],
+): readonly T[] {
+  if (!TEMPLATE_CHANNEL_NAMES.has(channel) || !contactId) return people
+  return people.filter((p) => p.id === contactId)
+}
+
+// ---------------------------------------------------------------------------
 // Who addressed it
 // ---------------------------------------------------------------------------
 
@@ -211,13 +363,95 @@ export function addressedByLabel(by: AddressedBy): string | null {
 // The evidence the draft may quote
 // ---------------------------------------------------------------------------
 
+/**
+ * The evidence behind ONE draft, judged the way the sender judges its words
+ * (`evidenceAsOfFor` in packages/db): by the latest successful scan at or
+ * before the moment the words were written, aged at now — or, for an answer
+ * to a reply, by no scan at all. It used to be the company's LATEST scan for
+ * every card, so the panel and the decision beside it could describe two
+ * different scans: after a re-scan it listed the new scan's lines under
+ * words written from the old one, and it warned "the send path refuses"
+ * over an answer the sender never judges by scan age. Found by review.
+ */
 export interface DraftEvidence {
-  /** When the scan whose findings are listed ran (ISO). */
-  readonly asOf: string
-  /** Derived from the scan's `ran_at` by `isStale`, never read from `findings.stale`. */
+  /**
+   * When the scan described ran (ISO): the one the words were written from,
+   * or — for an answer — the company's latest. Null only for an answer about
+   * a company with no successful scan.
+   */
+  readonly asOf: string | null
+  /**
+   * Derived from that scan's `ran_at` by `isStale` at now, never read from
+   * `findings.stale`. For a draft it is the sender's own `stale_evidence`
+   * question; for an answer it is only a caution, which the sender does not
+   * ask.
+   */
   readonly stale: boolean
-  /** One line per quotable finding. Empty when stale — nothing stale is quotable. */
+  /**
+   * One line per quotable finding — `quotableFindings`, the draft
+   * generator's own filter, which reads the company's LATEST scan. So there
+   * are lines only when that is the scan described, and it is fresh: nothing
+   * stale is quotable, and a newer scan's lines are not what these words
+   * were written from.
+   */
   readonly lines: readonly string[]
+  /** An answer to a reply (`answers_touch_id`): the sender judges it by no scan. */
+  readonly answersReply?: boolean
+  /** A successful scan newer than the one the words were written from, when there is one. */
+  readonly newer?: { readonly asOf: string; readonly stale: boolean } | null
+}
+
+/**
+ * A scan, as the page reads it: its id, when it ran, and whether it is past
+ * its re-verification deadline now — judged by the page with `isStale` on
+ * `ran_at` (this file imports nothing from the server or from core's
+ * runtime, because a client component imports it).
+ */
+export interface EvidenceScan {
+  readonly id: string
+  readonly ranAt: Date
+  readonly stale: boolean
+}
+
+/**
+ * The evidence panel for one draft, from what the page read. Pure: the page
+ * does the reads — the latest successful scan at or before the draft's
+ * `created_at` (`writtenFrom`), the company's latest successful scan
+ * (`latest`) and that scan's quotable lines — and this decides which of them
+ * describes the draft.
+ *
+ * Null for a draft written before any successful scan of its company: the
+ * sender has no scan to judge its words by, and `evidenceNote` says so.
+ */
+export function draftEvidenceFrom(input: {
+  readonly answersReply: boolean
+  readonly writtenFrom: EvidenceScan | null
+  readonly latest: EvidenceScan | null
+  /** `quotableFindings` over `latest`, as lines — empty when it is stale or there is none. */
+  readonly latestLines: readonly string[]
+}): DraftEvidence | null {
+  const { latest } = input
+  if (input.answersReply) {
+    if (!latest) return { asOf: null, stale: false, lines: [], answersReply: true }
+    return {
+      asOf: latest.ranAt.toISOString(),
+      stale: latest.stale,
+      lines: latest.stale ? [] : input.latestLines,
+      answersReply: true,
+    }
+  }
+  const written = input.writtenFrom
+  if (!written) return null
+  const newer =
+    latest && latest.id !== written.id && latest.ranAt.getTime() > written.ranAt.getTime()
+      ? { asOf: latest.ranAt.toISOString(), stale: latest.stale }
+      : null
+  return {
+    asOf: written.ranAt.toISOString(),
+    stale: written.stale,
+    lines: written.stale || newer ? [] : input.latestLines,
+    newer,
+  }
 }
 
 /**
@@ -230,9 +464,25 @@ export const STALE_EVIDENCE_NOTE =
   'This draft is about a company whose findings are stale; §2.2 says re-verify before anything outbound — ' +
   're-scan, then draft it again. The send path refuses a draft written from a stale scan, and approving does not change that.'
 
+/**
+ * A draft written before any successful scan of its company. Not "never
+ * scanned": the company may have been scanned since, and these words were
+ * still not written from it.
+ */
 export const MISSING_EVIDENCE_NOTE =
-  'This draft is about a company this product has never scanned successfully, so nothing it says about them ' +
-  'was observed here; §2.2 says re-verify before anything outbound — scan, then approve.'
+  'No successful scan of this company had run when this draft was written, so nothing it says about them ' +
+  'was observed here; §2.2 says re-verify before anything outbound — check every claim against the company page, ' +
+  'or scan and draft it again.'
+
+/**
+ * An answer to a reply. The sender does not judge it by the age of a scan
+ * (`evidenceAsOfFor` is null for it), so the card must not say the send path
+ * refuses it — that steered approvers to deny legitimate answers. What is
+ * left is the person's own check. Found by review.
+ */
+export const ANSWER_EVIDENCE_NOTE =
+  'This is an answer to their reply. The send path does not judge an answer by the age of a scan, so the ' +
+  'evidence does not stop it — check that it repeats no finding that is no longer known to be true.'
 
 /** How many evidence lines a card shows before pointing at the company page. */
 export const EVIDENCE_LINES_SHOWN = 6
@@ -259,30 +509,74 @@ export type EvidenceNote =
  * is enabled comes from the candidates' `previewSend` answers, and those ask
  * the sender's own question — is the scan these words were WRITTEN from past
  * its deadline now? — so a draft written from a stale scan is blocked there,
- * as `stale_evidence`, and a draft about a never-scanned company is not (no
- * scan could have been quoted). A fresh scan with no gaps is plain: nothing
- * is wrong, but a draft claiming a gap has nothing behind it.
+ * as `stale_evidence`, and a draft written before any scan is not (no scan
+ * could have been quoted). The panel describes that same scan
+ * (`draftEvidenceFrom`), so the two cannot disagree. A fresh scan with no
+ * gaps is plain: nothing is wrong, but a draft claiming a gap has nothing
+ * behind it. An answer to a reply never gets the stale sentence, because
+ * the sender never refuses one as stale.
  */
 export function evidenceNote(evidence: DraftEvidence | null, hasCompany: boolean): EvidenceNote | null {
   if (!hasCompany) {
     return { tone: 'plain', text: 'This draft is not about a company, so there is no scan evidence to check it against.' }
   }
-  if (evidence === null) return { tone: 'warn', text: MISSING_EVIDENCE_NOTE }
+  if (evidence?.answersReply) return answerNote(evidence)
+  if (evidence === null || evidence.asOf === null) return { tone: 'warn', text: MISSING_EVIDENCE_NOTE }
+  const written = shortDate(evidence.asOf)
   if (evidence.stale) {
-    return { tone: 'warn', text: `${STALE_EVIDENCE_NOTE} The last successful scan ran ${shortDate(evidence.asOf)}.` }
+    // Re-scanned since, and the new scan is fresh: "re-scan" has been done,
+    // and only a new draft freshens the words.
+    if (evidence.newer && !evidence.newer.stale) {
+      return {
+        tone: 'warn',
+        text:
+          `The scan this draft was written from (${written}) is past its re-verification deadline, and the send ` +
+          'path refuses words written from it; approving does not change that. The company was re-scanned ' +
+          `${shortDate(evidence.newer.asOf)} — deny this draft and draft it again from that scan.`,
+      }
+    }
+    return { tone: 'warn', text: `${STALE_EVIDENCE_NOTE} The scan it was written from ran ${written}.` }
+  }
+  if (evidence.newer) {
+    return {
+      tone: 'plain',
+      text:
+        `Written from the scan of ${written}. A newer scan ran ${shortDate(evidence.newer.asOf)}, so its lines are ` +
+        'not listed as what these words may quote — check them against the company page, which shows what changed.',
+    }
   }
   if (evidence.lines.length === 0) {
     return {
       tone: 'plain',
-      text: `The latest successful scan (${shortDate(evidence.asOf)}) observed no gaps, so the draft has none to quote.`,
+      text: `The scan this draft was written from (${written}) observed no gaps, so the draft has none to quote.`,
     }
   }
   return null
 }
 
+/** The note on an answer to a reply: the person's own check, and the latest scan's standing. */
+function answerNote(evidence: DraftEvidence): EvidenceNote {
+  if (evidence.asOf === null) {
+    return { tone: 'plain', text: `${ANSWER_EVIDENCE_NOTE} This company has no successful scan.` }
+  }
+  const latest = shortDate(evidence.asOf)
+  if (evidence.stale) {
+    return {
+      tone: 'warn',
+      text:
+        `${ANSWER_EVIDENCE_NOTE} The last successful scan ran ${latest} and is past its re-verification deadline, ` +
+        'so nothing it observed may be repeated as current.',
+    }
+  }
+  if (evidence.lines.length === 0) {
+    return { tone: 'plain', text: `${ANSWER_EVIDENCE_NOTE} The latest successful scan (${latest}) observed no gaps.` }
+  }
+  return { tone: 'plain', text: ANSWER_EVIDENCE_NOTE }
+}
+
 /** The heading over the evidence lines, with the scan's date. */
 export function evidenceHeading(evidence: DraftEvidence): string {
-  return `What the draft may quote — observed ${shortDate(evidence.asOf)}`
+  return `What the draft may quote — observed ${evidence.asOf ? shortDate(evidence.asOf) : 'an unknown date'}`
 }
 
 // ---------------------------------------------------------------------------
@@ -291,17 +585,80 @@ export function evidenceHeading(evidence: DraftEvidence): string {
 
 export const APPROVE_DOES_NOT_SEND = 'Approving does not send. The worker re-checks every rule at the moment of sending.'
 
+/**
+ * Configuration, never observation (`deployment()` says what this web half
+ * is set up to reach): a worker on Fly can be sending against this database
+ * while this deployment holds no AGENT_URL, so "nothing will send" is not
+ * something this line knows. Review round 3, finding [20].
+ */
 export const NO_WORKER_FOOTNOTE =
-  'Approving does not send, and nothing on this deployment will until a worker is connected — ' +
-  'every rule is checked again at that moment, not now.'
+  'Approving does not send. No worker is configured on this deployment — if one runs against this database ' +
+  'elsewhere, it checks every rule again at the moment of sending, not now.'
 
 /**
- * The line beside Approve. With no worker, "the worker re-checks" describes
- * something that is not there, so the line says what is: the queue shows
- * `nothingWillSendNote()` once, above the cards, and each card says this.
+ * LinkedIn is never sent by the worker: its only provider sends email, so an
+ * approved LinkedIn row waits for a PERSON, as a step on /tasks — Start
+ * checks every rule at that moment and hands them the words, and they send
+ * from their own account. With or without a worker. Review round 3, [19].
  */
-export function approveFootnote(noSenderNote: string | null): string {
+export const LINKEDIN_APPROVE_FOOTNOTE =
+  'Approving does not send. A LinkedIn message becomes a step on /tasks for a person to send from their own ' +
+  'account — every rule is checked again when they press Start.'
+
+export const LINKEDIN_APPROVED =
+  'Approved. It is now a LinkedIn step on /tasks: a person presses Start there, every rule is checked again at ' +
+  'that moment, and they send it from their own LinkedIn account. Nothing was sent, and no worker sends LinkedIn.'
+
+const isLinkedIn = (channel: string): boolean => channel === 'linkedin'
+
+/**
+ * An SMS goes through DoveSoft, and only where the WORKER holds
+ * DOVESOFT_API_KEY and DOVESOFT_ENTITY_ID — its host, which this web half
+ * cannot see. A worker with SMS off reports the row unserved and leaves it
+ * alone, so "the worker will send it" was a promise nothing here could
+ * keep. The worker writes whether SMS is on into its heartbeat, and the
+ * dashboard's worker line reads it; that is where to look.
+ */
+const SMS_APPROVED =
+  'Approved. An SMS goes only through DoveSoft, and only if SMS is switched on where the worker runs ' +
+  '(DOVESOFT_API_KEY and DOVESOFT_ENTITY_ID on its host, which this page cannot see) — the dashboard’s worker ' +
+  'line says whether it is. Every rule is checked again at sending, the registered template included.'
+
+const SMS_APPROVED_NO_WORKER =
+  'Approved, and queued. No worker is configured on this deployment, so it goes only if one runs against this ' +
+  'database elsewhere with SMS switched on — through DoveSoft, with DOVESOFT_API_KEY and DOVESOFT_ENTITY_ID on its ' +
+  'host — and every rule is checked at that moment, not now, the registered template included.'
+
+/**
+ * The line beside Approve. With no worker configured, "the worker re-checks"
+ * describes something this deployment does not know is there, so the line
+ * says what it does know; the queue shows `nothingWillSendNote()` once, above
+ * the cards. A LinkedIn draft is a person's to send whatever the worker is
+ * doing, so neither sentence is about it.
+ */
+export function approveFootnote(noSenderNote: string | null, channel = 'email'): string {
+  if (isLinkedIn(channel)) return LINKEDIN_APPROVE_FOOTNOTE
   return noSenderNote ? NO_WORKER_FOOTNOTE : APPROVE_DOES_NOT_SEND
+}
+
+/** What the card says once a draft is approved. */
+export function approvedMessage(channel: string, noSenderNote: string | null): string {
+  if (isLinkedIn(channel)) return LINKEDIN_APPROVED
+  if (channel === 'sms') return noSenderNote === null ? SMS_APPROVED : SMS_APPROVED_NO_WORKER
+  return noSenderNote === null
+    ? 'Approved. The worker will send it on its next pass — after checking the suppression list, ' +
+        'consent, quiet hours and the daily cap again. If it lands in quiet hours it waits for morning.'
+    : 'Approved, and queued. No worker is configured on this deployment, so it goes only if one runs against ' +
+        'this database elsewhere — and every rule is checked at that moment, not now.'
+}
+
+/**
+ * `nothingWillSendNote()` above the queue — only while a draft on it is one
+ * a worker would send. A queue of LinkedIn drafts waits for a person on
+ * /tasks, so a sentence about the worker is about none of them.
+ */
+export function queueNoSenderNote(channels: readonly string[], noSenderNote: string | null): string | null {
+  return channels.some((c) => !isLinkedIn(c)) ? noSenderNote : null
 }
 
 // ---------------------------------------------------------------------------

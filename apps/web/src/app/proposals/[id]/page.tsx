@@ -1,7 +1,7 @@
 import { notFound, redirect } from 'next/navigation'
 import { and, eq } from 'drizzle-orm'
-import { DEFAULT_STALE_AFTER_DAYS, can, isStale, parseIcpDefinition, type Proposal } from '@agency/core'
-import { readProposal, schema, type AgencyDb } from '@agency/db/queries'
+import { can, isStale, type Proposal } from '@agency/core'
+import { readProposal, schema, shareEvidenceSuperseded, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { ProposalDocument } from '@/components/pipeline/proposal-document'
@@ -10,7 +10,10 @@ import { ProposalShareSlot } from '@/components/pipeline/proposal-share'
 import type { ProposalSlotProps } from '@/components/pipeline/proposal-slot'
 import { ProposalStatus } from '@/components/pipeline/proposal-status'
 import { When } from '@/components/when'
+import { readIcp } from '@/lib/company-list'
 import { getDb } from '@/lib/db'
+import { orgIdentity } from '@/lib/org-identity'
+import { supersededBannerText } from '@/lib/proposal-markdown'
 import { icpForOrg } from '@/lib/queries'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -24,6 +27,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
  * on (print, download, a buyer's link).
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export default async function ProposalPage({ params }: { params: Promise<{ id: string }> }) {
   const session = await auth()
@@ -33,7 +37,9 @@ export default async function ProposalPage({ params }: { params: Promise<{ id: s
   if (!UUID.test(id)) notFound()
 
   const db = getDb() as unknown as AgencyDb
-  const [row, icpRow] = await Promise.all([readProposal(db, user.orgId, id), icpForOrg(user.orgId)])
+  const [row, icpRow, org] = await Promise.all([
+    readProposal(db, user.orgId, id), icpForOrg(user.orgId), orgIdentity(user.orgId),
+  ])
   if (!row) notFound()
   const [company] = await db
     .select({ domain: schema.companies.domain, name: schema.companies.name })
@@ -45,17 +51,10 @@ export default async function ProposalPage({ params }: { params: Promise<{ id: s
   if (!company) notFound()
   const doc = row.document as Proposal
 
-  let orgLabel = 'Agency'
-  let staleAfter = DEFAULT_STALE_AFTER_DAYS
-  if (icpRow) {
-    try {
-      const icp = parseIcpDefinition(icpRow.definition)
-      orgLabel = icp.label
-      staleAfter = icp.freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
-    } catch {
-      orgLabel = 'Agency'
-    }
-  }
+  // Guarded, like the print view and the Markdown export this page links to:
+  // `isStale` throws on a threshold that is not a positive number, and the
+  // raw `stale_after_days` made this page a 500 over a hand-edited 0.
+  const { staleAfterDays: staleAfter } = readIcp(icpRow?.definition)
 
   // §2.2. The generator refuses to write a proposal from a stale scan — but a
   // proposal written while the scan was fresh keeps sitting here, and the
@@ -68,6 +67,12 @@ export default async function ProposalPage({ params }: { params: Promise<{ id: s
     .where(and(eq(schema.scans.orgId, user.orgId), eq(schema.scans.id, row.scanId)))
     .limit(1)
   const evidenceStale = isStale(scan?.ranAt, staleAfter)
+  // A newer successful scan supersedes this one: only the latest is quoted
+  // outbound (§2.2), and the share link already reads it as "being
+  // re-verified". Said here, before anybody marks it sent or downloads it,
+  // rather than after. Review round 3, finding [6].
+  const evidenceSuperseded = await shareEvidenceSuperseded(db, user.orgId, row.id)
+  const superseded = supersededBannerText(company.domain)
   const signOutAction = async () => {
     'use server'
     await signOut({ redirectTo: '/signin' })
@@ -76,7 +81,7 @@ export default async function ProposalPage({ params }: { params: Promise<{ id: s
   const slot: ProposalSlotProps = { orgId: user.orgId, proposalId: row.id, status: row.status, evidenceStale, canWrite }
 
   return (
-    <Shell user={user} orgName={orgLabel} current="pipeline" signOut={signOutAction}>
+    <Shell user={user} current="pipeline" signOut={signOutAction}>
       <p className="crumb"><a href="/pipeline">← Pipeline</a></p>
       <h1>{doc.title}</h1>
       <p className="lede">
@@ -94,14 +99,22 @@ export default async function ProposalPage({ params }: { params: Promise<{ id: s
           <code>{company.domain}</code> and generate a fresh proposal rather than sending this one.
         </div>
       ) : null}
+      {evidenceSuperseded ? (
+        <div className="note note-warn">
+          <strong>{superseded.lead}</strong> {superseded.rest}
+          {row.status === 'draft' ? ' Regenerate it before marking it sent.' : null}
+        </div>
+      ) : null}
       <ProposalStatus id={row.id} status={row.status} canWrite={canWrite} />
-      <ProposalLinksSlot {...slot} />
+      <ProposalLinksSlot {...slot} evidenceSuperseded={evidenceSuperseded} />
       <ProposalShareSlot {...slot} />
 
       <ProposalDocument
         doc={doc}
         company={{ domain: company.domain, name: company.name }}
-        agency={{ name: orgLabel }}
+        // The org's name, as the print view and the buyer's page print it —
+        // not the ICP's label, which names a market rather than an agency.
+        agency={{ name: org.name }}
         status={row.status}
         evidenceAsOf={scan ? scan.ranAt.toISOString() : null}
         evidenceStale={evidenceStale}

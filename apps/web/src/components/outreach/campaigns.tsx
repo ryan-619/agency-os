@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import type { EnrolSkip } from '@agency/core'
 import { REFUSAL_WORDS, campaignAutoPausedWords } from '@/lib/refusal-words'
+import { CHANNEL_HINT, SMS_AUTO_SEND_OFF, SMS_NOT_ENROLLED } from '@/components/campaigns/sms-words'
 
 /**
  * Campaigns (PROMPT.md §8.4).
@@ -31,7 +32,7 @@ import { REFUSAL_WORDS, campaignAutoPausedWords } from '@/lib/refusal-words'
 export interface CampaignView {
   readonly id: string
   readonly name: string
-  readonly channel: 'email' | 'linkedin'
+  readonly channel: 'email' | 'linkedin' | 'sms'
   readonly dailyCap: number
   readonly quietStart: string
   readonly quietEnd: string
@@ -104,7 +105,7 @@ export function CampaignsPanel({
                 </div>
                 {canWrite || canEnrol ? (
                   <div className="row-actions">
-                    {canEnrol && c.status !== 'done' && enrolling !== c.id ? (
+                    {canEnrol && c.status !== 'done' && c.channel !== 'sms' && enrolling !== c.id ? (
                       <button type="button" onClick={() => setEnrolling(c.id)}>
                         Enrol qualifying contacts (preview)
                       </button>
@@ -121,6 +122,9 @@ export function CampaignsPanel({
                 Up to {c.dailyCap} a day · quiet {c.quietStart.slice(0, 5)}–{c.quietEnd.slice(0, 5)} in each recipient&apos;s
                 own timezone
               </div>
+              {c.channel === 'sms' ? (
+                <p className="muted" style={{ margin: '6px 0 0', fontSize: 12.5 }}>{SMS_NOT_ENROLLED}</p>
+              ) : null}
               {c.status === 'paused' && c.autoPaused ? (
                 <p
                   className="note note-warn"
@@ -179,7 +183,7 @@ function CampaignForm({
   onCancel: () => void
 }) {
   const [name, setName] = useState(campaign?.name ?? '')
-  const [channel, setChannel] = useState<'email' | 'linkedin'>(campaign?.channel ?? 'email')
+  const [channel, setChannel] = useState<'email' | 'linkedin' | 'sms'>(campaign?.channel ?? 'email')
   const [dailyCap, setDailyCap] = useState(campaign?.dailyCap ?? 25)
   const [quietStart, setQuietStart] = useState(campaign?.quietStart.slice(0, 5) ?? '21:00')
   const [quietEnd, setQuietEnd] = useState(campaign?.quietEnd.slice(0, 5) ?? '08:00')
@@ -195,7 +199,14 @@ function CampaignForm({
       const res = await fetch(campaign ? `/api/campaigns/${campaign.id}` : '/api/campaigns', {
         method: campaign ? 'PATCH' : 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ name, channel, dailyCap, quietStart, quietEnd, autoSend, status, icpProfileId: null }),
+        // An edit names the status it LOADED, and the save is refused (409)
+        // if that changed since: a campaign the worker paused for bouncing
+        // while this form was open must not be re-activated by a save that
+        // changed only the cap.
+        body: JSON.stringify({
+          name, channel, dailyCap, quietStart, quietEnd, autoSend: channel === 'sms' ? false : autoSend, status, icpProfileId: null,
+          ...(campaign ? { expectStatus: campaign.status } : {}),
+        }),
       })
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string }
@@ -221,14 +232,12 @@ function CampaignForm({
 
       <label>
         Channel
-        <select value={channel} onChange={(e) => setChannel(e.target.value as 'email' | 'linkedin')}>
+        <select value={channel} onChange={(e) => setChannel(e.target.value as 'email' | 'linkedin' | 'sms')}>
           <option value="email">Email</option>
           <option value="linkedin">LinkedIn</option>
+          <option value="sms">SMS (opted-in people only)</option>
         </select>
-        <span className="hint">
-          Cold outreach is email and LinkedIn only. SMS and voice are not offered for a campaign, and the
-          send path refuses them regardless.
-        </span>
+        <span className="hint">{CHANNEL_HINT}</span>
       </label>
 
       <label>
@@ -274,17 +283,23 @@ function CampaignForm({
       <label className="tool-check" style={{ marginTop: 12 }}>
         <input
           type="checkbox"
-          checked={autoSend}
-          disabled={!canAutoSend && !autoSend}
+          checked={autoSend && channel !== 'sms'}
+          disabled={channel === 'sms' || (!canAutoSend && !autoSend)}
           onChange={(e) => setAutoSend(e.target.checked)}
         />
         <span>
           <strong>Auto-send.</strong>{' '}
-          {senderConnected
-            ? 'Messages in this campaign leave without a person reading each one.'
-            : 'Messages in this campaign would leave without a person reading each one — but no worker is connected to this deployment, so none of them will leave at all until one is.'}
-          Every rule — suppression, consent, quiet hours, the cap — still applies to every message.
-          {!canAutoSend ? ' Only an owner can turn this on.' : ''}
+          {channel === 'sms' ? (
+            SMS_AUTO_SEND_OFF
+          ) : (
+            <>
+              {senderConnected
+                ? 'Messages in this campaign leave without a person reading each one.'
+                : 'Messages in this campaign would leave without a person reading each one — but no worker is connected to this deployment, so none of them will leave at all until one is.'}
+              Every rule — suppression, consent, quiet hours, the cap — still applies to every message.
+              {!canAutoSend ? ' Only an owner can turn this on.' : ''}
+            </>
+          )}
         </span>
       </label>
 
@@ -409,13 +424,19 @@ function EnrolPanel({
     void enrol(true)
   }, [])
 
-  const linkedInWarning =
-    campaign.channel === 'linkedin' ? (
-      <p className="note note-warn" style={{ marginTop: 8 }}>
-        No provider can send on LinkedIn; approved rows will wait for the LinkedIn step.
-      </p>
-    ) : null
-  const noSender = noSenderNote ? (
+  // The worker never sends LinkedIn: its one provider sends email. A queued or
+  // approved LinkedIn row is a step on /tasks that a person starts — every
+  // rule is checked then — and sends from their own account, so nothing here
+  // says "the worker", and the no-worker note is not about these rows.
+  // Review round 3, finding [19].
+  const linkedIn = campaign.channel === 'linkedin'
+  const linkedInWarning = linkedIn ? (
+    <p className="note note-warn" style={{ marginTop: 8 }}>
+      Nothing sends LinkedIn automatically. Each message becomes a step on <a href="/tasks">/tasks</a>: a person
+      presses Start, every rule is checked again at that moment, and they send it from their own LinkedIn account.
+    </p>
+  ) : null
+  const noSender = noSenderNote && !linkedIn ? (
     <p className="note note-warn" style={{ marginTop: 8 }}>
       {noSenderNote}
     </p>
@@ -426,7 +447,13 @@ function EnrolPanel({
       <div style={{ marginTop: 12 }}>
         <div className="note">
           <p style={{ margin: 0 }}>
-            {done.status === 'queued' ? (
+            {done.status === 'queued' && linkedIn ? (
+              <>
+                Queued <strong>{plural(done.queued, 'message', 'messages')}</strong> as steps on /tasks for a person to
+                send from their own LinkedIn account. Nothing was sent — every rule is checked again when they press
+                Start.
+              </>
+            ) : done.status === 'queued' ? (
               <>
                 Queued <strong>{plural(done.queued, 'message', 'messages')}</strong> for the worker to send. Nothing was
                 sent yet — each one is checked against every rule at the moment it is sent.
@@ -478,9 +505,13 @@ function EnrolPanel({
               </p>
             ) : null}
             <p style={{ margin: '8px 0 0' }}>
-              {plan.status === 'queued'
-                ? 'This campaign auto-sends: these go to the worker without a person reading each one. Every rule is still checked at the moment of sending.'
-                : 'Each draft waits in Approvals for a person to read it and choose to send it.'}
+              {plan.status === 'queued' && linkedIn
+                ? 'This campaign auto-sends, but LinkedIn has no automatic sender: each message becomes a step on /tasks, and a person reads each one and sends it from their own account once every rule passes at Start.'
+                : plan.status === 'queued'
+                  ? 'This campaign auto-sends: these go to the worker without a person reading each one. Every rule is still checked at the moment of sending.'
+                  : linkedIn
+                    ? 'Each draft waits in Approvals for a person to read it; once approved, it becomes a step on /tasks for a person to send from their own LinkedIn account.'
+                    : 'Each draft waits in Approvals for a person to read it and choose to send it.'}
               {campaign.status !== 'active'
                 ? ` The campaign is ${campaign.status}, so nothing in it is sent until it is active.`
                 : ''}
@@ -503,7 +534,9 @@ function EnrolPanel({
             {busy
               ? 'Queuing…'
               : plan.status === 'queued'
-                ? `Queue ${plural(plan.queued, 'message', 'messages')} to send`
+                ? linkedIn
+                  ? `Queue ${plural(plan.queued, 'message', 'messages')} as /tasks steps`
+                  : `Queue ${plural(plan.queued, 'message', 'messages')} to send`
                 : `Queue ${plural(plan.queued, 'draft', 'drafts')} for approval`}
           </button>
         ) : null}

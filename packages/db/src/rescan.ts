@@ -32,7 +32,7 @@
  */
 import { and, asc, eq, gte, sql } from 'drizzle-orm'
 import {
-  DEFAULT_STALE_AFTER_DAYS, isStale,
+  isStale, staleAfterDaysOf,
   type IcpDefinition, type SiteProfile,
 } from '@agency/core'
 import * as schema from './schema.js'
@@ -332,7 +332,9 @@ export async function runRescan(db: AgencyDb, deps: RescanDeps): Promise<RescanR
   const started = deps.now()
   const elapsed = (): number => deps.now().getTime() - started.getTime()
   const icp = deps.icp.definition
-  const staleDays = icp.freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
+  // Never the raw value: `markStaleFindings` and `isStale` both throw on one
+  // that is not a positive number, and a bad profile must not stop the cron.
+  const staleDays = staleAfterDaysOf(icp)
 
   // The sweep first, as the CLI does, so the cache is current for every
   // reader — even though the selection below does not trust it.

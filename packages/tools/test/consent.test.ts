@@ -13,9 +13,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import { z } from 'zod'
-import { addSuppression, contactsRecordConsent, type AgencyDb } from '@agency/db'
+import { addSuppression, contactPauseByHand, contactsRecordConsent, recordInboundSms, type AgencyDb } from '@agency/db'
 import * as schema from '@agency/db/schema'
 import { migratedDb, type TestDb } from '../../db/test/helpers.js'
+import { failOnce } from '../../db/test/fault-db.js'
 import { AGENCY_TOOLS, checkSend, getConsent, type AgencyToolSpec, type ToolContext } from '../src/index.js'
 
 const NOON_UTC = new Date('2026-09-15T12:00:00.000Z')
@@ -139,7 +140,9 @@ describe('the consent tools', () => {
       const out = await check()
       if (!out.ok) throw new Error(out.message)
       expect(out.data).toMatchObject({
-        code: 'consent_revoked', facts: { paused: true, pausedReason: reason, consent: 'never_asked', suppressed: false },
+        code: 'paused',
+        humanCanResolve: false,
+        facts: { paused: true, pausedReason: reason, pausedFor: 'replied', consent: 'never_asked', suppressed: false },
       })
       expect(out.summary).toBe(
         `paused: they replied (${reason}); every campaign stops for them until a person answers from /inbox ` +
@@ -149,14 +152,83 @@ describe('the consent tools', () => {
       expect(out.summary).not.toMatch(/declined/)
     })
 
-    it('quotes any other pause with its reason, and never calls it "not a refusal"', async () => {
-      const reason = 'unsubscribed 2026-09-15T11:00:00.000Z'
+    /**
+     * Which pause it is decides what lifts it, read the way the inbox reads
+     * it (`pauseReasonClass`, an exact `replied <ISO>` match). Found by
+     * review: a prefix test promised an /inbox answer for a teammate's
+     * "replied on the phone (by …)", which the inbox refuses, and told the
+     * model to resume somebody whose opt-out was never recorded.
+     */
+    const pausedAs = async (reason: string) => {
       await db.update(schema.contacts).set({ pausedAt: NOON_UTC, pausedReason: reason }).where(eq(schema.contacts.id, priyaId))
       const out = await check()
       if (!out.ok) throw new Error(out.message)
+      expect(out.data).toMatchObject({ code: 'paused', humanCanResolve: false })
+      expect(out.summary).toMatch(/Nothing was queued\.$/)
+      return out
+    }
+
+    it('calls a teammate’s pause a teammate’s, even one that starts with "replied", and never promises an /inbox answer', async () => {
+      const reason = 'replied on the phone, call in October (by sam@agency.test)'
+      const out = await pausedAs(reason)
+      expect(out.data).toMatchObject({ facts: { pausedFor: 'manual' } })
       expect(out.summary).toBe(
-        `paused (${reason}): every campaign stops for them until a person reads why and resumes them on /contacts. ` +
+        `paused by a teammate (${reason}): every campaign stops for them until a person resumes them on /contacts. ` +
+          'Answering a reply from /inbox does not lift this pause. Approving a draft does not lift a pause. Nothing was queued.',
+      )
+      expect(out.summary).not.toMatch(/not a refusal/)
+      expect(out.summary).not.toMatch(/they replied/)
+    })
+
+    it('never suggests resuming an opt-out that was not recorded — it says to record it', async () => {
+      const out = await pausedAs('opt-out not recorded: one-click unsubscribe 2026-09-15T11:00:00.000Z (Error)')
+      expect(out.data).toMatchObject({ facts: { pausedFor: 'opt_out_not_recorded' } })
+      expect(out.summary).toMatch(/record the opt-out by hand on \/suppressions/)
+      expect(out.summary).toMatch(/do not suggest resuming them/)
+      expect(out.summary).not.toMatch(/resumes? them (on|there)/)
+      expect(out.summary).not.toMatch(/not a refusal/)
+    })
+
+    /**
+     * Review round 8: a text from a number several contacts share asked to
+     * stop and could not be recorded. The holder may never have sent it, so
+     * the tool never says THEY asked; recording the number is what lets a
+     * person lift the pause.
+     */
+    it('words a shared number’s holder as a holder, never as the one who asked', async () => {
+      const out = await pausedAs('opt-out not recorded: a text from a number they share, 2026-09-15T11:00:00.000Z (record_failed)')
+      expect(out.data).toMatchObject({ facts: { pausedFor: 'opt_out_not_recorded' } })
+      expect(out.summary).toMatch(/a text from a phone number they share with another contact asked to stop/)
+      expect(out.summary).toMatch(/records the number on \/suppressions/)
+      expect(out.summary).toMatch(/do not suggest resuming them/)
+      expect(out.summary).not.toMatch(/they asked to stop/)
+    })
+
+    it('never suggests resuming an erasure that did not finish — it says to complete it', async () => {
+      const out = await pausedAs('erasure requested 2026-09-15; not completed (unreadable_phone)')
+      expect(out.data).toMatchObject({ facts: { pausedFor: 'erasure' } })
+      expect(out.summary).toMatch(/complete the erasure from their record on \/contacts/)
+      expect(out.summary).toMatch(/do not suggest resuming them/)
+      expect(out.summary).not.toMatch(/resumes? them (on|there)/)
+    })
+
+    it('calls an unsubscribe an opt-out, never something to resume', async () => {
+      const reason = 'unsubscribed 2026-09-15T11:00:00.000Z'
+      const out = await pausedAs(reason)
+      expect(out.summary).toBe(
+        `paused: they unsubscribed (${reason}). That is their opt-out — do not suggest resuming them. ` +
           'Approving a draft does not lift a pause. Nothing was queued.',
+      )
+      expect(out.summary).not.toMatch(/not a refusal/)
+    })
+
+    it('quotes any other pause with its reason, and never calls it "not a refusal"', async () => {
+      const reason = 'waiting on legal'
+      const out = await pausedAs(reason)
+      expect(out.data).toMatchObject({ facts: { pausedFor: 'other' } })
+      expect(out.summary).toBe(
+        `paused (${reason}): every campaign stops for them until a person reads why on /contacts and resumes them ` +
+          'there if that is right. Approving a draft does not lift a pause. Nothing was queued.',
       )
       expect(out.summary).not.toMatch(/not a refusal/)
     })
@@ -289,5 +361,117 @@ describe('the consent tools', () => {
       expect(out.code).toBe('not_found')
       expect(audited).toEqual([])
     })
+  })
+})
+
+/**
+ * Review round 10, [2]: a holder of a shared number whose STOP could not be
+ * recorded, whose own pause — a teammate's — stood instead of the hold. The
+ * class is `manual`, and `check_send` told the model a person resumes them
+ * on /contacts, while Resume refuses until the number is recorded
+ * (RESUME_SHARED_NUMBER_KEPT). Both tools read the gate's answer now,
+ * `sharedNumberHold`, and say what Resume waits for — never that they asked.
+ */
+describe('the consent tools on a shared number’s holder whose own pause stood', () => {
+  const PHONE = '+919812345678'
+  const AT = new Date('2026-09-15T06:30:00.000Z')
+  let test: TestDb
+  let db: AgencyDb
+  let orgId: string
+
+  beforeEach(async () => {
+    test = await migratedDb()
+    db = drizzle(test.pg, { schema }) as unknown as AgencyDb
+    const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
+    orgId = org!.id
+    const [company] = await db
+      .insert(schema.companies)
+      .values({ orgId, domain: 'acme.example', timeZone: 'Asia/Kolkata' })
+      .returning({ id: schema.companies.id })
+    await db.insert(schema.campaigns).values({ orgId, name: 'Mail', channel: 'email', status: 'active', autoSend: false })
+    const person = async (email: string) =>
+      (await db
+        .insert(schema.contacts)
+        .values({ orgId, companyId: company!.id, email, phone: PHONE, timeZone: 'Asia/Kolkata' })
+        .returning({ id: schema.contacts.id }))[0]!.id
+    const jo = await person('jo@acme.example')
+    const bina = await person('bina@acme.example')
+    await db.insert(schema.touches).values({
+      orgId, contactId: jo, companyId: company!.id, channel: 'sms', direction: 'out', status: 'sent',
+      body: 'Hi Jo', recipient: PHONE, sentAt: new Date(AT.getTime() - 86_400_000), providerId: 'ds-1',
+    })
+    expect((await contactPauseByHand(db, { orgId, contactId: bina, reason: 'on leave (by sam@agency.test)', now: new Date(AT.getTime() - 60_000) })).ok).toBe(true)
+    await failOnce(test.pg, { table: 'suppressions', event: 'INSERT', when: `NEW.kind = 'phone'` })
+    const r = await recordInboundSms(db, { from: PHONE, text: 'Wrong number. STOP', providerMessageId: null, orgId, receivedAt: AT, log: { error: () => {} } })
+    expect(r).toMatchObject({ matched: 'contact', optOutNotRecorded: true })
+  }, 30_000)
+
+  afterEach(async () => {
+    await test?.close()
+  })
+
+  const ctx = (): ToolContext => ({
+    db,
+    orgId,
+    principal: { id: 'user-1', orgId, role: 'owner' },
+    turnId: '44444444-4444-4444-8444-444444444444',
+    now: () => AT,
+    audit: async () => {},
+  })
+  const run = async <S extends z.ZodRawShape>(spec: AgencyToolSpec<S>, input: unknown) =>
+    spec.handler(z.object(spec.shape).parse(input) as never, ctx())
+
+  it('check_send says Resume waits for the number, after the teammate’s pause, and never that they asked', async () => {
+    const out = await run(checkSend, { domain: 'acme.example', contactEmail: 'bina@acme.example', campaignName: 'Mail' })
+    if (!out.ok) throw new Error(out.message)
+    expect(out.data).toMatchObject({ code: 'paused', facts: { pausedFor: 'manual', sharedNumberHold: true } })
+    expect(out.summary).toMatch(/^paused by a teammate \(on leave \(by sam@agency\.test\)\)/)
+    expect(out.summary).toContain(
+      'They also hold a phone number a text came from that asked to stop, and it could not be recorded — it may not ' +
+        'have been them — so Resume is refused until a person records the number on /suppressions; do not suggest ' +
+        'resuming them before that.',
+    )
+    expect(out.summary).not.toMatch(/they asked to stop/)
+    expect(out.summary).toMatch(/Nothing was queued\.$/)
+  })
+
+  it('get_consent says they cannot be resumed until the number is recorded', async () => {
+    const out = await run(getConsent, { contactEmail: 'bina@acme.example' })
+    if (!out.ok) throw new Error(out.message)
+    expect(out.data).toMatchObject({ paused: true, sharedNumberHold: true })
+    expect(out.summary.split('\n')[0]).toBe(
+      'bina@acme.example at acme.example — paused: nothing is sent to them, and they cannot be resumed until a person ' +
+        'records a phone number they share on /suppressions — a text from it asked to stop and could not be recorded, ' +
+        'and it may not have been them',
+    )
+  })
+
+  // Review round 13: a holder paused by their own reply. /inbox refuses the
+  // answer until the number is recorded, so check_send must not offer it.
+  it('check_send offers neither /inbox nor Resume for a holder their own reply paused', async () => {
+    await db
+      .update(schema.contacts)
+      .set({ pausedReason: `replied ${new Date(AT.getTime() + 60_000).toISOString()}` })
+      .where(eq(schema.contacts.email, 'bina@acme.example'))
+    const out = await run(checkSend, { domain: 'acme.example', contactEmail: 'bina@acme.example', campaignName: 'Mail' })
+    if (!out.ok) throw new Error(out.message)
+    expect(out.data).toMatchObject({ code: 'paused', facts: { pausedFor: 'replied', sharedNumberHold: true } })
+    expect(out.summary).not.toContain('which resumes them')
+    expect(out.summary).toContain(
+      'so neither answering their reply from /inbox nor Resume on /contacts lifts the pause until a person records ' +
+        'the number on /suppressions; do not suggest either before that.',
+    )
+    expect(out.summary).not.toMatch(/they asked to stop/)
+  })
+
+  it('says nothing of the kind once the number is recorded', async () => {
+    await addSuppression(db, { orgId, kind: 'phone', value: PHONE, reason: 'texted STOP', source: 'manual' })
+    const sent = await run(checkSend, { domain: 'acme.example', contactEmail: 'bina@acme.example', campaignName: 'Mail' })
+    if (!sent.ok) throw new Error(sent.message)
+    expect(sent.data).toMatchObject({ code: 'paused', facts: { sharedNumberHold: false } })
+    expect(sent.summary).not.toContain('They also hold a phone number')
+    const consent = await run(getConsent, { contactEmail: 'bina@acme.example' })
+    if (!consent.ok) throw new Error(consent.message)
+    expect(consent.summary.split('\n')[0]).toBe('bina@acme.example at acme.example — paused: nothing is sent to them until a person resumes them')
   })
 })

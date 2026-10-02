@@ -8,10 +8,10 @@ import { agentConfigured } from '@/lib/agent'
 import { getDb } from '@/lib/db'
 import { deployment } from '@/lib/deployment'
 import { env } from '@/lib/env'
+import { orgIdentity } from '@/lib/org-identity'
 import { icpForOrg } from '@/lib/queries'
 import { workerStatus, type WorkerStatus } from '@/lib/worker-status'
 import { deploymentFacts, workerLine } from './facts'
-import { orgIdentity } from './org'
 
 /**
  * Settings: the landing page for everything that configures the product.
@@ -38,6 +38,7 @@ const AREAS: readonly { readonly href: string; readonly title: string; readonly 
   { href: '/settings/icp', title: 'ICP', what: 'The profile every score is computed against. Read only.' },
   { href: '/settings/spend', title: 'Spend', what: 'What the model has cost, per day and per person.' },
   { href: '/settings/mail', title: 'Mail', what: 'SPF, DMARC and DKIM for our own sending domain.' },
+  { href: '/settings/templates', title: 'Templates', what: 'The DLT-registered SMS templates every SMS is drafted from.' },
   { href: '/settings/deployment', title: 'Deployment', what: 'What is configured, the worker, the schema.' },
   { href: '/compliance', title: 'Compliance', what: 'The questions an auditor asks, as counts.' },
   { href: '/audit', title: 'Audit', what: 'Every recorded action, newest first.' },
@@ -91,7 +92,7 @@ export default async function SettingsPage() {
   }
 
   return (
-    <Shell user={user} orgName={org.name} current="settings" signOut={signOutAction}>
+    <Shell user={user} current="settings" signOut={signOutAction}>
       <h1>Settings</h1>
       <p className="lede">
         Who this organisation is, what this deployment can and cannot do, and where each setting lives.

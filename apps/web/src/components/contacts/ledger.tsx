@@ -1,9 +1,13 @@
 'use client'
 
 import { Fragment, useState } from 'react'
+import { pauseReasonClass } from '@agency/core'
 import { When } from '@/components/when'
 import { ContactEdit } from '@/components/contacts/edit'
+import { SmsComposer } from '@/components/contacts/sms-composer'
+import { SharedNumberHolderNote } from '@/components/shared-number-note'
 import { sendCheckSentence, type SendCheckView } from '@/lib/consent-view'
+import { offersResume, resumeOfferFor } from '@/lib/shared-number-pause'
 
 /**
  * The consent ledger (§2.1): one row per person, and per row the facts the
@@ -12,10 +16,35 @@ import { sendCheckSentence, type SendCheckView } from '@/lib/consent-view'
  * quiet hours are checked in; whether a reply has paused them.
  *
  * Every word on a row was chosen by `lib/consent-view.ts` on the server, so
- * this component renders and does not decide. The one thing it asks for
+ * this component renders and does not decide — with one reading of its own:
+ * which pause buttons a row gets, from the pause's CLASS, through
+ * `pauseReasonClass`, the one pure reader the route, the inbox and the send
+ * path share (review round 3), and through `resumeOfferFor`
+ * (`lib/shared-number-pause.ts`). A pause the contact's own unrecorded
+ * opt-out or an unfinished erasure left gets no Resume and says what to do
+ * instead — the route refuses it anyway (409). A shared number's holder,
+ * whose pause has the same class, is neither (review round 9): a text from
+ * a number they share asked to stop, they may not have sent it, and the
+ * route lifts their pause once the number is on the suppression list — so
+ * the row says exactly that and offers Resume, which answers the route's
+ * sentence until the number is recorded. So does a holder whose own pause
+ * stood instead of the hold (review round 10, [2]): the shape is a
+ * teammate's or an unsubscribe's, so the row reads the database's answer,
+ * `sharedNumberHold`, beside it. A reply's pause gets Pause beside
+ * Resume, so a teammate can hold somebody whose reply someone may answer.
+ * The route also refuses a resume while an opt-out the audit log says was
+ * never recorded matches no suppression row; that needs the database, so
+ * the row shows the route's sentence when it happens. Resume sends the
+ * pause the row SHOWS (`pausedReason`), and the route lifts that one and no
+ * other: a pause somebody wrote after the page loaded is a 409 saying to
+ * reload (review round 4). The one thing it asks for
  * itself is "Why can't I reach them?", which calls the sender's own dry run
  * (`/api/contacts/[id]/send-check`) and prints the answer in the words every
  * other screen uses. That call queues nothing; the page says so beside it.
+ *
+ * "Draft SMS", on a row with a phone number, opens the SMS composer
+ * (`sms-composer.tsx`): a registered DLT template, its variables filled, the
+ * sender's dry run over those exact words, and a draft parked on /approvals.
  *
  * Two more per row. "Download record" is everything held about the person,
  * as JSON (`/api/contacts/[id]/record`, any member, audited). "Erase…" is
@@ -54,6 +83,12 @@ export interface LedgerView {
   readonly zoneMissing: boolean
   readonly pausedAt: string | null
   readonly pausedReason: string | null
+  /**
+   * Resume refuses their pause until a shared number is recorded
+   * (`consentLedgerFor`'s `sharedNumberHold`, review round 10, [2]) — a
+   * holder whose own pause stood instead of the hold. False when not paused.
+   */
+  readonly sharedNumberHold: boolean
   readonly emailBouncedAt: string | null
   readonly emailBounceCode: string | null
   readonly channels: readonly LedgerChannelView[]
@@ -71,7 +106,7 @@ export interface LedgerCampaign {
 
 const KEY_WORDS: Record<LedgerSuppressionView['key'], string> = { email: 'email', phone: 'phone', linkedin: 'LinkedIn' }
 
-type Panel = 'check' | 'edit' | 'erase'
+type Panel = 'check' | 'edit' | 'erase' | 'sms'
 
 /** Only a URL that is plainly a LinkedIn page becomes a link; anything else is shown as text. */
 function linkedinHref(url: string): string | null {
@@ -140,6 +175,9 @@ export function ContactsLedger({
         {rows.map((r) => {
           const li = r.linkedinUrl ? linkedinHref(r.linkedinUrl) : null
           const panel = open?.id === r.id ? open.panel : null
+          // Null when they are not paused. Which buttons the row gets — see the header.
+          const pausedFor = r.pausedAt ? pauseReasonClass(r.pausedReason) : null
+          const offer = resumeOfferFor(pausedFor, r.pausedReason, r.sharedNumberHold)
           return (
             <Fragment key={r.id}>
               <tr>
@@ -214,23 +252,57 @@ export function ContactsLedger({
                         <button type="button" className="linkish" onClick={() => toggle(r.id, 'edit')}>
                           Edit and consent
                         </button>
-                        {r.pausedAt ? (
-                          <button type="button" className="linkish" disabled={busy === r.id} onClick={() => void patch(r.id, { action: 'resume' })}>
+                        {r.phone ? (
+                          <button
+                            type="button"
+                            className="linkish"
+                            onClick={() => toggle(r.id, 'sms')}
+                            title="From a registered DLT template, for a person to approve. Nothing is sent from here."
+                          >
+                            Draft SMS
+                          </button>
+                        ) : null}
+                        {offer === 'opt_out_not_recorded' ? (
+                          <span className="muted" style={{ fontSize: 12 }}>
+                            No Resume: they asked to stop and it could not be recorded. Record the opt-out on{' '}
+                            <a href="/suppressions">/suppressions</a>; the pause stays.
+                          </span>
+                        ) : offer === 'erasure' ? (
+                          <span className="muted" style={{ fontSize: 12 }}>
+                            No Resume: they asked to be erased and it did not complete. An owner finishes it with Erase….
+                          </span>
+                        ) : offer === 'record_number' ? (
+                          <span className="muted" style={{ fontSize: 12 }}>
+                            <SharedNumberHolderNote />
+                          </span>
+                        ) : null}
+                        {offersResume(offer) ? (
+                          <button type="button" className="linkish" disabled={busy === r.id} onClick={() => void patch(r.id, { action: 'resume', pausedReason: r.pausedReason })}>
                             Resume
                           </button>
-                        ) : (
+                        ) : null}
+                        {!pausedFor || pausedFor === 'replied' ? (
                           <button
                             type="button"
                             className="linkish"
                             disabled={busy === r.id}
+                            title={
+                              pausedFor === 'replied'
+                                ? 'Replaces the pause their reply caused with yours, so answering the reply will not lift it.'
+                                : undefined
+                            }
                             onClick={() => {
-                              const reason = window.prompt('Why pause them? (kept with the pause)')
+                              const reason = window.prompt(
+                                pausedFor === 'replied'
+                                  ? 'Why hold them? This replaces the pause their reply caused, so answering the reply will not lift it. (Kept with the pause.)'
+                                  : 'Why pause them? (kept with the pause)',
+                              )
                               if (reason?.trim()) void patch(r.id, { action: 'pause', reason })
                             }}
                           >
-                            Pause
+                            {pausedFor === 'replied' ? 'Hold (pause)' : 'Pause'}
                           </button>
-                        )}
+                        ) : null}
                       </>
                     ) : null}
                     {isOwner ? (
@@ -249,6 +321,13 @@ export function ContactsLedger({
                       <SendCheck contactId={r.id} campaigns={campaigns} />
                     ) : panel === 'erase' ? (
                       <EraseContact contactId={r.id} name={r.name} onCancel={() => setOpen(null)} />
+                    ) : panel === 'sms' ? (
+                      <SmsComposer
+                        contactId={r.id}
+                        smsConsent={r.channels.find((c) => c.channel === 'sms')?.state ?? null}
+                        campaigns={campaigns}
+                        onCancel={() => setOpen(null)}
+                      />
                     ) : (
                       <ContactEdit
                         contact={{

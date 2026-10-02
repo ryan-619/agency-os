@@ -474,7 +474,15 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   'draft.approved': (c) => `approved a draft ${own(CHANNEL_NOUN, word(c.d, 'channel')) ?? 'message'} to a contact at ${c.co}`,
   'draft.denied': (c) => {
     const note = text(c.d, 'note', 80)
-    return `denied a draft about ${c.co}${note ? `: ${quoted(note)}` : ''}`
+    // A deny on words quoting a scan that aged out OR that a newer scan
+    // superseded is recorded as stale_evidence, which enrolment does not
+    // count against a new draft. The detail does not say which, and "a
+    // re-scan lets it" is false of the second — the re-scan happened, and
+    // re-enrolment drafts again straight away — so the words fit both.
+    const stale = word(c.d, 'refusalCode') === 'stale_evidence'
+    return `denied a draft about ${c.co}${stale ? ' (its evidence was stale — it can be drafted again from a current scan)' : ''}${
+      note ? `: ${quoted(note)}` : ''
+    }`
   },
   'contact.replied': (c) => {
     const kind = word(c.d, 'replyKind')
@@ -487,19 +495,88 @@ const SENTENCES: Readonly<Record<string, Template>> = {
       dealMove(text(c.d, 'deal', 40)),
     ])}`
   },
-  'contact.opt_out_not_recorded': (c) =>
-    `could not record an opt-out from a contact at ${c.co} — it is NOT on the suppression list; follow up by hand`,
-  'contact.created': (c) => `added a contact at ${c.co}`,
-  'contact.paused': (c) => {
-    const reason = text(c.d, 'reason', 80)
-    return `paused a contact at ${c.co}${reason ? `: ${quoted(reason)}` : ''}${flag(c.d, 'alreadyPaused') ? ' (already paused)' : ''}`
+  // Two writers: a reply filed under a contact (`recordInboundReply`, the
+  // contact as subject), and an SMS STOP with no subject and no contact at
+  // all. That one comes two ways. `sms.ts`'s `optOutLost` LOOKED: a number
+  // no single contact holds, or one that could not be read — there is no
+  // contact to name. The DoveSoft route's `record_failed` did not: the
+  // recording THREW, most often inside the one matched contact's
+  // `recordInboundReply`, which rolled back, so whose number it was is not
+  // known and the contact who holds it is to be looked for (review round 5,
+  // [14]; it read "a number no single contact holds", and the person
+  // following up recorded a bare suppression and never paused them). Nor
+  // can it know that nothing was written (review round 7, [8]): a shared
+  // number's holders may have been held in one org before another threw,
+  // and an earlier delivery may have recorded it all — so the sentence says
+  // to CHECK /suppressions, and that the holders may be paused already.
+  //
+  // And a reply's stop from somebody OTHER than the contact it was filed
+  // under (`fromIsContact: false`, review round 7, [7]): a colleague in the
+  // thread replying all. Written about the reply or the message it
+  // answered, with the contact as `filedUnder`, never as the subject — the
+  // inbox reads a row about the contact as THEIR opt-out nobody recorded —
+  // and it names the address to record: the sender's, not the contact's.
+  //
+  // And the contacts who HOLD a number whose STOP could not be recorded,
+  // other than the one it was filed under (`sharedNumber`, review round 8):
+  // one row per org, about the text when it is stored here, never naming
+  // them as the subject or `contactId` — the inbox read a row that did as
+  // their own opt-out, however old, and they were locked out for good by a
+  // fault DoveSoft's retry recovers from. They are held hard until the
+  // number is suppressed, and then eased to the ordinary hold.
+  'contact.opt_out_not_recorded': (c) => {
+    if (flag(c.d, 'sharedNumber') === true) return sharedNumberOptOut(c.d)
+    if (flag(c.d, 'fromIsContact') === false) {
+      const lead = `could not record an opt-out from a reply sent by somebody other than the contact at ${c.co} it was filed under`
+      const contact = 'the contact is not treated as the one who asked'
+      return word(c.d, 'why') === 'record_failed'
+        ? `${lead} — recording the reply failed, so the sender may not be on the suppression list: a retry may record it, ` +
+            `but check /suppressions for the address the reply came from and record it there if it is missing; ${contact}`
+        : `${lead} — the sender is NOT on the suppression list; read their address from the reply and record it by hand; ${contact}`
+    }
+    if (c.row.subjectType !== 'contact' && !has(c.d, 'contactId') && !has(c.d, 'touchId')) {
+      if (word(c.d, 'why') === 'record_failed') {
+        return (
+          'could not record an opt-out texted in: recording the text failed, so whose number it was is not known, and ' +
+          'part of it may already be recorded — by an earlier delivery, or by this one before it failed; it may not be on ' +
+          'the suppression list. It was refused so DoveSoft retries, but until a retry is recorded, check /suppressions ' +
+          "for the number in the provider's inbound log and record it there if it is missing — anybody holding the " +
+          'number may already be paused; pause whoever holds it and is not'
+        )
+      }
+      const why = own(UNPLACED_OPT_OUT_WHY, word(c.d, 'why'))
+      return `could not record an opt-out texted from a number no single contact holds${
+        why ? ` (${why})` : ''
+      } — it is NOT on the suppression list; read the number from the provider's inbound log and record it by hand`
+    }
+    return `could not record an opt-out from a contact at ${c.co} — it is NOT on the suppression list; follow up by hand`
   },
-  // Two writers: the contacts route (a person pressing Resume) and the inbox,
-  // which resumes only the pause a reply caused and records its CLASS.
+  'contact.created': (c) => `added a contact at ${c.co}`,
+  // Two writers. The contacts route, a person's reason, naming the reply's
+  // pause it replaced by CLASS (`replacedPauseFor`) — answering that reply no
+  // longer resumes them. And `denyDraft`, putting a reply's pause back when
+  // the answer that lifted it was denied (`inboundTouchId`); its reason is
+  // the system's own, so the sentence says it instead of quoting it.
+  'contact.paused': (c) => {
+    if (has(c.d, 'inboundTouchId')) return `paused a contact at ${c.co} — the answer to their reply was denied`
+    const reason = text(c.d, 'reason', 80)
+    return `paused a contact at ${c.co}${reason ? `: ${quoted(reason)}` : ''}${flag(c.d, 'alreadyPaused') ? ' (already paused)' : ''}${
+      word(c.d, 'replacedPauseFor') === 'replied' ? ', replacing the pause their reply caused' : ''
+    }`
+  },
+  // Three writers: the contacts route (a person pressing Resume), the inbox,
+  // which resumes only the pause a reply caused and records its CLASS, and
+  // `dispatchTouch`, lifting the reply's pause a stuck-send recovery put
+  // back over an answer the provider had taken after all (`answerTouchId`,
+  // review round 5).
   'contact.resumed': (c) => {
     const why = own(PAUSED_FOR, word(c.d, 'pausedFor'))
     return `resumed a contact at ${c.co}${why ? ` who had been paused ${why}` : ''}${
-      has(c.d, 'inboundTouchId') ? ', to answer their reply' : ''
+      has(c.d, 'inboundTouchId')
+        ? ', to answer their reply'
+        : has(c.d, 'answerTouchId')
+          ? ', because the answer to it went after all'
+          : ''
     }`
   },
   'contact.timezone_set': (c) => {
@@ -833,25 +910,269 @@ const SENTENCES: Readonly<Record<string, Template>> = {
       ? 'posted the daily digest to Slack'
       : `built the daily digest and did not post it${why ? `: ${own(DIGEST_NOT_POSTED, why) ?? spaced(why)}` : ''}`
     // The alert that the worker is silent cannot come from the worker; this row says whether it went.
-    switch (word(c.d, 'workerAlert')) {
-      case 'posted':
-        return `${digest}; the worker was silent, and a separate alert was posted`
-      case 'failed':
-        return `${digest}; the worker was silent, and the alert could NOT be posted`
-      case 'no_slack':
-        return `${digest}; the worker was silent, and nobody was alerted`
-      default:
-        return digest
+    const alert = ((): string | null => {
+      switch (word(c.d, 'workerAlert')) {
+        case 'posted':
+          return 'the worker was silent, and a separate alert was posted'
+        case 'failed':
+          return 'the worker was silent, and the alert could NOT be posted'
+        case 'no_slack':
+          return 'the worker was silent, and nobody was alerted'
+        default:
+          // A closed session somebody ran by hand: named in the digest, alerted about by nobody, on purpose.
+          return word(c.d, 'worker') === 'retired'
+            ? 'no worker is configured and the last one reported in more than a week ago, so it counts as retired and nobody was alerted'
+            : null
+      }
+    })()
+    // `found > posted`: pauses past the cap, a notice Slack refused, or no Slack — said, not left in the raw detail.
+    const pauses = detailValue(c.d, 'campaignPauses')
+    const found = num(pauses, 'found')
+    const posted = num(pauses, 'posted')
+    let unannounced: string | null = null
+    if (found !== null && posted !== null && found > posted) {
+      const missed = found - Math.max(0, posted)
+      unannounced =
+        found === 1
+          ? 'a campaign paused itself and got no notice of its own — /campaigns lists it'
+          : `${found} campaigns paused themselves and ${
+              missed === found ? 'none got a notice of its own' : `${missed} got no notice of their own`
+            } — /campaigns lists them`
     }
+    return join([digest, alert, unannounced])
   },
+
+  // --- DoveSoft (0019): registered templates and SMS -----------------------
+  // A template is a registration copied from the DLT portal; an SMS is drafted
+  // from one and goes through the one send path. Ids and counts only.
+  'template.created': (c) => {
+    const id = text(c.d, 'externalId', 64)
+    const category = word(c.d, 'category')
+    return `recorded ${aChannel(word(c.d, 'channel'))} template${id ? ` (${id})` : ''}${category ? `, ${spaced(category)}` : ''}`
+  },
+  'template.activated': (c) => {
+    const id = text(c.d, 'externalId', 64)
+    return `switched ${aChannel(word(c.d, 'channel'))} template back on${id ? ` (${id})` : ''}; messages can be drafted from it again`
+  },
+  'template.deactivated': (c) => {
+    const id = text(c.d, 'externalId', 64)
+    return `switched off ${aChannel(word(c.d, 'channel'))} template${id ? ` (${id})` : ''}; a draft written from it is refused at sending`
+  },
+  'template.imported': (c) => {
+    const n = (k: string): number | null => num(c.d, k)
+    return `imported templates from a DLT export${tail([
+      n('imported') !== null && `${n('imported')} added`,
+      (n('alreadyPresent') ?? 0) > 0 && `${n('alreadyPresent')} already present`,
+      (n('skipped') ?? 0) > 0 && `${n('skipped')} skipped`,
+      (n('refused') ?? 0) > 0 && `${n('refused')} refused`,
+    ])}`
+  },
+  'sms.drafted': (c) =>
+    `drafted an SMS to a contact at ${c.co} from a registered template; it waits for approval and nothing was sent`,
+  'sms.delivery_unmatched': (c) =>
+    `received a delivery report for an SMS this system did not send${
+      word(c.d, 'why') === 'ambiguous' ? ' (it named more than one message)' : ''
+    }; nothing was changed`,
+  // A suppression is claimed only where the row says one was written:
+  // `suppressed: true`. A row with no key — an unreadable number's, before
+  // r5 wrote `suppressed: false` there — had none written, and read as if it had.
+  //
+  // Four writers in sms.ts (review round 6): a text filed under nobody; one
+  // filed under a contact, whose OTHER holders were held — `filedUnder`
+  // says whether under another contact in this org or a contact in another
+  // org; and a redelivery of either that only wrote a missing suppression
+  // (`redelivered`) — or, since review round 8, eased holders an earlier
+  // delivery had held hard (`released`), in the filed org too.
+  'sms.inbound_unmatched': (c) => {
+    const optOut = flag(c.d, 'optOut') === true
+    const stop = optOut
+      ? flag(c.d, 'suppressed') === true
+        ? '; it asked to stop, and the number was put on the suppression list'
+        : '; it asked to stop, and the number is NOT on the suppression list — follow up by hand'
+      : ''
+    const contacts = num(c.d, 'contacts')
+    const redelivered = flag(c.d, 'redelivered') === true
+    const filedUnder = word(c.d, 'filedUnder')
+    // The hold REPLACES the pause a holder's own unanswered reply had caused
+    // (review round 7), so answering that reply no longer lifts it — named
+    // by class and count, never the reason.
+    const replacedN = word(c.d, 'replacedPauseFor') === 'replied' ? (num(c.d, 'replacedPauses') ?? 1) : 0
+    const replaced =
+      replacedN <= 0
+        ? ''
+        : contacts === 1 && replacedN === 1
+          ? '; the hold replaced the pause their reply had caused'
+          : `; the hold replaced the pause a reply had caused for ${replacedN} of them`
+    // The holders a delivery eased from the hard hold an unrecorded STOP
+    // left them in, once the number was suppressed (review round 8).
+    const eased = released(c.d)
+    if (filedUnder === 'another_org') {
+      const here = contacts !== null && contacts > 1 ? `${contacts} contacts here hold` : 'a contact here holds'
+      return redelivered
+        ? `received again a text from a number ${here}, which it had filed under a contact in another organisation${stop}${eased}`
+        : `received a text from a number ${here}, and filed it under a contact in another organisation that this system had texted${held(
+            c.d, 'contact here holding it', 'contacts here holding it',
+          )}${replaced}${stop}${eased}`
+    }
+    if (filedUnder === 'another_contact') {
+      return redelivered
+        ? `received again a text from a number more than one contact here holds, which it had filed under one of them${stop}${eased}`
+        : `received a text from a number more than one contact here holds, and filed it under the one this system had texted${held(
+            c.d, 'other contact holding it', 'other contacts holding it',
+          )}${replaced}${stop}${eased}`
+    }
+    const why = own(SMS_UNMATCHED, word(c.d, 'why')) ?? 'that could not be placed'
+    return redelivered
+      ? `received again a text from a number ${why}, which it had filed under nobody; nobody was paused again${stop}${eased}`
+      : `received a text from a number ${why}, so it was filed under nobody${held(
+          c.d, 'contact holding the number', 'contacts holding the number',
+        )}${replaced}${stop}${eased}`
+  },
+  // The two DoveSoft pushes this deployment could not read (/api/inbound/dovesoft/*).
+  // Which field was missing, by name — never a value, a number or the words.
+  'sms.dlr_unreadable': (c) =>
+    `could not read a delivery report DoveSoft sent${unreadableWhy(c.d)}; it was refused so DoveSoft retries, and nothing was changed`,
+  'sms.inbound_unreadable': (c) =>
+    `could not read a text DoveSoft passed on${unreadableWhy(c.d)}, so nothing was recorded — it may have asked to stop; ` +
+    'it was refused so DoveSoft retries, and the field names it did carry are in the error log',
+}
+
+/** " (no message id or status)", " (the body was not a form or a JSON object)", " (it was larger …)", or nothing. */
+function unreadableWhy(d: unknown): string {
+  if (word(d, 'why') === 'unreadable_body') return ' (the body was not a form or a JSON object)'
+  if (word(d, 'why') === 'too_large') return ' (it was larger than the route reads)'
+  const missing = (words(d, 'missing') ?? []).map((m) => own(UNREADABLE_FIELD, m)).filter((m): m is string => Boolean(m))
+  return missing.length ? ` (no ${missing.join(' or ')})` : ''
+}
+
+/** The fields an unreadable DoveSoft push lacked, in words. */
+const UNREADABLE_FIELD: Readonly<Record<string, string>> = {
+  messageid: 'message id',
+  status: 'status',
+  from: 'sender number',
+  text: 'text',
+}
+
+/** "an SMS", "a WhatsApp", "a voice" — a channel's name with its article, for a template. */
+function aChannel(channel: string | null): string {
+  const name = channelName(channel)
+  return /^(SMS|[aeiou])/i.test(name) ? `an ${name}` : `a ${name}`
+}
+
+/**
+ * What a text from a shared number did to the contacts holding it, from
+ * `sms.inbound_unmatched`'s counts: how many were paused, of how many, and
+ * how many of their waiting messages were cancelled — or nothing when it
+ * did neither. Said whenever EITHER count is above zero (review round 6):
+ * a holder already paused is not paused again, and their drafts are still
+ * cancelled. `one` and `many` name who, as the row's writer counts them.
+ */
+function held(d: unknown, one: string, many: string): string {
+  const paused = num(d, 'paused') ?? 0
+  const cancelled = num(d, 'cancelledQueued') ?? 0
+  const of = num(d, 'contacts')
+  if (paused <= 0 && cancelled <= 0) return ''
+  const were = (n: number): string => (n === 1 ? 'was' : 'were')
+  const messages = (n: number): string => `${n} queued message${n === 1 ? '' : 's'}`
+  let who: string | null = null
+  if (paused > 0) {
+    if (of !== null && paused >= of) {
+      who = of === 1 ? `the ${one} was paused` : of === 2 ? `both ${many} were paused` : `all ${of} ${many} were paused`
+    } else if (of !== null) {
+      who = `${paused} of the ${of} ${many} ${were(paused)} paused`
+    } else {
+      who = `${paused === 1 ? `a ${one}` : `${paused} ${many}`} ${were(paused)} paused`
+    }
+  }
+  if (who === null) {
+    const to = of === 1 ? `the ${one}` : `the ${many}`
+    return `; ${messages(cancelled)} to ${to} ${were(cancelled)} cancelled (already paused, so not paused again)`
+  }
+  return `; ${who}${cancelled > 0 ? ` and ${messages(cancelled)} cancelled` : ''}`
+}
+
+/**
+ * `contact.opt_out_not_recorded` for the contacts holding a number whose
+ * STOP could not be recorded, other than the one it was filed under
+ * (`sharedNumber`, review round 8). Whose words the text was is not said
+ * of them — they may have sent nothing — and what holds them, and what ends
+ * it, is: Resume is refused until the number is on the suppression list,
+ * and the next text DoveSoft delivers from it after that (its retry of this
+ * one included) makes it an ordinary hold Resume lifts — except for a holder
+ * whose own pause stood (`kept`, review round 9), which no text changes.
+ *
+ * Which retry comes depends on why (review round 10, [6]): a recording that
+ * failed is answered 500 whatever the push carried, so DoveSoft retries it;
+ * a suppression that failed is answered 500 only when the push carried a
+ * message id — without one its retry could not be told from a new text, so
+ * it is answered 200 and no retry comes.
+ */
+function sharedNumberOptOut(d: unknown): string {
+  const n = num(d, 'contacts') ?? 1
+  const p = num(d, 'paused') ?? n
+  const holds = n === 1 ? 'a contact here holds' : `${n} contacts here hold`
+  const why =
+    word(d, 'why') === 'record_failed'
+      ? 'recording the text failed, so the number may not be on the suppression list; a retry may record it, but check ' +
+        '/suppressions for the number on their record and record it there if it is missing'
+      : 'the number is NOT on the suppression list; record it by hand on /suppressions, from their record'
+  const unpaused =
+    p >= n ? '' : p <= 0 ? '; none of them could be paused — pause them by hand' : `; only ${p} of the ${n} could be paused — pause the rest by hand`
+  // A holder already held by a pause of their own keeps it (review round 9):
+  // no text eases it, and Resume lifts it — where Resume may — only once the
+  // number is recorded. `kept` counts them, and `paused` includes them.
+  const k = Math.min(num(d, 'kept') ?? 0, n)
+  const kept =
+    k <= 0
+      ? ''
+      : `; ${k === n ? (n === 1 ? 'they were' : 'all of them were') : `${k} of them ${k === 1 ? 'was' : 'were'}`} already held by a ` +
+        'pause of their own, which stands — no text changes it, and Resume lifts it, where Resume may, only once the number is recorded'
+  const retry = word(d, 'why') === 'record_failed' ? 'its retry of this one included' : 'its retry of this one included, where the push carried a message id'
+  return (
+    `could not record an opt-out texted from a number ${holds} — ${why}. ` +
+    'They are not treated as the one who asked, but are held until it is recorded: Resume is refused until then, ' +
+    `and the next text DoveSoft delivers from the number after that — ${retry} — makes it an ` +
+    `ordinary hold that Resume lifts${kept}${unpaused}`
+  )
+}
+
+/**
+ * `sms.inbound_unmatched`'s word on the holders a delivery eased (review
+ * round 8): held hard while the STOP was not recorded, now held as anyone
+ * sharing the number is. A count, never who.
+ */
+function released(d: unknown): string {
+  const n = num(d, 'released') ?? 0
+  if (n <= 0) return ''
+  return n === 1
+    ? '; a contact here held while the opt-out was not recorded is now held as anyone sharing the number is, which Resume lifts'
+    : `; ${n} contacts here held while the opt-out was not recorded are now held as anyone sharing the number is, which Resume lifts`
+}
+
+/** Why `sms.inbound_unmatched` filed a text under nobody — `sms.ts`'s own reasons. */
+const SMS_UNMATCHED: Readonly<Record<string, string>> = {
+  no_contact: 'no contact has',
+  ambiguous: 'more than one contact has',
+  unreadable_number: 'that could not be read',
+}
+
+/**
+ * Why an SMS STOP nobody could place was not recorded: `sms.ts`'s reasons.
+ * Anything else is an error's class name, which says nothing a person can
+ * act on, and is left out. The DoveSoft route's `record_failed` has a
+ * sentence of its own: that writer never learned whose number it was.
+ */
+const UNPLACED_OPT_OUT_WHY: Readonly<Record<string, string>> = {
+  unparseable_number: 'the number could not be read',
 }
 
 /** Every action this page has a sentence for. The test iterates it. */
 export const AUDIT_ACTIONS: readonly string[] = Object.freeze(Object.keys(SENTENCES).sort())
 
 /**
- * Rows a person must not scroll past: an opt-out that was not stored, and a
- * call with no AI disclosure — §2.1's failures, highlighted rather than
+ * Rows a person must not scroll past: an opt-out that was not stored (or a
+ * text that could not be read, which may have been one), and a call with no
+ * AI disclosure — §2.1's failures, highlighted rather than
  * rendered like every other line. And one operational failure nobody else
  * will report: the worker went silent and the daily alert reached nobody,
  * either because Slack refused it or because there is no Slack. The worker
@@ -862,7 +1183,13 @@ export function isAlarm(row: AuditLine): boolean {
     case 'contact.opt_out_not_recorded':
     case 'unsubscribe.not_recorded':
     case 'contact.erasure_failed':
+    // A text nobody could read may have been a STOP that is recorded nowhere.
+    case 'sms.inbound_unreadable':
       return true
+    // A STOP from a number nobody could be placed under, and no suppression
+    // written for it. Only `suppressed: true` says one was.
+    case 'sms.inbound_unmatched':
+      return flag(row.detail, 'optOut') === true && flag(row.detail, 'suppressed') !== true
     case 'call.opted_out':
       return flag(row.detail, 'suppressed') === false
     case 'call.ended':
@@ -987,6 +1314,7 @@ const FAMILY_LABEL: Readonly<Record<string, string>> = {
   approval: 'Approvals', turn: 'Chat turns', connector: 'Connectors', credential: 'Credentials', user: 'Team',
   company: 'Companies', note: 'Notes', task: 'Tasks', call: 'Calls', notification: 'Notifications',
   scan: 'Scheduled rescans', cron: 'Scheduled jobs', export: 'Exports', linkedin: 'LinkedIn steps',
+  template: 'Message templates', sms: 'SMS',
 }
 export const AUDIT_FAMILIES: readonly { readonly value: string; readonly label: string }[] = Object.freeze(
   [...new Set(AUDIT_ACTIONS.map((a) => a.split('.')[0] ?? a))].map((value) => ({
@@ -1013,6 +1341,7 @@ export const AUDIT_SUBJECT_TYPES: readonly { readonly value: string; readonly la
   { value: 'task', label: 'A task' },
   { value: 'user', label: 'A teammate' },
   { value: 'secret', label: 'A stored credential' },
+  { value: 'message_template', label: 'A message template' },
 ])
 
 /**

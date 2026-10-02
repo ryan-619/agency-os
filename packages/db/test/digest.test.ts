@@ -18,8 +18,10 @@
  *     outside it does not, and a second delivery posts nothing — shown in
  *     sequence, because PGlite runs one transaction at a time; the lock
  *     that serialises two at once on real Postgres is pinned by its source;
- *   * a campaign that paused itself is read once: since the previous
- *     digest, inside the 24-hour lookback, capped, per org.
+ *   * a campaign that paused itself is read once: strictly after the mark
+ *     the previous run recorded (or inside the 24-hour lookback when there
+ *     is none), capped, per org — whatever the web's clock and the
+ *     database's say, and to the microsecond.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { randomUUID } from 'node:crypto'
@@ -454,6 +456,17 @@ describe('the daily digest', () => {
           { campaignId: first, bouncePct: 12, threshold: 5 },
           { campaignId: second, bouncePct: 7.5, threshold: 5 },
         ],
+        // The last row read, as the database stored it: the next run reads strictly after it.
+        readThrough: { at: '2026-09-30T10:00:00.000000Z', id: expect.any(String) },
+      })
+    })
+
+    it('reads the 24-hour lookback, and records how far it read, when there is no previous run to read after', async () => {
+      await paused(orgId, hoursAgo(30))
+      expect(await digestCampaignPauses(db, orgId, { now: NOW })).toEqual({
+        found: 0,
+        pauses: [],
+        readThrough: { at: NOW.toISOString(), id: null },
       })
     })
 
@@ -466,7 +479,7 @@ describe('the daily digest', () => {
       await paused(orgId, hoursAgo(23))
       await digestAt(orgId, hoursAgo(21))
       const after = await paused(orgId, hoursAgo(1))
-      expect(await digestCampaignPauses(db, orgId, { now: NOW })).toEqual({
+      expect(await digestCampaignPauses(db, orgId, { now: NOW })).toMatchObject({
         found: 1,
         pauses: [{ campaignId: after, bouncePct: 12, threshold: 5 }],
       })
@@ -489,7 +502,7 @@ describe('the daily digest', () => {
       })
       await paused(orgId, hoursAgo(1), { bouncePct: 'lots', threshold: 5 })
       await paused(orgId, hoursAgo(1), { threshold: 5 })
-      expect(await digestCampaignPauses(db, orgId, { now: NOW })).toEqual({ found: 0, pauses: [] })
+      expect(await digestCampaignPauses(db, orgId, { now: NOW })).toMatchObject({ found: 0, pauses: [] })
     })
 
     /** The route reads the pauses and posts inside digestOnce; a second delivery reads nothing new. */
@@ -498,15 +511,154 @@ describe('the daily digest', () => {
       const announced: string[] = []
       const deliver = () =>
         digestOnce(db, orgId, new Date(NOW.getTime() - DIGEST_WINDOW_HOURS * HOUR), async (tx) => {
-          const { pauses, found } = await digestCampaignPauses(tx, orgId, { now: NOW })
+          const { pauses, found, readThrough } = await digestCampaignPauses(tx, orgId, { now: NOW })
           announced.push(...pauses.map((p) => p.campaignId))
-          await digestRecord(tx, { orgId, posted: true, counts: digestCounts(await digestFacts(tx, orgId, { now: NOW })), campaignPauses: { found, posted: pauses.length } })
+          await digestRecord(tx, {
+            orgId, posted: true, counts: digestCounts(await digestFacts(tx, orgId, { now: NOW })),
+            campaignPauses: { found, posted: pauses.length, readThrough },
+          })
         })
       expect((await deliver()).ran).toBe(true)
       expect((await deliver()).ran).toBe(false)
       expect(announced).toHaveLength(1)
       const [row] = await db.select().from(schema.auditLog).where(eq(schema.auditLog.action, 'cron.digest'))
-      expect((row!.detail as Record<string, unknown>)['campaignPauses']).toEqual({ found: 1, posted: 1 })
+      expect((row!.detail as Record<string, unknown>)['campaignPauses']).toEqual({
+        found: 1, posted: 1, readThrough: { at: '2026-09-30T11:00:00.000000Z', id: expect.any(String) },
+      })
+    })
+
+    // -----------------------------------------------------------------------
+    /**
+     * The window between runs is a HIGH-WATER MARK on one clock: the stored
+     * `(created_at, id)` of the last pause a run read, kept in its
+     * `cron.digest` row and read strictly after by the next. The route's `now`
+     * is a JavaScript clock taken before the org loop; the `cron.digest` row
+     * is stamped with Postgres `now()` at the transaction's start. Bounding
+     * one run by the first and the next by the second lost every pause stamped
+     * in between, and announced twice every pause stamped in between the other
+     * way round when the web's clock ran ahead of the database's.
+     *
+     * These run in real time, the way the route does: the `cron.digest` row
+     * gets the database's own `now()`, and each run's `now` is placed around
+     * it on purpose.
+     */
+    describe('between runs', () => {
+      const ZERO = digestCounts({
+        pendingApprovals: 0, unhandledReplies: 0, rottingDeals: 0, staleCompanies: 0, neverScanned: 0,
+        dueTasks: 0, overdueTasks: 0, refusals24h: [], optOutsNotRecorded24h: 0, spend24hUsd: '0.00', topRotting: [],
+      })
+
+      /** One org's run as the route makes it: read inside the once-per-day guard, record the mark it read to. */
+      const runAt = async (now: Date) => {
+        const run = await digestOnce(db, orgId, new Date(now.getTime() - DIGEST_WINDOW_HOURS * HOUR), async (tx) => {
+          const got = await digestCampaignPauses(tx, orgId, { now })
+          await digestRecord(tx, {
+            orgId, posted: true, counts: ZERO,
+            campaignPauses: { found: got.found, posted: got.pauses.length, readThrough: got.readThrough },
+          })
+          return got
+        })
+        if (!run.ran) throw new Error('the once-per-day guard stopped a run this test meant to make')
+        return run.value
+      }
+
+      /** A pause stamped at an exact instant, to the microsecond, as the database stores it. */
+      const pausedAt = async (at: string) => {
+        const campaignId = randomUUID()
+        await test.pg.query(
+          `INSERT INTO audit_log (org_id, actor, action, subject_type, subject_id, created_at, detail)
+           VALUES ($1, 'system', 'campaign.auto_paused', 'campaign', $2, $3::timestamptz, $4::jsonb)`,
+          [orgId, campaignId, at, JSON.stringify({ bouncePct: 12, threshold: 5, sentTo: 25, bounced: 3 })],
+        )
+        return campaignId
+      }
+      const offset = (base: number, ms: number) => new Date(base + ms).toISOString()
+
+      it('announces on the next run a pause stamped after the route’s now but before the digest transaction', async () => {
+        const t0 = Date.now()
+        const routeNow = new Date(t0 - 60_000)
+        // The worker commits it after the route took `now` and before the digest's BEGIN.
+        const between = await pausedAt(offset(t0, -30_000))
+        expect((await runAt(routeNow)).found).toBe(0)
+        const next = await runAt(new Date(routeNow.getTime() + 24 * HOUR))
+        expect(next.pauses.map((p) => p.campaignId)).toEqual([between])
+        expect(next.found).toBe(1)
+      })
+
+      it('never announces one pause twice across two runs, even when the web’s clock runs ahead of the database’s', async () => {
+        const t0 = Date.now()
+        // A route clock a minute ahead: this pause is read by the first run although the digest row is stamped before it.
+        const routeNow = new Date(t0 + 60_000)
+        const early = await pausedAt(offset(t0, 30_000))
+        const first = await runAt(routeNow)
+        expect(first.pauses.map((p) => p.campaignId)).toEqual([early])
+        const later = await pausedAt(offset(t0, 90_000))
+        const second = await runAt(new Date(routeNow.getTime() + 23 * HOUR))
+        expect(second.pauses.map((p) => p.campaignId)).toEqual([later])
+        const announced = [...first.pauses, ...second.pauses].map((p) => p.campaignId)
+        expect(new Set(announced).size).toBe(announced.length)
+      })
+
+      /**
+       * `created_at` holds microseconds and a Date milliseconds. A mark cut to
+       * the millisecond reads the first pause again; one rounded up loses the
+       * second, which the database stamped in the same millisecond.
+       */
+      it('keeps the mark to the microsecond: a pause in the same millisecond as the last one read is read once, next time', async () => {
+        const ms = new Date(Date.now() - 10 * 60_000).toISOString() // …T12:34:56.789Z
+        const at = (us: string) => ms.replace('Z', `${us}Z`)
+        const first = await pausedAt(at('400'))
+        const runOne = await runAt(new Date(Date.parse(ms) + 5))
+        expect(runOne.pauses.map((p) => p.campaignId)).toEqual([first])
+        expect(runOne.readThrough).toEqual({ at: at('400'), id: expect.any(String) })
+        // Stamped in the same millisecond, committed after the first run read.
+        const second = await pausedAt(at('700'))
+        const runTwo = await runAt(new Date(Date.parse(ms) + 5 + 23 * HOUR))
+        expect(runTwo.pauses.map((p) => p.campaignId)).toEqual([second])
+        expect(runTwo.readThrough.at).toBe(at('700'))
+        const [row] = await db
+          .select({ detail: schema.auditLog.detail })
+          .from(schema.auditLog)
+          .where(eq(schema.auditLog.action, 'cron.digest'))
+          .orderBy(schema.auditLog.createdAt)
+          .limit(1)
+        expect((row!.detail as { campaignPauses: { readThrough: unknown } }).campaignPauses.readThrough).toEqual(runOne.readThrough)
+      })
+
+      it('finds the previous run’s mark past twenty-four hours, so a late run drops nothing', async () => {
+        const routeNow = new Date(Date.now())
+        expect((await runAt(routeNow)).found).toBe(0)
+        const justAfter = await pausedAt(offset(routeNow.getTime(), 1_000))
+        // Vercel fires anywhere inside its minute, and a failed day makes the gap a whole day longer.
+        const late = await runAt(new Date(routeNow.getTime() + 24 * HOUR + 30_000))
+        expect(late.pauses.map((p) => p.campaignId)).toEqual([justAfter])
+      })
+
+      /**
+       * A run that reads nothing keeps the previous mark rather than moving
+       * it to its own `now`: a pause the database stamped before that run
+       * read, but committed after, is still after the mark.
+       */
+      it('carries the mark through a run that reads nothing', async () => {
+        const t0 = Date.now() - 2 * 60_000
+        const first = await pausedAt(offset(t0, 0))
+        expect((await runAt(new Date(t0 + 1_000))).pauses.map((p) => p.campaignId)).toEqual([first])
+        const quiet = await runAt(new Date(t0 + 1_000 + 21 * HOUR))
+        expect(quiet.found).toBe(0)
+        // Stamped before the quiet run's `now`, and visible only after it read.
+        const straggler = await pausedAt(offset(t0, 5_000))
+        const next = await runAt(new Date(t0 + 1_000 + 42 * HOUR))
+        expect(next.pauses.map((p) => p.campaignId)).toEqual([straggler])
+      })
+
+      it('reads the pauses past the cap once: counted by that run, never carried into the next', async () => {
+        const t0 = Date.now() - 2 * 60_000
+        for (let i = 0; i < DIGEST_MAX_PAUSE_NOTICES + 2; i += 1) await pausedAt(offset(t0, i * 1_000))
+        const full = await runAt(new Date(t0 + 60_000))
+        expect(full.found).toBe(DIGEST_MAX_PAUSE_NOTICES + 2)
+        expect(full.pauses).toHaveLength(DIGEST_MAX_PAUSE_NOTICES)
+        expect((await runAt(new Date(t0 + 60_000 + 21 * HOUR))).found).toBe(0)
+      })
     })
   })
 })

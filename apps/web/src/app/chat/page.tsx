@@ -18,6 +18,7 @@ import { getDb } from '@/lib/db'
  * back here starts a fresh thread rather than reopening one you put away.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export default async function ChatPage() {
   const session = await auth()

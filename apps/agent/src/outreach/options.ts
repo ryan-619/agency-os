@@ -5,7 +5,7 @@
  * logger, the batch size — as required arguments, and everything a later
  * feature adds (the one-click unsubscribe headers, the bounce threshold that
  * pauses a campaign) as optional ones. This function is where those optional
- * ones are built from `loadEnv()`'s result, so `index.ts` spreads its answer
+ * ones are built from `loadEnv()`'s result, so `worker.ts` spreads its answer
  * into the `startSender` call and is never edited to add one.
  *
  * The type is derived from `SenderDeps` rather than written out, so a setting

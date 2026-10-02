@@ -10,7 +10,7 @@
  * A heartbeat that stops is the fact the CLAUDE.md header warns nobody can
  * otherwise see.
  *
- * `index.ts` is wired once and never edited again: it calls `startHeartbeat`
+ * `worker.ts` is wired once and never edited again: it calls `startHeartbeat`
  * after the single-worker lock and reads `lastHeartbeatAt` into `/readyz`.
  *
  * A failing write is logged by `err.name` and survived. A worker that dies

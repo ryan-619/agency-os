@@ -18,7 +18,7 @@
  */
 import { and, asc, desc, eq, gte, isNull, lte, ne, or, sql } from 'drizzle-orm'
 import {
-  DEFAULT_STALE_AFTER_DAYS, isStale, meetingBrief, parseIcpDefinition,
+  isStale, meetingBrief, parseIcpDefinition, staleAfterDaysOf,
   type Brief, type IcpDefinition,
 } from '@agency/core'
 import * as schema from './schema.js'
@@ -552,7 +552,8 @@ export async function briefForMeeting(
   } catch {
     icp = null
   }
-  const staleAfter = icp?.freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
+  // Never the raw value: `isStale` throws on one that is not a positive number.
+  const staleAfter = staleAfterDaysOf(icp)
 
   const [contacts, deal, found, thread] = await Promise.all([
     listContactsForCompany(db, orgId, meeting.companyId),

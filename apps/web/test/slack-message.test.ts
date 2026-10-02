@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { slackOptOutNotRecordedPayload } from '@agency/core'
 import { displayDomain, slackMessage, type NotificationEvent } from '../src/lib/slack-message'
 
 const ORG = '00000000-0000-4000-8000-00000000000a'
@@ -27,11 +28,14 @@ const EVENTS: readonly NotificationEvent[] = [
   {
     kind: 'digest', orgId: ORG, pendingApprovals: 2, unhandledReplies: 3, rottingDeals: 1, staleCompanies: 4, neverScanned: 5,
     dueTasks: 1, overdueTasks: 1, refusals24h: [{ code: 'daily_cap', n: 3 }, { code: 'quiet_hours', n: 1 }],
-    optOutsNotRecorded24h: 0, spend24hUsd: '0.12', worker: 'live', topRotting: ['acme.example', 'b.example'],
+    optOutsNotRecorded24h: 0, spend24hUsd: '0.12', worker: 'live', workerLastSeenAt: '2026-09-30T06:40:00.000Z',
+    campaignPauses: { found: 0, notices: 0 }, topRotting: ['acme.example', 'b.example'],
   },
   { kind: 'campaign_paused', orgId: ORG, campaignId: '00000000-0000-4000-8000-000000000006', bouncePct: 7.5, threshold: 5 },
   // A reply that said stop and could not be suppressed (the inbound routes).
   { kind: 'opt_out_not_recorded', orgId: ORG, touchId: '00000000-0000-4000-8000-000000000007', contactId: '00000000-0000-4000-8000-000000000001', path: 'reply' },
+  // A STOP texted from a number no single contact holds: no message row, no contact (the DoveSoft route).
+  { kind: 'opt_out_not_recorded', orgId: ORG, touchId: null, contactId: null, path: 'reply' },
 ]
 
 /** The lines of a payload that are not the deep link. */
@@ -120,6 +124,49 @@ describe('slackMessage', () => {
     expect(payload.text).not.toContain('sequence is paused')
   })
 
+  /**
+   * Review round 8, [8]: a colleague on the thread replied all, and the
+   * reply was filed under the contact our message went to. "They asked to
+   * stop" beside the contact's id pointed a person at somebody who never
+   * asked.
+   */
+  describe('a reply from somebody else on the thread', () => {
+    const colleague = (over: Partial<Extract<NotificationEvent, { kind: 'reply' }>> = {}): NotificationEvent => ({
+      kind: 'reply', orgId: ORG, contactId: 'c', touchId: 't', companyDomain: 'acme.example', replyKind: 'opted_out',
+      paused: true, suppressed: true, fromIsContact: false, ...over,
+    })
+
+    it('says somebody else asked to stop, and not to suppress the contact', () => {
+      const text = slackMessage(colleague(), ORIGIN).text
+      expect(text).toContain('Reply from acme.example — somebody else on the thread asked to stop.')
+      expect(text).toContain('The sender’s address is on the suppression list — do not answer them.')
+      expect(text).toContain('did not ask to stop: do not suppress them')
+      expect(text).toContain('touch t · filed under contact c · sent by somebody other than the contact')
+      expect(text).not.toContain('They asked to stop')
+    })
+
+    it('says whose words another kind was, and that the contact is held only as any reply holds them', () => {
+      const text = slackMessage(colleague({ replyKind: 'interested', suppressed: false }), ORIGIN).text
+      expect(text).toContain('Reply from acme.example — interested, from somebody else on the thread.')
+      expect(text).toContain('The contact it was filed under is paused, as any reply pauses them')
+    })
+
+    it('posts the contact’s own reply byte for byte as before', () => {
+      const own = slackMessage(
+        { kind: 'reply', orgId: ORG, contactId: 'c', touchId: 't', companyDomain: 'acme.example', replyKind: 'opted_out', paused: true, suppressed: true },
+        ORIGIN,
+      ).text
+      expect(own).toBe(
+        [
+          'Reply from acme.example — asked to stop.',
+          'They asked to stop — do not answer. The address is on the suppression list.',
+          'touch t · contact c',
+          `${ORIGIN}/companies/acme.example`,
+        ].join('\n'),
+      )
+    })
+  })
+
   it('says a paused reply is waiting on a person', () => {
     const payload = slackMessage(
       { kind: 'reply', orgId: ORG, contactId: 'c', touchId: 't', companyDomain: 'acme.example', replyKind: 'not_now', paused: true, suppressed: false },
@@ -174,6 +221,20 @@ describe('slackMessage', () => {
     expect(payload.text.endsWith('…')).toBe(true)
   })
 
+  it('says a retired worker is retired, when it was last seen, and that none is configured — not that it is silent', () => {
+    const digest = { ...EVENTS[6]!, worker: 'retired', workerLastSeenAt: '2026-09-02T17:30:00.000Z' } as NotificationEvent
+    const text = slackMessage(digest, ORIGIN).text
+    expect(text).toContain('Worker: retired — last seen 2026-09-02; no worker is configured')
+    expect(text).not.toContain('SILENT')
+  })
+
+  it('counts the campaigns that paused themselves past the notices, and links to the list — never a name', () => {
+    const digest = { ...EVENTS[6]!, campaignPauses: { found: 7, notices: 3 } } as NotificationEvent
+    const text = slackMessage(digest, ORIGIN).text
+    expect(text).toContain(`and 4 more campaigns paused themselves — see ${ORIGIN}/campaigns`)
+    expect(slackMessage(EVENTS[6]!, ORIGIN).text).not.toContain('paused themselves')
+  })
+
   it('says what a silent worker means for the queue', () => {
     const payload = slackMessage(EVENTS[5]!, ORIGIN)
     expect(payload.text).toContain('not being sent')
@@ -191,6 +252,40 @@ describe('slackMessage', () => {
       expect(words(path)).toMatch(/^OPT-OUT NOT RECORDED\./)
       expect(words(path)).toContain('A person has to record it now.')
     }
+  })
+
+  /**
+   * The worker raises this alarm too (apps/agent/src/notify.ts), through the
+   * same builder in packages/core. Pinned to the bytes the web posted before
+   * the builder moved, so neither process changed what the channel reads.
+   */
+  it('builds the opt-out alarm with the core builder the worker uses, byte for byte as before', () => {
+    const event = EVENTS[8] as Extract<NotificationEvent, { kind: 'opt_out_not_recorded' }>
+    expect(slackMessage(event, ORIGIN)).toEqual(slackOptOutNotRecordedPayload(event, ORIGIN))
+    expect(slackMessage(event, `${ORIGIN}/`)).toEqual({
+      text:
+        'OPT-OUT NOT RECORDED. Somebody asked to be left alone through a reply and no suppression row could be written. ' +
+        'A person has to record it now.\n' +
+        'touch 00000000-0000-4000-8000-000000000007 · contact 00000000-0000-4000-8000-000000000001\n' +
+        'https://app.test/suppressions',
+    })
+  })
+
+  /**
+   * With no message row the alarm cannot point at a touch, and the number it
+   * came from is lead data: it links to the Compliance page, which counts the
+   * failure, and names no number, no touch and no suppressions link.
+   */
+  it('links an opt-out alarm with no touch to /compliance, and names no number', () => {
+    const text = slackMessage(EVENTS[9]!, ORIGIN).text
+    expect(text).toMatch(/^OPT-OUT NOT RECORDED\./)
+    expect(text).toContain('no message or contact named')
+    // It says what is known (review round 7, [8]): check first, record if missing.
+    expect(text).toContain('it may not be on the suppression list')
+    expect(text.split('\n').at(-1)).toBe(`${ORIGIN}/compliance`)
+    expect(text).not.toContain('/suppressions')
+    expect(text).not.toContain('touch ')
+    expect(text).not.toMatch(/\+?\d{10,}/)
   })
 
   it('says why a campaign paused itself', () => {

@@ -63,9 +63,17 @@
  * The child is therefore launched through `env -u …`, which removes those
  * variables after the CLI has merged them in and then execs the real command.
  * `env` replaces itself, so the connector's own argv is unchanged and `ps`
- * shows nothing new. What this does NOT fix, stated rather than hidden: the
- * SDK passes the whole `mcpServers` object to the CLI as `--mcp-config <json>`
- * on ITS argv, decrypted credentials included, for every transport.
+ * shows nothing new.
+ *
+ * ## Not on the CLI's argv either
+ *
+ * What this module builds never goes in `options.mcpServers`: the SDK writes
+ * that option onto the CLI's own argv as `--mcp-config <json>`, decrypted
+ * credentials included, for every transport. A turn and a probe hand these
+ * servers over the CLI's control channel on stdin instead
+ * (`runtime/open-query.ts`), and `buildQueryOptions` accepts in-process
+ * servers only. A stdio credential still reaches its child through the
+ * child's environment, which is where it has to be.
  */
 import type { AgencyDb, ConnectorRow } from '@agency/db'
 import {

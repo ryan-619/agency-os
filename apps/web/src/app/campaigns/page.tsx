@@ -1,12 +1,11 @@
 import { redirect } from 'next/navigation'
-import { can, parseIcpDefinition } from '@agency/core'
+import { can } from '@agency/core'
 import { campaignActivity, campaignAutoPauses, listCampaigns, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { CampaignsPanel, type CampaignView } from '@/components/outreach/campaigns'
 import { getDb } from '@/lib/db'
 import { deployment, nothingWillSendNote } from '@/lib/deployment'
-import { icpForOrg } from '@/lib/queries'
 
 /**
  * Campaigns (PROMPT.md §8.4).
@@ -25,6 +24,7 @@ import { icpForOrg } from '@/lib/queries'
  * why it stopped and what to do.
  */
 export const dynamic = 'force-dynamic'
+export const runtime = 'nodejs'
 
 export default async function CampaignsPage() {
   const session = await auth()
@@ -39,7 +39,7 @@ export default async function CampaignsPage() {
     rows.map(async (c) => ({
       id: c.id,
       name: c.name,
-      channel: (c.channel === 'linkedin' ? 'linkedin' : 'email') as 'email' | 'linkedin',
+      channel: (c.channel === 'linkedin' || c.channel === 'sms' ? c.channel : 'email') as CampaignView['channel'],
       dailyCap: c.dailyCap,
       quietStart: c.quietStart,
       quietEnd: c.quietEnd,
@@ -55,16 +55,6 @@ export default async function CampaignsPage() {
     })),
   )
 
-  const icpRow = await icpForOrg(user.orgId)
-  let orgLabel = 'Agency'
-  if (icpRow) {
-    try {
-      orgLabel = parseIcpDefinition(icpRow.definition).label
-    } catch {
-      orgLabel = 'Agency'
-    }
-  }
-
   const d = deployment()
 
   const signOutAction = async () => {
@@ -73,13 +63,14 @@ export default async function CampaignsPage() {
   }
 
   return (
-    <Shell user={user} orgName={orgLabel} current="campaigns" signOut={signOutAction}>
+    <Shell user={user} current="campaigns" signOut={signOutAction}>
       <h1>Campaigns</h1>
       <p className="lede">
         A campaign is where a message&apos;s daily cap and quiet hours come from, and whether it needs
         a person per message. Every message, approved or automatic, is checked against the
         suppression list, consent, quiet hours and the cap at the moment it is sent — the campaign
-        sets the numbers, it does not skip the rules.
+        sets the numbers, it does not skip the rules. An SMS campaign never sends by itself: each SMS
+        is drafted per person from a registered template and approved by a person.
       </p>
       <CampaignsPanel
         campaigns={views}

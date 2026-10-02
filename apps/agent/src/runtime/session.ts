@@ -15,7 +15,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { and, eq, isNull } from 'drizzle-orm'
-import type { Options } from '@anthropic-ai/claude-agent-sdk'
+import type { McpServerConfig, Options } from '@anthropic-ai/claude-agent-sdk'
 import { parseIcpDefinition, type ChatEventBody, type Principal } from '@agency/core'
 import {
   activeIcpProfile, appendAudit, enabledAgentDefs, ensureApproval, expireApproval, readApproval,
@@ -90,7 +90,17 @@ export interface SessionDeps {
 
 export interface TurnRuntime {
   readonly turnId: string
+  /** Carries the in-process `agency` server and no connector (`buildQueryOptions`). */
   readonly options: Options
+  /**
+   * What the turn hands the CLI over its control channel before the prompt
+   * (`runtime/open-query.ts`): every connector this turn has, with its
+   * credential, and `agency` again — the same instance — because the hand-over
+   * REPLACES the dynamic set and an in-process server missing from it is
+   * disconnected. Empty when there are no connectors, and the turn runs
+   * exactly as it did before connectors moved off the argv.
+   */
+  readonly mcpServers: Readonly<Record<string, McpServerConfig>>
   readonly abort: AbortController
 }
 
@@ -249,11 +259,11 @@ export async function buildTurnRuntime(
 
   const options = buildQueryOptions({
     canUseTool,
-    // The in-process agency server always, plus whatever is registered and
-    // enabled. `agency` is spread LAST so a connector named "agency" cannot
-    // displace the app's own tools — the unique index on (org_id, name) does
-    // not know that name is taken.
-    mcpServers: { ...connectors.servers, agency: mcpServer },
+    // The in-process agency server and nothing else. The SDK writes every
+    // server in this option that is not in-process onto the CLI's argv as
+    // `--mcp-config <json>`, decrypted credentials included, so the
+    // connectors are handed over the control channel instead (below).
+    mcpServers: { agency: mcpServer },
     agents: subagents.agents,
     skills: deps.skills,
     hooks: {
@@ -271,7 +281,14 @@ export async function buildTurnRuntime(
     ...(deps.claudeCodePath ? { pathToClaudeCodeExecutable: deps.claudeCodePath } : {}),
   })
 
-  return { turnId, options, abort }
+  // Everything registered and enabled, plus the agency server again. `agency`
+  // is spread LAST so a connector named "agency" cannot displace the app's own
+  // tools — the unique index on (org_id, name) does not know that name is
+  // taken, and a row from before 0018's CHECK can still hold it.
+  const handedOver = Object.keys(connectors.servers).some((name) => name !== 'agency')
+  const mcpServers = handedOver ? { ...connectors.servers, agency: mcpServer } : {}
+
+  return { turnId, options, mcpServers, abort }
 }
 
 /**

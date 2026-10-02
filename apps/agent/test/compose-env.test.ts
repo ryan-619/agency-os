@@ -18,7 +18,7 @@
  * Nothing here starts Docker.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import { parseEnv } from 'node:util'
@@ -111,6 +111,9 @@ describe('compose names every optional variable an app reads', () => {
   const WEB_NOT_PASSED = new Set([
     'VERCEL_ENV', // set by the platform, never by hand; unset is what the cron routes expect here
   ])
+  const VOICE_NOT_PASSED = new Set([
+    'VOICE_MODEL', // declared and read by nothing: the scripted policy is the whole conversation (CLAUDE.md, Voice)
+  ])
 
   it.each(declared('apps/agent/src/env.ts').filter((n) => !AGENT_NOT_PASSED.has(n)))('the agent receives %s', (name) => {
     expect(serviceEnv('agent').has(name)).toBe(true)
@@ -120,12 +123,26 @@ describe('compose names every optional variable an app reads', () => {
     expect(serviceEnv('web').has(name)).toBe(true)
   })
 
+  /**
+   * The voice service's summary model (§5.5) could not be switched on under
+   * compose at all: none of its LLM_* reached the container, so every call
+   * got the deterministic summary whatever .env said.
+   */
+  it.each(declared('apps/voice/src/env.ts').filter((n) => !VOICE_NOT_PASSED.has(n)))('the voice service receives %s', (name) => {
+    expect(serviceEnv('voice').has(name)).toBe(true)
+  })
+
   /** The variables the review found missing, named, so the lists above cannot pass vacuously. */
   it.each([
     ['web', 'CRON_SECRET'], ['web', 'SLACK_WEBHOOK_URL'], ['web', 'UNSUBSCRIBE_SECRET'],
     ['web', 'RESEND_WEBHOOK_SECRET'], ['web', 'RESEND_API_KEY'], ['web', 'INBOUND_WEBHOOK_SECRET'],
     ['web', 'SECRETS_KEY'],
     ['agent', 'UNSUBSCRIBE_SECRET'], ['agent', 'WEB_PUBLIC_URL'], ['agent', 'OUTREACH_BOUNCE_PAUSE_PCT'],
+    ['agent', 'SLACK_WEBHOOK_URL'],
+    ['agent', 'DOVESOFT_API_KEY'], ['agent', 'DOVESOFT_ENTITY_ID'], ['agent', 'DOVESOFT_BASE_URL'],
+    ['voice', 'LLM_PROVIDER'], ['voice', 'LLM_MODEL'], ['voice', 'OLLAMA_BASE_URL'], ['voice', 'OLLAMA_IS_LOCAL'],
+    ['voice', 'LLM_ALLOW_REMOTE_LEAD_DATA'], ['voice', 'OPENAI_API_KEY'], ['voice', 'ANTHROPIC_API_KEY'],
+    ['voice', 'VOICE_HANDOFF_USER_EMAIL'],
   ])('%s receives %s', (service, name) => {
     expect(serviceEnv(service).has(name)).toBe(true)
   })
@@ -135,10 +152,21 @@ describe('compose names every optional variable an app reads', () => {
     // Not vacuous: the multi-line entries are read too.
     expect(declared('apps/agent/src/env.ts')).toEqual(expect.arrayContaining(['AGENT_USE_LOCAL_LOGIN', 'IMAP_SECURE', 'LLM_ALLOW_REMOTE_LEAD_DATA']))
     expect(declared('apps/web/src/lib/env.ts')).toEqual(expect.arrayContaining(['DATABASE_URL', 'AUTH_URL', 'AUTH_TRUST_HOST']))
+    expect(declared('apps/voice/src/env.ts')).toEqual(expect.arrayContaining(['VOICE_PUBLIC_URL', 'OLLAMA_IS_LOCAL', 'LLM_ALLOW_REMOTE_LEAD_DATA']))
     const agent = new Set(declared('apps/agent/src/env.ts'))
     const web = new Set(declared('apps/web/src/lib/env.ts'))
+    const voice = new Set(declared('apps/voice/src/env.ts'))
     for (const name of AGENT_NOT_PASSED) expect(agent.has(name), name).toBe(true)
     for (const name of WEB_NOT_PASSED) expect(web.has(name), name).toBe(true)
+    for (const name of VOICE_NOT_PASSED) expect(voice.has(name), name).toBe(true)
+  })
+
+  /** VOICE_MODEL's reason holds only while nothing in the service reads it. */
+  it('passes no VOICE_MODEL because nothing in apps/voice reads it', () => {
+    expect(serviceEnv('voice').has('VOICE_MODEL')).toBe(false)
+    const readers = readdirSync(resolve(root, 'apps/voice/src')).filter((f) => f.endsWith('.ts') && f !== 'env.ts')
+    expect(readers.length).toBeGreaterThan(3)
+    for (const file of readers) expect(read(`apps/voice/src/${file}`), file).not.toContain('VOICE_MODEL')
   })
 
   /** The one-shot tasks need a connection string and nothing else. */
@@ -173,14 +201,28 @@ describe('every service boots on what compose hands it', () => {
       expect(env.UNSUBSCRIBE_SECRET).toBeUndefined()
       expect(env.WEB_PUBLIC_URL).toBeUndefined()
       expect(env.LLM_PROVIDER).toBeUndefined()
+      expect(env.SLACK_WEBHOOK_URL).toBeUndefined()
       // A blank threshold is the default, never 0 — which would pause a campaign on its first bounce.
       expect(env.OUTREACH_BOUNCE_PAUSE_PCT).toBe(5)
+      // SMS off, and DoveSoft's own API: the production rule passes on the default.
+      expect(env.DOVESOFT_API_KEY).toBeUndefined()
+      expect(env.DOVESOFT_ENTITY_ID).toBeUndefined()
+      expect(env.DOVESOFT_BASE_URL).toBe('https://api.dovesoft.io')
     })
 
-    it('boots the voice service', () => {
+    it('boots the voice service, with the summary model off and lead data kept local', () => {
       const env = loadVoiceEnv(containerEnv('voice', dotenv) as NodeJS.ProcessEnv)
       expect(env.VOICE_PUBLIC_URL).toBeUndefined()
       expect(env.VOICE_ORG_ID).toBeUndefined()
+      expect(env.VOICE_HANDOFF_USER_EMAIL).toBeUndefined()
+      expect(env.LLM_PROVIDER).toBeUndefined()
+      expect(env.LLM_MODEL).toBeUndefined()
+      expect(env.OLLAMA_BASE_URL).toBe('http://127.0.0.1:11434')
+      // A blank is the default in both directions: declared local, and no consent to send lead data away.
+      expect(env.OLLAMA_IS_LOCAL).toBe(true)
+      expect(env.LLM_ALLOW_REMOTE_LEAD_DATA).toBe(false)
+      expect(env.OPENAI_API_KEY || undefined).toBeUndefined()
+      expect(env.ANTHROPIC_API_KEY || undefined).toBeUndefined()
     })
 
     it('boots the web app, with every feature behind a blank off', async () => {
@@ -195,13 +237,48 @@ describe('every service boots on what compose hands it', () => {
   /** And a value set in .env now arrives: the whole point of the wiring. */
   it('delivers a configured value to both halves that need it', async () => {
     const secret = 'u'.repeat(40)
-    const dotenv = { ...MINIMAL_DOTENV, UNSUBSCRIBE_SECRET: secret, WEB_PUBLIC_URL: 'https://agency.example.com', CRON_SECRET: 'c'.repeat(40) }
+    const slack = 'https://hooks.slack.com/services/T0000/B0000/XXXXXXXX'
+    const dotenv = {
+      ...MINIMAL_DOTENV, UNSUBSCRIBE_SECRET: secret, WEB_PUBLIC_URL: 'https://agency.example.com', CRON_SECRET: 'c'.repeat(40),
+      SLACK_WEBHOOK_URL: slack,
+    }
     const agent = loadAgentEnv(containerEnv('agent', dotenv) as NodeJS.ProcessEnv)
     expect(agent.UNSUBSCRIBE_SECRET).toBe(secret)
     expect(agent.WEB_PUBLIC_URL).toBe('https://agency.example.com')
+    expect(agent.SLACK_WEBHOOK_URL).toBe(slack)
     const web = await bootWeb(containerEnv('web', dotenv))
+    expect(web['SLACK_WEBHOOK_URL']).toBe(slack)
     expect(web['UNSUBSCRIBE_SECRET']).toBe(secret)
     expect(web['CRON_SECRET']).toBe('c'.repeat(40))
+  })
+
+  /** SMS, configured in .env, reaches the worker — the only process that sends. */
+  it('delivers the DoveSoft configuration to the worker', () => {
+    const dotenv = {
+      ...MINIMAL_DOTENV, DOVESOFT_API_KEY: 'dsk-0123456789', DOVESOFT_ENTITY_ID: '1101234567890123456',
+      DOVESOFT_BASE_URL: 'https://gateway.dovesoft.example.com',
+    }
+    const agent = loadAgentEnv(containerEnv('agent', dotenv) as NodeJS.ProcessEnv)
+    expect(agent.DOVESOFT_API_KEY).toBe('dsk-0123456789')
+    expect(agent.DOVESOFT_ENTITY_ID).toBe('1101234567890123456')
+    expect(agent.DOVESOFT_BASE_URL).toBe('https://gateway.dovesoft.example.com')
+  })
+
+  /** The summary model, configured once in .env, reaches the voice container — and the worker's triage, which reads the same names. */
+  it('delivers the summary model to the voice service', () => {
+    const dotenv = {
+      ...MINIMAL_DOTENV, LLM_PROVIDER: 'ollama', LLM_MODEL: 'llama3.1', OLLAMA_BASE_URL: 'http://ollama:11434', OLLAMA_IS_LOCAL: 'false',
+      LLM_ALLOW_REMOTE_LEAD_DATA: 'true', VOICE_HANDOFF_USER_EMAIL: 'owner@example.com',
+    }
+    const voice = loadVoiceEnv(containerEnv('voice', dotenv) as NodeJS.ProcessEnv)
+    expect(voice.LLM_PROVIDER).toBe('ollama')
+    expect(voice.LLM_MODEL).toBe('llama3.1')
+    expect(voice.OLLAMA_BASE_URL).toBe('http://ollama:11434')
+    expect(voice.OLLAMA_IS_LOCAL).toBe(false)
+    expect(voice.LLM_ALLOW_REMOTE_LEAD_DATA).toBe(true)
+    expect(voice.VOICE_HANDOFF_USER_EMAIL).toBe('owner@example.com')
+    const agent = loadAgentEnv(containerEnv('agent', dotenv) as NodeJS.ProcessEnv)
+    expect(agent.LLM_PROVIDER).toBe('ollama')
   })
 
   it('still refuses to start without the two secrets', () => {

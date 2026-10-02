@@ -106,7 +106,7 @@ import type { CallRow } from './calls.js'
 import type { MeetingRow } from './meetings.js'
 import type { NoteRow } from './notes.js'
 import type { TaskRow } from './tasks.js'
-import type { InboundLog, TouchRow } from './outreach.js'
+import { pauseContactOverriding, type InboundLog, type TouchRow } from './outreach.js'
 
 /** What an erased message's subject, body and From read as afterwards. */
 export const ERASURE_PLACEHOLDER = '[erased at the person’s request]'
@@ -758,7 +758,7 @@ export async function erasureErase(
     // with THIS reason, over any earlier one (see the header).
     let paused = false
     try {
-      paused = await pauseOverriding(
+      paused = await pauseContactOverriding(
         db, orgId, contactId, `erasure requested ${now.toISOString().slice(0, 10)}; not completed (${why})`, now,
       )
     } catch (pauseErr) {
@@ -793,26 +793,6 @@ export async function erasureErase(
     })
     return { ok: false, reason: 'suppression_failed', message: failureMessage(why, paused), why, paused, latestTouchId }
   }
-}
-
-/**
- * Pause them with THIS reason, whether or not they were already paused.
- *
- * `pauseContact` keeps the first reason on purpose — a second reply must not
- * replace the one that explains the pause — and that is wrong here: an
- * erasure that could not finish is the reason that matters now. Left behind
- * an older `replied …`, it let answering that reply in /inbox resume a person
- * who had asked to be erased (the inbox ends only a reply's own pause). The
- * UPDATE is written here rather than as a parameter on `pauseContact`,
- * which outreach.ts owns.
- */
-async function pauseOverriding(db: AgencyDb, orgId: string, contactId: string, reason: string, now: Date): Promise<boolean> {
-  const rows = await db
-    .update(schema.contacts)
-    .set({ pausedAt: now, pausedReason: reason.slice(0, 500) })
-    .where(and(eq(schema.contacts.orgId, orgId), eq(schema.contacts.id, contactId)))
-    .returning({ id: schema.contacts.id })
-  return rows.length === 1
 }
 
 /** Exposed for the test that keeps it in step with `booking.ts`. */

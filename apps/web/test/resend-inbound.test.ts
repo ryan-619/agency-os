@@ -18,6 +18,7 @@
 import { createHmac } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { htmlToText as coreHtmlToText } from '@agency/core'
 import { looksLikeOptOut, type InboundOutcome } from '@agency/db/queries'
 import {
   RESEND_MAX_BODY,
@@ -166,7 +167,8 @@ describe('mapReceivedEmail', () => {
     expect(mapReceivedEmail({ ...RECEIVED, message_id: undefined, headers: {} })?.messageId).toBeNull()
   })
 
-  it('never has a DSN: the receiving API lists attachments without inlining them', () => {
+  /** A report's parts are attachments, read by further requests in receiveResendWebhook — resend-dsn.test.ts. */
+  it('has no DSN of its own: the receiving API lists attachments without inlining them', () => {
     expect(mapReceivedEmail(RECEIVED)?.dsn).toBeNull()
   })
 })
@@ -183,8 +185,14 @@ describe('htmlToText, read by the opt-out reader', () => {
     const text = htmlToText(gmailStop)
     expect(text.split('\n')[0]).toBe('Stop')
     expect(looksLikeOptOut(text)).toBe(true)
-    // Flattened to one line — the worker's fallback — the same reply is not.
+    // Why the lines matter: flattened to one line, the same reply is not an
+    // opt-out. That is what the worker's IMAP parser used to do with an HTML
+    // part below the root (Outlook's multipart/related), so the person was
+    // paused and never suppressed. Both paths now read HTML through this one
+    // converter, in packages/core — apps/agent/test/inbox.test.ts drives the
+    // worker's parser over the same HTML and asserts the same text.
     expect(looksLikeOptOut(text.replace(/\s+/g, ' '))).toBe(false)
+    expect(htmlToText).toBe(coreHtmlToText)
   })
 
   it('does not read a quoted "unsubscribe" as the person’s own words', () => {

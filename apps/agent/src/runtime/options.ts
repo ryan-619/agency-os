@@ -23,7 +23,7 @@
  * the `managedSettings` policy tier below, and the `PreToolUse` hook that
  * forces a prompt for anything above low risk.
  */
-import type { Options } from '@anthropic-ai/claude-agent-sdk'
+import type { McpSdkServerConfigWithInstance, Options } from '@anthropic-ai/claude-agent-sdk'
 
 /**
  * Every option key this application is allowed to set.
@@ -79,7 +79,16 @@ export const FORBIDDEN_TOOLS: readonly string[] = [
 
 export interface BuildOptionsInput {
   readonly canUseTool: Options['canUseTool']
-  readonly mcpServers: NonNullable<Options['mcpServers']>
+  /**
+   * IN-PROCESS servers only, and the type says so. The SDK writes every
+   * server in `mcpServers` that is not in-process onto the CLI's argv as
+   * `--mcp-config <json>` — a connector's decrypted header or stdio
+   * credential included, readable by anyone who can list processes on the
+   * host. Connectors go over the control channel instead
+   * (`runtime/open-query.ts`); an in-process server's name is all the CLI
+   * is told about it, in the `initialize` request on stdin.
+   */
+  readonly mcpServers: Readonly<Record<string, McpSdkServerConfigWithInstance>>
   /**
    * The subagents from `agent_defs` (§7).
    *
@@ -130,9 +139,12 @@ export function buildQueryOptions(input: BuildOptionsInput): Options {
     // answer — what IS in the default tool set — by making it irrelevant.
     tools: [],
     disallowedTools: [...FORBIDDEN_TOOLS],
-    mcpServers: input.mcpServers,
-    // Only servers declared here. Without it, an `.mcp.json` on disk would add
-    // servers nobody registered in the connectors table.
+    mcpServers: { ...input.mcpServers },
+    // Only servers this process names — here, or handed over the control
+    // channel. Without it, an `.mcp.json` on disk would add servers nobody
+    // registered in the connectors table. (It does not refuse the hand-over:
+    // measured against the shipped CLI, `setMcpServers` connects a stdio
+    // server under `--strict-mcp-config`.)
     strictMcpConfig: true,
     // §7's subagents. Note what is NOT done alongside this: §7 says to include
     // "Agent" in allowedTools "so delegation does not stall on approval". That
@@ -226,7 +238,7 @@ export function buildQueryOptions(input: BuildOptionsInput): Options {
  * out of the OS keychain — this process never reads it, never holds it, and
  * never puts it in an environment. It exists so Phase 2 and Phase 3's
  * Definitions of Done can be proved on a machine with no API key, and
- * `index.ts` REFUSES TO BOOT with it when NODE_ENV is production: a personal
+ * `loadEnv` REFUSES TO BOOT with it when NODE_ENV is production: a personal
  * credential standing behind a shared service is what §2.3 is about.
  */
 export type AgentCredential =

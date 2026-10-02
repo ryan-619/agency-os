@@ -131,10 +131,34 @@ describe('previewSend agrees with dispatchTouch', () => {
     await agrees('send_now')
   })
 
-  it('a paused contact reads as consent_revoked', async () => {
-    await db.update(schema.contacts).set({ pausedAt: NOON, pausedReason: 'replied' }).where(eq(schema.contacts.id, contactId))
-    const p = await agrees('consent_revoked')
+  /**
+   * A pause is its own refusal, not a revoked consent — the code enrolment
+   * reads as the person's own no. The consent the decision read is the row
+   * as recorded (none), and the pause's class is reported beside its text.
+   */
+  it('a paused contact reads as paused, with the consent as recorded', async () => {
+    await db.update(schema.contacts).set({ pausedAt: NOON, pausedReason: 'on leave until October (by sam@agency.test)' }).where(eq(schema.contacts.id, contactId))
+    const p = await agrees('paused')
+    expect(p.decision).toMatchObject({ humanCanResolve: false })
     expect(p.facts.paused).toBe(true)
+    expect(p.facts.pausedFor).toBe('manual')
+    expect(p.facts.consent).toBeNull()
+    expect(p.facts.consentRecorded).toBeNull()
+  })
+
+  it('a declined AND paused contact reads as consent_revoked: the refusal they recorded outranks the pause', async () => {
+    await db.insert(schema.consents).values({ orgId, contactId, channel: 'email', granted: false, source: 'said no on a call' })
+    await db.update(schema.contacts).set({ pausedAt: NOON, pausedReason: `replied ${NOON.toISOString()}` }).where(eq(schema.contacts.id, contactId))
+    const p = await agrees('consent_revoked')
+    expect(p.facts.pausedFor).toBe('replied')
+  })
+
+  /** Found by review: a stale draft whose address also bounced read as `bounced`, which a person may resolve. */
+  it('stale AND bounced reads as stale_evidence, which nobody may approve past', async () => {
+    await db.insert(schema.scans).values({ orgId, companyId, ranAt: new Date(NOON.getTime() - 30 * 86_400_000), ok: true })
+    await db.update(schema.contacts).set({ emailBouncedAt: NOON, emailBounceCode: '5.1.1' }).where(eq(schema.contacts.id, contactId))
+    const p = await agrees('stale_evidence')
+    expect(p.decision).toMatchObject({ humanCanResolve: false })
   })
 
   /**
@@ -152,6 +176,7 @@ describe('previewSend agrees with dispatchTouch', () => {
     expect(p.facts.pausedReason).toBe('replied 2026-09-15')
     // Nobody recorded a consent answer; the pause is not one.
     expect(p.facts.consentRecorded).toBeNull()
+    expect(p.facts.consent).toBeNull()
   })
 
   /** Found by review: a refused AND bounced person read as `bounced`, which a person may resolve. */

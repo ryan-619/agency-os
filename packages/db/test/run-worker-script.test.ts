@@ -1,0 +1,671 @@
+/**
+ * tools/run-worker.sh — the worker on the operator's own machine, the
+ * deployment for an agency that has not rented a server.
+ *
+ * It is driven here against stubs: `uname` (to read as a Mac, or not),
+ * `security` (a Keychain kept in files), `caffeinate` (runs its command),
+ * `node` (in front of the real one, for the version check), `pbcopy` (keeps
+ * what it was handed, so a test can compare it), the lockfile's
+ * `node_modules/.bin/tsc` and `tsx` (each records what it was asked to run
+ * and the NAMES and values in its environment, then stops), and an `npx`
+ * that records being run at all — which it never may be. So the REAL script
+ * runs, and nothing reaches a database, a mailbox or the network.
+ *
+ * The prompts need a terminal. Where util-linux's `script` is installed (CI's
+ * Ubuntu), the questions are answered through a pseudo-terminal it opens,
+ * with echo off so a typed secret never reaches the transcript, one answer
+ * per prompt as it appears; elsewhere only the saved-answer path runs.
+ *
+ * What is pinned:
+ *  - a saved answer reaches the worker's ENVIRONMENT, never any process's
+ *    argument list (§2.3: `ps` shows argv to every user on the machine) —
+ *    the Keychain stub records every argv it is given;
+ *  - port 465 is implicit TLS (`SMTP_SECURE=true`), anything else STARTTLS;
+ *  - the packages are built before the worker starts, because they run as
+ *    compiled JavaScript and a fresh checkout or a `git pull` would otherwise
+ *    run stale code or none — and built BEFORE any answer is read, with the
+ *    lockfile's tsc and tsx by path, never npx, which runs whatever the
+ *    registry holds under a name it cannot find locally (review round 9,
+ *    [9]); a checkout without them is told to run `npm ci`;
+ *  - the UNSUBSCRIBE_SECRET is never made up on a key press (review round 9,
+ *    [2] and [7]): Enter keeps the saved one or sends no header, a new one is
+ *    made only when typed for, confirmed, and only where it can be put on the
+ *    clipboard AND saved — never off a Mac — and a secret saved before
+ *    survives a reconfigure that turns sending off;
+ *  - chat runs only with a tunnel: an ngrok stub stands in for ngrok, which is
+ *    started from an EMPTY environment (no credential reaches a third
+ *    party's binary), with the domain on its argv and nothing secret; the
+ *    worker gets the Anthropic key and the saved AGENT_INTERNAL_TOKEN only
+ *    when chat is on, and the token is made on a key press only onto the
+ *    clipboard and into the Keychain — and never over an unsubscribe secret
+ *    still waiting to be pasted;
+ *  - Neon's pooled endpoint is refused, saved or not;
+ *  - `--forget` removes every saved answer.
+ */
+import { spawn, spawnSync } from 'node:child_process'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
+const script = resolve(root, 'tools/run-worker.sh')
+
+const DB = 'postgresql://owner:db-password-never-in-argv-77@ep-quiet-sky-123.us-east-1.aws.neon.tech/agency'
+const SMTP_PASSWORD = 're_smtp_key_never_in_argv_31'
+const IMAP_PASSWORD = 'imap-app-password-never-in-argv'
+const UNSUB = 'u'.repeat(64)
+const VERCEL_UNSUB = 'v'.repeat(64)
+const FROM = 'Agency <hello@myagencyos.in>'
+const ANTHROPIC_KEY = 'sk-ant-api03-key-never-in-argv-or-ngrok'
+const CHAT_TOKEN = 't'.repeat(64)
+const CHAT_DOMAIN = 'calm-otter-42.ngrok-free.app'
+/** What the worker's build and run must never be handed before the operator has answered anything. */
+const CREDENTIALS = [
+  'DATABASE_URL', 'SMTP_PASSWORD', 'IMAP_PASSWORD', 'UNSUBSCRIBE_SECRET', 'SLACK_WEBHOOK_URL', 'DOVESOFT_API_KEY',
+  'ANTHROPIC_API_KEY', 'AGENT_INTERNAL_TOKEN',
+]
+
+let dir: string
+let bin: string
+let keychain: string
+let logs: string
+
+function stub(name: string, body: string): void {
+  const path = join(bin, name)
+  writeFileSync(path, `#!/usr/bin/env bash\n${body}\n`)
+  chmodSync(path, 0o755)
+}
+
+/**
+ * The lockfile's tsc or tsx: record the argv on one line — the tool's name
+ * first — then every NAME=value, then stop.
+ */
+const LOCAL_BIN = '{ printf "%s %s\\n" "$(basename "$0")" "$*"; env; printf "\\n\\0\\n"; } >> "$LOGS/run"; exit 0'
+
+/** A checkout the script can `cd` into: tools/run-worker.sh and a node_modules with its two tools. */
+function layout(): string {
+  const repo = join(dir, 'repo')
+  mkdirSync(join(repo, 'tools'), { recursive: true })
+  mkdirSync(join(repo, 'node_modules/.bin'), { recursive: true })
+  writeFileSync(join(repo, 'tools/run-worker.sh'), readFileSync(script))
+  chmodSync(join(repo, 'tools/run-worker.sh'), 0o755)
+  for (const tool of ['tsc', 'tsx']) {
+    writeFileSync(join(repo, 'node_modules/.bin', tool), `#!/usr/bin/env bash\n${LOCAL_BIN}\n`)
+    chmodSync(join(repo, 'node_modules/.bin', tool), 0o755)
+  }
+  return repo
+}
+
+function save(name: string, value: string): void {
+  writeFileSync(join(keychain, name), Buffer.from(value).toString('base64'))
+}
+
+/** What the Keychain stub holds for `name`, decoded; undefined when nothing is saved. */
+function saved(name: string): string | undefined {
+  const file = join(keychain, name)
+  return existsSync(file) ? Buffer.from(readFileSync(file, 'utf8').trim(), 'base64').toString() : undefined
+}
+
+/** What pbcopy was last handed; undefined when it never ran. */
+function clipboard(): string | undefined {
+  const file = join(logs, 'clipboard')
+  return existsSync(file) ? readFileSync(file, 'utf8') : undefined
+}
+
+/** Whether anything ran npx — which nothing may. */
+const npxRan = () => existsSync(join(logs, 'npx'))
+
+function run(repo: string, args: string[] = []) {
+  return spawnSync('bash', [join(repo, 'tools/run-worker.sh'), ...args], {
+    cwd: repo,
+    env: { PATH: `${bin}:${process.env.PATH}`, HOME: dir, KEYCHAIN: keychain, LOGS: logs },
+    encoding: 'utf8',
+    timeout: 30_000,
+  })
+}
+
+function calls(): { argv: string; env: Record<string, string> }[] {
+  if (!existsSync(join(logs, 'run'))) return []
+  return readFileSync(join(logs, 'run'), 'utf8').trim().split('\n\0\n').filter(Boolean).map((block) => {
+    const [argv, ...env] = block.split('\n')
+    return { argv: argv!, env: Object.fromEntries(env.map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)])) }
+  })
+}
+
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), 'run-worker-'))
+  bin = join(dir, 'bin')
+  keychain = join(dir, 'keychain')
+  logs = join(dir, 'logs')
+  for (const d of [bin, keychain, logs]) mkdirSync(d)
+
+  stub('uname', 'echo Darwin')
+  // The Keychain: find prints the stored base64; delete removes it; `-i`
+  // reads `add-generic-password … -a NAME -w BASE64` lines on STDIN. Every
+  // argv it is ever given is appended to a log the tests read.
+  stub('security', [
+    'printf "%s\\n" "$*" >> "$LOGS/security-argv"',
+    'case "$1" in',
+    '  find-generic-password) a=""; while [ $# -gt 0 ]; do [ "$1" = -a ] && a="$2"; shift; done',
+    '    [ -f "$KEYCHAIN/$a" ] || exit 44; cat "$KEYCHAIN/$a"; echo ;;',
+    '  delete-generic-password) a=""; while [ $# -gt 0 ]; do [ "$1" = -a ] && a="$2"; shift; done; rm -f "$KEYCHAIN/$a" ;;',
+    '  -i) while read -r cmd rest; do set -- $rest; a=""; w=""',
+    '      while [ $# -gt 0 ]; do case "$1" in -a) a="$2";; -w) w="$2";; esac; shift; done',
+    '      printf "%s" "$w" > "$KEYCHAIN/$a"; done ;;',
+    'esac',
+  ].join('\n'))
+  stub('caffeinate', 'shift; exec "$@"')
+  // The version check is the only thing that asks node; answer it as 22,
+  // whatever node this machine has first on PATH.
+  stub('node', `case "$1" in -p) echo 22 ;; -v) echo v22.0.0 ;; *) exec "${process.execPath}" "$@" ;; esac`)
+  stub('pbcopy', 'cat > "$LOGS/clipboard"')
+  // npx: never to be run. It records that it was, and stops.
+  stub('npx', 'printf "%s\\n" "$*" >> "$LOGS/npx"; exit 0')
+})
+
+afterEach(() => rmSync(dir, { recursive: true, force: true }))
+
+describe('tools/run-worker.sh', () => {
+  it('passes the shell syntax check', () => {
+    expect(spawnSync('bash', ['-n', script]).status).toBe(0)
+  })
+
+  it('runs the worker on the saved answers, in its environment and never on an argument list', () => {
+    const repo = layout()
+    save('DATABASE_URL', DB)
+    save('SMTP_HOST', 'smtp.resend.com')
+    save('SMTP_PORT', '465')
+    save('SMTP_USER', 'resend')
+    save('SMTP_PASSWORD', SMTP_PASSWORD)
+    save('MAIL_FROM', 'Agency <hello@myagencyos.in>')
+    save('IMAP_HOST', 'imap.gmail.com')
+    save('IMAP_USER', 'hello@myagencyos.in')
+    save('IMAP_PASSWORD', IMAP_PASSWORD)
+    save('WEB_PUBLIC_URL', 'https://myagencyos.in')
+    save('UNSUBSCRIBE_SECRET', UNSUB)
+
+    const r = run(repo)
+    expect(r.status, r.stderr).toBe(0)
+    expect(r.stdout).toContain('Using the answers saved in your Keychain')
+    expect(r.stdout).toContain('sending:  ON')
+    expect(r.stdout).toContain('with a one-click unsubscribe link to https://myagencyos.in')
+    expect(r.stdout).toContain('replies:  ON')
+
+    const c = calls()
+    // Built first, then the worker — both the lockfile's own, by path, and
+    // never npx (round 9, [9]).
+    expect(c.map((x) => x.argv)).toEqual(['tsc --build', 'tsx apps/agent/src/index.ts'])
+    expect(npxRan()).toBe(false)
+    // The build ran before a single answer was read: it holds none of them.
+    for (const name of CREDENTIALS) expect(c[0]!.env[name], name).toBeUndefined()
+    const worker = c[1]!.env
+    expect(worker.DATABASE_URL).toBe(DB)
+    expect(worker.SMTP_PASSWORD).toBe(SMTP_PASSWORD)
+    expect(worker.IMAP_PASSWORD).toBe(IMAP_PASSWORD)
+    expect(worker.UNSUBSCRIBE_SECRET).toBe(UNSUB)
+    expect(worker.SMTP_SECURE).toBe('true')
+    expect(worker.IMAP_PORT).toBe('993')
+    expect(worker.NODE_ENV).toBe('production')
+    expect(worker.AGENT_BIND).toBe('127.0.0.1')
+    expect(worker.AGENT_INTERNAL_TOKEN?.length).toBeGreaterThanOrEqual(32)
+
+    // No secret on any argument list: not npx's, not the Keychain's.
+    const argvs = [...c.map((x) => x.argv), readFileSync(join(logs, 'security-argv'), 'utf8')].join('\n')
+    for (const secret of [DB, 'db-password-never-in-argv-77', SMTP_PASSWORD, IMAP_PASSWORD, UNSUB]) {
+      expect(argvs).not.toContain(secret)
+    }
+    // …and nothing the script printed carries one.
+    for (const secret of ['db-password-never-in-argv-77', SMTP_PASSWORD, IMAP_PASSWORD, UNSUB]) {
+      expect(r.stdout + r.stderr).not.toContain(secret)
+    }
+  })
+
+  it('is STARTTLS on any port but 465', () => {
+    const repo = layout()
+    save('DATABASE_URL', DB)
+    save('SMTP_HOST', 'smtp.example.com')
+    save('SMTP_PORT', '587')
+    save('MAIL_FROM', 'x@example.com')
+    expect(run(repo).status).toBe(0)
+    expect(calls()[1]!.env.SMTP_SECURE).toBe('false')
+  })
+
+  it('says sending is off, and starts no mailbox, without a From', () => {
+    const repo = layout()
+    save('DATABASE_URL', DB)
+    const r = run(repo)
+    expect(r.status).toBe(0)
+    expect(r.stdout).toContain('sending:  OFF')
+    expect(r.stdout).toContain('replies:  OFF')
+    expect(calls()[1]!.env.SMTP_HOST).toBeUndefined()
+  })
+
+  it('refuses the pooled endpoint, saved or not, before the worker is started', () => {
+    const repo = layout()
+    save('DATABASE_URL', DB.replace('ep-quiet-sky-123.', 'ep-quiet-sky-123-pooler.'))
+    const r = run(repo)
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain("POOLED endpoint")
+    // The build runs before any answer is read (round 9, [9]), so it has
+    // run — holding none of them — and the worker has not.
+    const c = calls()
+    expect(c.map((x) => x.argv)).toEqual(['tsc --build'])
+    expect(c[0]!.env.DATABASE_URL).toBeUndefined()
+    expect(r.stderr).not.toContain('db-password-never-in-argv-77')
+  })
+
+  it('asks for npm ci before anything when the checkout has no node_modules', () => {
+    const repo = layout()
+    rmSync(join(repo, 'node_modules'), { recursive: true })
+    save('DATABASE_URL', DB)
+    const r = run(repo)
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain("npm ci")
+    expect(calls()).toEqual([])
+  })
+
+  it.each(['tsc', 'tsx'])('asks for npm ci — and never reaches for npx — when the lockfile’s %s is missing', (tool) => {
+    // An install with --omit=dev, or under NODE_ENV=production: node_modules
+    // is there and the development tools are not. npx would fetch whatever
+    // the registry holds under that name and run it with every credential
+    // in its environment (round 9, [9]).
+    const repo = layout()
+    rmSync(join(repo, 'node_modules/.bin', tool))
+    save('DATABASE_URL', DB)
+    save('SMTP_PASSWORD', SMTP_PASSWORD)
+    const r = run(repo)
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain(`no node_modules/.bin/${tool}`)
+    expect(r.stderr).toContain("Run 'npm ci'")
+    expect(calls()).toEqual([])
+    expect(npxRan()).toBe(false)
+    // Asked before anything was read: not even the Keychain.
+    expect(existsSync(join(logs, 'security-argv'))).toBe(false)
+  })
+
+  it('keeps a saved UNSUBSCRIBE_SECRET, and with none saved sends without the header — making none', () => {
+    const repo = layout()
+    save('DATABASE_URL', DB)
+    save('SMTP_HOST', 'smtp.resend.com')
+    save('MAIL_FROM', FROM)
+    save('UNSUBSCRIBE_SECRET', UNSUB)
+    expect(run(repo).status).toBe(0)
+    expect(calls()[1]!.env.UNSUBSCRIBE_SECRET).toBe(UNSUB)
+
+    rmSync(join(keychain, 'UNSUBSCRIBE_SECRET'))
+    rmSync(join(logs, 'run'))
+    const r = run(repo)
+    expect(r.status).toBe(0)
+    expect(r.stdout).toContain('WITHOUT an unsubscribe header')
+    expect(calls()[1]!.env.UNSUBSCRIBE_SECRET).toBeUndefined()
+    expect(saved('UNSUBSCRIBE_SECRET')).toBeUndefined()
+    expect(clipboard()).toBeUndefined()
+  })
+
+  describe('chat, through an ngrok tunnel', () => {
+    const ngrokArgv = () => (existsSync(join(logs, 'ngrok-argv')) ? readFileSync(join(logs, 'ngrok-argv'), 'utf8') : undefined)
+    const ngrokEnv = () => readFileSync(join(logs, 'ngrok-env'), 'utf8')
+    /**
+     * ngrok: records its argv and environment, then stays up as a tunnel
+     * does. The log path is written in, because ngrok is started from an
+     * empty environment — $LOGS does not reach it.
+     */
+    const ngrok = () => stub('ngrok', `printf "%s\\n" "$*" >> "${logs}/ngrok-argv"; env > "${logs}/ngrok-env"; exec sleep 5`)
+    const saveChat = () => {
+      save('DATABASE_URL', DB)
+      save('SMTP_PASSWORD', SMTP_PASSWORD)
+      save('CHAT_URL', `https://${CHAT_DOMAIN}`)
+      save('ANTHROPIC_API_KEY', ANTHROPIC_KEY)
+      save('AGENT_INTERNAL_TOKEN', CHAT_TOKEN)
+    }
+
+    it('runs the tunnel and hands the worker the key and the saved token — none of them on any argv, nothing to ngrok', () => {
+      ngrok()
+      saveChat()
+      const repo = layout()
+      const r = run(repo)
+      expect(r.status, r.stderr).toBe(0)
+      expect(r.stdout).toContain(`chat:     ON  — the live site reaches this Mac at https://${CHAT_DOMAIN}`)
+      const worker = calls()[1]!.env
+      expect(worker.ANTHROPIC_API_KEY).toBe(ANTHROPIC_KEY)
+      expect(worker.AGENT_INTERNAL_TOKEN).toBe(CHAT_TOKEN)
+      expect(worker.AGENT_MODEL).toBe('claude-haiku-4-5')
+      expect(worker.AGENT_BIND).toBe('127.0.0.1')
+      // The API port, on the domain, and nothing else.
+      expect(ngrokArgv()).toBe(`http 127.0.0.1:3002 --url=https://${CHAT_DOMAIN} --log=stdout --log-level=warn\n`)
+      // ngrok's environment holds no credential this script was handed.
+      const env = ngrokEnv()
+      for (const secret of [DB, SMTP_PASSWORD, ANTHROPIC_KEY, CHAT_TOKEN]) expect(env).not.toContain(secret)
+      for (const name of CREDENTIALS) expect(env, name).not.toMatch(new RegExp(`^${name}=`, 'm'))
+      // No secret on an argv or the screen.
+      const argvs = [...calls().map((x) => x.argv), ngrokArgv()!, readFileSync(join(logs, 'security-argv'), 'utf8')].join('\n')
+      for (const secret of [ANTHROPIC_KEY, CHAT_TOKEN]) {
+        expect(argvs).not.toContain(secret)
+        expect(r.stdout + r.stderr).not.toContain(secret)
+      }
+    })
+
+    it('leaves chat off, says why, and hands the worker no key when ngrok is not installed', () => {
+      saveChat()
+      const r = run(layout())
+      expect(r.status, r.stderr).toBe(0)
+      expect(r.stdout).toContain("chat:     OFF — ngrok is not installed: 'brew install ngrok'")
+      const worker = calls()[1]!.env
+      expect(worker.ANTHROPIC_API_KEY).toBeUndefined()
+      expect(worker.AGENT_INTERNAL_TOKEN).not.toBe(CHAT_TOKEN)
+      expect(worker.AGENT_INTERNAL_TOKEN?.length).toBeGreaterThanOrEqual(32)
+    })
+
+    it('leaves chat off, and says so, when ngrok cannot open the domain', () => {
+      stub('ngrok', 'echo "ERR_NGROK_4018: authentication failed"; exit 1')
+      saveChat()
+      const r = run(layout())
+      expect(r.status, r.stderr).toBe(0)
+      expect(r.stderr).toContain('ERR_NGROK_4018')
+      expect(r.stdout).toContain(`chat:     OFF — ngrok could not open ${CHAT_DOMAIN}`)
+      expect(calls()[1]!.env.ANTHROPIC_API_KEY).toBeUndefined()
+    })
+
+    it('hands the worker no key when chat was never turned on, whatever is saved', () => {
+      ngrok()
+      save('DATABASE_URL', DB)
+      save('ANTHROPIC_API_KEY', ANTHROPIC_KEY)
+      const r = run(layout())
+      expect(r.status).toBe(0)
+      expect(r.stdout).toContain('chat:     OFF — no inbound route')
+      expect(calls()[1]!.env.ANTHROPIC_API_KEY).toBeUndefined()
+      expect(ngrokArgv()).toBeUndefined()
+    })
+  })
+
+  it('forgets every saved answer with --forget', () => {
+    const repo = layout()
+    save('DATABASE_URL', DB)
+    save('SMTP_PASSWORD', SMTP_PASSWORD)
+    const r = run(repo, ['--forget'])
+    expect(r.status).toBe(0)
+    expect(readdirSync(keychain)).toEqual([])
+    expect(calls()).toEqual([])
+  })
+
+  it('refuses an argument it does not know', () => {
+    const r = run(layout(), ['--save-everything'])
+    expect(r.status).toBe(2)
+    expect(r.stderr).toContain('usage')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The questions, answered through a terminal (review round 9, [2] and [7])
+// ---------------------------------------------------------------------------
+
+/**
+ * util-linux's `script`, which runs a command on a pseudo-terminal of its
+ * own: the run-worker prompts open /dev/tty, and this is one. `--echo never`
+ * so nothing typed is echoed into the transcript, whatever the moment a
+ * hidden prompt turns echo off. macOS's `script` takes other arguments; there
+ * only the saved-answer path above runs.
+ */
+const PTY = (() => {
+  const v = spawnSync('script', ['--version'], { encoding: 'utf8' })
+  const help = spawnSync('script', ['--help'], { encoding: 'utf8' })
+  return v.status === 0 && /util-linux/.test(v.stdout) && /--echo/.test(help.stdout)
+})()
+
+/** One answer, typed when the prompt containing `prompt` has appeared. */
+type Turn = readonly [prompt: string, answer: string]
+
+/**
+ * Run the script on a terminal, answering each prompt in order as it
+ * appears, and wait for it to finish. A prompt that never comes ends the run
+ * at the timeout with what was printed, so a failure says where it stuck.
+ */
+function converse(repo: string, args: string[], turns: readonly Turn[]): Promise<{ status: number | null; transcript: string; unanswered: string[] }> {
+  const command = ['bash', join(repo, 'tools/run-worker.sh'), ...args].map((a) => `'${a}'`).join(' ')
+  const child = spawn('script', ['-q', '-f', '-e', '--echo', 'never', '-c', command, '/dev/null'], {
+    cwd: repo,
+    env: { PATH: `${bin}:${process.env.PATH}`, HOME: dir, KEYCHAIN: keychain, LOGS: logs, SHELL: '/bin/sh', TERM: 'dumb' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  let transcript = ''
+  let next = 0
+  let from = 0
+  const answer = () => {
+    while (next < turns.length) {
+      const [prompt, reply] = turns[next]!
+      const at = transcript.indexOf(prompt, from)
+      if (at < 0) return
+      from = at + prompt.length
+      child.stdin.write(`${reply}\n`)
+      next++
+    }
+  }
+  child.stdout.on('data', (d: Buffer) => {
+    transcript += d.toString('utf8')
+    answer()
+  })
+  child.stderr.on('data', (d: Buffer) => {
+    transcript += d.toString('utf8')
+  })
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => child.kill('SIGKILL'), 20_000)
+    child.on('close', (status) => {
+      clearTimeout(timer)
+      child.stdin.destroy()
+      resolve({ status, transcript, unanswered: turns.slice(next).map(([p]) => p) })
+    })
+  })
+}
+
+interface Dialog {
+  /** Configure sending (the unsubscribe question is asked only then). */
+  readonly smtp: boolean
+  /** Turn chat on: the domain, then the key typed at its prompt ('' keeps a saved one). */
+  readonly chat?: { readonly domain: string; readonly key: string; readonly pasteFirst?: boolean; readonly saved?: boolean }
+  /** Typed at the unsubscribe prompt: '' is Enter. */
+  readonly unsubscribe?: string
+  /** Typed at "Make a new UNSUBSCRIBE_SECRET?", when the script asks it. */
+  readonly confirmNew?: string
+  /** Typed at "Remember these answers", which only a Mac is asked. */
+  readonly remember?: string
+}
+
+/** Every prompt the script asks, in order, with these answers. */
+function dialog(d: Dialog): Turn[] {
+  const t: Turn[] = [['Production DATABASE_URL', DB], ['Configure SENDING email now?', d.smtp ? 'y' : 'n']]
+  if (d.smtp) {
+    t.push(['SMTP host', ''], ['SMTP port', ''], ['SMTP username', ''], ['SMTP password', SMTP_PASSWORD], ['From address', FROM])
+  }
+  t.push(['Configure SMS through DoveSoft now?', 'n'], ['Configure REPLY DETECTION now?', 'n'], ['Public address of the web app', ''])
+  if (d.smtp) t.push(['One-click unsubscribe', d.unsubscribe ?? ''])
+  if (d.confirmNew !== undefined) t.push(['Make a new UNSUBSCRIBE_SECRET?', d.confirmNew])
+  t.push(['Slack webhook URL', ''])
+  t.push(['Turn on CHAT on the live site', d.chat ? 'y' : 'n'])
+  if (d.chat) {
+    t.push(['Your ngrok static domain', d.chat.domain], ['Anthropic API key', d.chat.key])
+    if (d.chat.pasteFirst) t.push(['Paste it into Vercel first', ''])
+    if (!d.chat.saved) t.push(['Press Enter once both are saved', ''])
+  }
+  if (d.remember !== undefined) t.push(['Remember these answers', d.remember])
+  return t
+}
+
+describe.runIf(PTY)('tools/run-worker.sh, answered at its prompts', () => {
+  /** Run, and expect it to finish with every prompt answered and no secret on the screen. */
+  async function answered(repo: string, args: string[], d: Dialog) {
+    const r = await converse(repo, args, dialog(d))
+    expect(r.unanswered, r.transcript).toEqual([])
+    expect(r.status, r.transcript).toBe(0)
+    for (const secret of ['db-password-never-in-argv-77', SMTP_PASSWORD, UNSUB, VERCEL_UNSUB]) expect(r.transcript).not.toContain(secret)
+    const c = calls()
+    expect(c.map((x) => x.argv)).toEqual(['tsc --build', 'tsx apps/agent/src/index.ts'])
+    // Built before the first question: the build holds no answer.
+    for (const name of CREDENTIALS) expect(c[0]!.env[name], name).toBeUndefined()
+    expect(c[1]!.env.DATABASE_URL).toBe(DB)
+    expect(npxRan()).toBe(false)
+    return { transcript: r.transcript, worker: c[1]!.env }
+  }
+
+  it('on a Mac, with nothing saved: Enter sends WITHOUT an unsubscribe header and makes no secret', async () => {
+    const r = await answered(layout(), [], { smtp: true, unsubscribe: '', remember: 'y' })
+    expect(r.worker.UNSUBSCRIBE_SECRET).toBeUndefined()
+    expect(r.transcript).toContain('WITHOUT an unsubscribe header')
+    expect(r.transcript).not.toContain('with a one-click unsubscribe link')
+    expect(clipboard()).toBeUndefined()
+    expect(saved('UNSUBSCRIBE_SECRET')).toBeUndefined()
+    // The rest was remembered.
+    expect(saved('DATABASE_URL')).toBe(DB)
+    expect(saved('SMTP_PASSWORD')).toBe(SMTP_PASSWORD)
+  })
+
+  it('on a Mac, --reconfigure: Enter KEEPS the saved secret — it is the default, never a rotation', async () => {
+    save('DATABASE_URL', DB)
+    save('UNSUBSCRIBE_SECRET', UNSUB)
+    const r = await answered(layout(), ['--reconfigure'], { smtp: true, unsubscribe: '', remember: 'y' })
+    expect(r.transcript).toContain('Enter keeps the one saved in your Keychain')
+    expect(r.worker.UNSUBSCRIBE_SECRET).toBe(UNSUB)
+    expect(r.transcript).toContain('with a one-click unsubscribe link to https://myagencyos.in')
+    expect(saved('UNSUBSCRIBE_SECRET')).toBe(UNSUB)
+    expect(clipboard()).toBeUndefined()
+  })
+
+  it('on a Mac, --reconfigure with sending turned off: the saved secret survives being remembered', async () => {
+    save('DATABASE_URL', DB)
+    save('SMTP_HOST', 'smtp.resend.com')
+    save('MAIL_FROM', FROM)
+    save('UNSUBSCRIBE_SECRET', UNSUB)
+    const r = await answered(layout(), ['--reconfigure'], { smtp: false, remember: 'y' })
+    expect(r.transcript).toContain('sending:  OFF')
+    expect(saved('SMTP_HOST')).toBeUndefined()
+    // The one value Vercel can never show back is still here for the run that turns sending on again.
+    expect(saved('UNSUBSCRIBE_SECRET')).toBe(UNSUB)
+  })
+
+  it('a pasted value is used as given — and declining to remember says the saved, different one is what the next run reads', async () => {
+    save('DATABASE_URL', DB)
+    save('UNSUBSCRIBE_SECRET', UNSUB)
+    const r = await answered(layout(), ['--reconfigure'], { smtp: true, unsubscribe: VERCEL_UNSUB, remember: 'n' })
+    expect(r.worker.UNSUBSCRIBE_SECRET).toBe(VERCEL_UNSUB)
+    expect(saved('UNSUBSCRIBE_SECRET')).toBe(UNSUB)
+    expect(r.transcript).toContain('the next run without')
+    expect(r.transcript).toContain('different UNSUBSCRIBE_SECRET')
+  })
+
+  it('on a Mac, `new` and a yes: one secret, on the clipboard, saved at once — even when the answers are not remembered', async () => {
+    const r = await answered(layout(), [], { smtp: true, unsubscribe: 'new', confirmNew: 'y', remember: 'n' })
+    const made = r.worker.UNSUBSCRIBE_SECRET
+    expect(made).toMatch(/^[0-9a-f]{64}$/)
+    expect(clipboard()).toBe(made)
+    expect(saved('UNSUBSCRIBE_SECRET')).toBe(made)
+    // Declined: nothing else was kept…
+    expect(saved('DATABASE_URL')).toBeUndefined()
+    // …and the warning came before the yes, not after.
+    const warned = r.transcript.indexOf('every unsubscribe link already mailed')
+    expect(warned).toBeGreaterThan(-1)
+    expect(warned).toBeLessThan(r.transcript.indexOf('Make a new UNSUBSCRIBE_SECRET?'))
+    expect(r.transcript).toContain('Paste it into Vercel')
+    expect(r.transcript).not.toContain(made!)
+  })
+
+  it('on a Mac, `new` that the Keychain will not keep: nothing is made, and the clipboard is cleared', async () => {
+    // `security -i` answering 0 for a command it refused: the write is read back, not trusted.
+    writeFileSync(join(bin, 'security'), readFileSync(join(bin, 'security'), 'utf8').replace('printf "%s" "$w" > "$KEYCHAIN/$a"', ':'))
+    const r = await answered(layout(), [], { smtp: true, unsubscribe: 'new', confirmNew: 'y', remember: 'n' })
+    expect(r.transcript).toContain('Could not save a new secret in your Keychain, so none was made')
+    expect(r.transcript).toContain('WITHOUT an unsubscribe header')
+    expect(r.worker.UNSUBSCRIBE_SECRET).toBeUndefined()
+    expect(clipboard()).toBe('')
+  })
+
+  it('on a Mac, `new` and a no: nothing is made, and the saved secret is kept', async () => {
+    save('DATABASE_URL', DB)
+    save('UNSUBSCRIBE_SECRET', UNSUB)
+    const r = await answered(layout(), ['--reconfigure'], { smtp: true, unsubscribe: 'new', confirmNew: 'n', remember: 'y' })
+    expect(r.worker.UNSUBSCRIBE_SECRET).toBe(UNSUB)
+    expect(saved('UNSUBSCRIBE_SECRET')).toBe(UNSUB)
+    expect(clipboard()).toBeUndefined()
+  })
+
+  it('on a Mac, chat yes: one token, on the clipboard and saved, the key in the Keychain — and the worker runs with both', async () => {
+    stub('ngrok', 'exec sleep 5')
+    const r = await answered(layout(), [], { smtp: false, chat: { domain: `https://${CHAT_DOMAIN}/`, key: ANTHROPIC_KEY }, remember: 'y' })
+    const token = r.worker.AGENT_INTERNAL_TOKEN
+    expect(token).toMatch(/^[0-9a-f]{64}$/)
+    expect(clipboard()).toBe(token)
+    expect(saved('AGENT_INTERNAL_TOKEN')).toBe(token)
+    expect(saved('ANTHROPIC_API_KEY')).toBe(ANTHROPIC_KEY)
+    expect(saved('CHAT_URL')).toBe(`https://${CHAT_DOMAIN}`)
+    expect(r.worker.ANTHROPIC_API_KEY).toBe(ANTHROPIC_KEY)
+    expect(r.transcript).toContain(`AGENT_URL            = https://${CHAT_DOMAIN}`)
+    for (const secret of [token!, ANTHROPIC_KEY]) expect(r.transcript).not.toContain(secret)
+  })
+
+  it('on a Mac, a new unsubscribe secret is not overwritten on the clipboard before it is pasted', async () => {
+    stub('ngrok', 'exec sleep 5')
+    const r = await answered(layout(), [], {
+      smtp: true, unsubscribe: 'new', confirmNew: 'y',
+      chat: { domain: CHAT_DOMAIN, key: ANTHROPIC_KEY, pasteFirst: true }, remember: 'y',
+    })
+    const waited = r.transcript.indexOf('The new UNSUBSCRIBE_SECRET is still on your clipboard')
+    expect(waited).toBeGreaterThan(-1)
+    expect(waited).toBeLessThan(r.transcript.indexOf('A new AGENT_INTERNAL_TOKEN is on your clipboard'))
+    expect(clipboard()).toBe(r.worker.AGENT_INTERNAL_TOKEN)
+    expect(saved('UNSUBSCRIBE_SECRET')).toBe(r.worker.UNSUBSCRIBE_SECRET)
+  })
+
+  it('on a Mac, --reconfigure with chat on: Enter keeps the saved key and token — never a rotation', async () => {
+    stub('ngrok', 'exec sleep 5')
+    save('DATABASE_URL', DB)
+    save('ANTHROPIC_API_KEY', ANTHROPIC_KEY)
+    save('AGENT_INTERNAL_TOKEN', CHAT_TOKEN)
+    const r = await answered(layout(), ['--reconfigure'], { smtp: false, chat: { domain: CHAT_DOMAIN, key: '', saved: true }, remember: 'y' })
+    expect(r.worker.ANTHROPIC_API_KEY).toBe(ANTHROPIC_KEY)
+    expect(r.worker.AGENT_INTERNAL_TOKEN).toBe(CHAT_TOKEN)
+    expect(r.transcript).toContain('Kept the AGENT_INTERNAL_TOKEN saved in your Keychain')
+    expect(clipboard()).toBeUndefined()
+  })
+
+  it('on a Mac, --reconfigure with chat turned off: the saved key and token survive being remembered, and the worker gets neither', async () => {
+    save('DATABASE_URL', DB)
+    save('CHAT_URL', `https://${CHAT_DOMAIN}`)
+    save('ANTHROPIC_API_KEY', ANTHROPIC_KEY)
+    save('AGENT_INTERNAL_TOKEN', CHAT_TOKEN)
+    const r = await answered(layout(), ['--reconfigure'], { smtp: false, remember: 'y' })
+    expect(saved('ANTHROPIC_API_KEY')).toBe(ANTHROPIC_KEY)
+    expect(saved('AGENT_INTERNAL_TOKEN')).toBe(CHAT_TOKEN)
+    expect(saved('CHAT_URL')).toBeUndefined()
+    expect(r.worker.ANTHROPIC_API_KEY).toBeUndefined()
+    expect(r.worker.AGENT_INTERNAL_TOKEN).not.toBe(CHAT_TOKEN)
+    expect(r.transcript).toContain('chat:     OFF — no inbound route')
+  })
+
+  describe('off a Mac, where a secret could be neither copied nor saved', () => {
+    beforeEach(() => stub('uname', 'echo Linux'))
+
+    it('Enter sends WITHOUT an unsubscribe header, and `new` is not offered', async () => {
+      const r = await answered(layout(), [], { smtp: true, unsubscribe: '' })
+      expect(r.worker.UNSUBSCRIBE_SECRET).toBeUndefined()
+      expect(r.transcript).toContain('WITHOUT an unsubscribe header')
+      expect(r.transcript).not.toContain('type new')
+      expect(r.transcript).not.toContain('Remember these answers')
+      expect(clipboard()).toBeUndefined()
+    })
+
+    it('`new` typed anyway makes nothing, and says why', async () => {
+      const r = await answered(layout(), [], { smtp: true, unsubscribe: 'new' })
+      expect(r.worker.UNSUBSCRIBE_SECRET).toBeUndefined()
+      expect(r.transcript).toContain('A new secret is made only on a Mac')
+      expect(r.transcript).toContain('WITHOUT an unsubscribe header')
+      expect(clipboard()).toBeUndefined()
+      expect(readdirSync(keychain)).toEqual([])
+    })
+
+    it('Vercel’s value, pasted, is what the worker mails under', async () => {
+      const r = await answered(layout(), [], { smtp: true, unsubscribe: VERCEL_UNSUB })
+      expect(r.worker.UNSUBSCRIBE_SECRET).toBe(VERCEL_UNSUB)
+      expect(r.transcript).toContain('with a one-click unsubscribe link')
+    })
+  })
+})

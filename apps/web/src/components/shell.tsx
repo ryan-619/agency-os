@@ -1,5 +1,6 @@
 import { can, type Role } from '@agency/core'
 import { SearchBox } from '@/components/search-box'
+import { orgIdentity } from '@/lib/org-identity'
 
 export interface ShellUser {
   /** Needed by `can()` — authorisation is about a principal, not a display name. */
@@ -46,11 +47,19 @@ const SETTINGS_PAGES: ReadonlySet<ShellCurrent> = new Set<ShellCurrent>([
   'settings', 'team', 'credentials', 'icp', 'spend', 'mail', 'deployment',
 ])
 
-export function Shell({
-  user, orgName, current, children, signOut, pendingApprovals = 0,
+/**
+ * The subtitle under "Agency OS" is the organisation's own name, read here
+ * from `orgs.name` and never handed in by a page. It used to be a prop, and
+ * most pages filled it with the active ICP's label — the name of a scoring
+ * profile — while the dashboard and the settings area filled it with the
+ * org's, so the sidebar named a different thing depending on the page. An
+ * async server component may read the database; `orgIdentity` is
+ * `server-only`, so Shell can never be pulled into a client bundle either.
+ */
+export async function Shell({
+  user, current, children, signOut, pendingApprovals = 0,
 }: {
   user: ShellUser
-  orgName: string
   current: ShellCurrent
   children: React.ReactNode
   signOut: () => Promise<void>
@@ -60,13 +69,14 @@ export function Shell({
    * second here, to notify about the first, would be the joke writing itself.
    */
   pendingApprovals?: number
-}) {
+}): Promise<React.ReactNode> {
+  const org = await orgIdentity(user.orgId)
   const on = (page: ShellCurrent): string | undefined => (current === page ? 'on' : undefined)
   return (
     <div className="shell">
       <aside className="side">
         <div className="brand">Agency OS</div>
-        <div className="brand-sub">{orgName}</div>
+        <div className="brand-sub">{org.name}</div>
 
         <SearchBox />
 

@@ -12,8 +12,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import {
-  HEARTBEAT_SILENT_AFTER_SECONDS,
-  heartbeatAge, heartbeatReport, heartbeatSilentAfter, heartbeatStatus,
+  HEARTBEAT_RETIRED_AFTER_DAYS, HEARTBEAT_SILENT_AFTER_SECONDS,
+  heartbeatAge, heartbeatReport, heartbeatReportedStatus, heartbeatSilentAfter, heartbeatSms, heartbeatStatus,
   isCheckViolation, readLatestHeartbeat, schema, writeHeartbeat,
   type AgencyDb, type HeartbeatWrite,
 } from '../src/index.js'
@@ -151,8 +151,24 @@ describe('writeHeartbeat and readLatestHeartbeat', () => {
       ageSeconds: 60,
       outreach: 'send-only',
       chat: 'enabled',
+      sms: null,
       status: 'live',
+      retired: false,
     })
+  })
+
+  /**
+   * The worker writes `sms` into `detail` (0019), because `outreach` and its
+   * CHECK describe the mailbox. A worker with no SMTP and DoveSoft on is
+   * `outreach: 'disabled'` and sends texts; the report has to carry both.
+   */
+  it('carries what the worker said about SMS through the row it wrote', async () => {
+    await writeHeartbeat(db, beat({ outreach: 'disabled', detail: { halted: false, lockHeld: true, sms: 'on' } }))
+    expect(heartbeatReport(await readLatestHeartbeat(db), true, at(20))).toMatchObject({
+      status: 'live', outreach: 'disabled', sms: 'on',
+    })
+    await writeHeartbeat(db, beat({ lastTickAt: at(30), detail: { halted: false, lockHeld: true, sms: 'off' } }))
+    expect(heartbeatReport(await readLatestHeartbeat(db), true, at(40)).sms).toBe('off')
   })
 })
 
@@ -190,6 +206,17 @@ describe('the pure half', () => {
     expect(heartbeatSilentAfter({ detail: null })).toBe(HEARTBEAT_SILENT_AFTER_SECONDS)
   })
 
+  it('reads SMS as on or off from the row’s detail, and as unknown otherwise', () => {
+    expect(heartbeatSms({ detail: { sms: 'on' } })).toBe('on')
+    expect(heartbeatSms({ detail: { sms: 'off', intervalMs: 15_000 } })).toBe('off')
+    // A worker from before 0019 wrote nothing about SMS: unknown, never "off".
+    expect(heartbeatSms({ detail: { halted: false, lockHeld: true } })).toBeNull()
+    expect(heartbeatSms(null)).toBeNull()
+    expect(heartbeatSms({ detail: null })).toBeNull()
+    // Not a value the worker writes: not guessed at.
+    for (const sms of ['ON', 'yes', true, 1, '']) expect(heartbeatSms({ detail: { sms } }), String(sms)).toBeNull()
+  })
+
   describe('heartbeatReport', () => {
     const r = (seconds: number, detail: unknown = {}) => ({
       lastTickAt: at(seconds), outreach: 'send-only', chat: 'disabled', detail,
@@ -197,7 +224,8 @@ describe('the pure half', () => {
 
     it('says not_configured only when there is no row and no worker is configured', () => {
       expect(heartbeatReport(null, false, at(0))).toEqual({
-        configured: false, lastSeenAt: null, ageSeconds: null, outreach: null, chat: null, status: 'not_configured',
+        configured: false, lastSeenAt: null, ageSeconds: null, outreach: null, chat: null, sms: null,
+        status: 'not_configured', retired: false,
       })
       expect(heartbeatReport(null, true, at(0)).status).toBe('never')
     })
@@ -220,6 +248,40 @@ describe('the pure half', () => {
       const slow = r(0, { intervalMs: 20 * 60_000 })
       expect(heartbeatReport(slow, true, at(1800)).status).toBe('live')
       expect(heartbeatReport(slow, true, at(3601)).status).toBe('silent')
+    })
+
+    /**
+     * `./tools/run-worker.sh` against production, once, then closed: its row
+     * stays, and only a running worker's own write prunes it. Where no worker
+     * is configured, a row that old is a session somebody ran by hand and
+     * closed — named as such, and alerted about by nobody. A worker that was
+     * running and stopped is worth a week of notices first.
+     */
+    it('reads a silent row past a week, where no worker is configured, as a retired session', () => {
+      const week = HEARTBEAT_RETIRED_AFTER_DAYS * DAY
+      expect(HEARTBEAT_RETIRED_AFTER_DAYS).toBe(7)
+      expect(heartbeatReport(r(0), false, at(week + 1))).toMatchObject({
+        status: 'silent', retired: true, ageSeconds: week + 1, lastSeenAt: at(0),
+      })
+      expect(heartbeatReportedStatus(heartbeatReport(r(0), false, at(week + 1)))).toBe('retired')
+      // A week to the second is still a worker that stopped.
+      expect(heartbeatReport(r(0), false, at(week))).toMatchObject({ status: 'silent', retired: false })
+      expect(heartbeatReportedStatus(heartbeatReport(r(0), false, at(week)))).toBe('silent')
+      // Where a worker IS configured, a stopped one is silent however long ago it stopped.
+      expect(heartbeatReport(r(0), true, at(30 * DAY))).toMatchObject({ status: 'silent', retired: false })
+      expect(heartbeatReportedStatus(heartbeatReport(r(0), true, at(30 * DAY)))).toBe('silent')
+    })
+
+    it('never calls a row retired that is not silent, or that is not there', () => {
+      // A worker that ticks every four days is on time six days after its last write.
+      const glacial = r(0, { intervalMs: 4 * DAY * 1000 })
+      expect(heartbeatReport(glacial, false, at(8 * DAY))).toMatchObject({ status: 'live', retired: false })
+      expect(heartbeatReport(glacial, false, at(12 * DAY + 1))).toMatchObject({ status: 'silent', retired: true })
+      expect(heartbeatReport(null, false, at(0))).toMatchObject({ status: 'not_configured', retired: false })
+      expect(heartbeatReport(null, true, at(0))).toMatchObject({ status: 'never', retired: false })
+      for (const status of ['not_configured', 'never', 'live', 'silent'] as const) {
+        expect(heartbeatReportedStatus({ status, retired: false })).toBe(status)
+      }
     })
   })
 })

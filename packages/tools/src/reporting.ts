@@ -17,21 +17,22 @@
  *    note as "note by <name>:" in quotation marks and says so in the summary,
  *    so "they have no CSP" typed after a call cannot be repeated as a finding.
  *  - **Message bodies stay out.** A timeline line carries a message's subject
- *    and its FIRST LINE only, bounded; the compliance summary is counts with
- *    no rows at all; search returns the label and one line of context the
- *    search module already chose, and that module cannot name a connector or
- *    a chat (§2.3).
+ *    and its FIRST LINE only, bounded — and for a LinkedIn message /tasks
+ *    would not show, neither (`linkedinThreadWithheld`, /tasks' own rule);
+ *    the compliance summary is counts with no rows at all; search returns
+ *    the label and one line of context the search module already chose, and
+ *    that module cannot name a connector or a chat (§2.3).
  *
  * Each tool asks `can()` the same question the page behind it asks, so a role
  * that could not open the page cannot read it through the agent either.
  */
 import { z } from 'zod'
-import { can, DEFAULT_STALE_AFTER_DAYS, parseIcpDefinition, pipelineMetrics, type PipelineMetrics } from '@agency/core'
+import { can, pipelineMetrics, staleAfterDaysOf, type PipelineMetrics } from '@agency/core'
 import {
   activeIcpProfile, analyticsTransitions, auditForSubject, callsForCompany, companyThread,
-  complianceSummary, findCompanyByDomain, listDeals, meetingsForCompany, notesAuthorLabel, notesFor,
-  proposalsForCompany, scanHistory, searchOrg, searchQueryFrom, searchSectionsFor, tasksList,
-  type AgencyDb, type AuditRow, type SearchSections,
+  complianceSummary, findCompanyByDomain, linkedinThreadWithheld, listDeals, meetingsForCompany, notesAuthorLabel,
+  notesFor, proposalsForCompany, scanHistory, searchOrg, searchQueryFrom, searchSectionsFor, tasksList,
+  type AgencyDb, type AuditRow, type LinkedinThreadWithheld, type SearchSections,
 } from '@agency/db'
 import * as schema from '@agency/db/schema'
 import { normaliseDomain } from '@agency/scanner'
@@ -86,15 +87,13 @@ function firstLineOf(text: string | null | undefined, max = 160): string | null 
   return lines.length > 1 && !cut.endsWith('…') ? `${cut} …` : cut
 }
 
-/** The ICP's freshness window, the way the compliance page reads it. */
+/**
+ * The ICP's freshness window, the way the compliance page reads it: through
+ * `staleAfterDaysOf`, which `readIcp` delegates to. The raw value made this
+ * tool throw on a `0` that the page answered at the default.
+ */
 async function staleDaysFor(db: AgencyDb, orgId: string): Promise<number> {
-  const row = await activeIcpProfile(db, orgId)
-  if (!row) return DEFAULT_STALE_AFTER_DAYS
-  try {
-    return parseIcpDefinition(row.definition).freshness?.stale_after_days ?? DEFAULT_STALE_AFTER_DAYS
-  } catch {
-    return DEFAULT_STALE_AFTER_DAYS
-  }
+  return staleAfterDaysOf((await activeIcpProfile(db, orgId))?.definition)
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +252,19 @@ function dealLine(row: AuditRow, names: ReadonlyMap<string, string>): string {
   return `deal ${row.action.replace(/^deal\./, '').replace(/_/g, ' ')}${who}`
 }
 
+/**
+ * Why a LinkedIn message's words are not in the timeline, in the company
+ * page's words for the same reasons. The rule is /tasks' own
+ * (`linkedinThreadWithheld`); this only words it.
+ */
+const LINKEDIN_HELD: Record<LinkedinThreadWithheld, string> = {
+  not_handed: 'Start has not handed them over',
+  refused: 'the send rules now refuse this person',
+  paused: 'the contact is paused',
+  unchecked: 'the rules cannot be checked — the contact or the campaign is gone',
+  expired: 'they were handed over more than a day ago',
+}
+
 export const getCompanyTimeline: AgencyToolSpec<typeof companyTimelineShape> = {
   name: 'get_company_timeline',
   description:
@@ -291,9 +303,26 @@ export const getCompanyTimeline: AgencyToolSpec<typeof companyTimelineShape> = {
     ])
     const dealRows = (await Promise.all(deals.map((d) => auditForSubject(ctx.db, ctx.orgId, 'deal', d.id, limit)))).flat()
     const names = await actorNames(ctx, dealRows)
+    // A LinkedIn message's words reach the model only where /tasks would
+    // print them (review round 5, [10]): never before Start hands them over,
+    // and not while the step is open and its re-check withholds them. A
+    // person could otherwise copy them into LinkedIn from a chat, past every
+    // rule Start runs — to somebody suppressed on LinkedIn since, say.
+    const withheld = await linkedinThreadWithheld(ctx.db, ctx.orgId, touches, ctx.now())
 
     const events: TimelineEvent[] = []
     for (const t of touches) {
+      const held = withheld.get(t.id)
+      if (held) {
+        const status = t.status === 'refused' && t.refusalCode ? `refused by the send path (${t.refusalCode})` : t.status
+        events.push({
+          at: t.sentAt ?? t.createdAt,
+          kind: 'message',
+          id: t.id,
+          text: `${t.channel} message out, ${status} — words withheld (${LINKEDIN_HELD[held]})`,
+        })
+        continue
+      }
       const subject = t.subject ? ` “${oneLine(t.subject, 120)}”` : ''
       const first = firstLineOf(t.body)
       const opening = first ? ` — first line: “${first}”` : ''
@@ -363,7 +392,10 @@ export const getCompanyTimeline: AgencyToolSpec<typeof companyTimelineShape> = {
     const header = `${domain}: ${shown.length} of ${events.length} event${events.length === 1 ? '' : 's'}, newest first.`
     const footer =
       'Notes are a teammate’s words, not evidence — never repeat one as something the scanner found. ' +
-      'Messages show the subject and the first line only.'
+      'Messages show the subject and the first line only.' +
+      (shown.some((e) => withheld.has(e.id))
+        ? ' A LinkedIn message’s words are shown only where /tasks would show them — Start checks every send rule first.'
+        : '')
     return ok(
       {
         domain,
@@ -423,6 +455,10 @@ export const getComplianceSummary: AgencyToolSpec<Record<string, never>> = {
       draftsOnStaleEvidence: {
         count: s.draftsOnStaleEvidence.count,
         byStatus: s.draftsOnStaleEvidence.byStatus,
+        byWhy: s.draftsOnStaleEvidence.byWhy,
+        refusedAtSending: s.draftsOnStaleEvidence.refusedAtSending,
+        notJudgedAtSending: s.draftsOnStaleEvidence.notJudgedAtSending,
+        notJudgedNoFurtherLook: s.draftsOnStaleEvidence.notJudgedNoFurtherLook,
         awaiting: s.draftsOnStaleEvidence.awaiting,
         unsent: s.draftsOnStaleEvidence.unsent,
       },
@@ -451,6 +487,7 @@ export const getComplianceSummary: AgencyToolSpec<Record<string, never>> = {
       autoSendOffCold: s.autoSendOffCold.count,
     }
 
+    const d = counts.draftsOnStaleEvidence
     const w = `the last ${s.windowDays} days`
     const tally = (xs: readonly { readonly granted: number; readonly refused: number }[], label: (i: number) => string) =>
       xs.map((x, i) => `${label(i)} ${x.granted} granted / ${x.refused} refused`).join(', ')
@@ -466,10 +503,21 @@ export const getComplianceSummary: AgencyToolSpec<Record<string, never>> = {
       `Opt-outs that failed to store: ${counts.optOutsNotRecorded.lastWindow} in ${w}, ${counts.optOutsNotRecorded.allTime} all time.`,
       `Messages that went out on an opt-in-only channel with no opt-in: ${counts.coldWithoutOptIn.touches} to ` +
         `${counts.coldWithoutOptIn.contacts} contacts (must be 0); ${counts.coldWithoutOptIn.stoppedBySendPath} stopped by the send path.`,
-      `Outbound messages not yet sent on stale or missing evidence: ${counts.draftsOnStaleEvidence.count} of ` +
-        `${counts.draftsOnStaleEvidence.unsent} not yet sent (must be 0) — ${counts.draftsOnStaleEvidence.byStatus.awaiting_approval} ` +
-        `awaiting approval; ${counts.draftsOnStaleEvidence.byStatus.approved} approved, ${counts.draftsOnStaleEvidence.byStatus.queued} ` +
-        `queued and ${counts.draftsOnStaleEvidence.byStatus.sending} sending, which go with no further look.`,
+      // The send path refuses a message whose words were written from a stale
+      // scan (`stale_evidence`), whoever approved it; saying these "go with no
+      // further look" told the model the opposite of what the sender does.
+      // It refuses one written from a fresh scan a newer one has superseded
+      // too (r4), and those are said apart: "a scan that is stale now" would
+      // be false about them. Every superseded row is refused at sending.
+      `Outbound messages not yet sent on stale or missing evidence: ${d.count} of ${d.unsent} not yet sent ` +
+        `(must be 0) — ${d.byStatus.awaiting_approval} awaiting approval, ${d.byStatus.approved} approved, ` +
+        `${d.byStatus.queued} queued, ${d.byStatus.sending} sending. ${d.refusedAtSending - d.byWhy.superseded} were written from a scan ` +
+        'that is stale now and are refused at sending (stale_evidence) — waiting to be refused, or to be re-drafted ' +
+        `after a re-scan; ${d.byWhy.superseded} were written from a scan a newer successful scan has superseded, ` +
+        'and are refused at sending too (stale_evidence) — waiting to be refused, or to be re-drafted from the latest ' +
+        `scan; ${d.notJudgedAtSending} have no successful scan behind them or answer a reply, so the send ` +
+        `path does not judge them by evidence and they go as written unless another rule stops them — ` +
+        `${d.notJudgedNoFurtherLook} of those with nobody looking again (approved, queued or sending).`,
       `Consent rows: ${tally(s.consents.byChannel, (i) => s.consents.byChannel[i]!.channel)}; ` +
         `${s.consents.total.granted} granted and ${s.consents.total.refused} refused in all.`,
       `Suppressions: ${s.suppressions.lastWindow.total} added in ${w} (${sources(s.suppressions.lastWindow.bySource)}); ` +

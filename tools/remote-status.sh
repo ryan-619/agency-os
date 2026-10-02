@@ -120,6 +120,21 @@ const { Client } = require("pg");
     [["notes", "proposal_shares", "tasks", "worker_heartbeats"]]);
   console.log("  0018 tables:", t18.rows.map(r => r.t + (r.present ? "" : " MISSING")).join(", "));
 
+  // 0019 the same way: touches.template_id is read by the send path for
+  // every message (sendFactsFor), so code ahead of it fails to send at all,
+  // and /settings/templates reads message_templates.
+  const tpl = await c.query(`
+    select data_type, is_nullable
+      from information_schema.columns
+     where table_schema = current_schema()
+       and table_name = $1 and column_name = $2`, ["touches", "template_id"]);
+  console.log("  touches.template_id:",
+    tpl.rows.length
+      ? tpl.rows[0].data_type + ", nullable=" + tpl.rows[0].is_nullable + "   <- 0019 is applied"
+      : "MISSING   <- 0019 is NOT applied, do not deploy");
+  const t19 = await c.query(`select to_regclass('message_templates') is not null as present`);
+  console.log("  0019 table: message_templates" + (t19.rows[0].present ? "" : " MISSING"));
+
   // A count and an age, like the users count below: never a row. /api/health
   // already publishes the same age as worker.ageSeconds.
   if (t18.rows.find(r => r.t === "worker_heartbeats" && r.present)) {

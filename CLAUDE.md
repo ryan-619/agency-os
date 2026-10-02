@@ -14,9 +14,31 @@ handling, one-click unsubscribe, a worker heartbeat, and two Vercel crons (a
 nightly rescan and a Slack digest). The agent's own tools went from nine to
 twenty-three. Everything web-side works with no worker; §2 describes each
 piece and §4 the decisions behind them, and DEPLOYING.md carries the release
-checklist, which starts with applying 0018 BEFORE the code that reads it.
+checklist, which applies the migrations BEFORE the code that reads them.
 
-**The worker deploys to Fly.io** (`fly.toml` at the repo root), and its
+**Then SMS through DoveSoft, on migration 0019** (§2, "SMS through DoveSoft"):
+the DLT-registered templates an Indian SMS must be sent from
+(`message_templates`), the template every outbound SMS names
+(`touches.template_id`), the operator's delivery reports beside `status`, a
+worker provider that texts only words a person approved, rendered from a
+registered template, to somebody who opted in to SMS, the two webhooks
+DoveSoft pushes reports and texts back to, and `/settings/templates`. It is
+tested against a fetch that records and never sends, and against PGlite —
+never against DoveSoft itself, whose push formats and `mobiles` format are
+assumptions to confirm before a real send. Calls
+and WhatsApp over DoveSoft are not built: DoveSoft publishes no API for
+either. Fourteen review rounds, and the follow-ups they left open, have been fixed
+on top of both releases; each fix is stated below where the rule it changed
+lives.
+
+**For now the agency runs the worker on the operator's own machine**
+(`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
+machine"), which needs no public address, because everything but chat is
+the worker reaching out. Chat is the script's one opt-in inbound route: an
+ngrok tunnel on the operator's free static domain to the worker's API port,
+with `AGENT_URL` and the same `AGENT_INTERNAL_TOKEN` set in Vercel once
+(DEPLOYING.md, "If you do want chat on the live site"). **Fly.io is the path once it rents a machine**
+(`fly.toml` at the repo root), and its
 defaults are the dangerous part: Fly scales a machine to zero between
 requests, which is Vercel's problem wearing a different hat — the advisory
 lock drops, the fifteen-second tick stops, and nothing looks broken because
@@ -32,18 +54,72 @@ worker upserts a `worker_heartbeats` row (keyed `hostname:pid`) every
 
 **The web half is LIVE on Vercel** at **https://myagencyos.in** (first
 deployed as `agency-os-tau-murex.vercel.app`), against a Neon Postgres (18.6)
-with Resend for magic links, seeded. The code expects migration **0018**
-(`EXPECTED_MIGRATION`); production was at 0017 when this release was written,
-and 0018 is applied BEFORE this code deploys, never after — DEPLOYING.md,
-"migrate FIRST", and GO-LIVE.md Part 2b. Proved live: `/api/health` reports
+with Resend for magic links, seeded. The code expects migration **0019**
+(`EXPECTED_MIGRATION`), and production is on 0019: it was at 0017 when the
+0018 release was written, and the release run's Vercel build applied 0018
+and then 0019 before `next build` (`tools/vercel-build-migrate.mjs`, under
+`AGENCY_MIGRATE_ON_BUILD=1`). A migration is always applied BEFORE the code
+that reads it deploys, never after — DEPLOYING.md, "migrate FIRST", and
+GO-LIVE.md Part 2b. That is done from GitHub, with no credential on a
+laptop: the hand-run **Production** workflow
+(`.github/workflows/production.yml`, running `tools/production.sh`) has the
+actions `status`, `migrate`, `deploy`, `release` (migrate, then deploy, then
+wait for `/api/health?strict=1` to report the checkout's migration) and
+`worker` (deploy `apps/agent` to Fly and point the web app at it — refused
+before anything is created or deployed unless production already has the
+checkout's `EXPECTED_MIGRATION`, because it never migrates and must not run
+ahead of its schema; run `release` from that ref first — and refused
+without `PRODUCTION_DATABASE_URL`, because the job that holds the worker's
+secrets never runs the Vercel CLI that `vercel pull` needs), each but
+`status` confirmed by typing its name. **`worker` is two JOBS** (review
+round 8): `worker (Fly)` receives the worker's own secrets in its script
+step alone (review round 6), deploys to Fly, and sets `AGENT_URL`,
+`AGENT_INTERNAL_TOKEN` and a non-secret `AGENT_INTERNAL_TOKEN_PENDING`
+through our own `tools/vercel-env.mjs`; `worker (web redeploy)`
+(`worker-web`), on a fresh VM handed `VERCEL_*` alone — and `REDEPLOY`, the
+`worker` job's one non-secret output as it arrived — runs the Vercel CLI
+to redeploy the web app, waits for `/api/health?strict=1`, promotes the
+pending record to the `AGENT_INTERNAL_TOKEN_WIRED` marker LAST, and waits
+for the worker to show live. When `REDEPLOY` arrived `true` and no record
+of this run can be read, it dies, because the live web app still runs on
+the old token — unless a LATER run's record is there AND that run's own
+web job has promoted it to `AGENT_INTERNAL_TOKEN_WIRED`, which is a re-run
+of an old run's web job and passes (`vercel-env.mjs superseded <FROM>
+<TO>`, comparing run ids, then the marker; review rounds 9 and 10). A later
+run whose own web job has not finished stops the re-run: "Workflow run <id>
+set a newer token and its web job has not finished — re-run that run's
+worker-web job, or the worker action." — because that record is the later
+run's FIRST job's, and says only that it set a newer token, not that the
+web app was redeployed with it. An empty later record (`<run>/`, Fly gave
+that run no digest), which no web job can promote, passes with a warning
+that its web job could not be checked. The helper prints the later run's
+id, and only that, on stdout, and `production.sh` reads it directly rather
+than through `vercel_env`, whose `die` would print into the substitution. A
+dropped output still reads the record alone,
+fail-open. Round 7 drew the line at a step, and a step is
+not a credential boundary: `tools/production.sh` un-exported the secrets and
+ran the Vercel CLI — which `npx` installs at run time, and whose `build`
+runs the whole web build — under `env -u` for each, which changes only what
+a child INHERITS; any process running as the same user reads them from
+`/proc/<pid>/environ` of the shells above it. Only a job boundary contains
+them. `WORKER_ONLY` still un-exports them, hands flyctl `FLY_API_TOKEN`
+alone and unsets the rest once Fly has staged them, and in the `worker`
+action every path to the Vercel CLI dies (`no_vercel_cli`). A new worker
+secret is named in the `worker` job's script step AND in `WORKER_ONLY` —
+never in `worker-web` — and `production-tooling.test.ts` fails when the two
+lists differ or a `WORKER_ONLY` name appears in any other job. DEPLOYING.md
+says what each needs.
+Proved live: `/api/health` reports
 `database: ok`, `/signin` renders, `/book/agency` serves the public booking
 page (it 404'd until the seed claimed the slug), and a sign-in request logged
 `magic link sent`. See [DEPLOYING.md](DEPLOYING.md) — including the two things
 a LOCAL `vercel build` gets wrong (it traces `.env` into the upload; deploying
 from `apps/web` cannot resolve the hoisted `node_modules`). The agent worker is
-NOT deployed and cannot be on serverless, so chat, email sending and IMAP
-reply detection are absent there and every screen that would promise them says
-so instead. What does NOT need it: replies through Resend's signed webhook,
+NOT on Vercel and cannot be on serverless, so chat, email and SMS sending and
+IMAP reply detection happen only where a worker runs — the operator's
+machine, for now — and every screen that would promise them says so
+instead. What does NOT need it: replies through Resend's signed
+webhook, DoveSoft's delivery reports and texts sent back (two web routes),
 LinkedIn steps a person sends from `/tasks`, and the rescan and digest crons.
 
 **Phases 2 and 3's Definitions of Done now PASS.** They were blocked for the
@@ -59,8 +135,8 @@ below. **Phase 4's is proved against a local SMTP sink, not a real mailbox.**
 | | proved | not proved |
 |---|---|---|
 | Phase 2 | **the whole thing, live.** `npm run smoke:agent` PASSED on 2026-09-25: one turn, 22 tool calls, 284 events, a cost reported, and an evidence-backed ranking of the pipeline's top three built from `scan_company`/`score_company`/`get_company` against the real database | nothing outstanding |
-| Phase 3 | **PASSED.** The agent named `mcp__deepwiki__ask_wiki_question`, `read_wiki_contents` and `read_wiki_structure` alongside its own nine (the `agency` server has twenty-three tools now), on a worker that had been running since BEFORE the connector row was written — §6's "no restart" promise, in the sequence that actually tests it | the agent *calling* a connector's tool in anger (it enumerates them; the gate asks it to enumerate) |
-| Phase 4 | draft → approved in the UI → deferred for quiet hours (live, 21:50 London) → sent in a real SMTP transaction → deal `contacted` → a reply by Message-ID pauses, ties, moves the deal to `replied` → "unsubscribe" suppresses. One test per §2.1 rule. | deliverability through a real mailbox; IMAP IDLE against a live server; a provider webhook with a real secret |
+| Phase 3 | **PASSED.** The agent named `mcp__deepwiki__ask_wiki_question`, `read_wiki_contents` and `read_wiki_structure` alongside its own nine (the `agency` server has twenty-three tools now), on a worker that had been running since BEFORE the connector row was written — §6's "no restart" promise, in the sequence that actually tests it | the agent *calling* a connector's tool in anger (it enumerates them; the gate asks it to enumerate); and the gate has NOT been re-run since connectors moved off the CLI's argv onto `setMcpServers` (§2, "The runtime is assembled") — that hand-over is verified against the real CLI 2.1.269 binary with no model call, and `npm run smoke:agent -- --connector deepwiki` should pass again before Phase 3 is claimed on it |
+| Phase 4 | draft → approved in the UI → deferred for quiet hours (live, 21:50 London) → sent in a real SMTP transaction → deal `contacted` → a reply by Message-ID pauses, ties, moves the deal to `replied` → "unsubscribe" suppresses. One test per §2.1 rule. | deliverability through a real mailbox; IMAP IDLE against a live server (the drain on new mail and the retry of a message that failed to record are proved against a fake mailbox that models imapflow's `idle()`, `apps/agent/test/inbox-drain.test.ts`); a provider webhook with a real secret |
 | Phase 5 | live, in the browser: a `replied` deal dragged to `meeting` (HTML5 drop → `deal.moved` audit row) → meeting recorded from the company page at 15:00 London, stored as 14:00Z → brief generated from the rows → proposal generated from the scan (8 scope items with evidence, 2 workstreams, USD 9,600–15,600 at a 1,200 day rate) → `sent` → `accepted` closes the deal `won`. A stranger on `/book/agency` became a company, a contact with E.164 phone, three consent rows carrying the form's wording, a meeting, and a deal at `meeting`. | the agent's `book_meeting`/`update_deal` in a live turn (same blocker as Phase 2); a calendar invitation (deliberately not sent from here) |
 | Phase 6 | the whole Definition of Done, end to end against the real service: a SIGNED webhook is answered with `<ConversationRelay>` carrying the disclosure, the relay socket opens against the URL that TwiML handed out, four scripted questions qualify the caller, asking for a person produces the `end` frame whose `HandoffData` makes `/twiml/action` return a `<Dial>`, and the row ends with `answered_at`, `disclosed_ai_at`, an outcome, Twilio's duration and recording URL, a transcript containing the caller's own words, and a summary. `apps/voice/test/service.test.ts`. | Twilio itself — the carrier, the STT and the TTS. A2P 10DLC has not cleared and there are no Twilio credentials, so no real telephone call has been placed to this service |
 
@@ -91,6 +167,22 @@ one.
   contacts and contacts with a recorded opt-in.
   *Enforced now:* `campaigns_no_auto_send_on_voice_or_sms` — a campaign cannot
   have `auto_send = true` on a `voice` or `sms` channel.
+- **An SMS needs an opt-in, a registered DLT template, and a person (0019).**
+  `decideSend` refuses an SMS with no GRANTED SMS consent row
+  (`cold_channel_forbidden`), and one whose words are not a registered,
+  active template with its slots filled (`no_template`, `template_mismatch`
+  — a link or a call-back number a slot was not registered for is a
+  mismatch, judged on the rendered text) — nobody may approve past any of
+  the three. `touches_sms_and_whatsapp_name_a_template`
+  makes an outbound SMS that can still go out unstorable without a template,
+  and `touches.template_id` references `(id, org_id, channel)`, so it can
+  only name a template of its own org AND channel. An SMS campaign never
+  auto-sends (the CHECK above, and `campaignInput` refuses it with a
+  sentence), and enrolment refuses an SMS campaign whole: each SMS is drafted
+  for one person with Draft SMS. A STOP texted back is the opt-out — a phone
+  suppression, source `reply` (or `voice` when the voice service's number
+  received it), or the loud `opt_out_not_recorded` path when it cannot be
+  written (§2, "SMS through DoveSoft").
 - **Consent is per channel and absence means NO.** `consents` has
   `UNIQUE (contact_id, channel)`, `granted` and `source` are both NOT NULL,
   `consents_source_is_not_blank` rejects an empty or whitespace-only source
@@ -117,7 +209,16 @@ one.
   `suppressions_source_is_known` admits `manual`, `reply`, `voice`,
   `unsubscribe` and `erasure` — one per writer, and a value nothing writes is
   not listed. The column is NULLABLE: a row written before it existed was not
-  tracked, and calling it `manual` would be a claim.
+  tracked, and calling it `manual` would be a claim. `voice` is the voice
+  service, which records what its number receives, spoken or TEXTED: its
+  inbound SMS STOP wrote no source until review round 3, so every such
+  opt-out was stored NULL and `/compliance` counted it as written before
+  0018. Its `/sms` handler reads a text with `smsTextAsksToStop` — the
+  reading DoveSoft's texts are recorded by — as well as the spoken reader it
+  always used, so STOPALL, UNSUB, CANCEL, END and QUIT texted to it are
+  `voice` phone suppressions (review round 5); with the spoken reader alone
+  they were opt-outs to DoveSoft's webhook and ordinary texts here. A STOP
+  texted to DoveSoft's number is a reply (`reply`).
 - **A refusal is final until an owner lifts it.** `contactsRecordConsent`
   refuses a grant over a recorded refusal (`refused_is_final`), and the rule
   is IN the statement, not only in the read before it: `contactsConsentUpsert`
@@ -128,10 +229,26 @@ one.
   NEVER ASKED, never to granted — and its DELETE and that audit row are one
   transaction. The route gates the lift to owners.
 - **A bounce is not an opt-out.** `contacts_bounce_has_code` keeps
-  `email_bounced_at` and `email_bounce_code` NULL together; the code must be an
-  RFC 3463 status; the mark is lifted only by `contactsUpdate` changing the
+  `email_bounced_at` and `email_bounce_code` NULL together, and (0019)
+  `contacts_bounce_code_is_rfc3463` makes the code an RFC 3463 status — 0018
+  paired the NULLs only, while this line already claimed the format; the
+  mark is lifted only by `contactsUpdate` changing the
   address, in the same UPDATE. It is a column and a `bounced` refusal, never a
   suppression row (§2, "A bounce is evidence about an address").
+- **An SMS delivery report sits BESIDE `status`, never in it (0019).**
+  `touches.delivery_status` (`pending`, `delivered`, `failed`),
+  `delivered_at` and `delivery_error` are outbound only
+  (`touches_delivery_is_outbound_only`), a delivered row carries a time —
+  when the report reached the web, since no time is read from a report — and
+  a failed one its bounded reason (`touches_delivered_has_its_time`,
+  `touches_delivery_failure_has_its_reason`, compared with `IS NOT DISTINCT
+  FROM` because a CHECK passes on NULL). `status` stays the send path's word:
+  `DELIVRD` does not move it, so the cap, enrolment's duplicate guard and the
+  compliance counts read every row as before, and the sender's own
+  predicates have no second writer to arbitrate against. A failed delivery,
+  like a bounce, is evidence about one attempt to one number and never a
+  suppression. One inbound SMS is one row: `touches_inbound_sms_provider_id_key`
+  is the partial unique index that settles two deliveries of one message.
 - **A reply is handled by a person, and only a reply.**
   `touches_handled_is_inbound_only` and `touches_handled_has_who` (a handled
   row names who, RESTRICT). An answer to a reply is OUTBOUND
@@ -203,14 +320,48 @@ narrowed on first where it is indexed and cheap, but never on its own.
 scan that was current when it was written, and a deferral — the cap, quiet
 hours, a paused campaign — can hold it for weeks while the rescan cron
 refreshes the scan and never the words. So `sendFactsFor` takes a REQUIRED
-`evidenceAsOf` — a stored message's `created_at` through the exported
-`evidenceAsOfFor(touch)`, null for an answer to a reply, which quotes no scan
-— and sets the required `SendFacts.evidenceStale` from the latest `ok = true`
-scan of the contact's company at or before that moment, judged by `isStale`
-on its `ran_at` at the moment of sending, at the active ICP's
-`stale_after_days` or 14. A re-scan after the words were written does not
-freshen them; a new draft does. `decideSend` refuses it `stale_evidence`
-(§2, "The send path").
+`evidenceAsOf`, an `EvidenceAsOf`: `StoredWords { touchId, writtenAt }` for a
+stored message, through the exported `evidenceAsOfFor(touch)`; a `Date` for
+words written at that instant and stored nowhere (a dry run); or null for an
+answer to a reply, which quotes no scan. It sets the required
+`SendFacts.evidenceStale` from the latest `ok = true` scan of the contact's
+company at or before that moment, judged by `isStale` on its `ran_at` at the
+moment of sending, at the threshold `staleAfterDaysOf` reads from the active
+ICP. For a stored message that scan is found IN SQL, against the row's stored
+`created_at` — the compliance count's own predicate, so the two cannot
+disagree about which scan the words quote. It used to compare `ran_at` with
+`created_at` read back as a millisecond `Date`, and a scan stamped inside the
+draft's millisecond, a few hundred microseconds before the words, was not
+seen (`packages/db/test/evidence-moment.test.ts`). A re-scan after the words
+were written does not freshen them; a new draft does. And **superseded is
+stale too** (review round 3): words whose scan a NEWER successful scan of the
+company has superseded set `evidenceStale` as well — asked in the same
+statement, against the stored `ran_at`, with the scan excluded by id — because
+the newer scan may observe a quoted gap as closed, and only the latest is
+quoted in anything outbound (`quotableFindings`' rule, and the share link's).
+A newer scan that did not reach the site supersedes nothing. `decideSend`
+refuses either `stale_evidence` (§2, "The send path"), and `decideGathered`
+in `packages/db/src/outreach.ts` words a superseded one for what happened ("A
+newer scan of this company has reached the site since the scan these words
+quote…") unless the scan is also past its deadline.
+
+**The threshold has one reader.** `staleAfterDaysOf(definition)` in
+`packages/core/src/freshness.ts` is how every caller reads
+`freshness.stale_after_days` — the sender, enrolment, the proposal and the
+share link, the meeting brief, the rescan, the digest, `tools/scan.ts`, the
+agent's tools and every page (the web's `readIcp` delegates to it): the
+value when it is a finite positive number, and 14 for no profile, a
+definition `parseIcpDefinition` refuses, no `freshness` block, or anything
+else. `isStale` throws on a non-positive threshold, and readers that passed
+the raw value made a hand-edited `0` a 500 on the proposal and company
+pages, the share link and two agent tools while `/compliance` fell back to
+the default — the page and the tool that must agree did not.
+`/settings/icp` names a refused value ("this profile sets 0, which is not a
+positive number of days, so every reader uses the product default") rather
+than displaying it as the threshold, and the company page reads a profile
+that does not parse as no profile rather than answering 500. A source pin,
+`stale-threshold-readers.test.ts` in `packages/db/test` and `apps/web/test`,
+keeps every reader on the helper.
 
 Two more §2.2 links, both added in 0006 and after:
 - **A score names the scan it was computed from.** It used to record a company
@@ -233,7 +384,8 @@ Two more §2.2 links, both added in 0006 and after:
 - No credential in a source file, a log line, or an agent's context window.
 - `connectors.secret_ref` points at an encrypted credential; it never holds one.
 - The CLIs strip credentials from their output — `safeTarget()` in
-  `packages/db/src/cli.ts` prints `host:port/db` and never the DSN.
+  `packages/db/src/safe-target.ts` (which the migration CLI prints through)
+  prints `host:port/db` and never the DSN.
 - `redact()` in `packages/core` walks nested objects and arrays and blanks any
   value whose **key** looks sensitive; both loggers use it. It is a backstop,
   not the primary defence — it matches on key name only, so a credential under
@@ -244,10 +396,32 @@ Two more §2.2 links, both added in 0006 and after:
   That URL is a bearer credential.
 - **Three more URLs are credentials, and are treated as such.** The Slack
   webhook URL (never logged, never in an audit row — `redact()` cannot see it,
-  because it is a value in a URL rather than under a key); a proposal share
+  because it is a value in a URL rather than under a key), which the worker
+  now holds too, under the same rules, for its one alarm (§2, "Notifications
+  and the heartbeat"); a proposal share
   token, of which only the sha256 is stored — `proposal_shares_token_hash_shape`
   (`^[0-9a-f]{64}$`) makes a raw token unstorable; and an unsubscribe token,
-  which names one message and nothing else.
+  which names one message and nothing else. A Resend attachment's
+  `download_url` is a signed bearer link of its own and is never logged
+  either.
+- **The DoveSoft key goes in one header and nowhere else.** `DOVESOFT_API_KEY`
+  lives in the provider's closure and the `key` request header — never a
+  property of the provider object, an error's message or name, a log line or
+  an audit row — and the request sets `redirect: 'error'`, because `fetch`
+  strips only `Authorization` across origins and a redirect would carry the
+  `key` header wherever it pointed. In production `DOVESOFT_BASE_URL` must be
+  `https:` on a public multi-label host or the worker refuses to boot, naming
+  the variable and never the value. `DOVESOFT_WEBHOOK_SECRET` is compared in
+  constant time and never logged by this code — but a `?token=` in a URL
+  lands in the platform's access log, which is why the `x-dovesoft-token`
+  header is the form to register where DoveSoft can send one, and why
+  `/settings/deployment` prints the URLs with a `<DOVESOFT_WEBHOOK_SECRET>`
+  placeholder rather than the secret. A GET push of an inbound text puts
+  more than the token there: the sender's NUMBER and the WORDS ride in the
+  same URL, into Vercel's request log and DoveSoft's own, so POST is the
+  form to ask DoveSoft for (§2, "SMS through DoveSoft"). Generate the secret
+  with `openssl rand -hex 32`, which needs no escaping in a URL; any other
+  character is percent-encoded there.
 - **A session cookie's value is a bearer credential too.** The scanner records
   each homepage `Set-Cookie` for `cookie_flags` with its VALUE replaced by
   `<redacted>` — the rule reads names and attributes only.
@@ -279,7 +453,8 @@ Two more §2.2 links, both added in 0006 and after:
   LinkedIn provider is a person"). A share link is not a send: a person pastes
   the URL into a message they write, and a link can only be minted from a
   proposal a person already marked `sent`. Erasing a contact is owner-only and
-  needs the contact's id typed back.
+  needs the contact's id typed back. Every SMS is drafted for one person from
+  a registered template and approved by a person on `/approvals`.
 
 ---
 
@@ -355,14 +530,34 @@ test bans spreading the row outright (the same instrument that keeps
 - **the log.** Names and transports only. A URL carries a token in a query
   string sooner or later, whatever the form says.
 
-**One leak is NOT fixed, and is stated rather than hidden (§13).** `sdk.mjs`
-passes the whole `mcpServers` object to the CLI as `--mcp-config <json>` on the
-`claude` process's argv — the decrypted `authorization`/`x-api-key` header and
-the stdio credential included, for every transport, for as long as a turn
-runs. Anyone who can list processes on the worker host can read it. The
-catalog's intro says so. A possible fix — the SDK's `setMcpServers` control
-request, which its settings text lists as a separate MCP entry point — is
-outside this repo's code and unverified.
+**The argv leak is fixed: connectors go over stdin, never the command line.**
+`sdk.mjs` turns every server in `options.mcpServers` that is not in-process
+into `--mcp-config <json>` on the `claude` process's argv — the decrypted
+`authorization`/`x-api-key` header and the stdio credential included, for as
+long as a turn ran, readable by anyone who could list processes on the worker
+host. Now `options.mcpServers` carries only the in-process `agency` server
+(`buildQueryOptions` types it `McpSdkServerConfigWithInstance`), and the
+connectors are handed over by `Query.setMcpServers` — an `mcp_set_servers`
+`control_request` on the child's stdin — before the user's message is
+(`apps/agent/src/runtime/open-query.ts`, shared by a turn and Test
+connection). `agency` rides in that payload too, because `mcp_set_servers`
+is AUTHORITATIVE: measured against CLI 2.1.269, leaving it out answers
+`removed: ['agency']`. The hand-over waits for each server to connect or
+fail, bounded by the CLI's own MCP timeout (30 s) and a 45 s cap of ours
+(`HANDOVER_TIMEOUT_MS`), because a turn must always end.
+`apps/agent/test/connector-argv.test.ts` runs the real SDK against a stub CLI
+that records its argv and stdin, with a control showing the old shape DID put
+the credential on argv. A stdio connector's credential still reaches its own
+child through that child's environment, as above. **The product copy says
+the same now** (both lines went on describing the old shape until a
+follow-up corrected them): the catalog's "Where a credential goes" note in
+`apps/web/src/components/settings/connector-catalog.tsx` says the worker
+hands the credential to the claude process "over its control channel —
+never on a command line", and that a server on the worker host receives it
+in an environment variable, which that host shows to its own user and to
+root; `STDIO_CAVEAT` in `packages/core/src/connector-catalog.ts` says a stdio
+server is launched with the model credentials removed from its environment,
+and the rest of the CLI's environment still reaches it.
 
 ### Connector catalog, credentials and tool disable
 
@@ -482,7 +677,11 @@ the worst possible failure for a button whose whole job is to say whether a
 server works. (`alwaysLoad: true` would make startup blocking instead, but it
 is capped at a 5s connect timeout and changes how the server's tools load into
 a real turn; a probe should not need a different config from the thing it
-tests.)
+tests.) The probe now hands its server over with `setMcpServers`, as a turn
+does, and that reply waits for the connection, so its first status is
+normally final; the poll stays for the case where it is not. It also runs
+the binary a turn runs (`CLAUDE_CODE_PATH`), where before it found `claude`
+on PATH and could test a different CLI from the one chat used.
 
 ### packages/tools
 The tools as PLAIN DATA, with **no import of the Agent SDK anywhere in the
@@ -513,12 +712,44 @@ The fourteen added with 0018, one line each:
 - **`check_send` and `get_consent`** make the gate's rule visible to the
   model; both queue nothing. `get_consent` reports a suppression match by kind
   and recording path, never the value. `check_send`'s data carries the
-  consent row AS RECORDED, as `get_consent` reads it, and its summary leads
-  with a reply pause when that is the reason — "paused: they replied (…); …
-  This is not a refusal of <channel>. get_replies shows what they said." —
-  because the send path models a pause as `consent_revoked`, and repeating
-  that told the model an interested prospect had declined. Any other pause
-  is quoted with its reason and never called "not a refusal".
+  consent row AS RECORDED, as `get_consent` reads it, and `pausedFor`, the
+  pause's class. When the send path's own `paused` code is the reason, the
+  summary leads with words for that class (`pauseReasonClass`, the inbox's
+  exact reading): only `replied` — exactly `replied <ISO instant>` —
+  promises an /inbox answer (unless `sharedNumberHold` holds, below) and is
+  called "not a refusal of <channel>";
+  `manual` says answering a reply does not lift it; `unsubscribed` is their
+  opt-out; `opt_out_not_recorded` and `erasure` say to record the opt-out or
+  finish the erasure, and never to resume them — except a shared number's
+  holder (`isSharedNumberOptOutPause`), worded as a holder: a text from a
+  number they share asked to stop, it may not have been them, and a person
+  records the number on /suppressions before the pause can be lifted. And a
+  holder whose OWN pause stood (review round 10): when `facts.sharedNumberHold`
+  — previewSend's fact — holds, the paused summary (`pauseWords`) and the
+  other-refusal branch append "They also hold a phone number a text came
+  from that asked to stop, and it could not be recorded — it may not have
+  been them — so Resume is refused until a person records the number on
+  /suppressions; do not suggest resuming them before that.", and its data
+  carries `facts.sharedNumberHold`; before, a teammate's pause there read
+  "until a person resumes them on /contacts", which Resume refused. For a
+  `replied` pause, whose /inbox answer `replyQueueDraft` refuses then too,
+  the summary drops that promise and appends `SHARED_NUMBER_HOLD_REPLIED_WORDS`
+  instead — "…so neither answering their reply from /inbox nor Resume on
+  /contacts lifts the pause until a person records the number on
+  /suppressions; do not suggest either before that." — in both branches
+  (review round 13).
+  `get_consent`'s first line for such a person reads "paused: nothing is
+  sent to them, and they cannot be resumed until a person records a phone
+  number they share on /suppressions — a text from it asked to stop and
+  could not be recorded, and it may not have been them" in place of "until
+  a person resumes them", and its data carries `sharedNumberHold` (from
+  `consentLedgerFor`). One
+  hold round 8 added is not told apart here yet, stated: a contact a
+  colleague's unrecorded stop was filed under reads as an ordinary `replied`
+  pause (§2, "The opt-out reader runs first"). A prefix test used to call a
+  teammate's "replied on the phone (by …)" a reply pause, promising an
+  answer the inbox then refused. A suppression or a recorded refusal
+  outranks the pause and is reported as itself, with the pause beside it.
 - **`get_scan_history`** lists every scan newest first with the score whose
   `scan_id` names it; an unreachable scan is "unreachable", never a 0.
 - **`get_evidence_changes`** compares the two newest scans that reached the
@@ -546,7 +777,13 @@ The fourteen added with 0018, one line each:
   open now or closed inside it. Below five it prints "insufficient data".
 - **`get_company_timeline`** merges touches, scans with THAT scan's score,
   deal audit rows, meetings, proposals, calls, notes and tasks, newest first.
-  A message is its subject and first line; a note is `note by <name>: "…"`,
+  A message is its subject and first line, except a LinkedIn message
+  `linkedinThreadWithheld` names, which prints only `<channel> message out,
+  <status> — words withheld (<why>)` (review round 5: a person could
+  otherwise copy them from a chat into LinkedIn past every rule Start
+  runs), and then the summary adds "A LinkedIn message’s words are shown
+  only where /tasks would show them — Start checks every send rule first."
+  A note is `note by <name>: "…"`,
   and the summary says a note is a teammate's words, not evidence. A meeting
   is printed in its own zone with the UTC instant beside it.
 - **`get_compliance_summary`** is `complianceSummary` at the ICP's stale
@@ -677,7 +914,8 @@ quiet stretch. Every panel dates evidence from `scans.ran_at` through
 | 4 ✅ | consent, suppression, quiet hours, daily caps — the one send path |
 | 5 ✅ | `proposalFromFindings` and `meetingBrief` — the two documents the pipeline writes, pure, refusing stale evidence |
 | 6 ✅ | the AI disclosure, the opt-out/handoff/sentiment readers, the scripted turn, and §5.5's `decideLlmCall` |
-| 0018 release ✅ | the informational signals' words, `diffFindings`, rotting and `pipelineMetrics`, enrolment's gate and draft, the kickoff and renewal templates, the bounce and auto-reply readers, the connector catalog as data, suppression sources |
+| 0018 release ✅ | the informational signals' words, `diffFindings`, rotting and `pipelineMetrics`, enrolment's gate and draft, the kickoff and renewal templates, the bounce and auto-reply readers, the connector catalog as data, suppression sources; from review, the one stale-threshold reader (`staleAfterDaysOf`) and the pause as its own refusal, with its class and words (`pauseReasonClass`, `pausedSentence`, re-exported by `packages/db`'s inbox); from later review, `htmlToText` (`html-text.ts`, linear time, the one converter both inbound paths use) and the opt-out alarm's Slack payload (`slack-payload.ts`, so the web and the worker post identical bytes) |
+| 0019 release ✅ | DLT (`dlt.ts`): `parseTemplate`, `renderTemplate`, `matchesTemplate` (both judging links and call-back numbers on the rendered text, `smuggledRuns`), `DLT_VAR_MAX_CHARS` (30 code points), TRAI's `PROMOTIONAL_WINDOW` (10:00–21:00 IST, and `hours` for the recipient's own clock), `promotionalBand` (`{ open, india, opensToday, nextOpen }`), `insidePromotionalBand`, `nextOpenMinute` and `isIndianNumber`, `smsOptOut` (the whole message, since review round 6 clause by clause, since review round 7 a capital STOP ending the text, and since review round 8 not after NON, FULL, a possessive or a place word, not STOP BY/IN/OVER/OFF, nor a bare STOP ending a question), `parseTemplateCategory`, `normaliseDltHeader`; `TEMPLATE_CHANNELS`, `TemplateFacts` and the two template steps in `decideSend`, and the promotional band's two (a band that never opens, `band_never_opens`; a band not open now); from review, `SendRefusal.retryAt` and `deferUntil` with its three bounds (`DEFER_FALLBACK_MS`, `DEFER_MAX_MS`, `DEFER_SLOW_MS`) in `send.ts` |
 
 ---
 
@@ -692,18 +930,34 @@ the function at all. `dispatchTouch` in `packages/db` is the only function
 that reaches a provider, and both an auto-send message and a human-approved
 draft go through it. The order is §8.4's, with the steps it does not name
 put where they belong — cold channel → unparseable recipient → suppressed →
-consent (`no_consent`, `consent_revoked`) → **bounced → stale evidence** →
-zone and quiet hours → daily cap → campaign inactive → approval — and
-`packages/core/test/send.test.ts` asserts the ORDER, not just the outcomes —
-the refusal code is what somebody reads six months later. The bounce and
-stale evidence sit after consent because neither is a person asking to be
-left alone, so neither may outrank one in the log, and before the clock
-because a message held until morning would still bounce, and would still
-quote something no longer known to be true.
+consent (`no_consent`, `consent_revoked`) → **paused → stale evidence →
+bounced** → **no template → template mismatch** (SMS and WhatsApp only,
+0019) → zone → a promotional SMS whose band never opens
+(`band_never_opens`, below) → the campaign's quiet hours → the promotional
+band (also `quiet_hours`) → daily cap → campaign inactive → approval — and
+`packages/core/test/send.test.ts` asserts the ORDER, not just the outcomes,
+in two tables: every channel's, and SMS's with the template steps — the
+refusal code is what somebody reads six months later. The
+pause, stale evidence and the bounce sit after consent because none of them
+is a person asking to be left alone, so none may outrank one in the log; the
+pause comes right after consent. Stale evidence, which nobody may approve
+past, comes before the bounce, which a person resolves, because a stale
+draft whose address also bounced read as "fix this first" with Approve
+enabled and turned into a blocked `stale_evidence` once the address was
+corrected. The template steps come after every refusal about the PERSON,
+because they are about the words — a suppressed or declined person must be
+logged as that, never as a template fault. All five come before the clock,
+because a message held until morning would still be to somebody paused,
+would still quote something no longer known to be true, would still bounce,
+and would still be scrubbed by the operator.
 
 **A person approves the words, not the moment.** Approving a draft names the
 recipient, the campaign and the approver (0011: a row may not say "approved"
-without both, like `approvals`) and marks it `approved`. The worker's tick
+without both, like `approvals`) and marks it `approved`. The approver
+chooses the recipient on email and LinkedIn only: an SMS or WhatsApp draft
+is a registered template filled in for ONE person, so `approveDraft`
+refuses it to anyone but its own `contact_id` (`rendered_for_another`, §2,
+"The approvals page"). The worker's tick
 then runs it through every rule AT THE MOMENT OF SENDING, because the
 recipient may have opted out in the hour since. `approvedByHuman` satisfies
 the approval gate exactly as `autoSend` does and nothing else.
@@ -716,46 +970,456 @@ and the shortcut (the sender's zone) is the mistake §2.1 names. An address
 that cannot be normalised is a refusal, because no suppression row could
 ever have matched it: `suppressed: false` there means unknown, not clear.
 
-**Four refusals nobody can approve past.** A suppression (somebody asking
+**Seven refusals nobody can approve past.** A suppression (somebody asking
 to be left alone), a recorded refusal, cold voice/SMS/WhatsApp, and — added
 by review — `stale_evidence` (§2.2): the words quote a scan that is past its
-re-verification deadline at the moment of sending, and approving them does
-not make them current; the fix is a re-scan and a new draft. §2.1 says cold
-SMS must be "structurally impossible"; an approver offered enough impossible
-things learns to click yes.
+re-verification deadline at the moment of sending, or one a newer
+successful scan has superseded (§1), and approving them does not make them
+current; the fix is a re-scan and a new draft, or for a superseded scan a
+new draft from the latest one. And `paused`:
+a person held from every campaign — they replied, a teammate is holding
+them, an opt-out or an erasure could not be completed, or a text from a
+number they share asked to stop and could not be recorded — never lifted by
+approving one message past the hold. Who may lift it depends on its class:
+answering the reply from `/inbox` ends only a `replied` pause, and Resume on
+`/contacts` refuses an `opt_out_not_recorded` or `erasure` pause outright
+(409), even once the opt-out has been recorded by hand — except a shared
+number's holder (`isSharedNumberOptOutPause`, review round 8), refused
+`RESUME_SHARED_NUMBER` only until a phone suppression in their org matches
+their phone, and then lifted (§2, "SMS through DoveSoft") — any pause at
+all of a contact held for a shared number's unrecorded STOP, that hard hold
+or a pause of their own the holders' loud path kept and a row listing them
+(`heldForUnrecordedSharedNumber` in `sms.ts`, review round 9), while the
+number on their phone has no phone suppression in their org, refused for a
+kept pause `RESUME_SHARED_NUMBER_KEPT`, which does not say they asked (a
+row listing them counts only until a `contact.resumed` row for them is
+NEWER than it: review round 10, below) —
+and any pause at all while the inbox's own `unrecordedOptOut` reading
+holds: an opt-out of THEIRS while an address it was about has no
+suppression row (`ownOptOutStillToRecord`, review round 9) — for a
+`contact.opt_out_not_recorded` row the address the reply it names came
+from and the contact's own address on the row's channel (every address
+when it names none), for `unsubscribe.not_recorded` the address the
+message was delivered to and the contact's email, for
+`contact.erasure_failed` every address, and for an opted-out reply of
+theirs its From — any key of an address recording it, so a domain row
+still covers an email, and the sentence naming what to record by kind
+("their email address", "the address their reply came from (shown on
+/inbox)"), never by value (any key of their email, phone or LinkedIn
+profile ended it before, so a number's suppression ended an email
+opt-out, and the email went) — or (review round 8) an opted-out reply
+from ANOTHER address on the thread filed under them whose own From no
+suppression row matches, refused
+`RESUME_UNRECORDED_ANOTHER_ADDRESS` in words that name the address to record
+— the reply's — because a suppression on the contact's address satisfied
+this gate and left the person who asked unrecorded (`contactResumeByHand`
+in `packages/db/src/inbox.ts`) — the button used to resume whatever the
+class, including the pauses that are the only protection left when an
+opt-out could not be stored. A shared-number row stops governing a holder
+once a `contact.resumed` row for them is newer than it (review round 10,
+`sharedNumberHolderRow`, and so `sharedNumberHolderRowExists`, the stored
+`created_at`s compared in SQL, never a `Date` read back): Resume lifts a
+pause of a holder a governing row lists only once the number is recorded,
+so a later resume is a person having lifted the hold, and read for ever
+the row refused every later pause of theirs, a teammate's included, and
+froze their phone once an owner removed the number's suppression. A newer
+row lists them afresh. Every writer of `contact.resumed` asks the same
+question first (review round 12): `/inbox`'s answer (`replyQueueDraft`)
+refuses `opt_out_not_recorded` with `SHARED_NUMBER_HELD` — record the
+number, then answer — and `dispatchTouch`'s recovered-send lift
+(`liftRecoveryPause`) keeps the re-pause, both under the contact's lock,
+because each lifted a listed holder's `replied` pause past the gate —
+reachable through the `paused` shortfall or a Resume that landed before
+the row committed — and its `contact.resumed` spent the row while the
+number was still unrecorded. So `/contacts` Resume, the inbox's answer and
+the recovery agree about such a holder. Both
+resume paths lift only the pause they were asked about
+(`resumeContact`'s `expectedReason`,
+in the UPDATE's predicate): the inbox the pause it READ under its locks,
+and `/contacts` the pause the PAGE SHOWED (review round 4). Every Resume
+button — the ledger, the company page's People, `/suppressions`' paused
+list and `/inbox` — sends the `pausedReason` it rendered, and
+`contactResumeByHand(db, { orgId, contact, expectedReason, actor })` judges
+it against the contact locked in its own transaction; the route used to
+judge and lift the pause IT read after the click, so a teammate's hold
+written after the page loaded was lifted from a stale tab. A shared
+number's holder is offered Resume too (review round 9): `/contacts` decides
+its buttons through `resumeOfferFor` in
+`apps/web/src/lib/shared-number-pause.ts`, beside a client-safe copy of
+`sms.ts`'s `isSharedNumberOptOutPause` that `shared-number-pause.test.ts`
+holds equal to it, regex text included, and all four screens say beside
+that Resume (`SharedNumberHolderNote`) "A text from a number they share
+asked to stop, and it could not be recorded — they may not have sent it.
+Record the number on /suppressions, then Resume; until the number is
+recorded there, Resume is refused." The ledger read the pause's class
+alone, said such a holder had asked to stop and offered no Resume, while
+the route lifts it once the number is recorded; only the contact's own
+unrecorded opt-out and an unfinished erasure show no Resume now. Since
+review round 10 `resumeOfferFor` also takes the ledger row's
+`sharedNumberHold` (from `consentLedgerFor`), so a holder whose OWN pause
+stood (`holdHard`'s `kept`) — a teammate's or an unsubscribe's, which by
+its shape alone got a plain Resume the route then refused
+`RESUME_SHARED_NUMBER_KEPT` — gets `record_number` on `/contacts`, the
+note beside Resume; and `/approvals`' paused block (`approveBlock`, through
+`decisionView(decision, preview.facts)` and
+`CandidateDecision.sharedNumberHold`) adds "A text from a number they share
+asked to stop and could not be recorded — they may not have sent it — so
+they cannot be resumed until the number is recorded on /suppressions."
+**Stated residual:** `/suppressions`' paused list, `/inbox` and the company
+page's People still decide the note by the pause's SHAPE alone
+(`isSharedNumberOptOutPause`), so a kept holder reads a plain Resume there
+with no note, and Resume's 409 (`RESUME_SHARED_NUMBER_KEPT`) is what says
+what to do — giving them the fact would be one
+`heldForUnrecordedSharedNumber` read per paused row on unbounded lists.
+`/inbox`'s answer composer is the same (review round 14): for a listed
+holder paused by their own reply it still offers Answer and says "Drafting
+resumes <name>", and the draft's 409 (`SHARED_NUMBER_HELD`: record the
+number, then answer) is what says what to do — nothing is drafted or sent.
+And `/suppressions`' paused list opens "Held from every campaign — most
+often because they replied; each row says why", where it read "A contact
+who replied.", false of a holder who may have sent nothing; since review
+round 10 it names every paused person ("(no name recorded)" otherwise)
+beside their email, else their phone, else their id (`pausedContacts` in
+`campaigns.ts` returns `firstName`, `lastName` and `phone`), and a shared
+number's holder's row shows "The number they share: <phone>" under the
+note, with, for `contacts:write`, a "Fill it in above" button that sets the
+add form to kind phone with that value — it adds nothing itself. `/inbox`
+shows "The number they share: <phone>" beside its note too, from
+`inboxTouches`' contact projection, which carries `phone` now. A pause that
+changed since is a 409 `changed_meanwhile` ("Reload the page …"), an
+unpaused contact a 409 `not_paused`, a missing one a 404, and a body with no
+`pausedReason` a 400; the guarded `resumeContact` also requires `paused_at
+IS NOT NULL`. The `contact.resumed` row (`{ pausedFor }` only) is written
+inside that transaction, uncaught, and no longer by the route — so a resume
+with no row, or a row with no resume, cannot exist, which is what
+`repauseForUnansweredReply` reads (below). `pausedSentence` words each
+class, and never says "resume" for an opt-out nobody could record or an
+erasure that did not finish; its `opt_out_not_recorded` sentence says "This
+contact asked to stop — or a text from a number they share did —" since
+review round 8, because a shared number's holders are paused in that class
+and may have sent nothing. And 0019's two: `no_template` (an SMS or
+WhatsApp message naming no registered template, or a deactivated one) and
+`template_mismatch` (words that are not their template with each slot
+filled) — an approval does not make the operator deliver words it did not
+register, and the fix is a new draft from an active template. §2.1 says cold SMS must be "structurally
+impossible"; an approver offered enough impossible things learns to click
+yes.
 
 **The clock is not a refusal.** Quiet hours, the cap and a paused campaign
-DEFER a message (`scheduled_for`, same status, approver kept); everything
-else is terminal, stale evidence included. The default window wraps
+DEFER a message (`scheduled_for`, same status, approver kept), and so does
+the band for a promotional SMS — 10:00–21:00 where the recipient is, for
+every number, and TRAI's 10:00–21:00 IST as well for a +91 one
+(`promotionalBand`, `isIndianNumber`) — under the same `quiet_hours` code,
+so the sender and `/approvals` needed no new one; everything
+else is terminal, stale evidence included. **One band is not the clock**
+(review round 4): a promotional SMS to a +91 number read in a zone whose
+10:00–21:00 never meets IST's at today's clocks — Denver and Phoenix all
+year, Los Angeles on daylight time — has no moment it may go, so it is
+refused `band_never_opens` (terminal at the tick, `humanCanResolve: true`,
+worded "promotional band never opens for them"), checked right after the
+zone and before the campaign's quiet hours, with a sentence naming the zone
+and both fixes: set `Asia/Kolkata` on the contact if they are in India, or
+draft again from a service template. Deferring it re-queued the row every
+hour for ever behind "it goes when the band opens", and the words would
+have been months old if it ever went. Round 4 reused `unknown_timezone`,
+which every screen words "no timezone on the contact" — false of a contact
+whose zone is Denver — so review round 5 gave it a code of its own, listed
+in `REFUSALS_A_CORRECTION_RESOLVES` and
+`COMPLIANCE_REFUSAL_HUMAN_CAN_RESOLVE`; a zone fixed before the draft is
+sent makes the same draft sendable. The same code refuses a band that opens
+only inside the campaign's own quiet hours, so that no minute of the day is
+open to both — which would otherwise be deferred an hour at a time for ever
+too — and that sentence names the window and says to narrow it. "Today" is
+the UTC offsets in force at the moment of sending,
+because a daylight-saving change opens or closes the overlap. The default window wraps
 midnight, and the naive comparison is not merely wrong for 21:00–08:00, it is
 inverted.
+
+**A deferral names the minute it may go** (review round 5). A `quiet_hours`
+refusal carries `retryAt`: the first whole minute after now that is outside
+the campaign's quiet hours and, for a promotional SMS, inside the band,
+read at the UTC offsets in force at now (`nextOpenMinute`, which asks each
+of the next 1,440 minutes). `deferUntil(decision, now)` in
+`packages/core/src/send.ts` is what the worker's tick and LinkedIn's Start
+both put in `scheduled_for`, so the two cannot land in different places:
+`retryAt` when it is ahead of now, capped at 24 hours (`DEFER_MAX_MS`); an
+hour (`DEFER_FALLBACK_MS`) when it is missing or not ahead; six hours
+(`DEFER_SLOW_MS`) for the cap and a paused campaign; and null — terminal —
+for every other code. It was a flat hour, and a band half an hour wide (an
+Indian number read in New York or Los Angeles in winter, or in Chicago in
+summer) was stepped over by every retry whose minute past the hour fell
+outside it, for up to ten days. A daylight-saving change between the
+deferral and the retry can make the message late by the size of the change
+or defer it once more, never early, because whoever waits asks every rule
+again. `decisionView` leaves `retryAt` out of what reaches `/approvals`.
 
 **Every outbound message carries a campaign**, because the campaign is where
 the cap and the quiet hours live. Companies and contacts carry an IANA
 `time_zone` (0010) — never derived from `companies.country`, which is not a
 timezone (the US has six).
 
+**A message is checked on its OWN channel, not its campaign's** (review
+round 3). `sendFactsFor` used to take the channel from the campaign, and
+with it the recipient, the suppression keys, consent and the bounce, while
+`dispatchTouch` picked the provider by the row's channel — so a campaign
+switched from LinkedIn to email while it held approved messages handed a
+LinkedIn message to somebody suppressed on LinkedIn, checked against their
+email keys. Now `gatherFacts` passes `touch.channel`, `previewSend` reads the
+channel off the stored row its `writtenAt` names, and only words nobody has
+stored take the campaign's. A message whose campaign now sends on another
+channel has no campaign of its own: it is refused terminally through the
+missing-facts path — `refusal_code` `unparseable_recipient`, which a
+correction resolves, with the sentence in `touches.error` — unless a refusal
+nobody may approve past, judged on the words' own channel, outranks it
+(`channelMismatch`, exported for `previewSend`), so a LinkedIn-suppressed
+person is recorded `suppressed`. And the edit that would strand such a
+message is refused: `updateCampaign` will not change a campaign's channel
+while it has queued, awaiting-approval, approved or sending rows (409
+`channel_has_live_messages`).
+
+**A campaign edit is made over what the form loaded.** The form sends every
+field back, status included, so a teammate who changed only the cap
+re-activated a campaign the worker had paused for bouncing in between. The
+form now sends the status it loaded (`expectStatus`), and `updateCampaign`
+puts it in the UPDATE's predicate beside the auto-send expectation; a save
+that matches nothing reads the row again and names the first expectation
+that failed — `status_changed` ("This campaign was set to paused while you
+were editing … Nothing was saved"), `auto_send_changed`,
+`channel_has_live_messages`, or `changed` — as a `CampaignUpdate` union the
+route words as a 409.
+
 **A reply does four things in one call** (`recordInboundReply`): logs the
 inbound touch, pauses the contact (one UPDATE, every campaign, immediately),
 cancels what was queued for them, and moves the deal FORWARD to `replied` —
 forward only, so a late reply never knocks a booked meeting back. If it
 says stop in so many words, the address goes on the suppression list: the
-reply IS the opt-out. Inbound mail is matched by the Message-ID this system
+reply IS the opt-out — on SMS and WhatsApp the number, read by `smsOptOut`
+(STOP, STOPALL, UNSUBSCRIBE, CANCEL, END, QUIT and OPT OUT alone; a stop
+word, `unsub` included, and one token, with an optional `all` before the
+token — `STOP ALL 56161`, `UNSUBSCRIBE ALL ACMEIN` — and a comma, colon or
+dash allowed after the keyword; "reply STOP"; a few SMS sentences, and the
+email reader's whole-message forms restated behind an optional
+please/pls/plz/kindly and before any run of please, pls, plz, thanks, thank
+you or thx set off by a space, a comma or a full stop ("Stop please thank
+you"), the curly apostrophe accepted; a phone's msg, msgs, txt, txts, sms
+and smses read wherever message or text is — "Dont msg me", "no more msgs
+pls" — "stop spamming me", "stop stop stop", "remove me" or "remove my
+number/mobile/phone" from your/the/this list, with mailing, sms, text,
+texting or contact allowed before "list", and since review round 7 "don't
+send me (any more) (these) messages (again / any more)", "stop sending
+(me) (these) messages (to me / to this or my number)" and "stop
+messaging/texting this or my number" — each still anchored at both ends,
+so "Don't send me messages after 9pm" and "Don't stop sending me messages"
+are not; review round 5 found "stop messaging me please" read as an
+ordinary reply) as well as by the prose reader every channel gets. **And
+clause by clause** (review round 6): a text of several clauses — split
+on sentence punctuation, a comma, a colon (review round 7: "Not interested:
+STOP"; never before `//`, so a link's scheme does not make its host a
+clause), a semicolon, an ellipsis, a line break or a spaced dash — is an
+opt-out when ONE clause, its own ends stripped, is one of those forms, so
+"Not interested. Stop" and "Who is this? Stop texting me" are, where read
+whole they were ordinary replies — paused, never suppressed, and
+resumable. A clause is read more strictly than a message: CANCEL, END and
+QUIT never count as one ("Not interested, cancel"), and a keyword's token
+there must be digits, capitals or `all`, so "All good, stop worrying" stays
+prose — "stop it" and "unsub me" are clause forms of their own since round
+7, because "Not interested, stop it" was an ordinary reply. A bare "Stop"
+beside any sentence is read as one — "Stop, I want to know more" included —
+the trade stated in the source, because a missed STOP is the worse error.
+**And a capital STOP ending the text**
+(review round 7, `endsInCapitalStop`): the commonest shape of all, since the
+footer said "Reply STOP", has no punctuation before the keyword — "Not
+interested STOP", "No thanks STOP 56161", "Not interested STOP. Thanks" —
+and was an ordinary reply. STOP, STOPALL, UNSUBSCRIBE, UNSUB, OPTOUT or OPT
+OUT typed in CAPITALS after at least one word, ending the WHOLE text (never
+a clause, so "Bus stop at 5 STOP? no" stays prose), is read as its own
+clause, with an optional ALL, one optional footer token, and the decoration
+and politeness a whole message may end with. Not after a negation or
+"non", an article or a possessive (my, your, our, their, his, her), "full",
+or a word that makes it a place or one stop of many — bus, pit, truck,
+metro, station, railway, rly, train, tram, terminal, depot, signal, toll,
+next, last, first, final, every, each, one ("Please don't STOP", "Working
+NON STOP", "the bus STOP", "FULL STOP", "your ONE STOP"); review round 8
+found "Working NON STOP", "Meet me at Metro STOP" and "Why STOP" read as
+opt-outs — an `opted_out` reply nobody can clear, and a phone suppression in
+every org holding the number. "no" and "halt" are left out on purpose: "No
+STOP" and "HALT STOP" are commands. Not with a question mark after it; not
+STOP BY, IN, OVER or OFF, a visit ("I can STOP BY", from an interested
+lead); and in a text typed in capitals throughout only with a token
+carrying a digit ("NOT INTERESTED STOP ACMEIN" is a miss chosen on
+purpose). **Nor a bare STOP ending a question typed without its question
+mark** (review round 8, `asksAQuestion`), read on the clause the STOP ends —
+after its last clause break, so "Who is this? Wrong number STOP" is still
+one: a clause that opens with a wh-word, or with an auxiliary or a modal and
+a word after it ("Why STOP", "Can I STOP", "When does it STOP", "Who said
+STOP"; "Do STOP" alone is a command). The exception is a question that ends
+before the keyword, whose STOP is the command it looks like: one addressed
+to the sender ending in you, me, us, this or that, my number or the texts,
+a please, pls, plz, kindly or just set aside ("Can you STOP", "When will
+you STOP", "Why are you texting me STOP", "Who sent this STOP"), one
+opening "who/what is this…", and "how many times…". Only the bare word is
+read this way: STOP with ALL or a short code, and STOPALL, UNSUBSCRIBE,
+UNSUB, OPTOUT and OPT OUT, are read in a question as before ("How do I
+UNSUBSCRIBE", "who is this STOPALL"), because those exist only to leave a
+list. Accepted misses, ordinary replies now — paused and resumable, as each
+already was with a question mark: "How do I STOP", "Can I STOP NOW", "When
+does it STOP", "This is final STOP", "Not interested FULL STOP". Accepted
+false positives, still opt-outs: a place NAMED before it ("Reached Kurla
+STOP" — a name looks like any word that ends a sentence), a question whose
+wh-word does not open the clause ("Sir why STOP"), a negation not right
+before the keyword ("We are never going to STOP"), and "Why did you STOP",
+read as a complaint. And one inconsistency, older than round 8 and left as
+it was: "How do I UNSUBSCRIBE" is an opt-out, and "How do I UNSUBSCRIBE?",
+with its question mark, is not. A lower-case or
+title-case "stop" there is a sentence ("I am at Andheri Bus Stop"), CANCEL,
+END and QUIT never count this way, and "Not interested STOP - Ravi", a
+signature after it, is a stated miss.
+Whitespace, punctuation, symbols and emoji are stripped from both ENDS only — `STOP)`, `¡STOP!`, `STOP 👍` — never from
+the middle, so "Don't stop! 👍" is still not one (review round 4). The email
+reader, `looksLikeOptOut`, was widened by sentences only (review round 6,
+which found "Please stop emailing me." read as an ordinary reply — paused,
+never suppressed): stop emailing / mailing / contacting / messaging /
+writing to / spamming me (again, any more), stop sending me emails or
+messages, don't contact / email / message / mail me, and unsubscribe,
+remove me, opt out or take me off your/the/this (mailing, email or contact)
+list — still a whole first line or a whole short message, behind one
+please/pls/kindly and before one please/pls/thanks/thank you/thx. Not by
+decoration at the ends, so a decorated "Unsubscribe 🙏" by EMAIL is still
+missed; and the SMS footer's token and `all` forms were kept out of it on
+purpose, because "stop by" in a mail would become a suppression. **All of
+it is ONE transaction** (review round 3): the row, the pause, the cancel, the suppression attempt, the deal
+move and the `contact.replied` audit row. They were separate statements with
+the row committed first, so a fault after the insert answered 500, the
+provider's retry met `handleInboundEmail`'s Message-ID dedupe, and a "Stop"
+was left unpaused and unsuppressed while its approved follow-up went on the
+next tick. Now a fault rolls everything back and the retry records it; a
+stored row is one whose consequences were stored with it, so a redelivery has
+nothing to finish (re-applying them on a duplicate was rejected: it would
+undo a teammate's resume since) — but for one write, an SMS STOP's phone
+suppression that could not be written, which DoveSoft's redelivery writes
+where it is still missing (review round 7, §2, "SMS through DoveSoft"). The
+three writes that may fail on their own — the suppression, the deal move,
+the audit rows — each run in a SAVEPOINT, because a statement the engine
+refuses aborts the transaction and a COMMIT sent to an aborted transaction
+is answered ROLLBACK with no error, which drizzle resolves (measured on
+PGlite): without one, a swallowed failure discarded the whole reply while
+the function returned its id
+(`packages/db/test/inbound-atomic.test.ts`). The deterministic kind is
+written on the row's own INSERT. A U+0000 in a reply's subject, body, From
+or provider id is stored as U+FFFD on every channel (an inbound reply's
+rule — a template refuses one instead, because it must be the registered
+words exactly: §2, "SMS through DoveSoft"), and the words read
+are the words stored (review round 5): Postgres refuses U+0000 in text, and
+mailparser keeps one decoded from quoted-printable `=00`, so such a reply
+failed its INSERT on every retry and a "stop" sent that way was recorded
+nowhere. Still open: a NUL in an email's Message-ID reaches
+`handleInboundEmail`'s dedupe read unreplaced, before the recorder runs. A
+stop reply whose whole transaction rolled
+back logs `OPT-OUT NOT RECORDED — the reply was rolled back; a provider retry
+records it, otherwise follow up by hand` (ids, `inReplyTo` — the message the
+reply answered — `fromIsContact`, review round 7's word on whether the
+reply came from that contact, null when the fault came before the contact
+row was read, and the error's name), except for a raced duplicate: a
+unique violation with a provider id set is 0019's inbound-SMS index refusing
+the second delivery of a STOP the first recorded, and a line telling a
+person to record it by hand would be false. The
+audit rows of such an attempt are not written, so the route's 500 or that
+line is the record until a retry lands — the provider's on the webhook
+routes, and on IMAP the worker's own, since it leaves a message it could not
+record unseen (below); for such a stop the two email webhook routes, the
+worker's IMAP inbox and DoveSoft's text route also pause the contact, write
+`contact.opt_out_not_recorded` and raise the alarm without waiting for that
+retry (§2, "The Resend inbound route is a READER", and "SMS through
+DoveSoft") — a contact whose COLLEAGUE sent the stop only as any reply
+pauses them, because it was not their opt-out (§2, "The opt-out reader
+runs first"). Inbound mail is matched by the Message-ID this system
 sent (unambiguous), then by an address that belongs to exactly ONE contact
 across every org — two orgs with the same address on file is a reply nobody
 can place, and it is dropped and logged rather than filed under the wrong
 agency.
 
+**The worker's IMAP path leaves what it could not record unseen, and drains
+while connected.** `drainUnseen` in `apps/agent/src/outreach/inbox.ts` marks
+a message `\Seen` only when it was handled or never can be: the server
+returned no source (expunged meanwhile), it has no readable sender, or the
+parser threw (`UnreadableInboundMessage`). A database fault inside
+`recordInboundReply` — which rolls the whole reply back, above — or a fetch
+that failed leaves it UNSEEN for the next drain. Before, every UID was marked
+seen in a `finally`, so a "stop" whose transaction rolled back was never
+retried and never recorded: the difference between an opt-out recorded a
+minute late and one never recorded at all. Bounded: failures are counted per
+UID, in memory (a restart forgets them and retries the message as new — the
+safe direction, because the inbound path dedupes on the reply's
+Message-ID), and the `INBOUND_MAX_ATTEMPTS`th (5) marks it seen and logs
+`INBOUND MESSAGE ABANDONED — handle it by hand` at error, with the UID and
+the error's NAME only: the mailbox still holds the message, the log nothing
+of it. Only the first failure of a drain is charged, because a database that
+is down fails every message behind that one too, and charging each would
+abandon the inbox to one outage; the messages behind a failing one are still
+tried, so one that will never record does not hold up a "stop" that arrived
+after it. The retry waits `DRAIN_TIMING.retryMs` (60 s), doubling per counted
+failure and capped at the refresh below — about a quarter of an hour before
+the fifth failure, long enough for a database to come back. **A stop is not
+left to those retries** (review round 6): one the recorder had placed takes
+the webhooks' loud path on its FIRST failure (`stopNotRecorded`) — the
+contact paused over any earlier reason, `contact.opt_out_not_recorded`
+`{ channel: 'email', why: 'record_failed' }`, and the alarm awaited, naming
+the message the reply answered or none, in `inbound-fault.ts`'s shapes;
+for a colleague's stop (`fromIsContact: false`, review round 7) the
+contact is paused only `replied <ISO>` through `pauseContact`, and the row
+and the alarm are about the message the sender answered, as on the
+webhooks (`rolledBackOptOutPause`; §2, "The Resend inbound route is a
+READER"), while each contact the line names as the sender is held as the
+one who asked (`rolledBackSenderHolds`, review round 8) — and the fault is
+then rethrown, so the drain still counts and
+retries it under the bound above. Before, it was retried and abandoned with
+log lines only, while the sender read the contact as clear. The line is
+`OPT-OUT NOT RECORDED — a reply that asked to stop could not be recorded;
+it stays unseen and is retried, otherwise follow up by hand`, with the UID,
+the fault's class, ids, `fromIsContact`, `paused`, `audited`, for a
+colleague's stop `senders`, `sendersHeld` and `sendersAudited`, and `alarm:
+'raised'|'already_raised'|'off'`.
+An `UnrecordedStops` map beside the failure count raises the alarm once per
+UID; a pause or audit write that threw is tried again on the message's next
+failure, and the UID is forgotten once the message settles — handled,
+unreadable or abandoned. A restart forgets it, so a stop still failing after
+one alarms and audits again. The inbox now hands the recorder a log, to keep
+its rolled-back line, and forwards every line to stderr in the recorder's
+own JSON shape (`recorderLines`), where they always went. **And the drain
+actually runs on new mail now.** imapflow 1.0.196's `idle()` resolves only
+when another command breaks IDLE or the connection drops — an untagged
+EXISTS only emits an `exists` event — so the old `await c.idle(); await
+drain(c)` loop read mail that arrived during a session only after the server
+dropped the connection and the worker reconnected. The session listens for
+`exists` and breaks IDLE with a NOOP (imapflow queues commands, so one sent
+mid-drain is safe; `woken` remembers it, and the next drain starts at once),
+and arms a timer while idle: the retry, or a 10-minute refresh
+(`refreshMs`), well inside RFC 2177's 29 minutes, which also catches an
+EXISTS that never arrived. `apps/agent/test/inbox-drain.test.ts` proves it
+against a fake mailbox and a real migrated database with an engine-raised
+fault — a rolled-back "Stop" retried and recorded with its suppression — and
+never against a live IMAP server (the Phase 4 table).
+
 **`sending` is the worker's claim** on a row (0011), so two workers picking
 one row produce one UPDATE that matches. A worker that died mid-send leaves
 a row that says so, and `recoverStuckSends` marks it `failed` with a reason
 — the safe direction; the alternative is guessing the provider was not
-reached and sending it twice.
+reached and sending it twice. The reason is worded by the row's own channel
+(`STUCK_SEND_ERRORS` in `apps/agent/src/boot/reconcile.ts`): a text "may or
+may not have gone; check the DoveSoft console before drafting it again", an
+email the same with "check the mailbox", and a LinkedIn step names the
+conversation. None says "re-approve to send it again", as the one sentence
+for every channel did: `approveDraft` takes only `awaiting_approval`, so a
+`failed` row is sent again only as a new draft (`LINKEDIN_STEP_STUCK_ERROR`,
+`/tasks`' own stuck-claim sentence, says "draft it again" too). For an answer to a reply it also puts the
+reply's pause back, in the same transaction (`repauseForUnansweredReply`,
+§2, "Replies have a screen").
 
 **The mail transport stays out of the Next graph.** `@agency/db/queries`
 does not export `smtp.ts`: the web app queues, the worker sends, and a
 transport that can deliver has no business in a bundle CI builds with no
-secrets. The inbound webhook (`/api/inbound/email`) is exempt from the
+secrets — the DoveSoft provider lives in `apps/agent` for the same reason.
+The inbound webhook (`/api/inbound/email`) is exempt from the
 cookie gate — a provider cannot carry a session — and refuses everything
 when `INBOUND_WEBHOOK_SECRET` is unset.
 
@@ -800,21 +1464,68 @@ runs `decideSend` over them and writes nothing. The contacts ledger, the
 send-check route, `check_send`, the approvals page and the inbox's answer
 path all show the decision the sender WILL make, from the same function —
 never a restatement of the rules that could drift from them. `previewSend`
-takes an optional `writtenAt` for the stale-evidence step: omitted means a
-message written now (the send-check route, `check_send`, enrolment's dry
-run); a Date means a stored draft (`/approvals` and the `/tasks` LinkedIn
-steps pass `evidenceAsOfFor(touch)`); null means an answer to a reply (the
-inbox). Beside the facts it reports `pausedReason`, `consentRecorded` (the row
-as stored, whatever a pause stands in for) and `evidenceStale`, for a screen
-to say; the decision does not read them.
+takes an optional `writtenAt` (an `EvidenceAsOf`, §1) for the stale-evidence
+step: omitted means a message written now (the send-check route,
+`check_send`, enrolment's dry run); a `StoredWords` means a stored draft,
+judged against its stored `created_at` to the microsecond (`/approvals` and
+the `/tasks` LinkedIn steps pass `evidenceAsOfFor(touch)`, and `/approvals`
+keys its previews by touch id, not by a millisecond); a `Date` means words
+written at that instant and stored nowhere (`smsDraft`'s dry run); null
+means an answer to a reply (the inbox). A stored draft is asked about on ITS
+OWN channel, as the sender sends it, and one whose campaign now sends on
+another comes back `ok: false`, reason `missing`, with `channelMismatch`'s
+sentence. On SMS and WhatsApp it also takes `words` (a template id and a
+body) for the template steps; with none, it answers a question about the
+PERSON as if the message were rendered from one of the channel's active
+templates — a non-promotional one where there is one — and says so
+(`template.source: 'any_active'`), never silently. Beside the facts it
+reports `pausedReason`, `pausedFor` (the reason's class), `consentRecorded`
+(the row as stored — the same value as `facts.consent`), `evidenceStale`,
+`evidenceSuperseded` and, since review round 10, `sharedNumberHold` —
+Resume's own answer (`heldForUnrecordedSharedNumber`), asked in
+`sendFactsFor` for a paused contact only, one `audit_log` read per send
+attempt to one, and false when they are not paused, and since review round
+11 only for a pause Resume asks that question about
+(`resumeAsksSharedNumber` in `sms.ts`): never their own unrecorded opt-out
+or an unfinished erasure, which Resume refuses first, so no reader tells a
+person the number would unlock them; `consentLedgerFor` carries it too — for a screen to say, and decides through
+`decideGathered`, so a dry run words a superseded scan, and a shared
+number's kept holder, exactly as the sender does.
 
-**A paused contact's facts are gathered like anybody's.** The paused branch
-of `sendFactsFor` used to short-circuit, so a paused AND suppressed person
-read as "not suppressed" on every preview and was logged as a revoked
-consent rather than as the opt-out. Suppression, consent and the cap are
-gathered for them too, and `decideSend` orders the refusals: a suppression
-still wins, and a refusal they recorded outranks the pause's stand-in
-consent.
+**A pause is its own fact, never a consent.** `SendFacts` carries a required
+`paused` and an optional `pausedFor` — a `pauseReasonClass`, never the
+reason's text, which can carry a teammate's address or the contact's words
+— and `facts.consent` is the row as recorded, for a paused person as for
+anybody. `decideSend` refuses `paused` (`humanCanResolve: false`) right
+after consent. It used to model a pause as a revoked consent, so a
+teammate's hold was logged `consent_revoked` — the recipient's own no — and
+enrolment read it that way for ever after the hold was lifted. The paused
+branch of `sendFactsFor` also used to short-circuit, so a paused AND
+suppressed person read as "not suppressed" on every preview; suppression,
+consent and the cap are gathered for them too, and `decideSend` orders the
+refusals: a suppression and a recorded refusal outrank the pause. And
+`decideGathered` words a `paused` refusal of a shared number's holder whose
+own pause stood (review round 10): when `sharedNumberHold` holds and the
+class is `replied`, `manual`, `unsubscribed` or `other`, it appends
+`SHARED_NUMBER_HOLD_SENTENCE` ("A text from a number they share also asked
+to stop, and it could not be recorded — they may not have sent it — so
+Resume is refused until the number is recorded on /suppressions."), because
+`pausedSentence` alone said "until a person resumes them there" of a pause
+Resume refuses. A reply's pause (`replied`) gets a sentence of its own,
+`SHARED_NUMBER_HOLD_REPLIED_SENTENCE` (review round 13): its class's words
+send a person to answer from `/inbox`, which `replyQueueDraft` refuses
+(`SHARED_NUMBER_HELD`) while the number is unrecorded, so it says neither
+answering the reply nor Resume lifts the pause until the number is recorded;
+`check_send` says the same (`SHARED_NUMBER_HOLD_REPLIED_WORDS`). The sender's own decision (`dispatchTouch`'s return value,
+what LinkedIn's Start shows) and every dry run — the ledger's "Why can't I
+reach them?", `/approvals`' rule line, enrolment, the inbox's answer,
+`smsDraft` — word it alike; the hard hold's own shape, an own unrecorded
+opt-out and an erasure keep their `pausedSentence`, which already says to
+record something or finish the erasure. `touches.error` is not written for
+a decided refusal, so no stored row changes. **Stated residual:**
+`dispatchTouch`'s last look before the provider — a pause that landed after
+the decision, "This contact was paused a moment ago." — words it with
+`pausedSentence` alone.
 
 **The ledger says never-asked, refused and granted are three facts.**
 `/contacts` shows each person's consent and suppression answer from
@@ -833,6 +1544,30 @@ allowed. Carrying the suppression over to the new value was rejected: that
 would suppress an address that may belong to somebody who never asked. Phones
 are stored as E.164 on edit, a LinkedIn URL must be one `normaliseLinkedIn`
 can read, and changing the email clears a bounce mark in the same UPDATE.
+Nor off a number held for an unrecorded shared-number STOP (review round
+9): while `heldForUnrecordedSharedNumber` holds, a phone change or clear
+that drops the number's key is refused `shared_number_hold` (409 from
+`PATCH /api/contacts/[id]`), and the UPDATE repeats the condition — the
+pause it read, and `NOT EXISTS (<a governing row>)` — because the hold is
+lifted by the NUMBER's suppression, read off their phone, and a contact
+moved off it held a pause nothing could lift. Not over a pause Resume
+refuses before it asks (`resumeAsksSharedNumber`, review round 12): their
+own unrecorded opt-out or an unfinished erasure is never lifted by Resume,
+so it strands nothing, and refused, the phone froze for good behind "resume
+them first". Paused or not (review round
+11, undoing round 10's "only while paused"): a row that lists a contact
+governs every LATER pause of theirs too, judged against whatever phone they
+have then, so an unpaused listed contact moved off the number — the
+`paused` shortfall, or a Resume that landed before the row committed — had
+a later pause Resume could never lift, and it asked for a number that never
+said STOP to be recorded. Such a contact hears `SHARED_NUMBER_HOLD_EDIT_UNPAUSED`:
+record the number on /suppressions, then pause and resume them on
+/contacts, which spends the row. Round 10's own case stays fixed by the
+row's spending rule alone: a contact resumed once the number was recorded
+is not held, so an owner who then removes the suppression can change the
+phone (§2, "The send path"). A change of spelling that keeps the number
+goes through; once the number is suppressed, moving the phone off it is
+the owner's decision above.
 
 **An import writes no consent row; a company carries a declared zone,
 editable, never derived from `country`.** `/contacts/import` drops a phone
@@ -845,27 +1580,49 @@ would be stored garbled. Company edit (`PATCH /api/companies/[id]`) changes
 the name, the country and the IANA zone, through `isKnownTimeZone`.
 
 **Enrolment is the first production caller of `draftOpener`.** It checks a
-usable address, pause, consent for the channel, a bounce and the recipient's
-zone, in the send path's order — a contact whose email bounced
-(`email_bounced_at` set) is skipped `bounced` on the email channel only,
-after the consent questions and before the zone, and the panel says to
-correct the address on `/contacts`. It does NOT read the suppression table:
-a suppressed contact is enrolled and then refused `suppressed` by
-`dispatchTouch`, the one place that rule lives (a dry run reports a hint
-count through `previewSend`); what it reads is its own earlier touches'
-`refusal_code`, so a `suppressed` refusal there blocks a re-draft.
+usable address, consent for the channel, a pause, a bounce and the
+recipient's zone, in the send path's order — a person who declined AND is
+paused is skipped `declined`, the stronger statement; a contact whose email
+bounced (`email_bounced_at` set) is skipped `bounced` on the email channel
+only, after the consent and pause questions and before the zone, and the
+panel says to correct the address on `/contacts`. It does NOT read the
+suppression table: a suppressed contact is enrolled and then refused
+`suppressed` by `dispatchTouch`, the one place that rule lives (a dry run
+reports a hint count through `previewSend`); what it reads is its own
+earlier touches' `refusal_code`, so a `suppressed` refusal there blocks a
+re-draft.
 
 **The duplicate guard is one rule, applied by the read and by the INSERT's
 own NOT EXISTS.** A `refused` row counts unless its code is one a correction
 or a re-scan resolves (`REFUSALS_A_CORRECTION_RESOLVES`: `bounced`,
-`unparseable_recipient`, `unknown_timezone`, `stale_evidence`) or one the
-clock resolves (`REFUSALS_THE_CLOCK_RESOLVES`: `quiet_hours`, `daily_cap`,
+`unparseable_recipient`, `unknown_timezone`, `band_never_opens` — a zone or
+a quiet window to correct, met only on a row another path wrote, because
+enrolment drafts no SMS — `stale_evidence`, and `paused`
+— a hold, not a no, which stops nothing once a person has lifted it; a
+contact paused NOW is skipped before any row is read) or one the clock
+resolves (`REFUSALS_THE_CLOCK_RESOLVES`: `quiet_hours`, `daily_cap`,
 `campaign_inactive`, which the sender defers rather than refuses, so a row
 still refused with one is a deferral a dying worker never restored). A
 person's deny (`needs_approval`), the recipient's refusal
 (`consent_revoked`, `suppressed`), and any other or unknown code block a new
 draft whether or not the campaign auto-sends — the first version ignored
-every `refused` row, and re-enrolling must not quietly ask again. `failed`
+every `refused` row, and re-enrolling must not quietly ask again. A reply's,
+an unsubscribe's and an erasure's cancel of queued messages still writes
+`consent_revoked`, so those still block; a row in flight when a reply lands
+is refused `paused` by the sender's last look, and so is what a shared
+number's hold cancels (§2, "SMS through DoveSoft"); alone, neither does. A deny is
+`needs_approval` unless the draft's own facts refuse it `stale_evidence`
+(judged by `sendFactsFor` and `decideSend` at the deny, from the words'
+written-at moment): then the row records `stale_evidence`, which a re-scan
+resolves, because the approver's no was about aged evidence and not the
+person; a suppression, a recorded refusal or a pause that outranks it
+leaves the deny `needs_approval`. The `draft.denied` audit detail carries
+the `refusalCode`, and `/audit` says "(its evidence was stale — it can be
+drafted again from a current scan)" for one. It said "a re-scan lets it be
+drafted again", which is false of words whose scan a newer one SUPERSEDED
+(§1): that re-scan already happened, and re-enrolment drafts them again
+straight away — and the detail cannot tell the two causes apart, so the
+sentence is the one true of both. `failed`
 is ignored only where a person approves each draft; under auto-send it
 blocks, because `recoverStuckSends` leaves `failed` on a send that may have
 gone. And under auto-send the read and the NOT EXISTS look at every
@@ -878,7 +1635,20 @@ campaign A already sent. Supervised campaigns keep the per-campaign rule.
 already have reached the provider), a denied draft, a recipient's refusal —
 is `already_contacted`. A never-scanned company is skipped `stale`, because a
 scan fixes both; and a campaign on a cold-forbidden channel is refused whole
-(`campaign_channel_unsupported`).
+(`campaign_channel_unsupported`) — an SMS campaign included, whose texts are
+drafted one person at a time with Draft SMS, and whose refusal says so: "SMS
+is drafted per person with Draft SMS on /contacts." follows the sentence
+every other channel gets, which alone pointed nowhere (a WhatsApp campaign's
+keeps it alone). **And the INSERT holds a
+lock** (review round 3): an `INSERT … WHERE NOT EXISTS` does not serialise
+under READ COMMITTED, so two overlapping enrolments could each insert an
+opener for one person — and under auto-send both rows are `queued` and never
+reach `/approvals`. Each insert now runs in a short transaction that first
+takes `pg_advisory_xact_lock(hashtext('enrol.draft'),
+hashtext('<org>:<contact>:<channel>'))` — the channel, not the campaign,
+because under auto-send the rule reads every campaign on it
+(`enrolPriorScope`) — so the second INSERT waits, takes its snapshot after
+the first commits, and its NOT EXISTS sees the first draft.
 
 **A gap with no detail is quoted in the words of what the scanner did, or
 not at all** (§2.2). One fallback used to call every such gap "header absent
@@ -894,15 +1664,85 @@ quoted — it stays in `gaps`.
 
 **The approvals page shows the same facts the sender reads**, from
 `previewSend` at the moment the draft's words were written
-(`evidenceAsOfFor`), and the evidence the draft quotes with its date —
-exactly `quotableFindings`, so a stale scan lists no lines and says why.
-Approve is disabled only for a `humanCanResolve: false` decision, and the
-page says so; everything else stays approvable, because the worker re-checks
-at sending. A draft written from a scan that is stale now is blocked as
-`stale_evidence` with its own sentence — deny, re-scan, draft again —
-because "choose someone else" fixes nothing when every person at the company
-gets the same aged words; `STALE_EVIDENCE_NOTE` says "re-scan, then draft
-it again" where it said "re-scan, then approve".
+(`evidenceAsOfFor`), and the evidence behind THAT draft
+(`draftEvidenceFrom`): the latest successful scan at or before its
+`created_at`, aged at now — the scan the sender judges the words by. It used
+to be the company's latest scan on every card, so after a re-scan the panel
+listed the new scan's lines under words written from the old one. Lines
+(still exactly `quotableFindings`) are listed only when that scan is the
+company's latest and fresh; a newer scan gets a plain note pointing at the
+company page; stale words with a fresh re-scan since say "deny this draft
+and draft it again from that scan"; a draft written before any successful
+scan gets `MISSING_EVIDENCE_NOTE` ("No successful scan of this company had
+run when this draft was written"), because "never scanned" is false once it
+has been scanned since. An answer to a reply never gets
+`STALE_EVIDENCE_NOTE` — the sender does not judge it by a scan, and the
+warning steered approvers to deny legitimate answers — but
+`ANSWER_EVIDENCE_NOTE`, the person's own check that it repeats no finding
+that is no longer known to be true. Approve is disabled only for a
+`humanCanResolve: false` decision, and the page says so; everything else
+stays approvable, because the worker re-checks at sending. A draft written
+from a scan that is stale now is blocked as `stale_evidence` with its own
+sentence — deny, re-scan, draft again — because "choose someone else" fixes
+nothing when every person at the company gets the same aged words;
+`STALE_EVIDENCE_NOTE` says "re-scan, then draft it again" where it said
+"re-scan, then approve". A draft whose scan a newer successful scan has
+superseded is blocked as `stale_evidence` too (§1), so the "newer scan" note
+above now sits beside a disabled Approve, and its block has a sentence of
+its own: "a newer scan of the company has run since the one it was written
+from, and only the latest scan is quoted in anything outbound … Deny it,
+then draft it again from the latest scan" — no re-scan, because the re-scan
+is what already happened, and "past its re-verification deadline" would be
+false of a scan a few days old. Aged words keep "the scan it was written
+from is past its re-verification deadline … Deny it, re-scan the company,
+then draft it again". `decisionView` in `apps/web/src/lib/approval-view.ts`
+tells the two apart by the opening words of the reason `decideGathered`
+writes (`SUPERSEDED_REASON`, setting `evidenceSuperseded` for
+`approveBlock`), because the page hands it the decision alone and the facts
+beside it cannot tell aged-and-superseded (worded as the deadline, the
+plainer of two true reasons) from superseded alone;
+`apps/web/test/approval-view.test.ts` runs the real `decideGathered`, so a
+rewording there fails the test rather than going quiet. A `paused`
+candidate's block says the draft can
+wait until the pause is lifted, never to deny it: a denial is a person's no,
+and blocks re-enrolment — and for a shared number's holder whose own pause
+stood (`decisionView(decision, preview.facts)` carrying `sharedNumberHold`,
+review round 10) it adds that they cannot be resumed until the number is
+recorded on /suppressions (§2, "The send path"). A `no_template` or
+`template_mismatch` block says the operator would not deliver it: deny,
+then draft again from an active
+registered template. `approveBlock(decision, channel)` takes the draft's
+channel (`drafts.tsx` passes `d.channel` at every call), and on SMS and
+WhatsApp neither the paused block nor the default one says "choose someone
+else", because there is nobody else to choose (review round 4): paused
+reads "the draft can wait here until then. Its template was filled in for
+this one person, so it cannot go to anyone else", and the default block on
+SMS "Deny the draft" with the same sentence and "A text to somebody else is
+drafted from their own row on /contacts (Draft SMS)". An SMS card names the
+template it was rendered from (its DLT id, header and category) and offers
+only the contact its slots were filled for (`smsCandidates`, which narrows
+a WhatsApp draft the same way, through `TEMPLATE_CHANNEL_NAMES`, a
+client-safe copy of core's `TEMPLATE_CHANNELS` that a test holds equal to
+it), and `approveDraft` holds every caller to
+the same rule: an SMS or WhatsApp (`TEMPLATE_CHANNELS`) draft approved to
+anyone but its own `contact_id` — a row whose contact is gone included — is
+refused `rendered_for_another` with nothing written, worded by `POST
+/api/touches/[id]/decide` (400: it can be approved only to the person it was
+written for; draft one for anybody else, an SMS with Draft SMS on
+`/contacts`). Only the page's list stood in the way of a direct API call
+before, and the words, a template filled with one person's details, would
+have gone to a colleague (`packages/db/test/approve-template-draft.test.ts`).
+An approved SMS card says it goes only through DoveSoft and only where SMS
+is switched on on the worker's host, which this page cannot see — the
+dashboard's worker line says whether it is — and that every rule, the
+registered template included, is checked again at sending
+(`approvedMessage`); with no worker configured it says one must run
+elsewhere with SMS switched on, never that "the worker will send it".
+Approving or
+enrolling LinkedIn says a person sends it from `/tasks`, never that the
+worker will, and the note that nothing sends without a worker is not shown
+over LinkedIn drafts or a LinkedIn campaign: the worker never sends
+LinkedIn (§2, "The LinkedIn provider is a person").
 From the keyboard approving is two steps: `a` arms the focused card and Enter
 on that same card approves; any other key or a change of focus disarms it
 (§2.4). A page load is bounded to 80 previews, four at a time, because
@@ -922,7 +1762,9 @@ caused — a reason that is exactly `replied <ISO instant>`
 (`pauseReasonClass` is `replied`) — with a `contact.resumed` audit row that
 records the pause's class as `pausedFor`, never its text, which can carry a
 teammate's address or the contact's words into an append-only log (the
-`/contacts` resume records the same). Any other pause — a teammate's, an
+`/contacts` resume records the same, and so does the third writer,
+`dispatchTouch`'s lift of a recovery's re-pause, beside `answerTouchId` —
+below). Any other pause — a teammate's, an
 unsubscribe's, an erasure that could not finish — is somebody else's
 decision, and answering is a 409 `paused_for_another_reason` that sends the
 person to `/contacts`; before, answering an old reply resumed a person
@@ -933,13 +1775,167 @@ on the From the reply came from, a recorded refusal of the channel, or a
 `unsubscribe.not_recorded` audit row naming them (by subject or
 `detail.contactId`), however old, is a 409 — the last is
 `opt_out_not_recorded`, because an opt-out that failed to store left no
-suppression row for the check before it to see — and nobody is resumed. The
-check is the sender's own dry run, inside the draft's
-transaction after the resume, so a refusal nobody may approve past rolls back
-both; one a person can resolve (quiet hours, the cap, a zone, a paused
+suppression row for the check before it to see — and nobody is resumed.
+`opt_out_not_recorded` is also answered when any inbound row of theirs has
+`reply_kind = 'opted_out'` and its From's keys (`suppressionKeysFor`; an
+unreadable From counts) match no suppression row today — the compliance
+page's own predicate, which survives a fault that failed the suppression
+AND the audit row beside it, since that write is `.catch(() => {})`. A
+COLLEAGUE's stop filed under them (review round 7, §2, "The opt-out reader
+runs first") names them only as `detail.filedUnder`, which is deliberately
+not read: it was not their opt-out, and read as one it locked them out for
+good, however old, even once the colleague was suppressed. Until the
+colleague's address is on `/suppressions`, the second reading still holds
+them, through the colleague's opted-out reply; recording that address ends
+it. **And it is worded as the colleague's** (review round 8): the reading,
+`unrecordedOptOut`, answers `{ own, fromAnotherAddress }` — an opted-out
+reply whose From `replyIsFromTheContact` shows to be another address is
+`fromAnotherAddress`, and one from their own address, or one that cannot be
+told apart from it, is `own`, worded and gated exactly as before.
+`replyQueueDraft` refuses the second `opt_out_not_recorded` in a sentence
+of its own — record THAT address, the reply's From shown on `/inbox`, on
+`/suppressions`, never this contact's — and only a suppression on that
+reply's own From keys ends it, for Resume too (§2, "The send path"),
+because "this person asked to stop … record it by hand" sent people to
+record the address of somebody who never asked, which satisfied Resume's
+gate while the sender stayed unrecorded. The page says the same:
+`inboxTouches` rows carry `fromIsContact`, an `opted_out` row's `suppressed`
+is read from its From's keys alone — the key `recordInboundReply` writes and
+`/compliance` reads (other rows still use the contact's keys and the From's)
+— and `apps/web/src/components/inbox/opted-out.ts` words a colleague's stop
+"A reply from another address on this thread (<from>) asked to stop — do
+not answer it. <name> did not ask, and is not treated as the one who
+asked", with a warning, while no suppression matches that From, to record
+THAT address and never the contact's, until which the contact cannot be
+resumed or answered. A contact's own stop keeps `inbox-view.ts`'s words.
+Past those, the check is the sender's own dry run, inside the draft's
+transaction after the resume, so a refusal nobody may approve past rolls
+back both; one a person can resolve (quiet hours, the cap, a zone, a paused
 campaign) comes back beside the draft as `wouldHold`. Two people answering
-one reply are serialised by locking the reply row — an `INSERT … WHERE NOT
-EXISTS` does not serialise under READ COMMITTED.
+one reply are serialised by locking the contact row and then the reply row
+(contact before touch, below) — an `INSERT … WHERE NOT EXISTS` does not
+serialise under READ COMMITTED; a reply whose contact changed between the
+read that learned it and the lock is refused `no_contact` ("The contact
+this reply came from changed while the answer was being drafted…") — and
+the resume lifts only the pause it READ (`resumeContact`'s `expectedReason`
+in the UPDATE's predicate). It used to decide on an unlocked read and then
+clear whatever the row held, so an "opt-out not recorded" pause written in
+between was wiped; now a pause that changed refuses
+`paused_for_another_reason` and rolls the draft back. **An answer that
+never goes puts the reply's pause back** (`repauseForUnansweredReply` in
+`packages/db/src/outreach.ts`): the inbox resumes a person when the answer
+is DRAFTED, because `/approvals` would otherwise refuse the answer itself
+as `paused`, and an answer that then did not go left a person whose reply
+nobody answered live in every campaign. Round 3 covered the deny alone
+(`repauseForDeniedAnswer`, now renamed); round 4 found the same gap behind
+an answer that failed at the provider, was refused at sending
+(`unknown_timezone`, `bounced`, `unparseable_recipient`) or was cancelled by
+a bounce. Every writer that settles an answer `failed` or `refused` now
+calls it, inside its own transaction and never caught, so the settle and
+the pause land together or not at all: `denyDraft`; `settle`, which every
+one of `dispatchTouch`'s terminal states goes through; the bounce's cancel
+(`outreachRecordBounce`); and `recoverStuckSends`
+(`apps/agent/src/boot/reconcile.ts`), now one transaction, because an
+answer that "may or may not have gone" must not leave the person live —
+the conservative direction. If the provider had taken that answer after
+all, `dispatchTouch`'s correction (`recordRecoveredSend`) lifts the re-pause
+in the same transaction as the `sent` UPDATE (review round 5) — left on, it
+held a person whose reply WAS answered, and answering the reply again from
+`/inbox` resumed them, so a second answer could follow the first. Only
+while it is still that pause (`liftRecoveryPause`): the newest
+`contact.paused` row naming this answer with `answerEnded: 'failed'` is the
+recovery's; no other audit row about the contact is at or after it
+(compared in SQL against its stored `created_at`), because a reply that
+arrived meanwhile kept the recovery's reason (`pauseContact` keeps the
+first) and is unanswered; no inbound row of theirs other than the reply
+answered is stored at or after the ANSWER row (review round 6, compared in
+SQL against the answer's stored `created_at`), because a reply's
+`contact.replied` row is best-effort and stamped at its transaction's
+START, which can fall before the recovery's row though the reply committed
+after it; and the reason is still exactly `replied
+<instant>` (`resumeContact`'s `expectedReason`). It writes `contact.resumed`
+`{ reason: 'the answer to their reply went after all', pausedFor:
+'replied', answerTouchId }`, actor `system`, which `/audit` words "…who had
+been paused by their reply, because the answer to it went after all".
+**One lock order, contact before touch:** every writer that holds a person
+and one of their messages locks the person first, the order the reply,
+bounce and erasure writers always took. `denyDraft` reads the answer row,
+locks the reply's contact (`lockReplyContact`, `FOR UPDATE`) and only then
+UPDATEs the answer; `recordRecoveredSend`, and since review round 6
+`settle` for an answer it ends, lock the reply's contact before their
+UPDATE too. `recoverStuckSends` reads the stuck claims, locks the reply
+contacts of the answers among them in one `SELECT … ORDER BY id FOR
+UPDATE` (`lockReplyContacts`, so two writers holding several people cannot
+each wait on the other), and only then UPDATEs the rows it read, still
+claimed. `replyQueueDraft` and `reclassify` read the reply unlocked to
+learn its contact, lock the contact, then lock the reply and check its
+contact is unchanged; when it changed, a draft is refused `no_contact` and
+a reclassify starts again in a fresh transaction, at most three times — a contact leaves
+a reply only by deletion or erasure, so the second pass locks nobody.
+Reclassify, settle, the recovery and the inbox's answer each locked the
+touch first until round 6, and so did a deny before round 5; each could
+deadlock (40P01) on a real Postgres with an erasure, which holds the person
+while it scrubs their rows — the erasure then took the loud "could not keep
+its suppression" path for a fault that was never about a suppression — or
+with a reply, a bounce or a reclassify for the same person. PGlite has one
+session and cannot show it, so a source test pins all six writers
+(`packages/db/test/lock-order.test.ts`), and since review round 8 the lock
+STRENGTH of `sms.ts`'s holder locks, `holdEach` and `releaseEach`, and
+since review round 9 `holdHard`'s — one `FOR NO KEY UPDATE`, no message
+touched, never `pauseContactOverriding` (§2, "SMS through DoveSoft"). Two
+settles are not an ending (`answerEndedBy`):
+a clock deferral (`REFUSALS_THE_CLOCK_RESOLVES`), which the tick and the
+LinkedIn step put back `approved`, and a `suppressed` refusal, whose writer
+pauses with the stronger reason itself. The unsubscribe, erasure, reply and
+reclassify cancels pause the person with their own reason, which
+`pauseContact` never replaces, so they need no call; nor do the LinkedIn
+step's "I did not send it" and `/tasks`' own stuck-claim recovery, because
+an answer is only ever email — no inbound LinkedIn path exists, and the
+inbox refuses SMS and WhatsApp. The `replied <instant>`
+pause returns only when this answer is what resumed them (`reply.answer_drafted`
+says `resumed: true`), nobody resumed them since (no later `contact.resumed`
+row, compared in SQL by id, read after the contact row is LOCKED, so a
+`/contacts` resume in flight is waited for and then seen), and no other
+answer of theirs is on its way. A deny's `contact.paused` row names the
+denier and `inboundTouchId`, which `/audit` words "paused a contact at
+<company> — the answer to their reply was denied"; every other ending is
+actor `system` with `{ reason, alreadyPaused: false, answerTouchId,
+answerEnded: 'failed'|'refused'|'bounced' }` — never `inboundTouchId`, so
+`/audit` does not call it a deny — and is worded by the generic reason
+sentence ("their reply is unanswered again: the answer to it failed to
+send"). The answer composer on `/inbox` says the same: "If the draft is
+denied, or the answer fails or is refused when it would be sent, the pause
+their reply caused goes back on — unless somebody resumes them before then,
+or another answer to them is still waiting"; it used to ask the person to
+"pause them again here" — a hand step the writers now take themselves.
+For a reply from another address on the thread (`fromIsContact` false) it
+reads "the pause this reply caused", and since review round 9 the page
+says whose reply it was and where the answer goes: the row is headlined
+"<from> — another address on this thread, filed under <contact>", opted-out
+rows included, and the composer says "This answer goes to <contact>'s
+address on file (<email>), not to <from>, the address this reply came
+from" and that "this reply, filed under them" paused them. It headlined
+the contact's name and said "their reply paused them", true of neither
+half, while the answer is addressed through the contact (`recipientFor`)
+and so mailed them with nothing on the screen saying so. The words are
+pure, in `apps/web/src/components/inbox/sender.ts` (`colleagueHeadline`,
+`answerComposerNote`, `resumedLine`); the contact's own reply reads as
+before, word for word.
+**An SMS or WhatsApp reply is never
+answered here** (0019): under DLT an answer must be a registered template,
+so `replyQueueDraft` refuses it `template_required` (409, its own sentence:
+Draft SMS on `/contacts` for SMS; WhatsApp sending is not built), ahead of
+0019's CHECK, which would otherwise have thrown a 500 — an opted-out reply on
+those channels still answers `opted_out` first. The queue labels each reply's
+channel and offers no free-text Answer on either. Draft SMS resumes nobody
+and refuses a paused person, and every SMS reply pauses them, so the hint
+in the Answer's place (`answerElsewhere(channel, person)` in
+`apps/web/src/components/inbox/channel.ts`) says "Resume them on /contacts
+first (their reply paused them), then Draft SMS on their row" when their
+reply's pause is the one they hold, and for any other pause only that
+`/contacts` says what it is and what lifts it (review round 4).
+`INBOX_LEDE` says answering an EMAIL reply resumes the person, and that a
+text is answered with Draft SMS on `/contacts`, after resuming them there.
 
 **The opt-out reader runs first, and a genuine auto-reply pauses nobody.**
 `recordInboundReply` reads the words before the headers: an auto-reply flag
@@ -958,30 +1954,130 @@ be sure before it suppresses, misses "I have left — remove me from your
 list", and with only it such a mail skipped the pause while asking to be
 taken off. The broad reader never writes a suppression; that is still
 `looksLikeOptOut` alone. Reclassifying an `auto_reply` to a human kind later,
-from the inbox or `classify_reply`, applies the pause and the cancel it
-skipped, and never ends a pause. An explicit `Auto-Submitted: no` wins over
+from the inbox, `classify_reply` or the worker's reply-triage model, applies
+the pause and the cancel it skipped, and never ends a pause. The model's
+kind is written the way a person's is (review round 3): through
+`replyReclassifyIfStill` (actor `agent`, audited `reply.reclassified`), only
+while the reply still has the kind the model was asked about, so every guard
+a person meets applies and a kind somebody set meanwhile stands
+(`changed_meanwhile`). It used to be an UPDATE by id, and a header-flagged
+auto-reply the model read as a person's became `wrong_person` and paused
+nobody. An explicit `Auto-Submitted: no` wins over
 any Precedence, because reading a mail as human-written is the direction that
 pauses; with no headers at all the behaviour is byte-for-byte what it was. An
 opt-out whose suppression cannot be written is audited
 `contact.opt_out_not_recorded`, logged `OPT-OUT NOT RECORDED — follow up by
-hand`, and returned as `optOutNotRecorded` — on the matched branch of
+hand`, and, when the reply came from the contact's own address, pauses
+the contact OVERWRITING any earlier reason with `opt-out not recorded: reply
+<ISO> (<why>)` (class `opt_out_not_recorded`), as the unsubscribe and
+erasure paths do — every path that knows an opt-out failed to store goes
+through one exported helper, `pauseContactOverriding` in
+`packages/db/src/outreach.ts`: this one (and `sms.ts` for the contact a
+STOP is filed under — a number's other holders, held with a reason of their
+own since review round 8, go through `holdHard` since review round 9, which
+writes over a reply's pause, the ordinary hold or an earlier hard hold and
+nothing else: §2, "SMS through DoveSoft"), the unsubscribe,
+the erasure, since review round 6 a stop whose whole recording threw on
+either email webhook, DoveSoft's text route or the worker's IMAP inbox, and
+since review round 8 the contacts who ARE the sender of a colleague's stop
+(below) — because the ordinary `pauseContact` keeps the
+first reason and an older `replied …` left in place let answering that
+reply resume them. **A colleague's stop is not the contact's** (review
+round 7). `handleInboundEmail` files a reply matched by References under
+the contact OUR message went to, whoever answered it, so a colleague in the
+thread replying all "please remove me", whose suppression then failed, held
+the contact as an opt-out nobody recorded — a pause no Resume lifts and a
+row `/inbox` reads however old — and locked out, for good, somebody who
+never asked to stop, even once a retry had suppressed the colleague.
+`recordInboundReply` now compares the From with the contact's own address
+key on the channel (`replyIsFromTheContact`, through `suppressionKeysFor`
+and never the domain, which a colleague shares; false only when both
+addresses read and differ, because "we could not tell" is not "it was
+somebody else") and returns it as `fromIsContact`. When it is false the
+contact keeps the reply's own `replied <ISO>` pause, which a person lifts,
+and the row is about the stored reply (`subjectType: 'touch'`, detail `{
+touchId, channel, why, fromIsContact: false, filedUnder: <contact id> }`),
+never naming the contact as subject or `contactId`, the two things the
+inbox reads as THEIR opt-out. `/audit` words it "could not record an
+opt-out from a reply sent by somebody other than the contact at <company>
+it was filed under — the sender is NOT on the suppression list; read their
+address from the reply and record it by hand; the contact is not treated as
+the one who asked" (for `why: 'record_failed'`, that the sender may not be
+on the list, a retry may record it, and to check `/suppressions` for the
+address first); it is still an alarm, and `/compliance` counts it with its
+company resolved through the touch. The contact's own stop is unchanged,
+and holds them as their own opt-out should. **And the sender is held**
+(review round 8): with the contact held only as any reply holds them, a
+colleague's unrecorded stop held nobody who asked, and a second contact
+here at the address that asked to stop was sent their approved message on
+the next tick. So `recordInboundReply` also holds every contact of the org
+whose address key on the channel is the From's (`contactsAtTheAddress`,
+through the exported `addressKeyOf` — the address, never the domain, which
+a colleague shares — ordered by id, and read in a savepoint right after the
+contact row and before the inbound INSERT, so a rolled-back line can name
+them): each paused over any earlier reason with `opt-out not recorded:
+reply <ISO> (<why>)` through `pauseContactOverriding`, their queued,
+awaiting-approval and approved messages refused `consent_revoked`, and a
+`contact.opt_out_not_recorded` row with THEM as its subject, `{ touchId,
+channel, why }` — their own unrecorded opt-out, the shape the inbox, Resume
+and `/compliance` read. Each write runs in its own savepoint, after the
+contact's reply pause, and the `OPT-OUT NOT RECORDED — follow up by hand`
+line carries `sendersHeld`. When the recording itself throws, the
+rolled-back line carries `senderContactIds` (ids only) and the fault paths
+hold them by id (§2, "The Resend inbound route is a READER"). Two residuals,
+stated: two colleague stops crossing between the same two contacts at once,
+both unsuppressed, lock them in opposite orders, and a deadlock there aborts
+only the sender-hold savepoint, which is logged while the reply commits
+(PGlite cannot show it); and `previewSend` and `check_send` still word the
+filed contact's hold as an ordinary `replied` pause, which promises an
+answer from `/inbox` that `/inbox` refuses until the colleague's address is
+recorded. (`pauseContact` takes
+an optional `replacing` reason and replaces a pause whose stored reason is
+exactly that one. Its callers are the `/contacts` Pause,
+`contactPauseByHand`, where a teammate's hold REPLACES a reply's pause, so
+the class becomes `manual` and the inbox will not lift it — over any other
+pause, Pause is a 409 "that pause stands" and writes nothing: a manual
+reason would turn an unrecorded opt-out's or an unfinished erasure's pause
+into one Resume lifts. The route writes `contact.paused` with `alreadyPaused:
+false`, plus `replacedPauseFor: 'replied'` when it replaced one, which
+`/audit` words "…, replacing the pause their reply caused" — the CLASS, never
+the replaced reason's text. And, since review round 7, the shared-number
+hold in `sms.ts` (`holdEach`), which replaces a holder's reply pause the
+same way — §2, "SMS through DoveSoft".) It is returned as
+`optOutNotRecorded`, beside `fromIsContact` — on the matched branch of
 `InboundOutcome` too (false on a duplicate), so `/api/inbound/email` and
 `/api/inbound/resend` send the `opt_out_not_recorded` Slack event (`path:
-'reply'`) AWAITED, in place of the ordinary reply message, and still answer
-200: a retry would be a duplicate and record nothing more. The worker's IMAP
-path still has no Slack path.
+'reply'`) AWAITED, in place of the ordinary reply message — for a
+colleague's stop `{ contactId: null, fromIsContact: false }`, naming the
+stored reply and never the contact, whose address is the wrong one to
+record, from the web's `optOutNotRecordedNotification` and the worker's
+`optOutNotRecordedEvent` alike — and still answer 200: a retry would be a
+duplicate and record nothing more. (A stop whose
+whole recording threw is the other case: nothing was stored, so those
+routes answer 500, pausing the contact and raising the same alarm first
+when the recorder had matched one — §2, "The Resend inbound route is a
+READER".) The worker's IMAP path raises the same alarm now, awaited and
+before the reply triage — and, since review round 6, on the first failure
+of a stop whose recording threw (§2, "The worker's IMAP path leaves what
+it could not record unseen") — through `apps/agent/src/notify.ts` when the worker has
+`SLACK_WEBHOOK_URL` — the same bytes as the web's, built by
+`packages/core/src/slack-payload.ts`, linked through the worker's
+`WEB_PUBLIC_URL` (without one the link line reads "Record it on the
+Suppressions page in the app."), with a `notification.sent|failed` audit
+row.
 
 **A bounce is evidence about an address, not a person asking to be left
-alone.** It is a column and a refusal — `bounced`, ordered after consent
-with the order asserted, and `humanCanResolve: true`: correct the address —
-never a suppression row. It used to sit right after `suppressed`, and moved
-because a person who had declined, or was paused, and whose address ALSO
-bounced read as `bounced` — resolvable — so `/approvals` enabled Approve and
-the inbox resumed them. A delivery report of any kind is never filed as a
-reply; before, a DSN from a server that sets References was recorded as the
-contact replying, which paused them and moved the deal to `replied`. The
+alone.** It is a column and a refusal — `bounced`, ordered after consent,
+the pause and stale evidence with the order asserted, and
+`humanCanResolve: true`: correct the address — never a suppression row. It
+used to sit right after `suppressed`, and moved because a person who had
+declined, or was paused, and whose address ALSO bounced read as `bounced` —
+resolvable — so `/approvals` enabled Approve and the inbox resumed them. A
+delivery report of any kind is never filed as a reply; before, a DSN from
+a server that sets References was recorded as the contact replying, which
+paused them and moved the deal to `replied`. The
 IMAP parser reads a report only when the mail's ROOT Content-Type is
-`multipart/report`: a delivery report nested inside an inline-forwarded
+`multipart/report`, and the Resend route applies the same root rule: a delivery report nested inside an inline-forwarded
 message is read as the reply that wraps it, so a prospect's "please
 unsubscribe me" forwarding a bounce inline is an opt-out, not a bounce of our
 message. A report is acted on only when it is tied to a message this system
@@ -991,29 +2087,55 @@ to, and that address is still the contact's; otherwise it is audited
 `contact.bounce_unmatched` and nothing changes. `5.2.2` (mailbox full) is
 transient although its class is 5, per RFC 3463, and a transient failure is
 recorded and changes nothing. `dispatchTouch`'s last look before the provider
-re-reads the mark, and re-checks suppression by address and domain — an
-unsubscribe or a "stop" landing in that window writes nothing else the look
-would see — and refuses a contact deleted or erased in between as
-`consent_revoked`, without calling the provider or writing the recipient back
-(the erasure blanked it on purpose). The final `sent` UPDATE matches only a
-row still in flight — `sending`, or the status a direct caller handed in — so
-a row somebody else settled meanwhile is not overwritten, and neither it nor
-a refusal's settle writes `recipient` back to a row whose `contact_id` is now
+refuses a contact deleted or erased in between as `consent_revoked`, without
+calling the provider or writing the recipient back (the erasure blanked it
+on purpose); then, in `decideSend`'s order, it re-checks suppression by
+address and domain BEFORE the pause, because an unsubscribe landing in that
+window writes a suppression and a pause, and is the opt-out; refuses a fresh
+pause as `paused` ("This contact was paused a moment ago." plus the class's
+`pausedSentence`), where it wrote `consent_revoked` "This contact replied a
+moment ago"; and re-reads the bounce mark. The final `sent` UPDATE matches
+only a row still in flight — `sending`, or the status a direct caller handed
+in — so a row somebody else settled meanwhile is not overwritten, with one
+exception, made by a second UPDATE (`recordRecoveredSend`) that runs only
+when the in-flight one matched nothing: a row a stuck-send recovery marked
+`failed` while the provider had it (`failed`, `sent_at` and `refusal_code`
+NULL) is recorded `sent` with its `provider_id`, `sent_at` and recipient,
+and the recovery's "may or may not have gone; check … before drafting it
+again" error is cleared — the provider's acceptance is better evidence
+than "may or may not have gone", and left `failed` the row could not be
+tied to a reply or a bounce by its Message-ID and a supervised re-enrolment
+drafted the same opener again. For an answer to a reply it locks the
+reply's contact first and lifts the pause the recovery put back (§2,
+"Replies have a screen"). A refusal settled over such a row — this dispatch
+never reached the provider — clears the recovery's error too, unless the
+refusal brings its own (review round 5), because "may or may not have gone"
+is false of it. Neither `sent` UPDATE nor a
+refusal's settle writes `recipient` back to a row whose `contact_id` is now
 NULL. A campaign that bounces past `OUTREACH_BOUNCE_PAUSE_PCT` (default 5;
 30 days, at least 20 people written to) pauses itself — the existing
 `campaign_inactive` deferral is the stop — and its window restarts after the
 pause. The check runs BEFORE the tick's send pass, not after it: the bounces
 that cross the threshold arrive between ticks, and a pause taken after the
 pass let up to a whole batch more go to a list already known to be bouncing.
+It runs only on a tick that sends email: a bounce is about an address, so a
+worker with DoveSoft and no mailbox pauses no email campaign.
 **Residual risk, stated:** anyone who can mail the agency inbox can
 write a DSN, so a report is believed only when it names one of our
 Message-IDs AND the address that message went to — in practice the
 recipient, or somebody they forwarded our mail to. The effect is bounded:
-email to that one address stops until corrected; it suppresses nobody,
-pauses nobody, and touches no other contact.
+email to that one address stops until corrected; it suppresses nobody and
+touches no other contact. It pauses nobody but in one case: when the
+messages it cancels include an answer to that contact's reply still waiting
+to go, it puts that reply's own `replied <instant>` pause back
+(`repauseForUnansweredReply`, under its guard), because an answer that will
+not go leaves the reply unanswered — the conservative direction, and a pause
+a person lifts by answering again (review round 5).
 
 **A click IS the opt-out** — the fourth way a suppression row is written,
-after the suppressions page, a reply and a spoken opt-out. The token is
+after the suppressions page, a reply (an email, or since 0019 a text through
+DoveSoft) and an opt-out spoken or texted to the voice service's number
+(source `voice`, §1). The token is
 `${touchId}.${hex HMAC-SHA256(UNSUBSCRIBE_SECRET, touchId)}`: it names the
 touch row and nothing else — no address, no expiry, no org. The minter is
 exported from the `@agency/db` root only; the web verifies through `queries`
@@ -1035,7 +2157,18 @@ suppression row still exists, answers done (200, `erased: true`, no alarm),
 because the erasure provably put its recipient on the list first. Any other
 NULL recipient, including a kept row an owner has since removed, is still
 loud. A repeat click is idempotent. A GET only redirects to the page, because
-link scanners prefetch. The worker adds
+link scanners prefetch. A token in the right shape whose MAC does not verify
+under the web app's secret — a worker that minted it under another
+`UNSUBSCRIBE_SECRET`, which refuses every one-click unsubscribe from that
+worker's mail — still gets the stranger's 404 with no hint, and since review
+round 9 is logged at error once per process per surface, by path and never
+the token: the click (`/api/unsubscribe`) as `OPT-OUT NOT RECORDED — a
+one-click unsubscribe link in the right shape did not verify under this web
+app's UNSUBSCRIBE_SECRET…`, and the page (`/unsubscribe`) with a sentence of
+its own (`logMismatchOnce` and `TOKEN_SHAPE` in
+`apps/web/src/app/api/unsubscribe/[token]/mismatch.ts`, shared by the route
+and the page). Only a MISSING secret was logged before; a wrong one was
+silent. The worker adds
 `List-Unsubscribe`/`List-Unsubscribe-Post` only with both
 `UNSUBSCRIBE_SECRET` and `WEB_PUBLIC_URL`, and in production refuses to boot
 on a `WEB_PUBLIC_URL` that is not `https:` on a public multi-label host —
@@ -1053,7 +2186,7 @@ The words reach the screen ONLY on the success path, and the row settles
 restores `approved` plus `scheduled_for` exactly as the worker's tick does,
 pinned by twin-row tests. The person sends when they get to it, which can
 be the next morning, so every read of `/tasks` re-runs `previewSend` for a
-handed step (with the touch's `created_at` as `writtenAt`, so a re-scan
+handed step (with `evidenceAsOfFor(touch)` as `writtenAt`, so a re-scan
 after the words were written does not freshen them) and the server
 WITHHOLDS the words — they never reach the client — when the answer is a
 refusal nobody may approve past, the contact is paused, the contact or
@@ -1065,7 +2198,24 @@ pressed Start (<time>)", a clock refusal (quiet hours, a paused campaign)
 shows as a line beside the words, and `deferred` is decided on the server.
 "I sent it" closes the step's task; "I did not send
 it" marks the row `failed` with `sent_at` cleared, so the daily cap stops
-counting it (the deal is left where the forward-only move put it). `/tasks`
+counting it (the deal is left where the forward-only move put it). Either is
+ONE transaction (`linkedinFinishStep`, review round 3): the task's
+completion, the `failed` UPDATE, `task.completed` and `linkedin.<outcome>`
+land together or not at all. The completion used to commit first, so a
+fault before the UPDATE left a message the person said never went recorded
+`sent` — counted by the cap, read by enrolment as contacted — and the retry
+found no open task and answered `alreadyDone`; now a fault leaves the step
+open and the retry does all of it, and the step's audit row is no longer
+caught, because a caught failure inside a transaction aborts it and the
+COMMIT would undo the rest without a word. **And no other screen prints
+words `/tasks` withholds**: the company page's Conversation panel printed
+every touch's body, the withheld words one click away, and the agent's
+`get_company_timeline` printed each message's subject and first line.
+`linkedinThreadWithheld` (`packages/db/src/linkedin-step.ts`) is `/tasks`'
+own rule for both — no subject or body for an outbound LinkedIn message Start has not
+handed over (an awaiting, approved, queued, refused or failed row included),
+nor for a handed one whose step is open and whose re-check withholds it;
+a handed message whose step is closed is history, and shows. `/tasks`
 materialises one `linkedin_send` task per approved or queued LinkedIn touch on
 read, so it works with no worker, and fails its own claims left `sending`
 past 30 minutes; `recoverStuckSends` is untouched and still covers them.
@@ -1074,7 +2224,8 @@ past 30 minutes; `recoverStuckSends` is untouched and still covers them.
 **Erasure keeps the suppression.** Suppression rows first, everything in one
 transaction, and a suppression that cannot be stored aborts the erasure and
 fails loudly (§2.1's Phase 4 obligation) — rolled back, the contact paused
-with the reason (OVERWRITING any earlier one, as the unsubscribe path does),
+with the reason (OVERWRITING any earlier one through
+`pauseContactOverriding`, as the unsubscribe and reply paths do),
 `contact.erasure_failed` audited, `OPT-OUT NOT RECORDED` logged, the Slack
 notice awaited, 500. A completed erasure's `contact.erased` detail carries
 `suppressedRecipients` — `{touchId: suppressionId}`, ids only — which is how
@@ -1108,15 +2259,75 @@ From, call numbers, and each email's domain — not only the contact row's.
 `handleInboundEmail` and can send nothing — no second matcher, and the same
 opt-out reader the IMAP listener and `/api/inbound/email` use. Its status codes
 are decisions about retrying: an unfetchable message is 502 and a recording
-failure 500, so Resend retries both; everything it read is 200. The generic
-route's "200 either way" is deliberately not copied, because a 2xx for an
-unread message could swallow a "stop". An HTML-only reply is converted to text
+failure 500, so Resend retries both; everything it read is 200, because a
+2xx for an unread message could swallow a "stop". The generic
+`/api/inbound/email` answered 200 or let a fault escape whole, and since
+review round 5 it keeps the same rule: it catches a recording fault, logs
+the fault's class only — drizzle's message quotes the address and the
+words, and Next logs an escaping error whole — and answers 500 so the
+provider retries. On both routes a stop whose recording threw takes the
+loud path before that 500 (`inboundEmailNotRecorded`, and `raisingOnFault`
+around the Resend reader's recorder, both in
+`apps/web/src/app/api/inbound/email/fault.ts`): the contact paused first,
+over any earlier reason (`pauseContactOverriding`, `opt-out not recorded:
+reply <ISO> (record_failed)`, class `opt_out_not_recorded`; review round 6
+— the row and the alarm told people, but the sender reads neither, so the
+contact's approved follow-up went on the next tick until a retry landed),
+a `contact.opt_out_not_recorded` row `{ channel: 'email', why:
+'record_failed' }` under the contact, and the awaited alarm naming the
+message the reply answered, or none when it was matched by address — each
+write tried on its own, and the error line saying `fromIsContact`,
+`paused` and `audited`. Whose it was comes from the recorder's own
+rolled-back line (`keepingRolledBackOptOut`), so nothing is read again from
+a database that just failed — and so does whether it was theirs (review
+round 7, §2, "The opt-out reader runs first"): when the line says
+`fromIsContact: false`, a colleague's stop, the contact is held only as any
+reply holds them, through the routes' `hold` dep (`pauseContact`, `replied
+<ISO>`, which keeps a stronger pause), the row is about the message the
+sender answered (`subjectType: 'touch'`, the subject `inReplyTo`; detail `{
+channel: 'email', why: 'record_failed', fromIsContact: false, filedUnder
+}`), and the alarm goes with `contactId: null` and `fromIsContact: false`.
+And the SENDER is held (review round 8): the line names the contacts of the
+org at the From's address as `senderContactIds`, found before the fault,
+`keepingRolledBackOptOut` keeps them, and each is paused over any earlier
+reason with the `record_failed` reason and given a `contact.opt_out_not_recorded`
+row with them as its subject (`rolledBackSenderHolds`), by id, with nothing
+read again — paused and audited, not cancelled, as the contact's own fault
+path is, because the pause is what the sender's last look refuses; the
+error line adds `senders`, `sendersHeld` and `sendersAudited`.
+A line that does not say — the fault came before the recorder read the
+contact — is read as their own, the conservative direction. That reader,
+and the pause (`rolledBackOptOutPause`, `{ reason, overriding }`), the
+audit row and the alarm it leads to, live in
+`packages/db/src/inbound-fault.ts` (pure, exported
+from `@agency/db` and `@agency/db/queries`; `fault.ts` re-exports the
+reader), because the worker's IMAP inbox takes the same path for the same
+fault and a person in `/audit` or Slack must not be able to tell which
+process noticed. A fault before the recorder ran leaves nothing saying
+whose, so nobody is paused on a guess, and a stop is logged at error with
+`alarm: 'not_raised_unplaced'`. The recorder's lines on both routes go to
+the web logger. An HTML-only reply is converted to text
 with its lines kept, so a one-word "Stop" above a `<blockquote>` reads as an
-opt-out. **Open finding:** the worker's IMAP path flattens HTML to one line,
-so the same HTML-only reply arriving there pauses the contact and is never
-suppressed; `apps/web/test/resend-inbound.test.ts` demonstrates it. `dsn` is
-always null on this path — the receiving API lists attachments without their
-contents — so a bounce arriving through Resend is never recognised as one.
+opt-out. The worker's IMAP path uses the same converter now
+(`htmlToText` in `packages/core/src/html-text.ts`), closing what was an open
+finding here: mailparser converts a ROOT `text/html` itself and keeps its
+lines, but an HTML part BELOW the root — Outlook's `multipart/related`, a
+`multipart/alternative` with no plain part — was flattened to one line, so
+the same reply paused the contact and was never suppressed. The parser also
+reads the HTML when the plain part is blank, the Resend mapping's rule. The
+converter runs in linear time: its regex passes were quadratic on HTML with
+no closing marker, and anybody who can mail the agency could burn about
+50 s of CPU per message on either path (round 3). **A bounce through Resend
+is recognised now.** When the root is `multipart/report` AND a
+`message/delivery-status` attachment is listed — both, the IMAP parser's
+root rule — the route fetches that part and the returned copy through `GET
+/emails/receiving/{email_id}/attachments/{id}` → `download_url`, and hands
+them over as `dsn` and `originalMessageIds`. The API key goes only to
+Resend's own API; the signed `download_url` is fetched without it, must be
+`https:` on a public DNS name with no userinfo or port (not pinned to one
+Resend host, because the docs name two), and is never logged; each part is
+read to at most 64 KB under one 10 s deadline for the whole report. An
+unreadable part is a 502, so Resend retries.
 
 **Not built:** SendGrid behind the provider interface (the interface is the
 point; the second implementation is a few lines when it is needed); any
@@ -1124,6 +2335,676 @@ automation of LinkedIn — the provider is a person, by design; multi-step
 sequences (enrolment writes one opener per person); and the campaign's
 `icp_profile_id` (enrolment qualifies against the active ICP; nothing sets or
 reads that column).
+
+### SMS through DoveSoft (0019)
+
+**An Indian SMS is the registered words or it is nothing.** Under TRAI's
+TCCCPR 2018 every commercial SMS to an Indian number goes through DLT: the
+header (sender id) and a content template are registered there as a pair,
+and the operator scrubs each message against them — text that is not the
+registered body with each `{#var#}` filled in is not delivered. So the
+product never sends free text by SMS. Everything below is that rule, kept on
+our side before a message is paid for; the DND scrub stays the operator's,
+because nothing here can see the DND registry and nothing pretends to.
+
+**The schema (0019).** `message_templates` holds the registrations — channel
+(`sms`, `whatsapp`, `voice`), `external_id` (the DLT template id, exactly what
+the provider is told), `sender_id` (a six-character upper-case DLT header for
+SMS, `message_templates_sms_sender_is_a_dlt_header`), the category (DLT's
+`promotional`, `transactional`, `service_implicit`, `service_explicit`, or
+Meta's three for WhatsApp, `message_templates_category_fits_channel`), the
+body with its slots, `language` and `active` — `UNIQUE (org_id, channel,
+external_id)`, so a re-import is idempotent, and `UNIQUE (id, org_id,
+channel)`, the triple `touches.template_id` references (`ON DELETE RESTRICT`:
+the registration a sent message was checked against outlives the message,
+or "it matched its template" is a claim with no evidence). The delivery
+columns and the inbound index are §1's. A row is a REGISTRATION, written by a
+person from the portal and never by a model, and it is never edited: DLT
+issues a new id when a body changes, so a template that should stop being
+used is switched off.
+
+**The rules are pure, in `packages/core/src/dlt.ts`.** `parseTemplate` reads
+a body into literals and slots — `{#var#}` and the pre-tagged kinds TRAI's
+August 2024 direction added (URLs, call-back numbers and the like must sit in
+a slot tagged for them); a kind nobody listed is refused when parsed, never
+read as literal text. `renderTemplate` fills the slots in order and refuses
+too few or too many values, a blank one, one over `DLT_VAR_MAX_CHARS` (30,
+counted in code points as the operator counts), one a tagged slot was not
+registered to carry, and a link or a call-back number a slot was not
+registered for. **That last is judged on the RENDERED text, never value by
+value** (`smuggledRuns`, review round 4): `https:/` and `/evil.example/x` in
+two adjacent slots are each harmless and together a link, and `98765` beside
+a literal ` 43210` is a phone number. A link is any `scheme://`, `www.`, a
+host with a `/path` on any TLD (every shortener), or a bare host on a listed
+TLD set that leaves out the English-word ones (`me`, `to`, `at`, `is`, …),
+so "Dr.Rao" passes; a number is 7–15 dialable digits with a group of three
+together, after dates, times and paise amounts are blanked and with a run
+after a currency left alone. A `{#var#}` or `{#alphanumeric#}` slot may not
+touch one, alone or joined to its neighbours; `{#url#}`, `{#urlott#}` and
+`{#email#}` may carry a link, and `{#cbn#}` and `{#numeric#}` digits (an
+OTP, an order number); a run the template's own fixed text makes is the
+registered text, and passes. The renderer names the slot, reuses
+`var_wrong_kind`, and never quotes the value. A company's bare domain typed
+into a plain slot (`rentman.io`) is refused now, as is a 7–15 digit
+reference unless it is glued to letters (`INV1234567`) or sits in a
+`{#numeric#}` slot. `matchesTemplate` is the operator's scrub run first: exact, no
+case or whitespace folding, compared in code points, and a
+dynamic-programming match rather than a regex, so literal text needs no
+escaping and adjacent slots cannot send a backtracking engine exponential;
+it applies the same rule inside the match, the runs found once per text and
+each slot placement checked by two prefix-sum subtractions, so the sender
+refuses `template_mismatch` whatever wrote the text.
+`PROMOTIONAL_WINDOW` is TRAI's band, 10:00–21:00 IST (not the 09:00 of the
+2010 rules, cited in the file). `promotionalBand(now, zone, recipient)`
+answers `{ open, india, opensToday, nextOpen }`: 10:00–21:00 where the recipient is,
+for every number, and TRAI's band as well only for a +91 one
+(`isIndianNumber`, through `normalisePhone`, so `0091 98765 43210` is
+Indian and a number with no country code is not — and an unreadable one is
+refused `unparseable_recipient` long before the clock).
+`opensToday` is false when the two never overlap at the offsets in force
+(§2, "The clock is not a refusal"). `nextOpen` is the first whole minute
+after now at which the band is open, at those offsets, and null exactly
+when `opensToday` is false; it is the band alone, so the send path asks
+`nextOpenMinute` itself for a minute the campaign's quiet hours leave open
+too (`retryAt`). It replaced `promotionalWindowOpen`,
+which applied IST to every number, Indian or not, and deferred a band that
+never opens for ever. `smsOptOut`
+is the keyword reader (§2, "A reply does four things"). `decideSend` reads
+`TemplateFacts { active, matches, category }` for `TEMPLATE_CHANNELS` (SMS
+and WhatsApp) — required, like `evidenceStale`, so a caller cannot forget the
+question — and the sender reads them off the ROW (`templateFactsFor` runs
+`matchesTemplate` over the stored body), never from a caller's claim.
+
+**Drafting is one person at a time** (`smsDraft` in `packages/db/src/sms.ts`).
+Draft SMS on `/contacts` (`POST /api/contacts/[id]/sms`, `campaigns:write`)
+renders an active SMS template with the values typed, live in the composer
+with GSM-7/UCS-2 segment counting (160/153 and 70/67) — an extension-table
+character (`€ [ ] { } ~ ^ \ |` and the form feed) makes the preview UCS-2,
+because the provider's `needsUnicode` sends it that way, and
+`apps/web/test/sms-composer.test.ts` holds the composer's set to the
+provider's over every code point to U+03FF plus `€` and `₹`; it promised one
+segment for a text billed as three (review round 4) — puts the exact words
+through `previewSend` and, unless that answers a refusal nobody may approve
+past, writes an `awaiting_approval` row naming the template, the rendered
+text and the contact's E.164 number, with an `sms.drafted` audit row (ids
+only). It refuses, with a sentence, a campaign that is not an ACTIVE SMS
+campaign, a template that is not an active SMS template of the org, values
+that will not render, a contact with no readable number, and a second live
+draft to the person under that campaign (`already_queued`, serialised under
+`pg_advisory_xact_lock(hashtext('sms.draft'), …)`). A refusal a person CAN
+resolve — quiet hours, the promotional band, the cap, a missing zone or a
+band that never opens — is drafted anyway and reported as `wouldHold`. The
+composer says "would wait" only where the worker waits — `DEFERRED_CODES`
+(`quiet_hours`, `daily_cap`, `campaign_inactive`) — and "would be refused at
+sending … fix it before approving" for any other resolvable hold, a missing
+zone and `band_never_opens` included, which the tick refuses for good. Its Check is `smsDraft`'s
+own dry run (`dryRun: true`, review round 4): every check above in the same
+order, the campaign's status and the live-draft (`already_queued`) read
+included, stopping before the insert with a `SmsDraftCheck`; it used to be
+the route's own `previewSend` call, which skipped both and offered a Draft
+that then answered 409. The route sends Check and Draft through
+`smsComposerAnswer` (`apps/web/src/app/api/contacts/[id]/sms/outcome.ts`),
+which catches a database fault — 500 with a sentence, and a log line naming
+the fault's class only, because drizzle's message quotes the number and
+the words typed. **SMS campaigns** exist on `/campaigns` (`campaignInput`
+accepts `sms`), never auto-send — the form cannot tick it, and the schema
+refuses it with a sentence on the field rather than forcing it off — and
+offer no Enrol button: enrolment refuses them whole.
+
+**Sending is the one send path with a second provider.**
+`apps/agent/src/outreach/dovesoft.ts` is a `MessageProvider` with
+`channels: ['sms']` that decides nothing: `dispatchTouch` has run every
+rule, and hands it the words, the number and the registration the words
+were checked against (`MessageProvider.send` takes an optional `template`:
+`externalId`, `senderId`, `category`, `language`, read from the row; a
+template-channel row whose registration cannot be read at dispatch is refused
+`no_template`, never sent bare). The request is DoveSoft's published one
+(the MoEngage partner guide): `POST <DOVESOFT_BASE_URL>/api/json/sendsms/`
+with the `key` header and `Content-Type: application/json`, `senderid`,
+`unicode`, `entityid` (`DOVESOFT_ENTITY_ID`, the DLT PE ID) and `tempid` in
+the query, and `{"listsms":[{"sms","mobiles","senderid"}]}` as the body.
+`unicode` is `1` exactly when a character falls outside the GSM 03.38 basic
+set — the extension table (`€ [ ] { } …`) counts as outside, the safe
+direction, because a gateway may mangle an escape and a mangled DLT text is
+scrubbed. Before any request it refuses (`DoveSoftRefusedError`) a missing
+registration, a header that is not a DLT header, a template id that is not
+1–64 of `[0-9A-Za-z_-]`, a recipient `normalisePhone` cannot read — a bare
+national number is refused, never guessed into India — and blank words;
+and, with no key or entity id, `DoveSoftNotConfiguredError`. One attempt,
+10 s, `redirect: 'error'` (§1, Secrets). A timeout or network failure is
+`DoveSoftUnreachableError`, a non-2xx `DoveSoftHttpError` with its status,
+and a 2xx with no readable message id `DoveSoftResponseError`; each message
+says the text may or may not have been accepted and to check the DoveSoft
+console before it is sent again, and none carries the key, the number or
+anything DoveSoft said back. The row is left `failed`, never retried: a
+second request after a timeout could be a second text.
+
+**One provider per channel in the tick.** `senderProvidersFrom` in
+`apps/agent/src/worker.ts` builds the SMTP mailbox for email (`SMTP_HOST` and
+`MAIL_FROM`) and DoveSoft for SMS (`DOVESOFT_API_KEY` AND
+`DOVESOFT_ENTITY_ID` — either alone is off, said at boot by NAME, at warn
+when half is set), and the sender runs when either exists. Each due row goes
+to the provider that names its channel, and `dueTouches` is asked only for
+the channels carried, because `dispatchTouch` refuses a channel its provider
+lacks WITHOUT touching the row: a row claimed `sending` for a channel nobody
+carries could be neither sent nor put back. So an approved SMS on a worker
+without DoveSoft stays `approved`, and the tick logs `sms rows waiting: no
+provider` by touch id only, once, and again only when the waiting set
+changes. Nothing ever hands the tick a provider for LinkedIn (a person sends
+it), voice (no code places a call) or WhatsApp (not built), and a test pins
+that no configuration yields one. The boot line and the heartbeat's `detail`
+carry `sms: 'on'|'off'`; `/readyz` does not. The web reads it off the row
+(`heartbeatSms`, §2, "Notifications and the heartbeat"), so a worker with
+DoveSoft and no SMTP — whose `outreach`, the MAILBOX, reads `disabled` — is
+a worker that sends, on the dashboard, `/settings` and `/compliance` alike
+(§2, "The settings pages and the dashboard").
+
+**Delivery reports and texts back arrive at the web, never the worker.**
+`/api/inbound/dovesoft/dlr` and `/api/inbound/dovesoft/sms` are public paths
+(under `/api/inbound`, already exempt from the cookie gate) authenticated by
+`DOVESOFT_WEBHOOK_SECRET` — the `x-dovesoft-token` header or a `token` query
+parameter, compared in constant time — and answer **503** to everything while
+it is unset (an open inbound-text route would let anyone pause a contact or
+write a suppression) and **401** to a wrong token. **The query value is read
+twice** (`tokenFrom`, review round 4): as `URLSearchParams` reads it, where
+`+` is a space, and percent-decoded with `+` left alone (`rawQueryValue`),
+and either may match. About half of all `openssl rand -base64 32` secrets
+contain a `+`, which is what these docs recommended, and one pasted raw into
+`?token=` refused every push, every STOP included, with nothing in any log.
+`openssl rand -hex 32` is the recommendation now, because it needs no
+escaping anywhere; a secret with any other character is percent-encoded
+where it stands in the URL (`+` is `%2B`). The first refused token on each
+route is logged once per process at error, by route name only
+(`logRefusalOnce`) — never per request, because anybody can send a wrong
+token. GET and POST alike, the
+fields read from the query, a form or a JSON object under short alias lists
+(`webhook.ts`: a new name is one string), bodies bounded at 16 KB. **A GET
+push puts its fields in the URL**, so for an inbound text the SENDER'S
+NUMBER AND THE WORDS land in the platform's request log (Vercel's, and
+DoveSoft's own), beside the token; the routes' own lines never carry them
+and cannot stop a platform logging a URL. GET is kept on purpose, because a
+STOP that cannot arrive is worse and Indian gateways commonly forward by
+GET; DoveSoft is asked to push by POST, a form or JSON, where it offers it,
+and `/settings/deployment` says so. Both
+formats are ASSUMED — DoveSoft documents neither push — so a payload missing
+the fields that matter is never answered 200 and dropped: it is a **400** (a
+**413** when too large) so DoveSoft retries, an `sms.dlr_unreadable` or
+`sms.inbound_unreadable` audit row in `DOVESOFT_ORG_ID`'s org when it is
+set, and an error line naming the fields it DID carry, never a value. `/audit` marks
+`sms.inbound_unreadable` as an alarm: a text nobody could read may have been
+a STOP. **A fault while recording is caught in the handler** (review round
+4): either route answers **500** so DoveSoft retries, and the error line
+names the fault's class only, because drizzle's message quotes every bound
+parameter — the number and the words — and Next `console.error`s an
+escaping error whole, past `redact()`. For a text whose words ask to stop
+(`smsTextAsksToStop`, the one reading `recordInboundSms` acts on, exported
+for this) the loud path runs too, under whoever the recorder said it was
+filing the text under (review round 6): named first by the error the
+recorder throws for a STOP whose holds or reply failed
+(`SmsOptOutNotRecorded`, review round 7, its `filingUnder`; below), and
+otherwise by its rolled-back line, which names the org and the contact
+(`keepingRolledBackSmsOptOut` in the route's `webhook.ts`, matching only
+`ROLLED_BACK_OPT_OUT_LINE`'s opening words, because the recorder also says
+`OPT-OUT NOT RECORDED` of OTHER orgs' holders, which is no evidence of
+whose the text was). Then `contact.opt_out_not_recorded` `{ channel:
+'sms', why: 'record_failed' }` is written under that contact in THEIR org —
+what `/compliance`, the digest and `/inbox` read — they are paused `opt-out
+not recorded: reply <ISO> (record_failed)` over any earlier reason
+(`pauseContactOverriding`, best-effort), and the AWAITED alarm names them,
+with no message on file; every OTHER org the error names, where the
+recorder has already taken the holders' loud path for the contacts holding
+the number (below), gets an alarm of its own (`smsLostOptOutNotification`, review round
+7 — those orgs heard nothing, and their holders kept a hold anyone could
+lift). Only a fault before the recorder wrote anything or named anybody —
+the duplicate check, the match, the narrowing, or a redelivered unplaced
+STOP's look for its earlier rows — leaves the row with no subject in
+`DOVESOFT_ORG_ID`'s org and the alarm with no touch and no contact, as for
+a STOP from a number nobody holds (below). A STOP whose holds committed in
+one org before another's faulted no longer reaches it, nor does a
+redelivery's finishing (review round 7), because that row said nothing was
+written and nobody paused. Round 5 took that path always, so a known
+contact's STOP was alarmed as "nothing in the app holds the number" and
+audited in an org that was not theirs, or nowhere. U+0000, which some SMPP
+gateways decode GSM-7's `@` as and Postgres refuses in text, is stored as
+U+FFFD in an inbound text and its message id and in a report's id and
+reason, so such a push no longer fails on every retry — and
+`recordInboundReply` does the same for every inbound reply on every channel
+(§2, "A reply does four things"). A template is the exception, and refuses
+one rather than replace it (review round 9, `/settings/templates` below).
+
+- **A delivery report** (`messageid`/`msgid`, `errorstatus`/`status`,
+  `errorreason`): `DELIVRD` and the spelled-out `Delivered` are
+  `delivered` (`DELIVERED_WORDS`; a "Delivered" report was stored as
+  `pending`); SMPP's final failures (`UNDELIV`, `EXPIRED`, `DELETED`,
+  `REJECTD` and their spelled-out forms, `UNDELIVERABLE` included —
+  `FAILED_WORDS`, a test pinning that no word is in both) are `failed`, with
+  the reason or the word itself as `delivery_error`;
+  anything else is `pending`, which claims nothing. `recordSmsDelivery`
+  matches exactly one outbound SMS by `provider_id` and is idempotent and
+  monotonic — `pending` only over nothing, a final word only over nothing or
+  `pending`, and the first final word stands. It never moves `status`, writes
+  no suppression and pauses nobody. The company page's Conversation panel
+  prints it beside the status (`deliveryLine` in
+  `apps/web/src/lib/delivery-view.ts`): "Delivery reported" beside
+  `delivered_at`, which is when the REPORT reached this deployment — no time
+  is read from a report (`readDlr`: the format is not public, and SMPP's
+  zone-less `done date` would be a guess of five and a half hours), and
+  DoveSoft batches and retries reports, so it can be hours after the handset
+  took it; the line said "Delivered to the handset" and dated the delivery
+  by its report (review round 4); "The operator has it; no final delivery
+  report yet."; or
+  "Not delivered" with the operator's reason and "A failed delivery is about
+  the number on this attempt; it suppresses nobody." — because "not
+  delivered" beside a person's name reads like a no. NULL — every email and
+  LinkedIn message, and a text whose report never came — prints nothing
+  rather than a guess. An id this system never sent is audited
+  `sms.delivery_unmatched` in `DOVESOFT_ORG_ID`'s org (without one it is only
+  returned for the route to log). Every report read is **200**, matched or
+  not, because a retry would never match either.
+- **A text back** (`mobile`/`from`/`sender`/`msisdn` and
+  `message`/`text`/`sms`/`content`, plus an optional message id and time):
+  the sender is read as E.164, with `+` added only to a bare `91` and a
+  ten-digit mobile number starting 6–9 — twelve digits no Indian national
+  number has — and no other country guessed; a time is taken only with a zone
+  or as an epoch, and never in the future. `recordInboundSms` matches the
+  number against contacts' phones across EVERY org, always, as a delivery
+  report is matched by its id (review round 4): drafting and sending an SMS
+  are not scoped to one org, and a STOP from a person another org texted,
+  read only inside `DOVESOFT_ORG_ID`, was suppressed in the wrong org and
+  left them on the list that texted them. `DOVESOFT_ORG_ID` is the FALLBACK,
+  never a filter: where a text from a number no contact anywhere holds is
+  filed, and its STOP suppressed — and nothing else. Several holders are
+  narrowed by the evidence (`whoseText`, review round 5) to the one contact
+  this system TEXTED at that number — a `sent` outbound SMS whose recipient
+  reads as that E.164 — and to nobody when it texted none of them or two or
+  more. No org is preferred (review round 6): every org's texts go out
+  through the one DoveSoft account (`dueTouches` reads every org), so
+  `DOVESOFT_ORG_ID` is no evidence of whose text was answered, and round 5's
+  preference for its holder among texted ones in several orgs filed a reply
+  on a guess. EXACTLY ONE contact, or exactly one texted: every OTHER
+  contact holding the number, in any org — a twin row in the same org or
+  another org's contact — is HELD first (below), BEFORE the reply is
+  recorded, because once it is a redelivery is a duplicate that holds
+  nobody; round 5 left the untexted holder live "by design", with an
+  approved text still going to the number that had just replied. A STOP is
+  then phone-suppressed in every OTHER org holding the number, each with
+  its `sms.inbound_unmatched` row, still BEFORE the reply is recorded
+  (review round 7): narrowing the match must not take the suppression away
+  from an org it would have reached, and neither write needs the reply row
+  — written after it, a reply that threw on every delivery left another
+  org's holder with nothing but a hold a teammate could lift. Then it goes
+  through `recordInboundReply`, the function an email reply goes through —
+  an inbound `sms` touch, the pause, the cancel, the deal forward, and a
+  STOP written as a PHONE suppression, source `reply`. When that suppression
+  could not be written, the contact's same-org co-holders take the loud
+  path with them (`why: 'suppression_failed'`), because the one row would
+  have covered them too; when recording the STOP THREW, which rolled that
+  row back with the reply, they take it with `why: 'record_failed'`, and the
+  recorder throws `SmsOptOutNotRecorded` — `fault`, `filingUnder`,
+  `optOutNotRecordedIn` and `heldIn`, the fault's CLASS and never a `cause`,
+  so drizzle's message, which quotes the number and the words, cannot be
+  logged through it — for the route's loud path above. **A holder takes the
+  HOLDERS' loud path, never the asker's** (review round 8,
+  `sharedNumberOptOutLost`): every holder of the number but the contact it
+  was filed under — those twins, another org's holders where the
+  suppression failed, every holder of a text filed under nobody, and every
+  holder when the holds themselves fault (`holdOrSayWhy`) — is paused `opt-out
+  not recorded: a text from a number they share, <ISO> (<why>)`
+  (`sharedNumberOptOutReason`, which `pauseReasonClass` reads as
+  `opt_out_not_recorded` by its opening words), and the org gets ONE
+  `contact.opt_out_not_recorded` row, `{ channel: 'sms', why,
+  sharedNumber: true, contacts, paused, kept?, holders: [ids] }`. **The hard
+  hold writes over no pause, a reply's, the ordinary hold or an earlier hard
+  hold, and nothing else** (review round 9, `holdHard`: each holder locked
+  `FOR NO KEY UPDATE` in a transaction of its own, the reason it replaces
+  named exactly in the UPDATE). It wrote over any earlier reason, through
+  `pauseContactOverriding`: a holder's own unrecorded opt-out, or an
+  erasure that had not finished, became this releasable shape, the retry
+  eased it, and their email went. A holder's own unrecorded opt-out, an
+  unfinished erasure, an unsubscribe's or a teammate's pause, and any other
+  pause, now stands; the row still lists them,
+  `paused` counts every holder held once it has run — written or kept, so a
+  shortfall is still a write that failed — and `kept`, present when above
+  zero, counts those whose own pause stood, while Resume refuses any pause
+  of a holder the row lists until the number is recorded
+  (`heldForUnrecordedSharedNumber`; §2, "The send path") — a row that
+  governs them only until a later `contact.resumed` row of theirs spends it
+  (review round 10). A kept holder is held by that row alone, appended after every hold
+  has committed, so **when the row's append FAILS** (review round 10) each
+  kept holder whose pause Resume would lift once the number is recorded —
+  class `manual`, `unsubscribed` or `other` (`RESUMABLE_ONCE_RECORDED`) —
+  gets the hard hold written over that pause after all, through `holdHard`'s
+  `overResumable`, under the same `FOR NO KEY UPDATE` lock, replacing
+  exactly the reason read; a kept own unrecorded opt-out or unfinished
+  erasure stands, and the `OPT-OUT NOT RECORDED — follow up by hand` line
+  carries `rowWritten: false`, `keptContactIds` and `heldHardInstead`. When
+  the row is written nothing changes. The cost, stated: a teammate's or an
+  unsubscribe's pause replaced this way loses its reason text on the
+  contact row — it survives only in that pause's own audit row — so once
+  the number is recorded and the hold eases to the ordinary one, the person
+  pressing Resume sees the shared-number hold, not the original reason;
+  that is the behaviour before round 9 for those classes, and only when
+  the row could not be written. And a residual: a Resume that lands in the
+  milliseconds between `holdHard`'s commit for a kept holder and the row's
+  commit still lifts their pause while the number is unrecorded. That needs
+  a person's click in that gap, and where their org's holds committed
+  `holdEach` has already cancelled their queued, awaiting-approval and
+  approved messages, so a text to the number needs a new draft and a new
+  approval. The row's subject is
+  the filed inbound touch where it is stored in that org and otherwise
+  nothing — never a holder, as subject or `detail.contactId`. Round 7 gave
+  each holder the asker's own pause and a row naming them, which `/inbox`
+  reads as THEIR opt-out nobody recorded, however old: somebody who may have
+  sent nothing was locked out on every channel, for good, by a fault
+  DoveSoft's retry recovers from. So the hard hold lasts only while the
+  number is unsuppressed. A delivery through `recordInboundSms` that finds
+  the number's phone suppression in a holder's org — DoveSoft's retry, a
+  redelivery's `finishRedelivered`, an unplaced redelivery, or any later
+  text from the number, whatever it says (review round 9,
+  `releaseWhereSuppressed`: only a STOP eased them before, so the "next
+  text" `RESUME_SHARED_NUMBER` promised eased nobody unless it was another
+  STOP) — replaces exactly that reason with the ordinary
+  hold below, `sharedNumberHoldReason` (`releaseSharedNumberHolds`, the holders
+  locked `FOR NO KEY UPDATE` by id, one transaction per org and best-effort:
+  a fault leaves that org's holders held hard and says so), and the org's
+  `sms.inbound_unmatched` row carries `released: n` — on a redelivery even
+  in an org where only the ease happened, the filed org included
+  (`filedUnder: 'another_contact'`, `redelivered: true`). And a number a
+  person records by hand on `/suppressions` releases them with no further
+  text: Resume refuses `isSharedNumberOptOutPause` (`RESUME_SHARED_NUMBER`,
+  which says a text from a number they share asked to stop, and to record
+  the number) only while no phone suppression in their org matches their
+  phone, and then lifts it, `contact.resumed { pausedFor:
+  'opt_out_not_recorded' }`. A holder whose own pause was kept is eased by
+  no text: Resume refuses it `RESUME_SHARED_NUMBER_KEPT` while the number is
+  unrecorded, and after that lifts it only where Resume lifts that pause at
+  all — a teammate's or an unsubscribe's, never their own unrecorded
+  opt-out or an erasure. The contact it was filed under keeps the
+  asker's pause and row. `/audit` words the row as a number N contacts here
+  hold, not treated as the one who asked, held until it is recorded, and
+  says the next text DoveSoft delivers from the number after that makes it
+  an ordinary hold that Resume lifts — "its retry of this one included,
+  where the push carried a message id" for a row whose `why` is not
+  `record_failed` (review round 10: a suppression that failed is answered
+  200 for an id-less push, so no retry comes), and unqualified for `why:
+  'record_failed'`, which the route answers 500 whatever the push carried —
+  with `kept` as "K of them were already held by a pause of their own, which
+  stands — no text changes it, and Resume lifts it, where Resume may, only
+  once the number is recorded", and
+  `/compliance` and the digest count one row per org where they counted one
+  per holder — its company resolved only when its subject is the filed text
+  stored in that org (`suppression_failed` in the filed org, or a
+  redelivery's re-attempt there), and otherwise an unknown company. A filed
+  text answers **200**; a filed STOP left unsuppressed anywhere — in the org
+  it was filed under or another holding the number — answers **500**
+  (review round 7), after the AWAITED `opt_out_not_recorded` alarms (below)
+  and, when the filed contact's own suppression was written, the ordinary
+  reply notice. It answered 200, so DoveSoft never retried, and the code
+  that writes a missing suppression on a retry was never reached. That
+  retry is a duplicate: it holds and pauses nobody, announces nothing, and
+  writes only what is missing (`finishRedelivered`, below), alarmed and
+  refused again where a write fails again. **That 500 is only for a push
+  that carried a message id** (review round 8): the recorder knows a redelivery by its id
+  alone, so the retry of a push with none, or a blank one, would be a new
+  text — a second inbound row, a second reply notice, a second loud path,
+  on every retry while the write kept failing. Such a push is answered
+  **200** after the same awaited alarms, with an error line saying it
+  carried no message id and that what is missing must be recorded by hand
+  (`duplicate`, `orgs`, `alarm`, `messageId: false`); since review round 9
+  so is a STOP filed under nobody whose retry would hold its holders again,
+  or that has nowhere to be written (below — since review round 10 not one
+  from a number no contact holds where `DOVESOFT_ORG_ID` is set), and an
+  unreadable number is still a 400. Every org whose holders were held gets an
+  `sms.inbound_unmatched` row (`why: 'ambiguous'`, `filedUnder:
+  'another_org'|'another_contact'`, `contacts`, `paused`, `cancelledQueued`,
+  and for a STOP `optOut` and `suppressed`), the filed org included when a
+  twin there was held. None, or several and nobody narrowed: nothing is
+  filed under a guessed person, and `sms.inbound_unmatched` is audited (ids
+  and counts) in every org involved
+  — but EVERY holder is held, one transaction per org, with the counts on
+  the row; the first version paused nobody, so an approved text to any of
+  them went on the next tick. **A hold** pauses `held: a text came from a
+  number another contact also holds, <ISO>` (`sharedNumberHoldReason`,
+  through `pauseContact`, so an existing pause keeps its reason — all but a
+  reply's, below), which `pauseReasonClass` reads as `other` — Resume on
+  `/contacts` lifts it, answering in `/inbox` does not — and refuses their
+  queued, awaiting-approval and approved messages on every channel `paused`,
+  a hold `REFUSALS_A_CORRECTION_RESOLVES` lets be drafted again once a
+  person lifts it (review round 6). It paused `replied <ISO>`, which told a
+  person to answer from `/inbox` a reply no row existed for, and cancelled
+  `consent_revoked`, the recipient's own no, which enrolment read as a
+  refusal for good of somebody who may have sent nothing. **A reply's own
+  pause is the one a hold replaces** (review round 7): `holdEach` reads each
+  holder's reason under a lock (`FOR NO KEY UPDATE`, by id, contact before
+  touch) and replaces a `replied <ISO>` pause, named exactly in the UPDATE
+  (`pauseContact`'s `replacing`, as `contactPauseByHand` does), because
+  `/inbox` ends a reply's pause when the reply is answered, and a holder
+  left with it was resumed by answering an old email while a person was
+  still working out whose this text was. The lock is `FOR NO KEY UPDATE`
+  since review round 8, never `FOR UPDATE`: every writer of `paused_reason`
+  is an UPDATE of non-key columns, which takes that same lock, so the reasons
+  are still read under one nobody can write past, while `FOR UPDATE` is the
+  one row lock that also conflicts with the `FOR KEY SHARE` a foreign-key
+  check takes — `approveDraft` re-pointing an email draft from one holder to
+  another holds the draft and waits on the new holder's key share, while the
+  hold, holding that holder, waits on the draft to cancel it: a deadlock
+  (40P01, reproduced on Postgres 16), and for a STOP the loud path for every
+  holder. `/audit` words each row by its
+  writer — filed under nobody, under another contact here, under a contact
+  in another org, or received again — and states the hold whenever either
+  count is above zero ("1 of the 2 contacts holding the number was paused"),
+  and a reply pause it replaced from the row's `replacedPauseFor: 'replied'`
+  and `replacedPauses` ("the hold replaced the pause their reply had
+  caused", or "… a reply had caused for N of them"). A fault while holding
+  throws, and the route answers 500 so DoveSoft retries — for a STOP, never
+  as the bare fault (review round 7). The holds are one transaction per org,
+  so one org's may commit before the next one's faults, and the subject-less
+  row the route then wrote said nothing was written and nobody paused, false
+  of it: its holders kept a `held:` pause anyone could lift while nothing
+  anywhere said their number had asked to stop. No suppression is written by
+  then, so EVERY holder takes the holders' loud path (`why:
+  'record_failed'`, one row per org) and the
+  recorder throws `SmsOptOutNotRecorded` with `heldIn`, the orgs whose holds
+  committed; the route pauses, audits and alarms the contact it was filing
+  under, if any, alarms every other org, and files no subject-less row. And
+  a STOP is not dropped, because a phone suppression is keyed by the number:
+  it is written in every org whose contacts carry it, or in
+  `DOVESOFT_ORG_ID`'s when no contact does, and the loud path runs where it
+  cannot be — with no contact and no org named, nowhere, so it is a 500
+  (a 200 for a push with no message id, below) logged `OPT-OUT NOT
+  RECORDED` for a person to record by hand. The row's
+  `suppressed` says whether the suppression was written — `false` in so many
+  words for an unreadable number's STOP, which wrote no key before — and
+  `/audit` claims one only for `suppressed: true`, marking an opt-out
+  without it as an alarm; it called an unreadable
+  number's STOP "put on the suppression list". An unreadable number is a **400** (the recorder has audited
+  it and taken the loud path for a STOP); an unplaceable STOP whose
+  suppression could not be written is a **500**, so DoveSoft retries it, and
+  the `contact.opt_out_not_recorded` row and the error line record it and
+  `/compliance` counts it — except, since review round 9, a push that
+  carried no message id, answered **200** after the awaited alarms with an
+  error line saying `messageId: false` and that what is missing must be
+  recorded by hand: a text filed under nobody is known on a redelivery by
+  a hash of its id alone (`messageHash`, below), so every retry of such a
+  push held every holder again — undoing a teammate's Resume and
+  cancelling drafts written since — and wrote another set of rows, the
+  filed branch's reason (review round 8) restated. Only where that is what
+  a retry would do (review round 10): the 200 is for `why: 'ambiguous'`,
+  where holders exist and a retry re-holds them, and for `no_contact` with
+  no `DOVESOFT_ORG_ID`, where a retry has nowhere to write. A no-id STOP
+  from a number NO contact holds, with `DOVESOFT_ORG_ID` set, is a **500**
+  again, so DoveSoft's retry writes the suppression in that org — the one
+  write the 200 gave up on for good — and that retry holds and releases
+  nobody (`retryOnlyRecords` in the route's `webhook.ts`). For both, the
+  `opt_out_not_recorded` Slack alarm is AWAITED before the answer, as a
+  filed STOP's is — **one per org where the suppression failed** (review
+  round 6): the recorder reports each as `optOutNotRecordedIn`, `{ orgId,
+  contactId | null }[]`, on both outcomes,
+  and the route raises one each through `smsOptOutAlarms` — for a filed
+  STOP, beside the filed contact's own alarm when their suppression failed
+  too, or beside the ordinary reply notice when it was written. Another
+  org's failure used to be
+  folded into the filed contact's flag, so the one alarm named the org whose
+  suppression had WORKED and the org that needed it heard nothing. Every
+  alarm but the filed contact's names a contact holding the number in its
+  org where there is one, with no message on file there, and links
+  `/suppressions`, because that record holds the number. Only a number
+  nobody holds (filed under `DOVESOFT_ORG_ID`) or one that could not be
+  read has none, and its alarm goes with `touchId: null` and `contactId:
+  null`: its message names no message or contact, says whose number it was
+  is not known and that it may not be on the suppression list, tells the
+  person to check `/suppressions` for the number in the provider's inbound
+  log and record it there if it is missing, and that anybody holding it may
+  already be paused (review round 7: a redelivered STOP has a message on
+  file, and a recording that threw may have recorded part of it, so "no
+  message is on file" and "nothing in the app holds the number" could be
+  false) — the number, lead data, is not in the message — and links
+  `/compliance`, never anything built from the number. It is filed
+  under `DOVESOFT_ORG_ID`, the org the recorder audits such a push under,
+  because the alarm's own `notification.*` audit row needs an org (its
+  subject is `touch` with a NULL id); without one no alarm is raised and
+  the error line says `alarm: 'not_raised_no_org'`. A delivery that fails
+  again raises it again, as it writes the audit row again
+  (`apps/web/test/dovesoft-webhook.test.ts`).
+  Before, `SlackOptOutNotRecordedEvent` required a touch, and such a STOP
+  reached a person only through an error line and an audit row. The
+  subject-less `contact.opt_out_not_recorded` row reads on `/audit` "could
+  not record an opt-out texted from a number no single contact holds (the
+  number could not be read) — it is NOT on the suppression list; read the
+  number from the provider's inbound log and record it by hand", where it
+  said "a contact at an unknown company" — the bracket only for
+  `unparseable_number`. A subject-less `why: 'record_failed'`, which only a
+  fault before the recorder wrote anything or named anybody leaves now, has
+  its own sentence (review round 5), because that writer never learned
+  whose number it was, and "no single contact holds" sent the person
+  following up to record a bare suppression and never pause anybody. Round
+  7 reworded it to say only what is known, because a fault in the duplicate
+  check on a redelivery, or in a redelivered unplaced STOP's look for its
+  rows, comes after an earlier delivery recorded it, and the sentence said
+  nothing was written and nobody paused: "could not record an opt-out
+  texted in: recording the text failed, so whose number it was is not
+  known, and part of it may already be recorded — by an earlier delivery,
+  or by this one before it failed; it may not be on the suppression list.
+  It was refused so DoveSoft retries, but until a retry is recorded, check
+  /suppressions for the number in the provider's inbound log and record it
+  there if it is missing — anybody holding the number may already be
+  paused; pause whoever holds it and is not". That fault path's
+  alarm is built by `smsUnplacedOptOutNotification` in the route's
+  `notification.ts`.
+  Deduplicated by the message id, and the partial unique index settles two
+  deliveries that race. A text filed under nobody leaves no inbound row to
+  find, so its `sms.inbound_unmatched` rows carry `messageHash` — a sha256
+  of DoveSoft's message id, never the id, which leads to the number and the
+  words in the provider's log — read back in SQL in the orgs involved; a
+  redelivery that finds one holds nobody again, which would undo a
+  teammate's resume and cancel drafts written since, and answers `why:
+  'duplicate'`, writing for a STOP only a phone suppression still missing.
+  A redelivered STOP filed under a contact writes any phone suppression
+  still missing (`finishRedelivered`): in the OTHER orgs holding the
+  number (review round 6), audited there `redelivered: true`, and since
+  review round 7 in the org it was filed under, audited `suppression.added`
+  with actor `system` beside the `contact.opt_out_not_recorded` the first
+  delivery left — only when the redelivery's own insert wrote it (review
+  round 8: `suppressPhone` returns `alreadyPresent`, and `suppressInEvery`
+  carries it per org), because one a person or a parallel delivery wrote
+  between the read and the insert was logged as System's add beside its
+  writer's. The first delivery's 500 is what makes that retry come. A
+  write that fails again takes the loud path again: `optOutNotRecorded` is
+  true on a duplicate only then, and `suppressed` says whether the filed
+  org holds the suppression after the redelivery (it was always false). A
+  fault while finishing — or in a redelivered unplaced STOP's read of what
+  is missing — is `SmsRedeliveryIncomplete` (`fault`, a class like the
+  other's, `orgId` and `contactId`): a 500 with an error line naming the
+  fault's class and the text's ids, and NO `contact.opt_out_not_recorded`
+  row and NO alarm, because the STOP was recorded and the first delivery
+  alarmed every org it could not suppress it in; it took the subject-less
+  path, which said nothing had been written while the suppression and the
+  pause stood. Both typed errors are exported from `@agency/db/queries`.
+  Three residuals, stated: a stale redelivery can re-add a suppression a
+  person removed in between, in the filed org now as in the others; after a
+  STOP's recording throws, the other orgs' rows already say the text was
+  filed under a contact in another organisation although the reply rolled
+  back, and the retry that files it writes a second row there; and a holder
+  held hard who later becomes the contact a text is filed under — the only
+  one texted at the number — is not eased by that text, because the filed
+  contact is left out of every release, though Resume lifts them once the
+  number is recorded. A fourth is closed (review round 9): a shared
+  number's holder is found, by a later delivery and by Resume alike,
+  through their CURRENT phone, and one whose phone was edited after the
+  STOP was eased by no delivery and refused by Resume for good — so
+  `contactsUpdate` refuses that edit while they are held, paused or not
+  (`shared_number_hold`, §2, "The send path"; round 10 narrowed it to
+  paused contacts and review round 11 put it back) — but not over their own
+  unrecorded opt-out or an unfinished erasure, which Resume never lifts
+  (review round 12).
+
+**`/settings/templates`** records registrations and registers nothing: add
+one by hand, switch one off or on (idempotent, audited
+`template.activated|deactivated`), or import the DLT portal's CSV export
+(`templatesImportDltCsv`). The import reads header cells by alias — the
+SmartPing portal's exact columns are not public, so `Template ID`, `Header`,
+`Template Type`, `Template Content` and the other common spellings each
+map to a field, and a new spelling is one string — takes only rows whose
+status is approved (or has no status column), and ends every line in exactly
+one of imported, already present, skipped or refused with its sentence; an
+id stored with DIFFERENT words is refused, never overwritten. A file that is
+not UTF-8 is refused whole — a body through a lossy decode would never match
+the operator's copy — as is one with no header, a required column missing
+or an unclosed quote. A U+0000 in any field a template stores — the body,
+the DLT id or WhatsApp name, the header or sender, the category, the name
+and the language — is refused with a sentence (`nulRefusal` in
+`packages/db/src/templates.ts`, review round 9), never replaced with U+FFFD
+as an inbound text's is, because a template is the registered text exactly
+and words with a character replaced are words nobody registered; the name
+has a refusal of its own for it, `bad_name` (400), and an import reports
+such a line as refused. It failed the INSERT, and the fault reached the
+route whole. Both POST routes now catch a database fault
+(`templateCreateAnswer` and `templateImportAnswer` in
+`apps/web/src/app/api/templates/outcome.ts`) and answer 500 with a
+sentence, logging the fault's class only, because drizzle's message lists
+the template's words and ids; an import's sentence says lines before the
+fault may already be recorded and that importing the same file again is
+safe. The routes are gated `campaigns:read` (list) and
+`campaigns:write` (add, switch, import). `/settings/deployment` names the
+DoveSoft variables and prints the two webhook URLs, built from `AUTH_URL` —
+never a Host header — with `<DOVESOFT_WEBHOOK_SECRET>` where the token goes.
+
+**Not built, and why.** Calls (OBD, click-to-call) and WhatsApp over
+DoveSoft: DoveSoft publishes no API documentation for either, and a guessed
+field name in a path that dials a person or decides an opt-out is the one
+thing this design will not do. `message_templates` and `TEMPLATE_CHANNELS`
+already carry WhatsApp, the inbox says WhatsApp sending is not available,
+and no provider exists. **Three assumptions, stated rather than hidden
+(§13):** the DLR and inbound push formats (the alias lists above — fix one
+in a line once DoveSoft's account manager confirms it); the response body,
+documented only as "carries `messageid`" (`messageIdFrom` takes a top-level
+`messageid` or the first one found breadth-first three levels down, exact
+key, and fails loudly otherwise); and the `mobiles` format — the E.164 digits
+WITHOUT the `+` (country code first, `dovesoftMobile`), the common Indian
+gateway form, the one thing to confirm with DoveSoft before a real send.
+Also open: the stale-evidence step judges an SMS draft by its company's
+scan although a template may quote no scan (the composer's dry run shows
+that refusal as it is); a daylight-saving change between a deferral and
+its retry can send a promotional SMS late by the size of the change or
+defer it once more (never early), and one to a +91 number in Los Angeles
+deferred across the switch to summer time is then refused
+`band_never_opens`, because the half hour its band had in winter is gone;
+the email opt-out reader still misses decoration at the ends (§2, "A reply
+does four things"); `smsOptOut` is still roughly quadratic on a long run of
+whitespace or punctuation, about 100–250 ms on a 16 KB body, from
+`SMS_DECORATION_ENDS`' end-anchored alternative and `SMS_CLAUSE_BREAK`'s
+spaced dash — round 7's capital-STOP reading walks the end in linear time,
+round 8's question reading splits the clause once and reads a bounded
+number of words, and neither adds anything measurable, and both routes sit behind the webhook
+secret; and a GET push logs a text's number and words at the
+platform, by design, until DoveSoft pushes by POST. The two labels round 4
+left lagging the band are current: `/settings/templates`' hint for a
+promotional template (`CATEGORY_HINT` in
+`apps/web/src/app/settings/templates/words.ts`) reads "Held outside
+10:00–21:00 where the recipient is — and outside 10:00–21:00 India time as
+well for an Indian (+91) number — and the operator drops it to a DND
+number", and `unknown_timezone`'s "no timezone on the contact" is true
+again of everything left under it, now the band has its own code.
 
 ### The pipeline (Phase 5, §8.6)
 
@@ -1160,7 +3041,12 @@ finding with its `scored` flag and lets core filter. `proposals.scan_id` is
 proposal quotes cannot be deleted from under it. Effort is rounded to halves
 ONCE, at the end — rounding each increment compounded the error. Accepting a
 proposal is what closes the deal `won`, through `setDealStage` (it stamps
-`closed_at`; `advanceDeal` only moves the stage).
+`closed_at`; `advanceDeal` only moves the stage). A status changes only over
+the status the caller READ (`setProposalStatus`'s `from`, in the UPDATE's
+predicate; review round 3): the team route read and then wrote, so a
+person's click could overwrite a buyer's acceptance through the share link
+that landed in between. No match is a 409 saying what it became; only
+`shareAccept`, which already holds the row `FOR UPDATE`, omits it.
 
 **The ICP's `why` describes the gap, so it must never be quoted as a
 strength.** The first live brief listed "Already in place: Known-outdated JS
@@ -1219,7 +3105,16 @@ beside advanceDeal's; `analyticsTransitions` leaves those out in SQL (they
 have no `to`), so one move is neither counted twice nor reported unreadable.
 Still NOT recorded as deal rows: a stage set by the agent's `update_deal`
 (audited as `agent.update_deal` with no `from`), a proposal accepted as won,
-and every automatic move made before this change.
+and every automatic move made before this change. **Forward-only and
+open-only are in the UPDATE's own WHERE** (review round 3): the rank check
+was a read, and under READ COMMITTED a booking or a person closing the deal
+could commit between it and `UPDATE … WHERE id = …`, so a move could be
+knocked back, a closed deal given an open stage, and `deal.advanced` written
+with a stale `from` even when nothing changed. Now a CTE locks the row
+`FOR UPDATE` only while it is still open and still behind `to`, `from` is
+the stage that UPDATE actually replaced, and a row that no longer matches
+asks again from the top — `unchanged`, or a new open deal if it was closed
+meanwhile — with nothing audited for a move that did not happen.
 
 **Analytics are lower bounds and say so.** `/pipeline/analytics` computes win
 rate and velocity (median days from creation to won) from `deals`, so those
@@ -1261,13 +3156,21 @@ banner, taken from `scans.ran_at`. `GET /api/proposals/[id]/markdown`
 (`deals:read`) returns the buyer's content — no score, tier or per-item weight
 — plus the stale banner, because Markdown is the form most likely to be pasted
 into a mail and removing the banner should take a deliberate edit; it refuses
-a DRAFT whose evidence is stale (409). Both write `proposal.exported`, and
-both read the stale threshold through `readIcp` (`lib/company-list.ts`), so
-an unparseable or non-positive `stale_after_days` falls back to the default
-rather than making `isStale` throw.
+a DRAFT whose evidence is stale (409), and one whose scan a newer successful
+scan has superseded (409, `reason: 'superseded'`), because only the latest
+scan is quoted; the print view, the proposal page and its download links show
+a superseded banner or note (`supersededBannerText`). Both write `proposal.exported`, and
+both read the stale threshold through `readIcp` (`lib/company-list.ts`),
+which delegates to `staleAfterDaysOf` (§1), so an unparseable or
+non-positive `stale_after_days` falls back to the default rather than making
+`isStale` throw.
 `ProposalDocument` carries an `audience`: the buyer copy omits score, tier,
 weights and the word "stale"; both keep the "not the case here (…)" and "not
-assessed" sentences verbatim.
+assessed" sentences verbatim. Every copy says "Prepared by <the org's name>"
+— `orgs.name`, through `orgIdentity` on `/proposals/[id]` as the print view
+and the buyer page already read it; the team view used to print the active
+ICP's label, a scoring profile's name, there (§2, "The settings pages and
+the dashboard").
 
 **A share link is the proposal's own document behind an unguessable,
 revocable token; accepting it is the same `setProposalStatus` a person
@@ -1282,11 +3185,38 @@ quotes is superseded — the newer one may say a priced gap is closed — so
 mint refuses `superseded` ("A newer scan exists — regenerate the proposal"),
 and the read and the accept treat a superseded scan as stale (the buyer is
 told it is being re-verified, no view is counted, accept is 410). An
-unreachable newer scan supersedes nothing. `shareEvidenceSuperseded` lets
-the proposal page's Create button say why before it is pressed. A view is a
-count and two
-timestamps. The public page returns 404 for an unknown, revoked or expired
-token alike (a page cannot answer 410; the accept route does).
+unreachable newer scan supersedes nothing. Supersession is compared in SQL
+against the STORED `ran_at` of the proposal's own scan, and that scan is
+excluded by id: `ran_at` is `DEFAULT now()`, stored to the microsecond, and
+a comparison against the same instant read back as a millisecond `Date`
+matched the proposal's own scan — on real Postgres every proposal was
+superseded by itself, no link could be minted, and every live one read
+"being re-verified". `shareEvidenceSuperseded` lets the proposal page's
+Create button say why before it is pressed — and is what the print view,
+the proposal page's warning ("Regenerate it before marking it sent") and the
+download links read. `shareCreateBlocked`
+(`apps/web/src/components/pipeline/proposal-share-copy.ts`) says it in the
+order the route would refuse, with one exception: a DRAFT whose evidence is
+stale or superseded hears that BEFORE "Mark the proposal as sent first",
+because `shareMint` refuses a sent proposal over either and nothing makes a
+scan current again — a re-scan writes a NEW scan, which supersedes this one
+— so the old order's advice could only end in a second refusal over a
+proposal now marked sent. Stale comes before superseded, the order the route
+uses for a sent proposal. A stale draft hears "Not while the evidence under
+this proposal is stale … This draft could not be linked even once marked
+sent: re-scan the company, generate a fresh proposal, mark that one sent,
+and link it"; a superseded one "A newer scan exists — regenerate the
+proposal … generate a fresh proposal from the latest scan, mark that one
+sent, and link it"; only a fresh draft is told to mark it sent first. Round
+3 moved the superseded draft and left the stale one hearing "mark it sent
+first" (review round 4; `proposal-buyer-view.test.ts` and
+`proposal-share-copy.test.ts` pin the order). Each
+link in the team's
+list says what its buyer sees: `stale — the buyer sees “being re-verified”`
+or `superseded — the buyer sees “being re-verified”`, never `live` for a
+link whose buyer cannot accept. A view is a count and two timestamps. The
+public page returns 404 for an unknown, revoked or expired token alike (a
+page cannot answer 410; the accept route does).
 
 **Notes and tasks are internal state with no outbound side.** Kickoff and
 renewal templates are created by a click, never by a stage change — the board
@@ -1428,8 +3358,19 @@ pool and, on failure, called `process.exit(1)` out from under whatever
 imported it — which is why the routes had no test for as long as they did.
 `startVoiceService(deps)` takes its database, logger, liveness ping and model
 as arguments and returns the port it actually bound, so the test drives the
-same code a deployment runs. (`apps/agent/src/index.ts` still has the old
-shape; it is not blocking anything and was left alone.)
+same code a deployment runs. The agent worker has since been split the same
+way: `apps/agent/src/worker.ts` exports `startWorker({ env, log })`,
+whose memoised `stop(signal)` never exits the process, and `index.ts` stays
+the entry — the image's `CMD`, the package scripts, `tools/run-worker.sh` and
+`tools/smoke-agent.ts` all name it — reading the environment and owning the
+signals and the exit code (`apps/agent/test/worker.test.ts`). The comments
+that named `index.ts` for wiring that moved — `tools/run-worker.sh`,
+`boot/heartbeat.ts`, `outreach/options.ts`, and `runtime/options.ts`, which
+now says `loadEnv` refuses the local login in production — name
+`worker.ts` or `loadEnv` now, and so do the two that said `index.ts` builds
+the inbox (`apps/agent/src/notify.ts`, beside `optOutAlarmFromEnvironment`,
+and the `optOutAlarm` field's comment in `apps/agent/src/outreach/inbox.ts`),
+which name `startWorker` in `worker.ts` (review round 4).
 
 **The scripted policy is the whole conversation.** `scriptedTurn` qualifies a
 caller in three questions with no model involved, which is what runs when no
@@ -1481,7 +3422,10 @@ deterministic one on every failure path. Only the caller's and the agent's
 turns are sent — not the system events. The worker calls `classify_reply`
 (`apps/agent/src/outreach/classify.ts`) and `draft_outreach`
 (`apps/agent/src/outreach/draft.ts`) the same way, beside the deterministic
-answer. `summarise_findings` has its task key and no caller yet; wiring it is
+answer; the model's reply kind is then WRITTEN through the inbox's
+reclassify path (`replyReclassifyIfStill`), so every guard a person meets
+applies to it and a kind a person set meanwhile stands (§2, "The opt-out
+reader runs first"). `summarise_findings` has its task key and no caller yet; wiring it is
 adding an `attemptText` call beside the deterministic answer that already
 exists, never in place of it. (The agent TOOL named `classify_reply` is a
 different thing: it records a kind a model or a person chose, and calls no
@@ -1500,9 +3444,10 @@ breach, because `decideApproval` allows it on purpose (§1). Freshness comes
 from the latest scan's `ran_at` through `isStale`, and the page shows how many
 stale companies `findings.stale` still calls fresh. The threshold is read
 through `readIcp` (`lib/company-list.ts`), like the proposal print view and
-the Markdown export: an unparseable or non-positive `stale_after_days` falls
-back to the default instead of making `isStale` throw, and the page says so
-in a note.
+the Markdown export, and `readIcp` delegates to `staleAfterDaysOf`, the
+helper `get_compliance_summary` and every other reader take (§1): an
+unparseable or non-positive `stale_after_days` falls back to the default
+instead of making `isStale` throw, and the page says so in a note.
 
 The must-be-zero checks: `callsThatDidNotDisclose()`, which leads the page;
 opted-out replies and calls with no matching suppression row today (keys from
@@ -1514,20 +3459,82 @@ KNEW an opt-out failed to store — `DIGEST_OPT_OUT_FAILURES`
 dashboard, the tool and the digest cannot disagree, each row naming its path
 and its company resolved through the contact, the touch or
 `detail.contactId` (counting the first alone reported 0 over a failed
-unsubscribe or erasure); voice/SMS/WhatsApp touches that WENT OUT with no
+unsubscribe or erasure; and since review round 8 a colleague's stop whose
+sender is a contact here leaves 1 + N rows — one about the reply, one under
+each sender contact — while a shared number's holders leave one per org,
+not one per holder, whose company resolves only through the filed text
+where it is stored in that org: §2, "SMS through DoveSoft");
+voice/SMS/WhatsApp touches that WENT OUT with no
 granted consent row today, with the send path's own refusals counted apart as
 "stopped by the send path"; and every outbound row not yet sent
 (`COMPLIANCE_UNSENT_STATUSES`: `awaiting_approval`, `approved`, `queued`,
-`sending`) whose company's latest successful scan is stale or missing,
-tagged by status with `byStatus` and `unsent` beside `awaiting` — a queued
-auto-send row or an approved, deferred one goes out with nobody looking
-again, so those are the ones the count most needs to see. Refusing such a
-row at sending is the send path's (`stale_evidence`); this is the reporting
-half. The auto-send check prints its predicate and its zero, and its
+`sending`) on stale or missing evidence, with its reason in `byWhy`:
+`stale` or `no_evidence` (the company's latest successful scan is stale, or
+there is none), `rescanned_since` — the latest scan is fresh, but the
+words were written from an older one that is stale now — or `superseded`:
+the words were written from a scan still inside its deadline, but a newer
+successful scan of the company exists, which the send path refuses
+`stale_evidence` too (§1). Aged AND superseded is `rescanned_since`, the
+plainer of two true reasons, as the sender words it. Each of the last two
+was missed in its turn, so the page could say zero while a blocked draft sat
+in `/approvals`. `superseded` is asked in the same SELECT the way
+`evidenceState` asks it: the latest `ok` scan at or before the words, then a
+newer `ok` scan compared against its STORED `ran_at` with that scan excluded
+by id — never a millisecond `Date` read back and compared, which matched the
+scan itself (`packages/db/test/compliance-stale-evidence.test.ts` checks a
+scan stored to the microsecond never supersedes itself, and that a newer
+FAILED scan supersedes nothing). Rows are tagged by status (`byStatus`, `unsent` beside
+`awaiting`), and each carries `writtenFromScanAt` — the scan the send path
+judges the words by, found in SQL against the stored values as
+`sendFactsFor` finds it, null for an answer to a reply — and
+`refusedAtSending`. That scan is looked up by
+`coalesce(contacts.company_id, touches.company_id)`: it went through the
+contact alone, so every `queue_touch` draft — `contact_id` NULL until a
+person picks the recipient — read `writtenFrom` NULL and `refusedAtSending`
+false, and the page and `get_compliance_summary` misreported how the send
+path treats the agent's drafts (review round 3). The listed rows split into `refusedAtSending` (the send
+path refuses them `stale_evidence`, whoever approved them, superseded ones
+included; the fix is a new draft from a fresh, latest scan — a re-scan
+first only where the scan aged), `notJudgedAtSending` (no successful scan behind
+the words, or an answer to a reply, which go as written unless another rule
+stops them — answers are counted here now, with no card of their own) and,
+of those, `notJudgedNoFurtherLook`: the approved, queued and sending ones,
+which go with nobody looking again. Refusing is the send path's; this is the
+reporting half. The page words a superseded row "written from the scan of
+<when>, still fresh; superseded by the newer scan of <when>", and its rule
+paragraph names supersession beside ageing; `get_compliance_summary` counts
+the superseded rows apart from the stale ones, because "a scan that is
+stale now" is false of them. The card that counts them reads "…of which
+refused at sending (stale or superseded evidence) — draft again from a
+current scan", a fix true of both; it said "(stale evidence) — re-scan, then
+draft again", which a superseded row does not need (review round 4). The auto-send check prints its predicate and its zero, and its
 test runs the same predicate over rows that would match. Every zero says
-"none recorded" and names the recorder `deployment()` reports absent — no
-worker, no reply path, no `UNSUBSCRIBE_SECRET`, a voice service the page
-cannot see. `COMPLIANCE_REFUSAL_HUMAN_CAN_RESOLVE` restates `decideSend`'s
+"none recorded" and names the recorder that is absent — no worker, no reply
+path, no `UNSUBSCRIBE_SECRET`, a voice service the page cannot see. Whether a
+WORKER records anything is read from the heartbeat (`workerStatus()`, through
+`apps/web/src/app/compliance/recorders.ts`), not from `deployment().worker`:
+the documented production shape is `AGENT_URL` unset with a worker on Fly
+that sends and reads a mailbox, and the page used to tell that deployment
+nothing sends. A worker sending only SMS counts as sending too:
+`workerSends` (`lib/dashboard-view.ts`, which the recorders import) reads
+the row's `sms` beside its `outreach`, the mailbox, so a worker with
+DoveSoft and no SMTP is no longer "not sending" here or on the dashboard,
+and the replies recorder says of such a worker "The worker is running with
+email outreach switched off" — its outreach is not off, only its mailbox —
+the dashboard's own words for the same heartbeat (`notReadingBecause`;
+review round 5; `workerSendsSms`).
+And where `deployment().smsInbound` holds, the replies recorder says no
+EMAIL webhook is configured and that texts, a STOP included, still arrive
+through DoveSoft's webhook. Configuration speaks only when the heartbeat cannot be read,
+and then as configuration ("No worker is configured on this deployment,
+and the heartbeat … could not be read"). Pages with no heartbeat in reach —
+`/contacts`, `/inbox`, `/approvals`, `/campaigns` and the inbox reply route
+— now word their notes as configuration and point at
+`/settings/deployment` (review round 3). `/contacts`' pause note says "As
+configured, this deployment pauses nobody on an email reply — a worker
+running elsewhere can, and a text reply through DoveSoft's webhook does
+where that is set up"; it said nobody was paused by a reply "only by hand",
+false on both counts. `COMPLIANCE_REFUSAL_HUMAN_CAN_RESOLVE` restates `decideSend`'s
 `humanCanResolve` per code (a row stores the code, not the decision), typed
 `Record<SendRefusalCode, boolean>` so a new code fails the build, and
 `compliance.test.ts` drives `decideSend` into every code and asserts they
@@ -1553,11 +3560,17 @@ expansions nobody listed, and for a `WRITTEN` entry nothing writes. A
 convention did this job before and failed: features built in parallel wrote
 seven actions from files that were not `audit-copy.ts`, and `/audit` showed
 each as a raw name. `isAlarm` highlights an opt-out that was not recorded, a
-call with no AI disclosure, and a digest whose worker-silent alert reached
-nobody. The page's own notes say what the log cannot: an approval decision is
-written twice (the web route and the worker), scans are audited only when the
-cron or the agent ran them, and suppression changes before 0018 were never
-written at all (§4).
+call with no AI disclosure, a digest whose worker-silent alert reached
+nobody, and (0019) an inbound text nobody could read, which may have been a
+STOP, and an `sms.inbound_unmatched` STOP whose row does not say
+`suppressed: true`. The page's own notes say what the log does not show the way one might
+expect: an automatic deal move is a line of its own, from System, beside the
+`send.sent`, `contact.replied`, `meeting.booked` or `proposal.generated` line
+that caused it (the notes used to say it had none, after `advanceDeal`
+started writing one — §2, "The pipeline"), and three moves still have no
+deal line; an approval decision is written twice (the web route and the
+worker); scans are audited only when the cron or the agent ran them; and
+suppression changes before 0018 were never written at all (§4).
 
 ### Notifications and the heartbeat
 
@@ -1569,10 +3582,57 @@ deep link: never a body, a name, an address, a phone number, a note or a
 chosen time. A free-mail lead's `<address>.inbound` row reaches the channel in
 NO field, the link included, because Slack unfurls and logs URLs; such a
 message links to `/inbox`, `/pipeline` or an id-based page, and
-`slack-message.test.ts` asserts no payload contains `.inbound`. The webhook
-URL is a bearer credential `redact()` cannot see, so it is never logged and a
-failure is reported by error NAME or Slack's short token. One attempt, 3 s,
-no retry, and an audit row `notification.sent|failed` with actor `system`.
+`slack-message.test.ts` asserts no payload contains `.inbound`. The
+`opt_out_not_recorded` member is core's `SlackOptOutNotRecordedEvent`, and
+that message — with the 4,000-character cut every message gets — is built in
+`packages/core/src/slack-payload.ts`, because the worker posts it too and a
+person in the channel must not be able to tell which process noticed. Its
+`touchId` is `string | null`, like `contactId` beside it. With neither — an
+SMS STOP from a number no contact holds or that could not be read, or one
+whose recording threw before the recorder wrote anything or named anybody
+(§2, "SMS through DoveSoft") — the message reads "no message or contact
+named", says whose number it was is not known here and that it may not be
+on the suppression list, tells the person to check the Suppressions page
+for the number in the provider's inbound log and record it there if it is
+missing, and that anybody holding it may already be paused, and links
+`/compliance` where a filed alarm links `/suppressions`. It said no message
+was on file and nothing in the app held the number, which a redelivered
+STOP, or a recording that threw after writing part of it, made false
+(review round 7). With a contact and no touch — an email stop whose
+recording threw, on either webhook or the worker's IMAP inbox, matched by
+its sender's address alone; an SMS STOP whose recording threw after the
+recorder named its contact; and, since review round 6, an SMS STOP whose
+suppression failed in an org where a contact holds the number — another
+org than the filed contact's, or any when it was filed under nobody — or,
+since round 7, whose recording threw after the recorder had taken the loud
+path there (`SmsOptOutNotRecorded`'s `optOutNotRecordedIn`), it
+says no message is on file, names a contact there and
+links `/suppressions`, because the contact's record holds the address or
+the number. With `fromIsContact: false` — a colleague's stop filed under
+the contact our message went to (review round 7; §2, "The opt-out reader
+runs first"), on the committed path or one whose recording threw — it reads
+"touch <id> · sent by somebody other than the contact" (or "no message on
+file" for none) and "The reply came from another address than the contact
+that message went to, so record THAT address, never the contact’s: read it
+from the mail itself, check the Suppressions page for it, and record it
+there if it is missing", and links `/suppressions`: without it the alarm
+named the contact, and the person following up would suppress the wrong
+address. The field is a boolean, never the address, and an event that does
+not set it posts the bytes it always did. A filed alarm's bytes are
+unchanged. **The ordinary `reply` notice says whose words they were too**
+(review round 8): its event carries an optional `fromIsContact?: false`,
+which `replyNotification` sets only when the outcome says false, and the
+message then reads "Reply from <domain> — somebody else on the thread asked
+to stop." (or "<kind>, from somebody else on the thread"), for a suppressed
+stop that the sender's address is on the list and the contact it was filed
+under did not ask to stop — "do not suppress them" — and "touch <id> ·
+filed under contact <id> · sent by somebody other than the contact": "they
+asked to stop" beside the contact's id pointed a person at somebody who
+never asked. A contact's own reply posts the bytes it always did, and
+DoveSoft's reply notice is untouched. The webhook URL is a bearer credential `redact()` cannot see, so
+it is never logged and a failure is reported by error NAME or Slack's short
+token. One attempt, 3 s, no retry, and an audit row
+`notification.sent|failed` with actor `system`.
 
 Routes call `notify()` inside `after()`, after the write, wrapped in
 try/catch — Next `console.error`s an escaping Error whole, past `redact()` —
@@ -1581,16 +3641,52 @@ callback, so a failed read cannot 500 a move that is already committed. A
 duplicate inbound delivery announces nothing; accepting a proposal closes the
 deal won inside `setProposalStatus`, and that close is not announced again.
 `opt_out_not_recorded` is the exception: it is AWAITED — on the unsubscribe
-and erasure paths, which are already answering 500, and on the two inbound
+and erasure paths, which are already answering 500; on the two email inbound
 routes, which answer 200 because a retry would be a duplicate and record
-nothing more. **`campaign_paused` comes from the digest cron**, because the
-pause happens in the worker, which has no Slack path: `digestOnce` posts one
-notice for each `campaign.auto_paused` row written since the previous
-digest, inside its 24-hour lookback, at most `DIGEST_MAX_PAUSE_NOTICES` (3),
-and the `cron.digest` row records `campaignPauses { found, posted }`, so a
-cut list is counted rather than dropped silently. The worker still logs a
-warn line per pause. **Not built:** retries, a per-org webhook, and a
-worker-side notifier.
+nothing more — except for a stop whose recording threw, which they answer
+500 so the provider retries (since round 5: §2, "The Resend inbound route
+is a READER"); on DoveSoft's `/api/inbound/dovesoft/sms`, which answers 500
+for every STOP left unsuppressed anywhere — one whose recording threw (since
+review round 4), one filed under nobody (400 for an unreadable number), and
+since review round 7 one filed under a contact, because a 200 there meant
+no retry ever came and the duplicate's write of the missing suppression
+was never reached — but only when the push carried a message id (since
+review round 8 for a STOP filed under a contact, and review round 9 for one
+filed under nobody), because without one its retry is recorded as a new
+text, so such a push is answered 200 after the same alarms — except, since
+review round 10, a STOP from a number no contact holds where
+`DOVESOFT_ORG_ID` is set, which is a 500 whatever the push carried, because
+its retry holds nobody and only writes the suppression — and raises the
+alarm again on each delivery that fails again, while a redelivery whose
+finishing faulted is a 500 with no alarm;
+and on the worker's IMAP path, before the reply triage for a stop whose
+suppression failed (§2, "The opt-out reader runs first"), and on the first
+failure of a stop whose recording threw (review round 6) — the same alarm
+through the same `optOutAlarm`, still the worker's one Slack path.
+**`campaign_paused` comes from the digest cron**, because the pause happens
+in the worker, which has no Slack path for it: `digestOnce` posts one
+notice for each `campaign.auto_paused` row read after the previous run's
+mark, at most `DIGEST_MAX_PAUSE_NOTICES` (3), and the `cron.digest` row
+records `campaignPauses { found, posted, readThrough }`. `readThrough` is
+`{ at, id }`: the stored `created_at` of the last pause read, as
+microsecond UTC ISO TEXT — never a JS `Date`, the /audit cursor's trap —
+and its id; the next run reads strictly after it, the marked row's
+timestamp compared in SQL by id. The window's lower end used to be the
+previous `cron.digest` row's own `created_at`, Postgres `now()` on another
+clock from the `now` the run had read up to, so a pause stamped between the
+two was read by neither run, or by both. The previous row is looked for
+across `DIGEST_MARK_LOOKBACK_DAYS` (7), not 24 hours, because Vercel fires a
+cron anywhere inside its minute — on about half of days the previous run is
+a little over a day old — and a failed day makes it two; a run that reads
+nothing carries the mark forward; with no mark, a run reads the 24-hour
+lookback, started no earlier than a mark-less previous row, and a run that
+reads nothing and had no mark records `{ at: <its now>, id: null }`. Past
+the cap the digest says so — "Campaign pauses: N announced below, and M
+more campaigns paused themselves — see <origin>/campaigns" — and the
+`/audit` sentence for `cron.digest` says how many pauses got no notice of
+their own (`found > posted`: past the cap, a refused post, or no Slack). The
+worker still logs a warn line per pause. **Not built:** retries, a per-org
+webhook, and a worker-side notifier for anything but the opt-out alarm.
 
 **The alert that the worker is silent cannot come from the worker.** The daily
 digest cron reads `worker_heartbeats` and posts a separate `worker_silent`
@@ -1602,15 +3698,38 @@ configuration — or when there is no row and a worker is configured. It used
 to require `AGENT_URL`, and the documented production shape (Vercel without
 it, the worker on Fly) is exactly the one where the digest's own line said
 "Worker: SILENT" while the alert was recorded `not_needed`; `workerSilent`
-now agrees with `heartbeatReport` on every cell. Once a day, because that is
-how often the cron runs; with several orgs it posts once per org, which one
-agency with one org does not need engineered around.
+now agrees with `heartbeatReport` on every cell, retired included. **A row
+does not beat configuration forever, though.** Only a running worker's own
+write prunes the table, so `./tools/run-worker.sh` run once against
+production and closed left a row that raised the alert every morning, for
+good — the daily noise that teaches a channel to ignore the one alert that
+matters. Where no worker is configured (`deployment().worker` false), a
+silent row older than `HEARTBEAT_RETIRED_AFTER_DAYS` (7,
+`packages/db/src/heartbeat-read.ts`, the one place the number lives) is
+RETIRED: no `worker_silent` alert, a digest
+line "retired — last seen <YYYY-MM-DD>; no worker is configured, so nothing
+is sending or reading replies", and `worker: 'retired'`, `workerAlert:
+'not_needed'` on the `cron.digest` row. A configured worker is silent
+however long it stays so, and an unconfigured row between the silent
+threshold and a week still alerts — a worker that was running and stopped
+is worth a week of notices. Once a day, because that is how often the cron
+runs; with several orgs it posts once per org, which one agency with one org
+does not need engineered around.
 
 **A silent worker is a number in `/api/health`, not an inference.**
 `worker_heartbeats` is a SYSTEM table with no `org_id` — the worker serves
 every org — keyed `hostname:pid`, upserted every tick with `{ halted,
-lockHeld, intervalMs, version }` (`version` is null under `node
-apps/agent/dist/index.js`, which is how the image runs). `booted_at` moves on
+lockHeld, sms, intervalMs, version }` in its `detail` (`version` is null
+under `node apps/agent/dist/index.js`, which is how the image runs; `sms` is
+`'on'|'off'`, whether this worker carries DoveSoft, 0019 — no table change).
+The row's `outreach` still means the MAILBOX, as it always has, and `sms` is
+read beside it: `heartbeatSms` (`packages/db/src/heartbeat-read.ts`) takes
+`detail.sms`, and `heartbeatReport` carries it as `sms: 'on'|'off'|null` —
+null for no row and for a row that does not say, which is a worker from
+before 0019, never read as off. `/api/health`'s `worker` block spreads the
+report, so it carries `sms` too, and the dashboard, `/settings` and
+`/compliance` word a worker that texts with its mailbox off as sending (§2,
+"The settings pages and the dashboard"). `booted_at` moves on
 a re-boot with the same id. Rows older than 30 days are pruned on every write,
 BEFORE the upsert, so a write throws exactly when its row was not written —
 which `lastHeartbeatAt()`, and so `/readyz`'s `heartbeatWrittenAt`, rely on.
@@ -1621,8 +3740,14 @@ What the row says comes from `healthInputs()`, the same object `/readyz`
 answers from, so the two cannot disagree about the halt or the lock. On the
 web side a row decides `live` or `silent` whatever the configuration says — an
 observation beats configuration — `never` is a configured worker with no row,
-and `not_configured` is neither. `worker` never changes `/api/health`'s status
-or code, even under `?strict=1`.
+and `not_configured` is neither; the one exception is the retired row above.
+`/api/health`'s `worker.status` is `heartbeatReportedStatus`, which says
+`retired` for it, beside `retired: true|false`. `retired` is not a fifth
+value of `HeartbeatReport['status']`, which stays `silent`; every reader
+words it through `workerWord` (`lib/dashboard-view.ts`), so the dashboard
+("Worker retired — last seen …"), `/settings` and `/settings/deployment` say
+`retired` too, as the digest does. `worker` never changes
+`/api/health`'s status or code, even under `?strict=1`.
 
 ### Search, exports and records
 
@@ -1651,10 +3776,16 @@ prospect-facing`, then RFC 4180 CRLF rows, with any cell starting `=`, `+`,
 unobserved signal, because a 0 is a number a spreadsheet sums; in the consents
 file a missing row is `never_asked`. `/companies` is a GET form run through
 `lib/company-list.ts`, and the companies export honours the same query string,
-so "export this view" is exactly the rows on screen. One known limitation: that
-file is domain-first and re-imports through `/companies/import`, whose importer
-reads everything after the first comma as the name — a NEW domain would be
-named `Acme,72,A — call first`. Existing domains are untouched.
+so "export this view" is exactly the rows on screen, and it pastes straight
+back into `/companies/import`: `parseCompanySeeds` (`packages/db/src/csv.ts`)
+spots an export by its header — a row of column names that includes
+`domain` and `name` and more besides — reads it as RFC 4180, takes those two
+columns and removes the formula guard's apostrophe from the name. Read the
+old way, everything after the first comma was the name, and a NEW domain
+came back named `Acme,72,A — call first`. A bare `domain,name` header or a
+headerless list reads exactly as before. The one ambiguity left: a stored
+name that really starts with an apostrophe followed by `=`, `+`, `-`, `@`, a
+tab or a CR comes back without it.
 
 **A person's whole record is one download, and erasure keeps the
 suppression** — see the send path above.
@@ -1662,19 +3793,73 @@ suppression** — see the send path above.
 ### The settings pages and the dashboard
 
 **`/settings` is five read-mostly pages.** `/settings/icp` shows the stored
-definition with no editor (§4). `/settings/spend` reads only Postgres sums of
+definition with no editor (§4); a stored `stale_after_days` that is not a
+positive number of days is named as refused, beside the default every
+reader uses in its place (§1). `/settings/spend` reads only Postgres sums of
 `chat_messages.cost_usd` — per UTC day and per person, revoked people
 included — gated on `audit:read` like `/compliance`. `/settings/deployment`
-names every variable and never shows a value or a URL, beside the heartbeat
+names every variable and never shows a value or a URL that carries one, beside the heartbeat
 and the schema state computed exactly as `/api/health` computes it; it is the
-page that answers "why would nothing send?". `/settings/mail` checks the WEB
+page that answers "why would nothing send?". Since 0019 it also prints the
+two DoveSoft webhook URLs to register, built from `AUTH_URL` with
+`<DOVESOFT_WEBHOOK_SECRET>` where the token goes, and says (`dovesoftFacts`)
+to generate the secret with `openssl rand -hex 32` or percent-encode it,
+that a GET push puts a text's number and words in the request log so POST is
+the form to ask for, that texts are matched in every org with
+`DOVESOFT_ORG_ID` only the home of a number no contact holds — it decides
+nothing about one a contact does — that without it a STOP from such a
+number is recorded nowhere and answered 500 so DoveSoft retries, "200 when
+the push carried no message id, since its retry could not be told from a
+new text" (review round 10; it said "answered 500" alone), and (review
+round 6) that a number several contacts share is filed under the one
+this system texted, with the
+others held, or otherwise under nobody with every holder held; the hub's "What this
+deployment can do" table has no DoveSoft row. `/settings/templates` is the
+one settings page added since, and it writes (§2, "SMS through DoveSoft"). `/settings/mail` checks the WEB
 app's `MAIL_FROM` domain — SPF, DMARC, and DKIM at the common selectors or
 `?dkim=<one label>` — with TXT lookups made from the browser through
 `/api/settings/mail-dns`, so a slow nameserver delays one panel rather than the
 page. The worker's `MAIL_FROM` lives on its own host, and the page says it
 cannot see it. A 1024-bit RSA DKIM key (Resend's and Google's default) passes
 with a note, and only a shorter one is "weak"; an answer that could not be
-read is "could not be checked", never "missing".
+read is "could not be checked", never "missing". The heartbeat's words on
+`/settings` (`workerModes` and `sendingAnswer` in
+`apps/web/src/app/settings/facts.ts`) say EMAIL where they mean the mailbox
+— "email outreach off", "sending email, not reading a mailbox" — and name
+SMS from the row's `sms`: "texts through DoveSoft" or "SMS off". A worker
+with its mailbox off and DoveSoft on "sends approved SMS through DoveSoft"
+(tone ok), where the page used to say it "sends nothing". A live sending
+worker whose row says `sms: 'off'` no longer hears that every unsent message
+"carries its reason on the message" (review round 4): the sender leaves a
+due row on a channel it carries no provider for exactly as it was, with no
+refusal code and no `scheduled_for`, and only its log says why. So
+`sendingAnswer` says an EMAIL carries its reason, and that an approved SMS
+waits with no reason on it until SMS is switched on where the worker runs
+(`DOVESOFT_API_KEY` and `DOVESOFT_ENTITY_ID` on its host); a row from before
+0019 (`sms` null) hears that a text MAY wait so. The tone stays ok — email
+sends, and an agency that never switched SMS on has nothing waiting. With
+`sms: 'on'` the old sentence stands.
+
+**The sidebar names the organisation, on every page, from one place.** The
+subtitle under "Agency OS" is `orgs.name`, read by `Shell`
+(`apps/web/src/components/shell.tsx`) itself: it is an async server
+component that awaits `orgIdentity(user.orgId)` from
+`apps/web/src/lib/org-identity.ts` — `server-only`, wrapped in React
+`cache()`, so the sidebar, the settings index and the proposal page share one
+read per request — and it has no `orgName` prop, so no page can name the org
+differently. It used to be a prop: the dashboard and the settings area
+passed the org's name and most other pages the active ICP's label — the name
+of a scoring profile — so the sidebar named a different thing depending on
+the page. Sixteen copies of that label read went with it, and
+`/contacts/import` and `/companies/import` read no ICP at all now: the label
+was their only use of it, and `/companies/import` parsed it bare, so a
+malformed profile could 500 that page. `app/settings/org.ts` is gone (the
+settings index imports `orgIdentity` from `lib/`). No `'use client'` module
+imports `Shell`. `apps/web/test/sidebar-org-name.test.ts` walks every
+`<Shell` call under `apps/web/src` and fails on an `orgName` attribute, an
+ICP-reading expression in any attribute, or an `orgLabel` left in a page,
+with self-tests showing its tag scanner can fail. The booking page and the
+buyer's `/p/[token]` have no sidebar and are untouched.
 
 **The dashboard states the phases once and every bullet from a fact.** Its
 headline says "Phases 0–6 are built", and that Phase 6 is deliberately not
@@ -1691,20 +3876,54 @@ from an observation — the heartbeat, the newest `scan.cron_run`, calls on
 record — so "stale companies are rescanned daily" is only said once a rescan
 has actually run in the last 36 hours.
 
+**A worker that sends texts is a worker that sends.** The heartbeat's
+`outreach` is the mailbox, so with DoveSoft on and no SMTP the dashboard
+read "Its outreach is switched off: nothing is sent" while texts went.
+`WorkerStatusLike` carries `sms` now (optional, absent reads as null, so a
+status built without it is still one), and every live case is worded from
+both: the worker line reads "… · sending and receiving email · texts through
+DoveSoft · chat on", or "SMS off" only where the mail words could be read as
+covering texts; the live-worker bullet says it "sends approved SMS through
+DoveSoft" beside whatever it says of email; a row from before 0019 gets the
+mailbox's sentence alone. `workerSends` counts either, so the headline and
+`/compliance`'s recorders no longer call an SMS-only worker "not sending".
+The bullet that said "Nothing here can place a call or send a text — no code
+path for either", false since 0019, is `no-calls` now: nothing here can
+place a call, and a text is sent only by the worker, through DoveSoft, from
+a registered template, once a person has approved it on `/approvals`. And
+texts back are their own fact, `deployment().smsInbound` (§4, "`deployment()`
+flags"): the inbound bullet appends "Texts a contact sends back, a STOP
+included, arrive through DoveSoft's webhook" to its email sentences, an
+SMS-only deployment gets `inbound-sms-only` ("Only texts can arrive here"),
+and the quiet-feed and "needs a look" notes no longer say no reply can
+arrive. They ask two questions, not one (review round 4): `emailRepliesArrive`
+(a mailbox-reading worker, or the email webhook) and `textsArrive`
+(`smsInbound`). A single `repliesArrive` that counted DoveSoft's webhook
+took the "None recorded" caveat off the unhandled-replies counter and had
+the feed say "replies still arrive" on a deployment no email reply can
+reach. With only DoveSoft's webhook the counter keeps its caveat — "None
+recorded: … and no inbound email webhook is configured, so no email reply
+can arrive here; texts still do, through DoveSoft's webhook" — and
+`quietFeedNote` says "… so no sends or email replies appear here; texts
+still arrive, through DoveSoft's webhook". `apps/web/test/dashboard-view.test.ts` runs the
+SMS shapes through `heartbeatReport`, and `worker-check.test.ts` runs the
+`workerSilent`/`heartbeatReport` agreement grid over `sms` on, off and
+absent.
+
 ## 3. Commands
 
 ```bash
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 3875 tests in 148 files: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice + the 0018 release and its review round
+npm test                 # 6411 tests in 216 files: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice + the 0018 release + DoveSoft SMS (0019) + fourteen review rounds
 npx vitest run --maxWorkers=1 --minWorkers=1   # the same suite on a machine short of memory
 npm run build            # packages, then the Next app
 
 # database (needs DATABASE_URL)
 npm run db:migrate            # apply pending
 npm run db:migrate -- status  # what is applied
-npm run db:migrate -- down 1  # revert one
+npm run db:migrate -- down 1  # revert one (a down that reaches 0018 is refused while any user has revoked access — see §4)
 npm run db:migrate -- reset   # all the way down, then up (refuses in production)
 npm run db:seed               # org + owner + ICP + 16 seed companies; idempotent
 
@@ -1734,8 +3953,21 @@ npm run smoke:agent -- --connector deepwiki   # the Phase 3 gate (§6's "no rest
 # production operations, all prompt-based so no connection string touches a
 # file, an argument list or shell history (§2.3)
 ./tools/remote-setup.sh       # migrate + seed a remote database
-./tools/remote-status.sh      # read-only schema facts, safe to paste — incl. "0018 is applied"
-./tools/run-worker.sh         # run the worker here, against production, nothing exposed
+./tools/remote-status.sh      # read-only schema facts, safe to paste — the migration list ("[x] 0019_messaging_templates_and_sms"), "0018 is applied" and "0019 is applied"
+./tools/run-worker.sh         # run the worker here, against production, nothing exposed — builds the
+                              # packages first, before any question is asked or saved answer read, with the
+                              # lockfile's node_modules/.bin/tsc (and runs the worker with .bin/tsx), never npx;
+                              # refuses with "Run npm ci" when either is missing. Sets WEB_PUBLIC_URL,
+                              # UNSUBSCRIBE_SECRET (Enter keeps the saved one or sends no unsubscribe header;
+                              # a new one only when `new` is typed and confirmed, on a Mac) and SLACK_WEBHOOK_URL,
+                              # and on a Mac keeps it awake (caffeinate -is) and can keep its answers in the
+                              # login Keychain, each value base64 on security's stdin, never its argv.
+                              # CHAT is optional: an ngrok tunnel on the operator's static domain to the
+                              # worker's API port, started from an EMPTY environment, the Anthropic key and
+                              # an AGENT_INTERNAL_TOKEN made onto the clipboard for Vercel (with AGENT_URL);
+                              # with chat off the worker is handed no Anthropic key
+./tools/run-worker.sh --reconfigure   # ask every question again
+./tools/run-worker.sh --forget        # delete the saved answers
 ./tools/add-teammate.sh       # grant somebody access — or Settings → Team, in the browser
 ./tools/spend.sh              # what the API has actually cost: per day, per person, run rate
 ./tools/mail-dns.sh           # SPF/DKIM/DMARC records for a sending domain
@@ -1772,16 +4004,22 @@ and the voice service on it. And compose reads `.env` only to fill
 `docker-compose.yml`'s `${…}` — a variable that file does not name never
 reaches a container, which left every optional feature off under compose
 while the operator believed it configured. So every optional variable the web
-app and the worker read is now named in its service block as
-`NAME: ${NAME:-}`, and `apps/agent/test/compose-env.test.ts` checks that
-against their schemas and boots all three services on what compose would
-hand them — except, each with its reason
-in the compose file, `AGENT_USE_LOCAL_LOGIN` (development only),
-`CLAUDE_CODE_PATH` (a host path), `APPROVAL_POLL_MS`/`APPROVAL_SWEEP_MS`
-(tuning knobs; the schema's defaults) and `VERCEL_ENV` (set by the
-platform). The voice service's `LLM_*` are still not passed. Nothing under
-compose calls the two cron routes; drive them from the host's crontab with
-`curl` and the bearer.
+app, the worker and the voice service read is now named in its service block
+as `NAME: ${NAME:-}` — the DoveSoft five included, `DOVESOFT_API_KEY`,
+`DOVESOFT_ENTITY_ID` and `DOVESOFT_BASE_URL` on the worker and
+`DOVESOFT_WEBHOOK_SECRET` and `DOVESOFT_ORG_ID` on the web — and
+`apps/agent/test/compose-env.test.ts` checks that against their schemas and
+boots all three services on what compose would hand them — except, each
+with its reason in the compose file, `AGENT_USE_LOCAL_LOGIN` (development
+only), `CLAUDE_CODE_PATH` (a host path), `APPROVAL_POLL_MS`/`APPROVAL_SWEEP_MS`
+(tuning knobs; the schema's defaults), `VERCEL_ENV` (set by the platform)
+and the voice service's `VOICE_MODEL`, which the schema declares and nothing
+reads (the scripted policy is the whole conversation). The voice service now
+gets the `LLM_*` it summarises calls with — `LLM_PROVIDER`, `LLM_MODEL`,
+`OLLAMA_BASE_URL`, `OLLAMA_IS_LOCAL`, `LLM_ALLOW_REMOTE_LEAD_DATA`,
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY` — and `VOICE_HANDOFF_USER_EMAIL`;
+they were not passed before. Nothing under compose calls the two cron
+routes; drive them from the host's crontab with `curl` and the bearer.
 
 **`next build` does not run in a git worktree whose `node_modules` is
 symlinked into the main checkout** (how parallel work in this repo is set up):
@@ -1792,7 +4030,7 @@ server/client boundary rules. The main checkout and Vercel are unaffected.
 **The suite's memory cost is per WORKER, and that is what falls over first.**
 vitest forks a worker per CPU and `freshDb()` builds an embedded Postgres in
 each one — and it does that in `beforeEach`, so every individual test gets a
-new PGlite instance and replays all eighteen migrations. On a machine under
+new PGlite instance and replays all nineteen migrations. On a machine under
 memory pressure the workers fight rather than share, and the first thing to
 give is `freshDb()` blowing the 30-second `hookTimeout`, which reads like a
 broken test and is not one. Measured here: `apps/voice` took **945 seconds and
@@ -1805,10 +4043,10 @@ process, keeps the finished data directory, and hands each test a COPY via
 `loadDataDir`. The work is shared; the state is not — `loadDataDir` hydrates
 a new instance rather than attaching to one. Measured: the whole suite went
 from **290s to 97s** single-worker, with the same tests passing, and
-`apps/voice` alone from 9.8s to 4.4s. The suite has more than doubled since:
-at 0018, after its review round, it is 3,875 tests in 148 files, and a
-single-worker run took 1,021 s on a four-core container that was running
-other work beside it — every test green, and the same suite green in CI.
+`apps/voice` alone from 9.8s to 4.4s. The suite has grown several times
+over since: at 0019, after DoveSoft and twelve review rounds, it is 6,411
+tests in 216 files, and the full single-worker run at `b83c693` took
+1,567 s — every test green. (At 0018 it was 4,246 in 154 and took 1,088 s.)
 
 `freshDb()` remains and `migrations.test.ts` and `schema-parity.test.ts`
 still use it — a test about applying migrations cannot start from a database
@@ -1820,9 +4058,17 @@ behaving strangely, intermittently, depending on file order. That is exactly
 how a suite starts passing vacuously, so it has its own test rather than an
 argument in a comment. `packages/db/test/harness.test.ts` writes a row named
 `LEAKED FROM THE PREVIOUS TEST` in one test and asserts the next cannot see
-it, checks the migrations really are applied (down to 0018's
-`findings.scored`, with 0017's `reply_kind` as a second line), and re-checks
+it, checks the migrations really are applied — the NEWEST first, because a
+snapshot built from older migrations would carry every earlier one: 0019's
+`message_templates` and `touches.template_id`/`delivery_status`, then 0018's
+`findings.scored` and 0017's `reply_kind` as further lines — and re-checks
 the UTC pin the snapshot could have lost.
+
+**PGlite's clock is millisecond-grained** — 108 of 200 back-to-back reads
+shared a timestamp — so a test that asserts the order of rows stamped by
+`now()` gives each row its own stated moment: the erasure test's suppression
+history did not, its tiebreak was a random uuid, and its order assertion
+failed in CI (`packages/db/test/erasure.test.ts`, `appendAuditAt`).
 
 `packages/core` and `packages/db` compile to `dist/` and are consumed as
 JavaScript, so **run `npx tsc --build` after changing them** or the web app
@@ -1934,6 +4180,19 @@ production secrets were passed to `docker build`. An image build must not need
 runtime credentials. CI builds the web app with no secrets in the environment
 to keep it that way. Never call `env()` or `getDb()` at module scope.
 
+**Vercel's own builders take a different path through Next from every other
+build.** They switch @vercel/next's new adapter on (`NEXT_ENABLE_ADAPTER=1`),
+and with this app's `output: 'standalone'` its `onBuildComplete` opens an
+`apps/web/.next/next-server.js.nft.json` the build never wrote, so every
+remote build failed after its migration step — the release run that put
+production on 0019 applied both migrations and then deployed nothing. A
+`vercel build` run anywhere else takes the classic path and works. So the
+Production workflow's remote path (`release` with no
+`PRODUCTION_DATABASE_URL`) passes `--build-env NEXT_ENABLE_ADAPTER=0`
+beside `AGENCY_MIGRATE_ON_BUILD=1`, and `deploy` builds on the runner and
+uploads the prebuilt output (`tools/production.sh`); both then wait for
+`/api/health?strict=1` to report the checkout's migration.
+
 **Sign-in reveals nothing about who has access.** Membership is checked inside
 `sendVerificationRequest`, not by returning `false` from the `signIn` callback.
 Refusing in the callback makes @auth/core throw `AccessDenied`, which redirects
@@ -2017,8 +4276,10 @@ place would change what every old score claims to mean.
 `scoring.ts`). The profile's outreach block — channels, `max_per_day`,
 `auto_send` — is enforced by nothing either: the send path applies each
 campaign's own channel, cap and quiet hours. The dashboard's Active ICP table
-still shows the profile's channels and daily cap as if they were the operative
-values; that is the one place left that overstates them.
+used to show the profile's channels and daily cap as if they were the
+operative values; its headings now read "Channels it describes" and "Daily
+cap it describes", and `ICP_OUTREACH_NOTE` under it says the send path
+applies each campaign's own, with links to `/campaigns` and `/settings/icp`.
 
 **Migration 0010's down file was edited before any deployment.** Its original
 down reverted `refused` rows to `failed` without clearing `refusal_code`,
@@ -2226,7 +4487,11 @@ second sender in a route, which is exactly what the rule forbids. The words are
 revealed only after the rules pass, because a message a person could copy
 before the rules ran is a message that can go after a refusal — and, for the
 same reason, withheld again on a later read once the send path refuses them
-past approval, the person is paused, or the hand-over is a day old.
+past approval, the person is paused, or the hand-over is a day old — on
+every screen, not only `/tasks`: the company page's Conversation panel and
+the agent's `get_company_timeline` apply the same rule
+(`linkedinThreadWithheld`), because a withheld message one click or one
+question away is not withheld.
 
 **A per-tool review that can only DISABLE, where §6 recommends wildcards that
 ALLOW.** §2's gate section explains why the wildcard is refused; this is what
@@ -2242,16 +4507,44 @@ default instead.
 **On Postgres 18 an `ON DELETE RESTRICT` refusal is SQLSTATE 23001, not
 23503.** Measured on PGlite 18.3, and Neon runs 18.6: RESTRICT raises
 `restrict_violation` (23001), NO ACTION still raises 23503, and Postgres 16/17
-report RESTRICT as 23503. So `pg-errors.ts`'s `isForeignKeyViolation` comment
-("or a RESTRICT refused the delete") is wrong on the deployed server, and
-`credentials.ts` recognises both codes, scoped to the one constraint it means.
-Any new code that maps a RESTRICT refusal to a sentence must do the same.
+report RESTRICT as 23503. `pg-errors.ts` therefore exports
+`isRestrictViolation(err, name?)` for 23001 and `isReferencedRowRefusal(err,
+name?)` for 23001 OR 23503; `credentials.ts` uses the second, scoped to the
+one constraint it means (`HELD_BY_A_CONNECTOR`), and a source pin keeps the
+literal codes out of every other `packages/db/src` module. Any new code that
+maps a refused DELETE of a referenced row to a sentence calls
+`isReferencedRowRefusal`. Every foreign key in the migrations names its ON
+DELETE — 45 CASCADE, 10 RESTRICT, 23 SET NULL at 0019, and none NO ACTION.
 
 **`deployment()` flags are configuration, never observation — and a flag
 means the feature can actually run.** `inbound: 'webhook'` for Resend needs
 BOTH `RESEND_WEBHOOK_SECRET` and `RESEND_API_KEY`, because the route answers
 503 without either and saying "webhook" about a route that refuses everything
-is the claim the module exists to stop. The pure facts live in
+is the claim the module exists to stop. And a configuration flag is never
+worded as what happened: review round 3 found `/compliance`, the inbox's
+notes, `/contacts`' reply note, the settings Replies fact and the inbox reply
+route reading `deployment().worker` (`AGENT_URL`) as if it said whether
+anything sends or reads replies — false on the documented production shape,
+`AGENT_URL` unset with a worker on Fly. Where copy says what a worker DID,
+it now reads the heartbeat, as the dashboard always had; elsewhere it says
+"configured" and points at `/settings/deployment`. The DoveSoft facts follow
+the same rule: `dovesoftFacts` says what the web half accepts, and that the
+sending half lives on the worker's host, which the page cannot see. Texts a
+contact sends back are a flag of their own, `smsInbound`
+(`DOVESOFT_WEBHOOK_SECRET` set), not a third `inbound` value, because
+everything said about `inbound` is about EMAIL — Message-IDs, addresses, a
+mailbox; it is optional, so a `Deployment` literal from before 0019 reads
+false. Before it, `noRepliesReadNote`, the dashboard's inbound bullet and
+quiet-feed note, `/contacts`, `/inbox` and `/compliance` all said no reply
+could reach this deployment while DoveSoft's webhook let texts, a STOP
+included, in; each now words the SMS-only shape. So does the "Replies" fact
+on `/settings` and `/settings/deployment` (`deploymentFacts` in
+`apps/web/src/app/settings/facts.ts`, review round 4): with
+`DOVESOFT_WEBHOOK_SECRET` set it is on, adds "Texts a contact sends back, a
+STOP included, arrive through DoveSoft's webhook", words the rest as
+"inbound email webhook" and "no email reply is read", and lists
+`DOVESOFT_WEBHOOK_SECRET` among its variables; it read off and "no reply is
+read" while the same page listed the URLs texts arrive at. The pure facts live in
 `lib/deployment-facts.ts` and the `server-only` reader in `lib/deployment.ts`,
 for a measured rule: **a module a test in `apps/web/test` imports carries no
 `server-only` and no `@/` import, transitively.** That is why
@@ -2263,28 +4556,33 @@ why a route that cannot be imported is pinned by reading its source.
 `''` for `z.string().min(32).optional()` and for `.url().optional()`, and
 `.env.example` documents each optional variable as a blank `NAME=` — so with
 the plain shapes, `cp .env.example .env` stopped the whole app booting over
-features nobody had turned on. In the web app the six optional string
-variables and `INBOUND_WEBHOOK_SECRET` are wrapped in
+features nobody had turned on. In the web app `CRON_SECRET`,
+`SLACK_WEBHOOK_URL`, `UNSUBSCRIBE_SECRET`, `RESEND_WEBHOOK_SECRET`,
+`RESEND_API_KEY`, `DOVESOFT_WEBHOOK_SECRET`, `DOVESOFT_ORG_ID` and
+`INBOUND_WEBHOOK_SECRET` are wrapped in
 `z.preprocess(blankIsUnset, …)`; a present short value is still refused. The
 worker and the voice service wrap EVERY entry but the required ones
-(`DATABASE_URL`, and the worker's `AGENT_INTERNAL_TOKEN`), so a blank takes
-the default everywhere: a blank `OUTREACH_BOUNCE_PAUSE_PCT` is 5, never 0,
-which would pause a campaign on its first bounce; a blank `IMAP_SECURE` is
-TLS, where it had read as `false`; a blank `LLM_MODEL`, `AGENT_MODEL` or
-`VOICE_MODEL` is no model rather than one called `''`; and a blank port or
-pool size is its default rather than a refused 0 (§3). Each app's
-`test/env.test.ts` reads the variable names from the schema's source and
-checks blank against absent for every one, so a variable added later is
-covered without being listed. The web app's schema is narrower — a blank
-`AGENT_URL`, `AGENT_INTERNAL_TOKEN` or numeric variable is still refused at
-boot, loudly, and `.env.example` gives each a value or says to generate one.
-The Slack host
+(`DATABASE_URL`, and the worker's `AGENT_INTERNAL_TOKEN`) — the base's
+`UNSUBSCRIBE_SECRET`, `WEB_PUBLIC_URL`, `SLACK_WEBHOOK_URL`, `LLM_*` and the
+three `DOVESOFT_*` (a blank `DOVESOFT_BASE_URL` is DoveSoft's own API) among
+them — so a blank takes the default everywhere: a blank
+`OUTREACH_BOUNCE_PAUSE_PCT` is 5, never 0, which would pause a campaign on its
+first bounce; a blank `IMAP_SECURE` is TLS, where it had read as `false`; a
+blank `LLM_MODEL`, `AGENT_MODEL` or `VOICE_MODEL` is no model rather than one
+called `''`; and a blank port or pool size is its default rather than a
+refused 0 (§3). Each app's `test/env.test.ts` reads the variable names from
+the schema's source and checks blank against absent for every one, so a
+variable added later is covered without being listed. The web app's schema
+is narrower — a blank `AGENT_URL`, `AGENT_INTERNAL_TOKEN` or numeric variable
+is still refused at boot, loudly, and `.env.example` gives each a value or
+says to generate one. The Slack host
 refinement is hoisted into a const so its schema entry sits on one line,
 because `packages/db/test/deployment.test.ts` reads `env.ts` line by line
 and took a multi-line entry for a REQUIRED variable.
 
-**CI's table count is derived from the migrations**, every `CREATE TABLE` plus
-`schema_migrations` — 31 at 0018 — rather than written down, so a migration
+**CI's table count is derived from the migrations**, every distinct `CREATE
+TABLE` in the up files plus `schema_migrations` — 32 at 0019, which adds
+`message_templates` (31 at 0018) — rather than written down, so a migration
 that adds a table cannot fail the Postgres 16 job for a reason nobody reads.
 The compose-config job carries `AGENT_INTERNAL_TOKEN`, without which compose
 refuses to render the file it is checking. `worker_heartbeats` is the one
@@ -2296,6 +4594,48 @@ with the auth tables and its own conventions.
 keys (§1) — in place of per-column references that let a row in one org name a
 person in another, and the answer trigger. `schema.ts` declares those columns
 without `.references`, as it already did `scanId`.
+
+**Reverting 0018 is refused while anybody's access is revoked.** 0018's down
+drops `users.revoked_at`, and code from before 0018 has no notion of
+revocation, so a rollback silently let every offboarded teammate request a
+link and sign in again; the file's own header called that only "revocations
+are lost". A shipped down file is never edited (§10), so the refusal lives in
+the migrator: `DOWN_GUARDS` in `packages/db/src/migrator.ts`, keyed by the
+version whose down does the damage, checked for the WHOLE revert list before
+anything is reverted. A `down` that reaches 0018 while any user has
+`revoked_at` set is refused with the count and nothing reverted, unless
+`--restores-revoked-access` is passed, and then the CLI says so. A revert
+that goes on to 0001 is exempt — it drops `users` itself — so `down all` and
+`reset` are not refused.
+
+**Migration 0019 adds and constrains; its down loses data, stated.**
+Everything new is text + CHECK and nothing is newer than Postgres 15.
+`touches_sms_and_whatsapp_name_a_template` is added `NOT VALID` — enforced
+on every new and updated row, never re-checked against stored ones —
+because nothing before 0019 could put an outbound SMS or WhatsApp row in a
+sendable state, and a row that somehow exists is refused `no_template` by
+`decideSend` the first time anything tries to send it. It binds only the
+statuses the sender can still carry to a provider (`awaiting_approval`,
+`approved`, `queued`, `sending`), and every move into one re-evaluates it;
+`sent` is reached only through `sending`, so every message that went out
+named its template on the way. **It does not bind `sent`, and the first
+version did** — review round 4 found that a CHECK is evaluated on EVERY
+later UPDATE of a row, `NOT VALID` or not, so reverting 0019 (which drops
+`template_id`) and applying it again left every earlier SMS un-updatable:
+its delivery report answered 500, its recipient could not be erased, and
+its contact could not be deleted (ON DELETE SET NULL is an UPDATE) — 0018's
+`connectors_name_is_not_agency` trap again. The down also SETTLES every SMS
+or WhatsApp message that could still go out — `refused`/`no_template`, or
+`failed` for one caught `sending` — with an `error` saying 0019 was
+reverted, because no code before 0019 can send one and a re-apply would
+otherwise leave it bound with no template.
+`packages/db/test/migration-0019-revert.test.ts` drives the sequence. Both
+halves were changed after 0019 was pushed to this branch and before it
+reached any deployed database (the 0010 precedent).
+`contacts_bounce_code_is_rfc3463` is in 0019 too, and added valid, because
+its one writer has refused anything else since 0018. Reverting 0019 deletes every template and
+every delivery report and unlinks every SMS from its template; inbound SMS
+rows stay.
 
 ---
 
@@ -2525,6 +4865,16 @@ PROMPT.md §6 recommends the wildcard for connectors and for `Skill`; §7
 recommends it for `Agent`; §6 wants `settingSources: ["project"]`. §2.4 says
 the gate IS `canUseTool`. §2 is labelled hard constraints and wins, so all
 three are refused and this is the fifth documented divergence.
+
+**A fourth allow-shaped knob sits on exactly the channel connectors now
+travel** (§2, "The runtime is assembled"). The SDK types an http/sse
+server's config with an optional `tools?: McpServerToolPolicy[]` carrying
+`permission_policy: 'always_allow' | 'always_ask' | 'always_deny'` — "per-tool
+permission policy carried on mcp_set_servers for remote servers" — and the
+CLI turns `always_allow` into `alwaysAllowRules.mcpServerPolicy`, answered
+before `canUseTool` is asked. Nothing here builds one (`BuiltMcpServer` has
+no `tools`), and `handOverServers` in `runtime/open-query.ts` refuses any
+config that carries the key rather than hand it over.
 
 The SDK names its own mitigation, twice: *"To gate every tool call, use a
 PreToolUse hook instead."* So the gate is four layers, and each exists because
