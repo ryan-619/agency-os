@@ -54,6 +54,16 @@
  *       old token. Now the helper answers 2, and worker-web is handed the
  *       worker job's `redeploy` output: an arrived `true` with no record of
  *       this run stops the job, unless a later run has written its own.
+ *
+ * Review round 10:
+ *
+ *  [3]  "A later run has written its own record" was read as "that run
+ *       wired", but a record is written by job 1 and only RECORDED as wired
+ *       by job 2. When the later run's own web job had failed too, a re-run
+ *       of the older run's web job went green with nothing deployed and the
+ *       live web app on a token the worker no longer accepts. Now it passes
+ *       only when the later run's record has been promoted to the marker,
+ *       and otherwise stops, naming that run.
  */
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -242,7 +252,8 @@ esac
 /**
  * tools/vercel-env.mjs's stand-in: production variables in a JSON file; an
  * API error on request. `pending`, `superseded` and `promote` read "<run
- * id>/<value>", as the real one does (its own tests are below).
+ * id>/<value>", as the real one does (its own tests are below), and
+ * `superseded` prints the later run's id, as the real one does.
  */
 const VERCEL_ENV_STUB = `#!/usr/bin/env node
 import fs from 'node:fs'
@@ -264,8 +275,12 @@ if (cmd === 'equals') process.exit(vars[key] === process.env.VALUE ? 0 : 1)
 if (cmd === 'set') { vars[key] = process.env.VALUE; save(); console.log('vercel: ' + key + ' set'); process.exit(0) }
 if (cmd === 'pending') process.exit(ofThisRun() === null ? 1 : 0)
 if (cmd === 'superseded') {
-  const m = /^([0-9]+)\\//.exec(vars[key] ?? '')
-  process.exit(m && BigInt(m[1]) > BigInt(process.env.RUN_ID) ? 0 : 1)
+  if (!to) process.exit(2)
+  const m = /^([0-9]+)\\/(.*)$/.exec(vars[key] ?? '')
+  if (!m || BigInt(m[1]) <= BigInt(process.env.RUN_ID)) process.exit(1)
+  console.log(m[1])
+  if (m[2] === '') { console.error('::warning::run ' + m[1] + ' left ' + key + ' with no digest, so whether its web job finished cannot be checked'); process.exit(0) }
+  process.exit(vars[to] === m[2] ? 0 : 1)
 }
 if (cmd === 'promote') {
   const record = ofThisRun()
@@ -273,6 +288,34 @@ if (cmd === 'promote') {
   vars[to] = record; save(); console.log('vercel: ' + to + ' set'); process.exit(0)
 }
 process.exit(2)
+`
+
+/**
+ * The Vercel REST API the REAL tools/vercel-env.mjs calls, over the stub's
+ * own state file — a `fetch` loaded with `node --import` — so a test can
+ * swap the real helper in and the workflow still reads and writes one set
+ * of variables. Every value comes back on a read, which the real API does
+ * only for an encrypted variable; nothing the action does reads a
+ * sensitive one back.
+ */
+const VERCEL_API = `import fs from 'node:fs'
+import path from 'node:path'
+const file = path.join(process.env.STUB_STATE, 'vercel-vars.json')
+const answer = (status, body) => new Response(JSON.stringify(body), { status })
+globalThis.fetch = async (url, init = {}) => {
+  const { pathname } = new URL(url)
+  const vars = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {}
+  if (init.method === 'POST' && pathname.endsWith('/env')) {
+    const { key, value } = JSON.parse(init.body)
+    fs.writeFileSync(file, JSON.stringify({ ...vars, [key]: value }))
+    return answer(201, { created: { key } })
+  }
+  if (pathname.endsWith('/env')) {
+    return answer(200, { envs: Object.keys(vars).map((key) => ({ id: 'env_' + key, key, target: ['production'], type: 'encrypted' })) })
+  }
+  const m = /\\/env\\/env_([A-Z_]+)$/.exec(pathname)
+  return m && m[1] in vars ? answer(200, { value: vars[m[1]] }) : answer(404, {})
+}
 `
 
 /** tools/production-env.mjs's stand-in: the database URL comes from the secret, else from the pulled file. */
@@ -402,6 +445,12 @@ describe('the worker action', () => {
   }
   const setVercel = (vars: Record<string, string>) => writeFileSync(join(state, 'vercel-vars.json'), JSON.stringify(vars))
   const flag = (name: string, on = true) => (on ? writeFileSync(join(state, name), '') : rmSync(join(state, name), { force: true }))
+  /** From here on, every job calls the REAL tools/vercel-env.mjs, answered by VERCEL_API over the same variables. */
+  const realHelper = () => {
+    copyFileSync(vercelEnv, join(dir, 'tools/vercel-env.mjs'))
+    writeFileSync(join(dir, 'vercel-api.mjs'), VERCEL_API)
+    writeFileSync(join(dir, 'bin/node'), NODE.replace('exec "$REAL_NODE" "$@"', `exec "$REAL_NODE" --import "${join(dir, 'vercel-api.mjs')}" "$@"`))
+  }
 
   /**
    * Run one job of the workflow: `tools/production.sh <arg>` with what the
@@ -743,6 +792,84 @@ describe('the worker action', () => {
 
   })
 
+  describe('a later run’s record lets an old web job pass only once that run RECORDED its wiring ([3], round 10)', () => {
+    for (const helper of ['the stub', 'the real helper'] as const) {
+      it(`${helper}: a later run whose own web job failed stops the old one's re-run, naming it — and once that run's web job finishes, the re-run passes`, () => {
+        if (helper === 'the real helper') realHelper()
+        // Two runs rotate the token, and both web jobs fail at the deploy.
+        flag('web-deploy-fails')
+        const old = runWorkflow()
+        expect(old.worker.status, old.worker.out).toBe(0)
+        expect(old.web!.status).not.toBe(0)
+        const newer = runWorkflow()
+        expect(newer.worker.status, newer.worker.out).toBe(0)
+        expect(newer.web!.status).not.toBe(0)
+        expect(vercelVars()[MARKER]).toBeUndefined()
+        flag('web-deploy-fails', false)
+
+        // "Re-run failed jobs" on the OLDER run: its id, its outputs. The
+        // later run set Fly and Vercel and never redeployed, so the live web
+        // app is on neither token — that is no "a later run has wired".
+        expect(old.outputs).toEqual({ redeploy: 'true' })
+        const rerun = runJob('worker-web', 'worker-web', BASE_SECRETS, old.runId, old.outputs)
+        expect(rerun.status).not.toBe(0)
+        expect(rerun.out).toContain(`::error::Workflow run ${newer.runId} set a newer token and its web job has not finished — re-run that run's worker-web job, or the worker action.`)
+        expect(rerun.out).not.toContain('a later run has wired since')
+        expect(rerun.out).not.toContain('no record of this run can be read')
+        expect(webDeploys(rerun)).toEqual([])
+        expect(vercelVars()[MARKER]).toBeUndefined()
+        expect(rerun.out).not.toContain(flySecrets().AGENT_INTERNAL_TOKEN!)
+        expect(rerun.out).not.toContain(digestOf(flySecrets().AGENT_INTERNAL_TOKEN!))
+
+        // Doing what it says: the later run's web job, re-run, deploys and
+        // records — and then the old one's re-run has nothing left to do.
+        const newerWeb = runJob('worker-web', 'worker-web', BASE_SECRETS, newer.runId, newer.outputs)
+        expect(newerWeb.status, newerWeb.out).toBe(0)
+        expect(webDeploys(newerWeb)).toHaveLength(1)
+        expectWiredTogether()
+        const recorded = vercelVars()[MARKER]
+        const again = runJob('worker-web', 'worker-web', BASE_SECRETS, old.runId, old.outputs)
+        expect(again.status, again.out).toBe(0)
+        expect(again.out).toContain(`a later run has wired since (run ${newer.runId})`)
+        expect(webDeploys(again)).toEqual([])
+        expect(vercelVars()[MARKER]).toBe(recorded)
+      })
+
+      it(`${helper}: a later record left empty — Fly gave that run no digest — passes, warning that its web job could not be checked`, () => {
+        if (helper === 'the real helper') realHelper()
+        flag('web-deploy-fails')
+        const old = runWorkflow()
+        expect(old.web!.status).not.toBe(0)
+        flag('web-deploy-fails', false)
+        flag('fly-no-digest')
+        const newer = runWorkflow()
+        expectBothJobs(newer)
+        expect(vercelVars()[PENDING]).toBe(`${newer.runId}/`)
+        expect(vercelVars()[MARKER]).toBeUndefined()
+
+        const rerun = runJob('worker-web', 'worker-web', BASE_SECRETS, old.runId, old.outputs)
+        expect(rerun.status, rerun.out).toBe(0)
+        expect(rerun.out).toContain(`::warning::run ${newer.runId} left ${PENDING} with no digest, so whether its web job finished cannot be checked`)
+        expect(rerun.out).toContain(`a later run has wired since (run ${newer.runId})`)
+        expect(webDeploys(rerun)).toEqual([])
+      })
+    }
+
+    it('the real helper: no record of any later run still stops the job with the round-9 sentence', () => {
+      realHelper()
+      const r = runWorkflow({}, undefined, () => {
+        const v = vercelVars()
+        delete v[PENDING]
+        setVercel(v)
+      })
+      expect(r.outputs).toEqual({ redeploy: 'true' })
+      expect(r.web!.status).not.toBe(0)
+      expect(r.web!.out).toContain(`no record of this run can be read from ${PENDING}`)
+      expect(r.web!.out).not.toContain('set a newer token')
+      expect(webDeploys(r.web)).toEqual([])
+    })
+  })
+
   describe('the Vercel CLI never runs on a VM that holds a worker secret ([5])', () => {
     it('the worker job runs no npx at all, on a wiring run as on a keeping one; the web job runs the CLI', () => {
       const wiring = runWorkflow(everySecret)
@@ -1031,7 +1158,7 @@ globalThis.fetch = async (url, init = {}) => {
       .split('\n')
       .filter(Boolean)
       .map((l) => JSON.parse(l) as { method: string; path: string; body: Record<string, unknown> | null })
-    return { status: r.status, out: `${r.stdout}${r.stderr}`, requests }
+    return { status: r.status, out: `${r.stdout}${r.stderr}`, stdout: r.stdout, requests }
   }
 
   const list = {
@@ -1134,7 +1261,12 @@ globalThis.fetch = async (url, init = {}) => {
           [['equals', 'AGENT_INTERNAL_TOKEN_WIRED'], { [listRoute]: [200, list], '/v1/projects/prj/env/env_1': failure }, { VALUE: 'agency-os-agent:0123abcd' }],
           [['pending', 'AGENT_INTERNAL_TOKEN_PENDING'], { [listRoute]: failure }, { RUN_ID: '42' }],
           [['pending', 'AGENT_INTERNAL_TOKEN_PENDING'], { [listRoute]: [200, list], '/v1/projects/prj/env/env_2': failure }, { RUN_ID: '42' }],
-          [['superseded', 'AGENT_INTERNAL_TOKEN_PENDING'], { [listRoute]: failure }, { RUN_ID: '42' }],
+          [['superseded', 'AGENT_INTERNAL_TOKEN_PENDING', 'AGENT_INTERNAL_TOKEN_WIRED'], { [listRoute]: failure }, { RUN_ID: '42' }],
+          [
+            ['superseded', 'AGENT_INTERNAL_TOKEN_PENDING', 'AGENT_INTERNAL_TOKEN_WIRED'],
+            { [listRoute]: [200, list], '/v1/projects/prj/env/env_2': [200, { value: '43/agency-os-agent:0123abcd' }], '/v1/projects/prj/env/env_1': failure },
+            { RUN_ID: '42' },
+          ],
           [['promote', 'AGENT_INTERNAL_TOKEN_PENDING', 'AGENT_INTERNAL_TOKEN_WIRED'], { [listRoute]: failure }, { RUN_ID: '42' }],
           [
             ['promote', 'AGENT_INTERNAL_TOKEN_PENDING', 'AGENT_INTERNAL_TOKEN_WIRED'],
@@ -1169,30 +1301,74 @@ globalThis.fetch = async (url, init = {}) => {
     })
   })
 
-  describe('superseded: whether a LATER run has written its own record ([8], round 9)', () => {
-    const routes = (value: unknown): Record<string, [number, unknown]> => ({
-      '/v10/projects/prj/env': [200, list],
+  describe('superseded: whether a LATER run has written its own record ([8], round 9) and recorded its wiring ([3], round 10)', () => {
+    const PENDING_ENTRY = list.envs[1]!
+    /** PENDING holds `value`; the marker holds `wired`, or is absent when that is undefined. */
+    const routes = (value: unknown, wired?: unknown): Record<string, [number, unknown]> => ({
+      '/v10/projects/prj/env': [200, wired === undefined ? { envs: [PENDING_ENTRY] } : list],
       '/v1/projects/prj/env/env_2': [200, { value }],
+      '/v1/projects/prj/env/env_1': [200, { value: wired }],
     })
-    const superseded = (value: unknown, runId: string) => run(['superseded', 'AGENT_INTERNAL_TOKEN_PENDING'], routes(value), { RUN_ID: runId })
+    const superseded = (value: unknown, runId: string, wired?: unknown) =>
+      run(['superseded', 'AGENT_INTERNAL_TOKEN_PENDING', 'AGENT_INTERNAL_TOKEN_WIRED'], routes(value, wired), { RUN_ID: runId })
 
-    it('0 for a later run’s record — compared as numbers, not as text — and printing no value', () => {
-      const later = superseded('43/agency-os-agent:0123abcd', '42')
-      expect(later.status).toBe(0)
+    it('0 for a later run’s record that run promoted to the marker — compared as numbers, not as text — printing that run’s id and no value', () => {
+      const later = superseded('43/agency-os-agent:0123abcd', '42', 'agency-os-agent:0123abcd')
+      expect(later.status, later.out).toBe(0)
+      expect(later.stdout).toBe('43\n')
       expect(later.out).not.toContain('0123abcd')
-      expect(superseded('100/', '99').status).toBe(0)
-      expect(superseded('12345678901234567890/x', '12345678901234567889').status).toBe(0)
+      expect(superseded('12345678901234567890/x', '12345678901234567889', 'x').status).toBe(0)
     })
 
-    it('1 for this run’s record, an earlier run’s, a value that is not a record, or none; 2 without a run id', () => {
-      expect(superseded('42/x', '42').status).toBe(1)
-      expect(superseded('41/x', '42').status).toBe(1)
-      expect(superseded('99/x', '100').status).toBe(1)
-      expect(superseded('agency-os-agent:0123abcd', '42').status).toBe(1)
-      expect(superseded(undefined, '42').status).toBe(1)
-      expect(run(['superseded', 'AGENT_URL'], routes('43/x'), { RUN_ID: '42' }).status).toBe(1)
-      expect(superseded('43/x', '').status).toBe(2)
-      expect(superseded('43/x', 'abc').status).toBe(2)
+    it('1 for a later run’s record that run never promoted — no marker, another value, or one that never comes back — still naming that run', () => {
+      for (const wired of [undefined, 'agency-os-agent:ffff', null, 'agency-os-agent:0123abcd/']) {
+        const r = superseded('43/agency-os-agent:0123abcd', '42', wired)
+        expect(r.status, `${String(wired)}: ${r.out}`).toBe(1)
+        expect(r.stdout).toBe('43\n')
+        for (const never of ['0123abcd', 'ffff']) expect(r.out).not.toContain(never)
+      }
+    })
+
+    it('0 for a later run’s EMPTY record — Fly gave that run no digest — with a warning that its web job could not be checked', () => {
+      for (const wired of [undefined, 'agency-os-agent:0123abcd']) {
+        const r = superseded('100/', '99', wired)
+        expect(r.status, r.out).toBe(0)
+        expect(r.stdout).toBe('100\n')
+        expect(r.out).toContain('::warning::run 100 left AGENT_INTERNAL_TOKEN_PENDING with no digest, so whether its web job finished cannot be checked')
+        expect(r.out).not.toContain('0123abcd')
+      }
+    })
+
+    it('1, printing nothing, for this run’s record, an earlier run’s, a value that is not a record, or none — and the marker is never asked', () => {
+      for (const [value, runId] of [
+        ['42/x', '42'],
+        ['41/x', '42'],
+        ['99/x', '100'],
+        ['agency-os-agent:0123abcd', '42'],
+        [undefined, '42'],
+      ] as const) {
+        const r = superseded(value, runId, 'x')
+        expect(r.status, `${String(value)} as run ${runId}`).toBe(1)
+        expect(r.stdout).toBe('')
+        expect(r.requests.map((q) => q.path)).not.toContain('/v1/projects/prj/env/env_1')
+      }
+      expect(run(['superseded', 'AGENT_URL', 'AGENT_INTERNAL_TOKEN_WIRED'], routes('43/x', 'x'), { RUN_ID: '42' }).status).toBe(1)
+    })
+
+    it('2 without a run id, without the marker to compare with, or when the marker cannot be read — never "no"', () => {
+      expect(superseded('43/x', '', 'x').status).toBe(2)
+      expect(superseded('43/x', 'abc', 'x').status).toBe(2)
+      const noMarker = run(['superseded', 'AGENT_INTERNAL_TOKEN_PENDING'], routes('43/x', 'x'), { RUN_ID: '42' })
+      expect(noMarker.status).toBe(2)
+      expect(noMarker.requests).toEqual([])
+      const unreadable = run(
+        ['superseded', 'AGENT_INTERNAL_TOKEN_PENDING', 'AGENT_INTERNAL_TOKEN_WIRED'],
+        { ...routes('43/agency-os-agent:0123abcd', 'agency-os-agent:0123abcd'), '/v1/projects/prj/env/env_1': [500, {}] },
+        { RUN_ID: '42' },
+      )
+      expect(unreadable.status).toBe(2)
+      expect(unreadable.stdout).toBe('')
+      expect(unreadable.out).toContain('reading AGENT_INTERNAL_TOKEN_WIRED failed: HTTP 500')
     })
   })
 })

@@ -406,9 +406,13 @@ worker() {
 # the old token, and every call it makes to the worker is refused. That
 # stops the run, red, and the next one rotates and wires both sides again —
 # unless a LATER run has written its own record since, which is what a
-# re-run of an old run's second job finds: that run wired, and this one has
-# nothing left to do. A dropped output still reads the record alone,
-# fail-open, as above.
+# re-run of an old run's second job finds. That record is the later run's
+# FIRST job's, so it says only that the later run set a newer token: this
+# job has nothing left to do only once the later run's own web job has
+# promoted it to the marker (review round 10, [3]). Until then it stops,
+# naming that run, because the live web app may hold neither token — an
+# empty record, which no web job can promote, passes with a warning. A
+# dropped output still reads the record alone, fail-open, as above.
 worker_web() {
   run_id
   vercel_ids
@@ -425,10 +429,20 @@ worker_web() {
     esac
   elif [ "${REDEPLOY:-}" != true ]; then
     echo "wiring: nothing of this run is waiting to be recorded (the worker job kept the existing wiring); the web app is not redeployed"
-  elif vercel_env superseded "$PENDING"; then
-    echo "wiring: nothing of this run is waiting to be recorded — a later run has wired since and left its own record; the web app is not redeployed"
   else
-    die "The worker job set a new AGENT_INTERNAL_TOKEN on Fly and Vercel in this run, but no record of this run can be read from $PENDING, so the web app was not redeployed: its live deployment still runs on the old token, and every call it makes to the worker is refused. Run the worker action again — it finds no record of a finished wiring, and wires both sides again."
+    # Not vercel_env: its `die` would print into $later. The helper prints
+    # the later run's id, and nothing else, on stdout.
+    local later="" rc=0
+    later=$(node tools/vercel-env.mjs superseded "$PENDING" "$MARKER") || rc=$?
+    case $rc in
+      0) echo "wiring: nothing of this run is waiting to be recorded — a later run has wired since (run $later); the web app is not redeployed" ;;
+      1)
+        [ -z "$later" ] \
+          || die "Workflow run $later set a newer token and its web job has not finished — re-run that run's worker-web job, or the worker action. This job deployed and recorded nothing, and until one of them finishes the live web app may still run on a token the worker no longer accepts."
+        die "The worker job set a new AGENT_INTERNAL_TOKEN on Fly and Vercel in this run, but no record of this run can be read from $PENDING, so the web app was not redeployed: its live deployment still runs on the old token, and every call it makes to the worker is refused. Run the worker action again — it finds no record of a finished wiring, and wires both sides again."
+        ;;
+      *) die "Could not read the Vercel project's variables (the line above says why); nothing was changed." ;;
+    esac
   fi
   worker_seen
 }
