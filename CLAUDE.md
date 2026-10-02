@@ -27,11 +27,15 @@ tested against a fetch that records and never sends, and against PGlite —
 never against DoveSoft itself, whose push formats and `mobiles` format are
 assumptions to confirm before a real send. Calls
 and WhatsApp over DoveSoft are not built: DoveSoft publishes no API for
-either. Seven review rounds, and the follow-ups they left open, have been fixed
+either. Eight review rounds, and the follow-ups they left open, have been fixed
 on top of both releases; each fix is stated below where the rule it changed
 lives.
 
-**The worker deploys to Fly.io** (`fly.toml` at the repo root), and its
+**For now the agency runs the worker on the operator's own machine**
+(`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
+machine"), which needs no public address, because everything but chat is
+the worker reaching out. **Fly.io is the path once it rents a machine**
+(`fly.toml` at the repo root), and its
 defaults are the dangerous part: Fly scales a machine to zero between
 requests, which is Vercel's problem wearing a different hat — the advisory
 lock drops, the fifteen-second tick stops, and nothing looks broken because
@@ -61,25 +65,40 @@ wait for `/api/health?strict=1` to report the checkout's migration) and
 `worker` (deploy `apps/agent` to Fly and point the web app at it — refused
 before anything is created or deployed unless production already has the
 checkout's `EXPECTED_MIGRATION`, because it never migrates and must not run
-ahead of its schema; run `release` from that ref first), each but `status`
-confirmed by typing its name; only the `worker` step receives the worker's
-own secrets (review round 6), and inside it `tools/production.sh` hands them
-to no program but flyctl (review round 7): one array, `WORKER_ONLY`,
-un-exports them for the whole script, runs the Vercel CLI — which `npx`
-installs at run time, and whose `build` runs the whole web build — under
-`env -u` for each, hands flyctl `FLY_API_TOKEN` alone, and unsets the rest
-once Fly has staged them. A new worker secret is named in the workflow's
-worker step AND in `WORKER_ONLY`, and `production-tooling.test.ts` fails
-when the two lists differ. DEPLOYING.md says what each needs.
+ahead of its schema; run `release` from that ref first — and refused
+without `PRODUCTION_DATABASE_URL`, because the job that holds the worker's
+secrets never runs the Vercel CLI that `vercel pull` needs), each but
+`status` confirmed by typing its name. **`worker` is two JOBS** (review
+round 8): `worker (Fly)` receives the worker's own secrets in its script
+step alone (review round 6), deploys to Fly, and sets `AGENT_URL`,
+`AGENT_INTERNAL_TOKEN` and a non-secret `AGENT_INTERNAL_TOKEN_PENDING`
+through our own `tools/vercel-env.mjs`; `worker (web redeploy)`
+(`worker-web`), on a fresh VM handed `VERCEL_*` alone, runs the Vercel CLI
+to redeploy the web app, waits for `/api/health?strict=1`, promotes the
+pending record to the `AGENT_INTERNAL_TOKEN_WIRED` marker LAST, and waits
+for the worker to show live. Round 7 drew the line at a step, and a step is
+not a credential boundary: `tools/production.sh` un-exported the secrets and
+ran the Vercel CLI — which `npx` installs at run time, and whose `build`
+runs the whole web build — under `env -u` for each, which changes only what
+a child INHERITS; any process running as the same user reads them from
+`/proc/<pid>/environ` of the shells above it. Only a job boundary contains
+them. `WORKER_ONLY` still un-exports them, hands flyctl `FLY_API_TOKEN`
+alone and unsets the rest once Fly has staged them, and in the `worker`
+action every path to the Vercel CLI dies (`no_vercel_cli`). A new worker
+secret is named in the `worker` job's script step AND in `WORKER_ONLY` —
+never in `worker-web` — and `production-tooling.test.ts` fails when the two
+lists differ or a `WORKER_ONLY` name appears in any other job. DEPLOYING.md
+says what each needs.
 Proved live: `/api/health` reports
 `database: ok`, `/signin` renders, `/book/agency` serves the public booking
 page (it 404'd until the seed claimed the slug), and a sign-in request logged
 `magic link sent`. See [DEPLOYING.md](DEPLOYING.md) — including the two things
 a LOCAL `vercel build` gets wrong (it traces `.env` into the upload; deploying
 from `apps/web` cannot resolve the hoisted `node_modules`). The agent worker is
-NOT deployed and cannot be on serverless, so chat, email and SMS sending and
-IMAP reply detection are absent there and every screen that would promise them
-says so instead. What does NOT need it: replies through Resend's signed
+NOT on Vercel and cannot be on serverless, so chat, email and SMS sending and
+IMAP reply detection happen only where a worker runs — the operator's
+machine, for now — and every screen that would promise them says so
+instead. What does NOT need it: replies through Resend's signed
 webhook, DoveSoft's delivery reports and texts sent back (two web routes),
 LinkedIn steps a person sends from `/tasks`, and the rescan and digest crons.
 
@@ -680,7 +699,12 @@ The fourteen added with 0018, one line each:
   promises an /inbox answer and is called "not a refusal of <channel>";
   `manual` says answering a reply does not lift it; `unsubscribed` is their
   opt-out; `opt_out_not_recorded` and `erasure` say to record the opt-out or
-  finish the erasure, and never to resume them. A prefix test used to call a
+  finish the erasure, and never to resume them. Two holds round 8 added are
+  not told apart here yet, stated: a shared number's holder is worded as one
+  who asked (the reason quoted beside it says whose), though Resume lifts
+  them once the number is recorded; and a contact a colleague's unrecorded
+  stop was filed under reads as an ordinary `replied` pause (§2, "The
+  opt-out reader runs first"). A prefix test used to call a
   teammate's "replied on the phone (by …)" a reply pause, promising an
   answer the inbox then refused. A suppression or a recorded refusal
   outranks the pause and is reported as itself, with the pause beside it.
@@ -849,7 +873,7 @@ quiet stretch. Every panel dates evidence from `scans.ran_at` through
 | 5 ✅ | `proposalFromFindings` and `meetingBrief` — the two documents the pipeline writes, pure, refusing stale evidence |
 | 6 ✅ | the AI disclosure, the opt-out/handoff/sentiment readers, the scripted turn, and §5.5's `decideLlmCall` |
 | 0018 release ✅ | the informational signals' words, `diffFindings`, rotting and `pipelineMetrics`, enrolment's gate and draft, the kickoff and renewal templates, the bounce and auto-reply readers, the connector catalog as data, suppression sources; from review, the one stale-threshold reader (`staleAfterDaysOf`) and the pause as its own refusal, with its class and words (`pauseReasonClass`, `pausedSentence`, re-exported by `packages/db`'s inbox); from later review, `htmlToText` (`html-text.ts`, linear time, the one converter both inbound paths use) and the opt-out alarm's Slack payload (`slack-payload.ts`, so the web and the worker post identical bytes) |
-| 0019 release ✅ | DLT (`dlt.ts`): `parseTemplate`, `renderTemplate`, `matchesTemplate` (both judging links and call-back numbers on the rendered text, `smuggledRuns`), `DLT_VAR_MAX_CHARS` (30 code points), TRAI's `PROMOTIONAL_WINDOW` (10:00–21:00 IST, and `hours` for the recipient's own clock), `promotionalBand` (`{ open, india, opensToday, nextOpen }`), `insidePromotionalBand`, `nextOpenMinute` and `isIndianNumber`, `smsOptOut` (the whole message, since review round 6 clause by clause, and since review round 7 a capital STOP ending the text), `parseTemplateCategory`, `normaliseDltHeader`; `TEMPLATE_CHANNELS`, `TemplateFacts` and the two template steps in `decideSend`, and the promotional band's two (a band that never opens, `band_never_opens`; a band not open now); from review, `SendRefusal.retryAt` and `deferUntil` with its three bounds (`DEFER_FALLBACK_MS`, `DEFER_MAX_MS`, `DEFER_SLOW_MS`) in `send.ts` |
+| 0019 release ✅ | DLT (`dlt.ts`): `parseTemplate`, `renderTemplate`, `matchesTemplate` (both judging links and call-back numbers on the rendered text, `smuggledRuns`), `DLT_VAR_MAX_CHARS` (30 code points), TRAI's `PROMOTIONAL_WINDOW` (10:00–21:00 IST, and `hours` for the recipient's own clock), `promotionalBand` (`{ open, india, opensToday, nextOpen }`), `insidePromotionalBand`, `nextOpenMinute` and `isIndianNumber`, `smsOptOut` (the whole message, since review round 6 clause by clause, since review round 7 a capital STOP ending the text, and since review round 8 not after NON, FULL, a possessive or a place word, not STOP BY/IN/OVER/OFF, nor a bare STOP ending a question), `parseTemplateCategory`, `normaliseDltHeader`; `TEMPLATE_CHANNELS`, `TemplateFacts` and the two template steps in `decideSend`, and the promotional band's two (a band that never opens, `band_never_opens`; a band not open now); from review, `SendRefusal.retryAt` and `deferUntil` with its three bounds (`DEFER_FALLBACK_MS`, `DEFER_MAX_MS`, `DEFER_SLOW_MS`) in `send.ts` |
 
 ---
 
@@ -912,16 +936,25 @@ successful scan has superseded (§1), and approving them does not make them
 current; the fix is a re-scan and a new draft, or for a superseded scan a
 new draft from the latest one. And `paused`:
 a person held from every campaign — they replied, a teammate is holding
-them, or an opt-out or an erasure could not be completed — never lifted by
+them, an opt-out or an erasure could not be completed, or a text from a
+number they share asked to stop and could not be recorded — never lifted by
 approving one message past the hold. Who may lift it depends on its class:
 answering the reply from `/inbox` ends only a `replied` pause, and Resume on
 `/contacts` refuses an `opt_out_not_recorded` or `erasure` pause outright
-(409), even once the opt-out has been recorded by hand, and any pause at all
-while the inbox's own `optOutNotRecorded` reading holds for the person and
-no suppression row matches any key of their email, phone or LinkedIn profile
-(`contactResumeByHand` in `packages/db/src/inbox.ts`) — the button used to
-resume whatever the class, including the pauses that are the only
-protection left when an opt-out could not be stored. Both resume paths lift
+(409), even once the opt-out has been recorded by hand — except a shared
+number's holder (`isSharedNumberOptOutPause`, review round 8), refused
+`RESUME_SHARED_NUMBER` only until a phone suppression in their org matches
+their phone, and then lifted (§2, "SMS through DoveSoft") — and any pause
+at all while the inbox's own `unrecordedOptOut` reading holds: an opt-out of
+THEIRS with no suppression row on any key of their email, phone or LinkedIn
+profile, or (review round 8) an opted-out reply from ANOTHER address on the
+thread filed under them whose own From no suppression row matches, refused
+`RESUME_UNRECORDED_ANOTHER_ADDRESS` in words that name the address to record
+— the reply's — because a suppression on the contact's address satisfied
+this gate and left the person who asked unrecorded (`contactResumeByHand`
+in `packages/db/src/inbox.ts`) — the button used to resume whatever the
+class, including the pauses that are the only protection left when an
+opt-out could not be stored. Both resume paths lift
 only the pause they were asked about (`resumeContact`'s `expectedReason`,
 in the UPDATE's predicate): the inbox the pause it READ under its locks,
 and `/contacts` the pause the PAGE SHOWED (review round 4). Every Resume
@@ -939,7 +972,10 @@ inside that transaction, uncaught, and no longer by the route — so a resume
 with no row, or a row with no resume, cannot exist, which is what
 `repauseForUnansweredReply` reads (below). `pausedSentence` words each
 class, and never says "resume" for an opt-out nobody could record or an
-erasure that did not finish. And 0019's two: `no_template` (an SMS or
+erasure that did not finish; its `opt_out_not_recorded` sentence says "This
+contact asked to stop — or a text from a number they share did —" since
+review round 8, because a shared number's holders are paused in that class
+and may have sent nothing. And 0019's two: `no_template` (an SMS or
 WhatsApp message naming no registered template, or a deactivated one) and
 `template_mismatch` (words that are not their template with each slot
 filled) — an approval does not make the operator deliver words it did not
@@ -1076,11 +1112,43 @@ and was an ordinary reply. STOP, STOPALL, UNSUBSCRIBE, UNSUB, OPTOUT or OPT
 OUT typed in CAPITALS after at least one word, ending the WHOLE text (never
 a clause, so "Bus stop at 5 STOP? no" stays prose), is read as its own
 clause, with an optional ALL, one optional footer token, and the decoration
-and politeness a whole message may end with. Not after a negation, an
-article or a place word ("Please don't STOP", "the bus STOP"), not with a
-question mark after it, and in a text typed in capitals throughout only with
-a token carrying a digit ("OK I WILL STOP BY" is not one, and "NOT
-INTERESTED STOP ACMEIN" is a miss chosen on purpose). A lower-case or
+and politeness a whole message may end with. Not after a negation or
+"non", an article or a possessive (my, your, our, their, his, her), "full",
+or a word that makes it a place or one stop of many — bus, pit, truck,
+metro, station, railway, rly, train, tram, terminal, depot, signal, toll,
+next, last, first, final, every, each, one ("Please don't STOP", "Working
+NON STOP", "the bus STOP", "FULL STOP", "your ONE STOP"); review round 8
+found "Working NON STOP", "Meet me at Metro STOP" and "Why STOP" read as
+opt-outs — an `opted_out` reply nobody can clear, and a phone suppression in
+every org holding the number. "no" and "halt" are left out on purpose: "No
+STOP" and "HALT STOP" are commands. Not with a question mark after it; not
+STOP BY, IN, OVER or OFF, a visit ("I can STOP BY", from an interested
+lead); and in a text typed in capitals throughout only with a token
+carrying a digit ("NOT INTERESTED STOP ACMEIN" is a miss chosen on
+purpose). **Nor a bare STOP ending a question typed without its question
+mark** (review round 8, `asksAQuestion`), read on the clause the STOP ends —
+after its last clause break, so "Who is this? Wrong number STOP" is still
+one: a clause that opens with a wh-word, or with an auxiliary or a modal and
+a word after it ("Why STOP", "Can I STOP", "When does it STOP", "Who said
+STOP"; "Do STOP" alone is a command). The exception is a question that ends
+before the keyword, whose STOP is the command it looks like: one addressed
+to the sender ending in you, me, us, this or that, my number or the texts,
+a please, pls, plz, kindly or just set aside ("Can you STOP", "When will
+you STOP", "Why are you texting me STOP", "Who sent this STOP"), one
+opening "who/what is this…", and "how many times…". Only the bare word is
+read this way: STOP with ALL or a short code, and STOPALL, UNSUBSCRIBE,
+UNSUB, OPTOUT and OPT OUT, are read in a question as before ("How do I
+UNSUBSCRIBE", "who is this STOPALL"), because those exist only to leave a
+list. Accepted misses, ordinary replies now — paused and resumable, as each
+already was with a question mark: "How do I STOP", "Can I STOP NOW", "When
+does it STOP", "This is final STOP", "Not interested FULL STOP". Accepted
+false positives, still opt-outs: a place NAMED before it ("Reached Kurla
+STOP" — a name looks like any word that ends a sentence), a question whose
+wh-word does not open the clause ("Sir why STOP"), a negation not right
+before the keyword ("We are never going to STOP"), and "Why did you STOP",
+read as a complaint. And one inconsistency, older than round 8 and left as
+it was: "How do I UNSUBSCRIBE" is an opt-out, and "How do I UNSUBSCRIBE?",
+with its question mark, is not. A lower-case or
 title-case "stop" there is a sentence ("I am at Andheri Bus Stop"), CANCEL,
 END and QUIT never count this way, and "Not interested STOP - Ravi", a
 signature after it, is a stated miss.
@@ -1177,12 +1245,15 @@ for a colleague's stop (`fromIsContact: false`, review round 7) the
 contact is paused only `replied <ISO>` through `pauseContact`, and the row
 and the alarm are about the message the sender answered, as on the
 webhooks (`rolledBackOptOutPause`; §2, "The Resend inbound route is a
-READER") — and the fault is then rethrown, so the drain still counts and
+READER"), while each contact the line names as the sender is held as the
+one who asked (`rolledBackSenderHolds`, review round 8) — and the fault is
+then rethrown, so the drain still counts and
 retries it under the bound above. Before, it was retried and abandoned with
 log lines only, while the sender read the contact as clear. The line is
 `OPT-OUT NOT RECORDED — a reply that asked to stop could not be recorded;
 it stays unseen and is retried, otherwise follow up by hand`, with the UID,
-the fault's class, ids, `fromIsContact`, `paused`, `audited` and `alarm:
+the fault's class, ids, `fromIsContact`, `paused`, `audited`, for a
+colleague's stop `senders`, `sendersHeld` and `sendersAudited`, and `alarm:
 'raised'|'already_raised'|'off'`.
 An `UnrecordedStops` map beside the failure count raises the alarm once per
 UID; a pause or audit write that threw is tried again on the message's next
@@ -1535,7 +1606,28 @@ not read: it was not their opt-out, and read as one it locked them out for
 good, however old, even once the colleague was suppressed. Until the
 colleague's address is on `/suppressions`, the second reading still holds
 them, through the colleague's opted-out reply; recording that address ends
-it. Past those, the check is the sender's own dry run, inside the draft's
+it. **And it is worded as the colleague's** (review round 8): the reading,
+`unrecordedOptOut`, answers `{ own, fromAnotherAddress }` — an opted-out
+reply whose From `replyIsFromTheContact` shows to be another address is
+`fromAnotherAddress`, and one from their own address, or one that cannot be
+told apart from it, is `own`, worded and gated exactly as before.
+`replyQueueDraft` refuses the second `opt_out_not_recorded` in a sentence
+of its own — record THAT address, the reply's From shown on `/inbox`, on
+`/suppressions`, never this contact's — and only a suppression on that
+reply's own From keys ends it, for Resume too (§2, "The send path"),
+because "this person asked to stop … record it by hand" sent people to
+record the address of somebody who never asked, which satisfied Resume's
+gate while the sender stayed unrecorded. The page says the same:
+`inboxTouches` rows carry `fromIsContact`, an `opted_out` row's `suppressed`
+is read from its From's keys alone — the key `recordInboundReply` writes and
+`/compliance` reads (other rows still use the contact's keys and the From's)
+— and `apps/web/src/components/inbox/opted-out.ts` words a colleague's stop
+"A reply from another address on this thread (<from>) asked to stop — do
+not answer it. <name> did not ask, and is not treated as the one who
+asked", with a warning, while no suppression matches that From, to record
+THAT address and never the contact's, until which the contact cannot be
+resumed or answered. A contact's own stop keeps `inbox-view.ts`'s words.
+Past those, the check is the sender's own dry run, inside the draft's
 transaction after the resume, so a refusal nobody may approve past rolls
 back both; one a person can resolve (quiet hours, the cap, a zone, a paused
 campaign) comes back beside the draft as `wouldHold`. Two people answering
@@ -1606,7 +1698,9 @@ while it scrubs their rows — the erasure then took the loud "could not keep
 its suppression" path for a fault that was never about a suppression — or
 with a reply, a bounce or a reclassify for the same person. PGlite has one
 session and cannot show it, so a source test pins all six writers
-(`packages/db/test/lock-order.test.ts`). Two settles are not an ending (`answerEndedBy`):
+(`packages/db/test/lock-order.test.ts`), and since review round 8 the lock
+STRENGTH of `sms.ts`'s two holder locks, `holdEach` and `releaseEach` (§2,
+"SMS through DoveSoft"). Two settles are not an ending (`answerEndedBy`):
 a clock deferral (`REFUSALS_THE_CLOCK_RESOLVES`), which the tick and the
 LinkedIn step put back `approved`, and a `suppressed` refusal, whose writer
 pauses with the stronger reason itself. The unsubscribe, erasure, reply and
@@ -1683,9 +1777,11 @@ the contact OVERWRITING any earlier reason with `opt-out not recorded: reply
 erasure paths do — every path that knows an opt-out failed to store goes
 through one exported helper, `pauseContactOverriding` in
 `packages/db/src/outreach.ts`: this one (and `sms.ts` for a number's other
-holders), the unsubscribe, the erasure, and since review round 6 a stop
-whose whole recording threw on either email webhook, DoveSoft's text route
-or the worker's IMAP inbox — because the ordinary `pauseContact` keeps the
+holders, with a reason of their own since review round 8), the unsubscribe,
+the erasure, since review round 6 a stop whose whole recording threw on
+either email webhook, DoveSoft's text route or the worker's IMAP inbox, and
+since review round 8 the contacts who ARE the sender of a colleague's stop
+(below) — because the ordinary `pauseContact` keeps the
 first reason and an older `replied …` left in place let answering that
 reply resume them. **A colleague's stop is not the contact's** (review
 round 7). `handleInboundEmail` files a reply matched by References under
@@ -1711,7 +1807,32 @@ the one who asked" (for `why: 'record_failed'`, that the sender may not be
 on the list, a retry may record it, and to check `/suppressions` for the
 address first); it is still an alarm, and `/compliance` counts it with its
 company resolved through the touch. The contact's own stop is unchanged,
-and holds them as their own opt-out should. (`pauseContact` takes
+and holds them as their own opt-out should. **And the sender is held**
+(review round 8): with the contact held only as any reply holds them, a
+colleague's unrecorded stop held nobody who asked, and a second contact
+here at the address that asked to stop was sent their approved message on
+the next tick. So `recordInboundReply` also holds every contact of the org
+whose address key on the channel is the From's (`contactsAtTheAddress`,
+through the exported `addressKeyOf` — the address, never the domain, which
+a colleague shares — ordered by id, and read in a savepoint right after the
+contact row and before the inbound INSERT, so a rolled-back line can name
+them): each paused over any earlier reason with `opt-out not recorded:
+reply <ISO> (<why>)` through `pauseContactOverriding`, their queued,
+awaiting-approval and approved messages refused `consent_revoked`, and a
+`contact.opt_out_not_recorded` row with THEM as its subject, `{ touchId,
+channel, why }` — their own unrecorded opt-out, the shape the inbox, Resume
+and `/compliance` read. Each write runs in its own savepoint, after the
+contact's reply pause, and the `OPT-OUT NOT RECORDED — follow up by hand`
+line carries `sendersHeld`. When the recording itself throws, the
+rolled-back line carries `senderContactIds` (ids only) and the fault paths
+hold them by id (§2, "The Resend inbound route is a READER"). Two residuals,
+stated: two colleague stops crossing between the same two contacts at once,
+both unsuppressed, lock them in opposite orders, and a deadlock there aborts
+only the sender-hold savepoint, which is logged while the reply commits
+(PGlite cannot show it); and `previewSend` and `check_send` still word the
+filed contact's hold as an ordinary `replied` pause, which promises an
+answer from `/inbox` that `/inbox` refuses until the colleague's address is
+recorded. (`pauseContact` takes
 an optional `replacing` reason and replaces a pause whose stored reason is
 exactly that one. Its callers are the `/contacts` Pause,
 `contactPauseByHand`, where a teammate's hold REPLACES a reply's pause, so
@@ -1956,6 +2077,14 @@ reply holds them, through the routes' `hold` dep (`pauseContact`, `replied
 sender answered (`subjectType: 'touch'`, the subject `inReplyTo`; detail `{
 channel: 'email', why: 'record_failed', fromIsContact: false, filedUnder
 }`), and the alarm goes with `contactId: null` and `fromIsContact: false`.
+And the SENDER is held (review round 8): the line names the contacts of the
+org at the From's address as `senderContactIds`, found before the fault,
+`keepingRolledBackOptOut` keeps them, and each is paused over any earlier
+reason with the `record_failed` reason and given a `contact.opt_out_not_recorded`
+row with them as its subject (`rolledBackSenderHolds`), by id, with nothing
+read again — paused and audited, not cancelled, as the contact's own fault
+path is, because the pause is what the sender's last look refuses; the
+error line adds `senders`, `sendersHeld` and `sendersAudited`.
 A line that does not say — the fault came before the recorder read the
 contact — is read as their own, the conservative direction. That reader,
 and the pause (`rolledBackOptOutPause`, `{ reason, overriding }`), the
@@ -2213,8 +2342,8 @@ what `/compliance`, the digest and `/inbox` read — they are paused `opt-out
 not recorded: reply <ISO> (record_failed)` over any earlier reason
 (`pauseContactOverriding`, best-effort), and the AWAITED alarm names them,
 with no message on file; every OTHER org the error names, where the
-recorder has already taken the loud path for the contacts holding the
-number, gets an alarm of its own (`smsLostOptOutNotification`, review round
+recorder has already taken the holders' loud path for the contacts holding
+the number (below), gets an alarm of its own (`smsLostOptOutNotification`, review round
 7 — those orgs heard nothing, and their holders kept a hold anyone could
 lift). Only a fault before the recorder wrote anything or named anybody —
 the duplicate check, the match, the narrowing, or a redelivered unplaced
@@ -2303,16 +2432,62 @@ reason, so such a push no longer fails on every retry — and
   recorder throws `SmsOptOutNotRecorded` — `fault`, `filingUnder`,
   `optOutNotRecordedIn` and `heldIn`, the fault's CLASS and never a `cause`,
   so drizzle's message, which quotes the number and the words, cannot be
-  logged through it — for the route's loud path above. A filed text answers
-  **200**; a filed STOP left unsuppressed anywhere — in the org it was filed
-  under or another holding the number — answers **500** (review round 7),
-  after the AWAITED `opt_out_not_recorded` alarms (below) and, when the
-  filed contact's own suppression was written, the ordinary reply notice.
-  It answered 200, so DoveSoft never retried, and the code that writes a
-  missing suppression on a retry was never reached. That retry is a
-  duplicate: it holds and pauses nobody, announces nothing, and writes only
-  what is missing (`finishRedelivered`, below), alarmed and refused again
-  where a write fails again. Every org whose holders were held gets an
+  logged through it — for the route's loud path above. **A holder takes the
+  HOLDERS' loud path, never the asker's** (review round 8,
+  `sharedNumberOptOutLost`): every holder of the number but the contact it
+  was filed under — those twins, another org's holders where the
+  suppression failed, every holder of a text filed under nobody, and every
+  holder when the holds themselves fault (`holdOrSayWhy`) — is paused over
+  any earlier reason with `opt-out not recorded: a text from a number they
+  share, <ISO> (<why>)` (`sharedNumberOptOutReason`, which `pauseReasonClass`
+  reads as `opt_out_not_recorded` by its opening words), and the org gets
+  ONE `contact.opt_out_not_recorded` row, `{ channel: 'sms', why,
+  sharedNumber: true, contacts, paused, holders: [ids] }`, whose subject is
+  the filed inbound touch where it is stored in that org and otherwise
+  nothing — never a holder, as subject or `detail.contactId`. Round 7 gave
+  each holder the asker's own pause and a row naming them, which `/inbox`
+  reads as THEIR opt-out nobody recorded, however old: somebody who may have
+  sent nothing was locked out on every channel, for good, by a fault
+  DoveSoft's retry recovers from. So the hard hold lasts only while the
+  number is unsuppressed. A delivery through `recordInboundSms` that finds
+  the number's phone suppression in a holder's org — DoveSoft's retry, a
+  redelivery's `finishRedelivered`, an unplaced redelivery, or any later
+  text from the number — replaces exactly that reason with the ordinary
+  hold below, `sharedNumberHoldReason` (`releaseSharedNumberHolds`, the holders
+  locked `FOR NO KEY UPDATE` by id, one transaction per org and best-effort:
+  a fault leaves that org's holders held hard and says so), and the org's
+  `sms.inbound_unmatched` row carries `released: n` — on a redelivery even
+  in an org where only the ease happened, the filed org included
+  (`filedUnder: 'another_contact'`, `redelivered: true`). And a number a
+  person records by hand on `/suppressions` releases them with no further
+  text: Resume refuses `isSharedNumberOptOutPause` (`RESUME_SHARED_NUMBER`,
+  which says a text from a number they share asked to stop, and to record
+  the number) only while no phone suppression in their org matches their
+  phone, and then lifts it, `contact.resumed { pausedFor:
+  'opt_out_not_recorded' }`. The contact it was filed under keeps the
+  asker's pause and row. `/audit` words the row as a number N contacts here
+  hold, not treated as the one who asked, held until it is recorded, and
+  `/compliance` and the digest count one row per org where they counted one
+  per holder — its company resolved only when its subject is the filed text
+  stored in that org (`suppression_failed` in the filed org, or a
+  redelivery's re-attempt there), and otherwise an unknown company. A filed
+  text answers **200**; a filed STOP left unsuppressed anywhere — in the org
+  it was filed under or another holding the number — answers **500**
+  (review round 7), after the AWAITED `opt_out_not_recorded` alarms (below)
+  and, when the filed contact's own suppression was written, the ordinary
+  reply notice. It answered 200, so DoveSoft never retried, and the code
+  that writes a missing suppression on a retry was never reached. That
+  retry is a duplicate: it holds and pauses nobody, announces nothing, and
+  writes only what is missing (`finishRedelivered`, below), alarmed and
+  refused again where a write fails again. **That 500 is only for a push
+  that carried a message id** (review round 8): the recorder knows a redelivery by its id
+  alone, so the retry of a push with none, or a blank one, would be a new
+  text — a second inbound row, a second reply notice, a second loud path,
+  on every retry while the write kept failing. Such a push is answered
+  **200** after the same awaited alarms, with an error line saying it
+  carried no message id and that what is missing must be recorded by hand
+  (`duplicate`, `orgs`, `alarm`, `messageId: false`); a STOP filed under
+  nobody is still a 500 with or without one. Every org whose holders were held gets an
   `sms.inbound_unmatched` row (`why: 'ambiguous'`, `filedUnder:
   'another_org'|'another_contact'`, `contacts`, `paused`, `cancelledQueued`,
   and for a STOP `optOut` and `suppressed`), the filed org included when a
@@ -2333,12 +2508,21 @@ reason, so such a push no longer fails on every retry — and
   `consent_revoked`, the recipient's own no, which enrolment read as a
   refusal for good of somebody who may have sent nothing. **A reply's own
   pause is the one a hold replaces** (review round 7): `holdEach` reads each
-  holder's reason under a lock (`FOR UPDATE`, by id, contact before touch)
-  and replaces a `replied <ISO>` pause, named exactly in the UPDATE
+  holder's reason under a lock (`FOR NO KEY UPDATE`, by id, contact before
+  touch) and replaces a `replied <ISO>` pause, named exactly in the UPDATE
   (`pauseContact`'s `replacing`, as `contactPauseByHand` does), because
   `/inbox` ends a reply's pause when the reply is answered, and a holder
   left with it was resumed by answering an old email while a person was
-  still working out whose this text was. `/audit` words each row by its
+  still working out whose this text was. The lock is `FOR NO KEY UPDATE`
+  since review round 8, never `FOR UPDATE`: every writer of `paused_reason`
+  is an UPDATE of non-key columns, which takes that same lock, so the reasons
+  are still read under one nobody can write past, while `FOR UPDATE` is the
+  one row lock that also conflicts with the `FOR KEY SHARE` a foreign-key
+  check takes — `approveDraft` re-pointing an email draft from one holder to
+  another holds the draft and waits on the new holder's key share, while the
+  hold, holding that holder, waits on the draft to cancel it: a deadlock
+  (40P01, reproduced on Postgres 16), and for a STOP the loud path for every
+  holder. `/audit` words each row by its
   writer — filed under nobody, under another contact here, under a contact
   in another org, or received again — and states the hold whenever either
   count is above zero ("1 of the 2 contacts holding the number was paused"),
@@ -2351,7 +2535,8 @@ reason, so such a push no longer fails on every retry — and
   row the route then wrote said nothing was written and nobody paused, false
   of it: its holders kept a `held:` pause anyone could lift while nothing
   anywhere said their number had asked to stop. No suppression is written by
-  then, so EVERY holder takes the loud path (`why: 'record_failed'`) and the
+  then, so EVERY holder takes the holders' loud path (`why:
+  'record_failed'`, one row per org) and the
   recorder throws `SmsOptOutNotRecorded` with `heldIn`, the orgs whose holds
   committed; the route pauses, audits and alarms the contact it was filing
   under, if any, alarms every other org, and files no subject-less row. And
@@ -2436,7 +2621,11 @@ reason, so such a push no longer fails on every retry — and
   number (review round 6), audited there `redelivered: true`, and since
   review round 7 in the org it was filed under, audited `suppression.added`
   with actor `system` beside the `contact.opt_out_not_recorded` the first
-  delivery left. The first delivery's 500 is what makes that retry come. A
+  delivery left — only when the redelivery's own insert wrote it (review
+  round 8: `suppressPhone` returns `alreadyPresent`, and `suppressInEvery`
+  carries it per org), because one a person or a parallel delivery wrote
+  between the read and the insert was logged as System's add beside its
+  writer's. The first delivery's 500 is what makes that retry come. A
   write that fails again takes the loud path again: `optOutNotRecorded` is
   true on a duplicate only then, and `suppressed` says whether the filed
   org holds the suppression after the redelivery (it was always false). A
@@ -2448,11 +2637,15 @@ reason, so such a push no longer fails on every retry — and
   alarmed every org it could not suppress it in; it took the subject-less
   path, which said nothing had been written while the suppression and the
   pause stood. Both typed errors are exported from `@agency/db/queries`.
-  Two residuals, stated: a stale redelivery can re-add a suppression a
-  person removed in between, in the filed org now as in the others; and
-  after a STOP's recording throws, the other orgs' rows already say the text
-  was filed under a contact in another organisation although the reply
-  rolled back, and the retry that files it writes a second row there.
+  Three residuals, stated: a stale redelivery can re-add a suppression a
+  person removed in between, in the filed org now as in the others; after a
+  STOP's recording throws, the other orgs' rows already say the text was
+  filed under a contact in another organisation although the reply rolled
+  back, and the retry that files it writes a second row there; and a
+  shared number's holder is found, by a later delivery and by Resume alike,
+  through their CURRENT phone, so one whose phone was edited after the STOP
+  is eased by no delivery and stays refused by Resume, which reads a phone
+  no suppression of that STOP matches.
 
 **`/settings/templates`** records registrations and registers nothing: add
 one by hand, switch one off or on (idempotent, audited
@@ -2495,8 +2688,9 @@ the email opt-out reader still misses decoration at the ends (§2, "A reply
 does four things"); `smsOptOut` is still roughly quadratic on a long run of
 whitespace or punctuation, about 100–250 ms on a 16 KB body, from
 `SMS_DECORATION_ENDS`' end-anchored alternative and `SMS_CLAUSE_BREAK`'s
-spaced dash — round 7's capital-STOP reading walks the end in linear time
-and adds nothing measurable, and both routes sit behind the webhook
+spaced dash — round 7's capital-STOP reading walks the end in linear time,
+round 8's question reading splits the clause once and reads a bounded
+number of words, and neither adds anything measurable, and both routes sit behind the webhook
 secret; and a GET push logs a text's number and words at the
 platform, by design, until DoveSoft pushes by POST. The two labels round 4
 left lagging the band are current: `/settings/templates`' hint for a
@@ -2960,7 +3154,12 @@ KNEW an opt-out failed to store — `DIGEST_OPT_OUT_FAILURES`
 dashboard, the tool and the digest cannot disagree, each row naming its path
 and its company resolved through the contact, the touch or
 `detail.contactId` (counting the first alone reported 0 over a failed
-unsubscribe or erasure); voice/SMS/WhatsApp touches that WENT OUT with no
+unsubscribe or erasure; and since review round 8 a colleague's stop whose
+sender is a contact here leaves 1 + N rows — one about the reply, one under
+each sender contact — while a shared number's holders leave one per org,
+not one per holder, whose company resolves only through the filed text
+where it is stored in that org: §2, "SMS through DoveSoft");
+voice/SMS/WhatsApp touches that WENT OUT with no
 granted consent row today, with the send path's own refusals counted apart as
 "stopped by the send path"; and every outbound row not yet sent
 (`COMPLIANCE_UNSENT_STATUSES`: `awaiting_approval`, `approved`, `queued`,
@@ -3115,7 +3314,17 @@ there if it is missing", and links `/suppressions`: without it the alarm
 named the contact, and the person following up would suppress the wrong
 address. The field is a boolean, never the address, and an event that does
 not set it posts the bytes it always did. A filed alarm's bytes are
-unchanged. The webhook URL is a bearer credential `redact()` cannot see, so
+unchanged. **The ordinary `reply` notice says whose words they were too**
+(review round 8): its event carries an optional `fromIsContact?: false`,
+which `replyNotification` sets only when the outcome says false, and the
+message then reads "Reply from <domain> — somebody else on the thread asked
+to stop." (or "<kind>, from somebody else on the thread"), for a suppressed
+stop that the sender's address is on the list and the contact it was filed
+under did not ask to stop — "do not suppress them" — and "touch <id> ·
+filed under contact <id> · sent by somebody other than the contact": "they
+asked to stop" beside the contact's id pointed a person at somebody who
+never asked. A contact's own reply posts the bytes it always did, and
+DoveSoft's reply notice is untouched. The webhook URL is a bearer credential `redact()` cannot see, so
 it is never logged and a failure is reported by error NAME or Slack's short
 token. One attempt, 3 s, no retry, and an audit row
 `notification.sent|failed` with actor `system`.
@@ -3136,8 +3345,11 @@ for every STOP left unsuppressed anywhere — one whose recording threw (since
 review round 4), one filed under nobody (400 for an unreadable number), and
 since review round 7 one filed under a contact, because a 200 there meant
 no retry ever came and the duplicate's write of the missing suppression
-was never reached — and raises the alarm again on each delivery that fails
-again, while a redelivery whose finishing faulted is a 500 with no alarm;
+was never reached — but since review round 8 only when the push carried a
+message id, because without one its retry is recorded as a new text, so
+such a push is answered 200 after the same alarms — and raises the alarm
+again on each delivery that fails again, while a redelivery whose
+finishing faulted is a 500 with no alarm;
 and on the worker's IMAP path, before the reply triage for a stop whose
 suppression failed (§2, "The opt-out reader runs first"), and on the first
 failure of a stop whose recording threw (review round 6) — the same alarm
@@ -3429,7 +3641,12 @@ npm run smoke:agent -- --connector deepwiki   # the Phase 3 gate (§6's "no rest
 # file, an argument list or shell history (§2.3)
 ./tools/remote-setup.sh       # migrate + seed a remote database
 ./tools/remote-status.sh      # read-only schema facts, safe to paste — the migration list ("[x] 0019_messaging_templates_and_sms"), "0018 is applied" and "0019 is applied"
-./tools/run-worker.sh         # run the worker here, against production, nothing exposed
+./tools/run-worker.sh         # run the worker here, against production, nothing exposed — builds the
+                              # packages first, sets WEB_PUBLIC_URL, UNSUBSCRIBE_SECRET and SLACK_WEBHOOK_URL,
+                              # and on a Mac keeps it awake (caffeinate -is) and can keep its answers in the
+                              # login Keychain, each value base64 on security's stdin, never its argv
+./tools/run-worker.sh --reconfigure   # ask every question again
+./tools/run-worker.sh --forget        # delete the saved answers
 ./tools/add-teammate.sh       # grant somebody access — or Settings → Team, in the browser
 ./tools/spend.sh              # what the API has actually cost: per day, per person, run rate
 ./tools/mail-dns.sh           # SPF/DKIM/DMARC records for a sending domain

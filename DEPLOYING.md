@@ -507,8 +507,9 @@ anything caught mid-send on the next boot.
 than a correctness one: quiet hours and the daily cap are evaluated at the
 moment of sending, so mail queued for 09:00 while the lid was shut goes out
 when the worker next runs and is re-checked against every §2.1 rule first.
-Nothing is sent that should not be; it is sent later than intended. `caffeinate
--dis ./tools/run-worker.sh` keeps the machine awake for as long as it runs.
+Nothing is sent that should not be; it is sent later than intended. On a
+Mac the script already runs under `caffeinate -is`, so idle sleep is not the
+risk; a lid closed on battery still is.
 
 ### Giving other people access
 
@@ -572,63 +573,100 @@ are the load-bearing lines.
 **From GitHub, with no credential on a laptop:** Actions → Production → Run
 workflow, action `worker`, confirm `worker`. It needs `FLY_API_TOKEN` (a Fly
 ORG token, on an org with a payment method) and `PRODUCTION_DATABASE_URL`
-(Neon's direct string — a `-pooler` host is turned into the direct one) as
-Actions secrets, beside `VERCEL_TOKEN`. **It refuses first, before anything
-is created, staged or deployed, unless production's database already has
-the checkout's `EXPECTED_MIGRATION` applied** (read with the migrator's
-`status`): the worker deploys this checkout, and a re-wiring redeploys the
-web app from it, so neither may run ahead of its schema. It never migrates
-— run `release` from the same ref first. Then it creates the app (or
-reuses one named from `fly.toml`'s `app`, suffixed when that global name is
-taken), stages the secrets over stdin, deploys one machine with
-`--ha=false` and waits for `/readyz`. It keeps the existing
+as Actions secrets, beside `VERCEL_TOKEN`. `PRODUCTION_DATABASE_URL` must
+already be Neon's DIRECT string — the `-pooler` rewriting applies only to a
+URL read from Vercel, and this action never reads one — and without it the
+run stops, naming it, before anything is created. **It refuses first,
+before anything is created, staged or deployed, unless production's
+database already has the checkout's `EXPECTED_MIGRATION` applied** (read
+with the migrator's `status`): the worker deploys this checkout, and a
+re-wiring redeploys the web app from it, so neither may run ahead of its
+schema. It never migrates — run `release` from the same ref first.
+
+**It runs as two jobs, each on a fresh VM** (review round 8), because a
+step is not a credential boundary (below). **Job 1, `worker (Fly)`,**
+creates the app (or reuses one named from `fly.toml`'s `app`, suffixed when
+that global name is taken), stages the secrets over stdin, deploys one
+machine with `--ha=false` and waits for `/readyz`. It keeps the existing
 `AGENT_INTERNAL_TOKEN` only when Vercel has `AGENT_URL`,
 `AGENT_INTERNAL_TOKEN` and a marker, `AGENT_INTERNAL_TOKEN_WIRED`, equal to
-`<fly app>:<Fly's own digest of AGENT_INTERNAL_TOKEN>` — an encrypted,
-readable Vercel production variable that holds no secret and that nothing
-in the app reads. Otherwise it generates a new token, stages it on Fly,
-deploys, sets it and `AGENT_URL` on Vercel, redeploys the web app, waits
-for `/api/health?strict=1`, and only then writes the marker, so a run cut
-off part-way — Fly re-tokened and Vercel not, or Vercel set and never
-redeployed — is rewired by the next run rather than read as done, where it
-used to see only that the names existed and go green with every web call
-to the worker refused. **The first `worker` run from a checkout that writes
-the marker therefore rotates the token once and redeploys the web app**,
-because no marker exists on Vercel yet. A hand edit of
-`AGENT_INTERNAL_TOKEN` on Fly is noticed (it changes Fly's digest); one on
-Vercel, outside the action, is not. An error from the Vercel API while
-reading the variables stops the run rather than reading as "missing", and
-if Fly reports no digest the run warns and the next one rotates again —
-safe, but noisy. It then waits for `/api/health` to report the worker
-`live`. Any of `ANTHROPIC_API_KEY`, `ANTHROPIC_WORKSPACE_ID`,
-`AGENT_MODEL`, `SECRETS_KEY`, `SMTP_*`, `MAIL_FROM`, `IMAP_*`,
-`SLACK_WEBHOOK_URL`, `UNSUBSCRIBE_SECRET`, `DOVESOFT_API_KEY` and
-`DOVESOFT_ENTITY_ID` set as Actions secrets is passed to the worker too;
-`WEB_PUBLIC_URL` is set to the site. Those, and `FLY_API_TOKEN` and
-`FLY_ORG`, reach only the workflow step that runs `worker`: `status`,
-`migrate`, `deploy` and `release` run in a step that sees
-`PRODUCTION_DATABASE_URL` and the `VERCEL_*` secrets alone. **Inside that
-step, `tools/production.sh` hands them to no program but flyctl.** One
-array at the top of the script, `WORKER_ONLY`, names every one of them,
-and the script un-exports them all for the whole run, so nothing it starts
-— its node helpers (`tools/vercel-env.mjs`, `vercel-project.mjs`,
-`production-env.mjs`), the migrator's CLI, `npx tsc`, curl — inherits one.
-The Vercel CLI (`npx --yes vercel@62.1.0`, installed at run time with no
-lockfile and floating transitive ranges) also runs under `env -u` for each,
-a second guard that holds if a later edit exports one again, so neither it
-nor the web build its `vercel build` runs ever sees one. flyctl is handed
-`FLY_API_TOKEN` alone, on each call; every other secret reaches Fly over
-stdin; and once `flyctl secrets import --stage` succeeds, every one but
-`FLY_API_TOKEN` is unset. **Adding a worker secret is two edits**: its name
-in the workflow's worker-step `env` AND in `WORKER_ONLY`, which both builds
-the staged list and strips — `packages/db/test/production-tooling.test.ts`
-fails when the two lists differ. This contains what a compromised Vercel
-CLI release could read; it does not prevent one, and that CLI still holds
-`VERCEL_TOKEN`, which reaches the project's production variables on its
-own. The further step, not taken because it adds a dependency, is to pin
-the CLI through the lockfile as a devDependency and run it from
-`node_modules/.bin`. The step that installs flyctl is pinned to a commit of
-`superfly/flyctl-actions`
+`<fly app>:<Fly's own digest of AGENT_INTERNAL_TOKEN>`; it then waits for
+`/api/health` to report the worker `live`, and job 2 is skipped. Otherwise
+it generates a new token, stages it on Fly, deploys, and sets `AGENT_URL`
+and `AGENT_INTERNAL_TOKEN` on Vercel and then — after the token, so that
+what is left to record never names a token Vercel does not hold —
+`AGENT_INTERNAL_TOKEN_PENDING`, `<workflow run id>/<fly app>:<digest>`, all
+through `tools/vercel-env.mjs`, our own REST helper, never the Vercel CLI.
+**Job 2, `worker (web redeploy)`** (`worker-web`), redeploys the web app
+only when Vercel holds a pending record of THIS run, waits for
+`/api/health?strict=1`, promotes that record to `AGENT_INTERNAL_TOKEN_WIRED`
+— last — and waits for the worker to show `live`. Both markers are
+encrypted, readable Vercel production variables that hold no secret and
+that nothing in the app reads. A run cut off part-way — Fly re-tokened and
+Vercel not, or Vercel set and never redeployed or never recorded — is
+rewired by the next run rather than read as done, where it used to see only
+that the names existed and go green with every web call to the worker
+refused; and because a record names its run, a re-run of an old run's
+second job never records a newer run's wiring. **The first `worker` run
+from a checkout that writes the marker therefore rotates the token once and
+redeploys the web app**, because no marker exists on Vercel yet. A hand
+edit of `AGENT_INTERNAL_TOKEN` on Fly is noticed (it changes Fly's digest);
+one on Vercel, outside the action, is not. An error from the Vercel API
+while reading the variables stops the run rather than reading as
+"missing", and if Fly reports no digest the run warns, the web app is still
+redeployed, nothing is recorded, and the next run rotates again — safe, but
+noisy.
+
+**The marker crosses on Vercel, never as a job output.** GitHub DROPS — it
+does not mask — a job output whose value contains any secret value of its
+job, as a substring and at any length, and job 1 holds `FLY_ORG` (which a
+Fly app name can contain), ports, and `SMTP_SECURE`/`IMAP_SECURE`, which are
+`true` or `false`. So its one output, `redeploy`, is read fail-open: job 2
+runs unless an explicit `false` arrived, and a `false` that was dropped
+costs one extra job, which finds nothing of this run pending and redeploys
+nothing. With required reviewers on the `production` environment, a
+`worker` run may ask for approval twice, once per job: both declare
+`environment: production`, so that a secret saved there is seen.
+
+Any of `ANTHROPIC_API_KEY`, `ANTHROPIC_WORKSPACE_ID`, `AGENT_MODEL`,
+`SECRETS_KEY`, `SMTP_*`, `MAIL_FROM`, `IMAP_*`, `SLACK_WEBHOOK_URL`,
+`UNSUBSCRIBE_SECRET`, `DOVESOFT_API_KEY` and `DOVESOFT_ENTITY_ID` set as
+Actions secrets is passed to the worker too; `WEB_PUBLIC_URL` is set to the
+site. Those, and `FLY_API_TOKEN` and `FLY_ORG`, reach only job 1's script
+step. `status`, `migrate`, `deploy` and `release` run in a job that sees
+`PRODUCTION_DATABASE_URL` and the `VERCEL_*` secrets alone, and no longer
+names `FLY_API_TOKEN` even in its visibility check — naming a secret
+anywhere in a job, even in a `!= ''`, sends its value to that job's runner,
+and that job runs the Vercel CLI — so a `FLY_API_TOKEN` saved as a Variable
+is reported by a `worker` run only. Job 2 sees `VERCEL_TOKEN`,
+`VERCEL_ORG_ID`, `VERCEL_PROJECT_ID` and `VERCEL_TEAM` alone, not even the
+database URL. **Only the job boundary contains them.** `tools/production.sh`
+still un-exports every name in `WORKER_ONLY` for the whole run, hands
+flyctl `FLY_API_TOKEN` alone on each call, sends every other secret to Fly
+over stdin, and unsets each but `FLY_API_TOKEN` once
+`flyctl secrets import --stage` succeeds — but un-exporting, `env -u` and
+`unset` keep a secret only out of what a child INHERITS. The environment a
+process was started with stays in `/proc/<pid>/environ`, which any process
+running as the same user can read, so round 7's guard — the Vercel CLI
+(`npx --yes vercel@62.1.0`, installed at run time with no lockfile and
+floating transitive ranges, whose `vercel build` runs the whole web build)
+started under `env -u` for each name, in the very job that held them — kept
+the secrets out of its environment and not out of its reach. So job 1 never
+runs that CLI: every path to it in the `worker` action dies
+(`no_vercel_cli`), and the database URL comes from `PRODUCTION_DATABASE_URL`,
+never `vercel pull`. And the script runs the lockfile's
+`node_modules/.bin/tsc` by path, for every action, never through `npx`,
+which installs a registry package when it finds no local one and assumes
+`--yes` in CI — so job 1 runs no `npx` at all. **Adding a worker secret is
+two edits**: its name in the `worker` job's script-step `env` AND in
+`WORKER_ONLY`, which both builds the staged list and strips — never in
+`worker-web`; `packages/db/test/production-tooling.test.ts` fails when the
+two lists differ or a `WORKER_ONLY` name appears in any other job. Job 2's
+Vercel CLI still holds `VERCEL_TOKEN`, which reaches the project's
+production variables on its own; the further step, not taken because it
+adds a dependency, is to pin the CLI through the lockfile as a
+devDependency and run it from `node_modules/.bin`. The step that installs
+flyctl is pinned to a commit of `superfly/flyctl-actions`
 (`setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1`, its `v1`), never a
 branch or a tag that a push there could move, and flyctl itself to `0.4.111`
 through the action's `version` input — upgrading flyctl is editing that line
@@ -820,8 +858,18 @@ whose contacts hold the number: that is 500, after an opt-out alarm for each
 org where it could not be written, so DoveSoft redelivers it, and the
 redelivery — a duplicate, which pauses nobody and announces nothing — writes
 the suppression still missing, alarming and refusing again if it fails
-again. A payload either route cannot read is 400 (413 when larger than
-16 KB) — never 200, because an unread text might have been a STOP — with an
+again. That 500 needs the push to carry a message id, because a redelivery
+is known by its id alone: a push with none would be recorded again as a new
+text on every retry, so it is answered 200 after the same alarms, and the
+error line says what is missing must be recorded by hand — ask DoveSoft to
+send the id with every inbound push. While any STOP is unrecorded, the
+contacts holding the number, other than the one it was filed under, are
+paused with a reason Resume refuses, saying a text from a number they share
+asked to stop; the next delivery from the number that finds it suppressed —
+the retry, or any later text — eases them to an ordinary hold, and once the
+number is on `/suppressions` Resume can lift them. A payload either route
+cannot read is 400 (413 when larger than 16 KB) — never 200, because an
+unread text might have been a STOP — with an
 `sms.*_unreadable` audit row and an error line, so DoveSoft retries. A STOP
 from a number no single contact holds whose suppression could not be written
 is 500, so it is retried too; that one, and a STOP from a number that cannot
