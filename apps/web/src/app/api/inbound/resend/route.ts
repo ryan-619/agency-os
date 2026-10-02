@@ -1,5 +1,5 @@
 import { NextResponse, after } from 'next/server'
-import { appendAudit, handleInboundEmail, type AgencyDb } from '@agency/db/queries'
+import { appendAudit, handleInboundEmail, pauseContactOverriding, type AgencyDb } from '@agency/db/queries'
 import { getDb } from '@/lib/db'
 import { env } from '@/lib/env'
 import { log } from '@/lib/logger'
@@ -45,11 +45,13 @@ export async function POST(request: Request): Promise<NextResponse> {
     secret: e.RESEND_WEBHOOK_SECRET,
     apiKey: e.RESEND_API_KEY,
     now: new Date(),
-    // A stop whose recording threw is audited and alarmed here, before the
-    // reader answers its 500 — the generic route's path (`../email/fault`).
+    // A stop whose recording threw is paused, audited and alarmed here,
+    // before the reader answers its 500 — the generic route's path
+    // (`../email/fault`).
     handle: raisingOnFault((mail) => handleInboundEmail(getDb() as unknown as AgencyDb, mail), {
       forward: log,
       audit: (entry) => appendAudit(getDb() as unknown as AgencyDb, entry),
+      pause: (orgId, contactId, reason, now) => pauseContactOverriding(getDb() as unknown as AgencyDb, orgId, contactId, reason, now),
       alarm: (event) => notify(event),
       log,
     }),

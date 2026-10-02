@@ -1,4 +1,7 @@
-import { looksLikeOptOut, type InboundLog } from '@agency/db/queries'
+import {
+  keepingRolledBackOptOut, looksLikeOptOut, rolledBackOptOutAlarm, rolledBackOptOutAudit, rolledBackOptOutPauseReason,
+  type InboundLog, type RolledBackOptOut,
+} from '@agency/db/queries'
 import type { NotificationEvent } from '../../../../lib/slack-message'
 
 /**
@@ -21,53 +24,35 @@ import type { NotificationEvent } from '../../../../lib/slack-message'
  * from the recorder itself — its rolled-back line names the org and the
  * contact it was filing under (`keepingRolledBackOptOut`), so nothing is
  * read again from a database that just failed, and nothing re-decides what
- * the words meant. With that: a `contact.opt_out_not_recorded` row naming
- * the contact (what /compliance and the digest count, and what keeps
- * /inbox from drafting to them), the `opt_out_not_recorded` alarm AWAITED
- * before the answer, and the error line. A fault before the recorder ran —
- * the duplicate check or the match itself — leaves nothing saying whose it
- * was: the words are read with the reply's own opt-out reader, and a stop
- * is said at error with `alarm: 'not_raised_unplaced'`, because an alarm
- * needs an org to be filed under and guessing one is the mistake the
- * matcher exists not to make.
+ * the words meant. With that: the contact PAUSED over any earlier reason
+ * (`pauseContactOverriding`, `opt-out not recorded: reply <ISO>
+ * (record_failed)`), a `contact.opt_out_not_recorded` row naming the
+ * contact (what /compliance and the digest count, and what keeps /inbox
+ * from drafting to them), the `opt_out_not_recorded` alarm AWAITED before
+ * the answer, and the error line. The pause is review round 6's: the row
+ * and the alarm told people, but the sender reads neither, so the contact's
+ * approved follow-up went on the worker's next tick until a retry landed —
+ * every other writer of that row pauses. Each write is tried on its own,
+ * because the database may be the thing that failed.
+ *
+ * A fault before the recorder ran — the duplicate check or the match
+ * itself — leaves nothing saying whose it was: the words are read with the
+ * reply's own opt-out reader, and a stop is said at error with `alarm:
+ * 'not_raised_unplaced'`, because an alarm needs an org to be filed under
+ * and guessing one is the mistake the matcher exists not to make. Nobody
+ * is paused on a guess either.
+ *
+ * The reading of the recorder's line, and the shape of the pause, the row
+ * and the alarm, live in packages/db (`inbound-fault.ts`), because the
+ * worker's IMAP inbox takes the same path for the same fault; re-exported
+ * here for the route.
  *
  * Kept beside the route, with no `server-only` and no `@/` import, so
  * `apps/web/test/inbound-email.test.ts` runs the route's own handling
  * against a real recorder and a real fault. The route itself reaches
  * `server-only` through `@/lib/db` and is pinned by reading its source.
  */
-
-/** What the recorder said about a stop it rolled back: ids only. */
-export interface RolledBackOptOut {
-  readonly orgId: string
-  readonly contactId: string
-  /** The message the reply answered, when it was matched by one. */
-  readonly inReplyTo: string | null
-}
-
-/**
- * The recorder's log, forwarded line for line to `forward` — and the last
- * `OPT-OUT NOT RECORDED` line that names an org and a contact, kept. On a
- * throw, the only line the recorder writes is the rolled-back one: its
- * other loud lines are said only once the reply has COMMITTED.
- */
-export function keepingRolledBackOptOut(
-  forward: InboundLog,
-): InboundLog & { readonly rolledBack: () => RolledBackOptOut | null } {
-  let kept: RolledBackOptOut | null = null
-  return {
-    error(message, fields) {
-      forward.error(message, fields)
-      const orgId = fields?.['orgId']
-      const contactId = fields?.['contactId']
-      if (message.startsWith('OPT-OUT NOT RECORDED') && typeof orgId === 'string' && typeof contactId === 'string') {
-        const inReplyTo = fields?.['inReplyTo']
-        kept = { orgId, contactId, inReplyTo: typeof inReplyTo === 'string' ? inReplyTo : null }
-      }
-    },
-    rolledBack: () => kept,
-  }
-}
+export { keepingRolledBackOptOut, type RolledBackOptOut }
 
 export interface InboundEmailFaultDeps {
   readonly audit: (entry: {
@@ -78,9 +63,16 @@ export interface InboundEmailFaultDeps {
     readonly subjectId: string
     readonly detail: Record<string, unknown>
   }) => Promise<void>
+  /**
+   * `pauseContactOverriding` on the route's database: true when the
+   * contact's row took the pause. May throw; the caller says so.
+   */
+  readonly pause: (orgId: string, contactId: string, reason: string, now: Date) => Promise<boolean>
   /** Awaited: the opt-out alarm. Bounded and never throws (`notify`). */
   readonly alarm: (event: NotificationEvent) => Promise<void>
   readonly log: { error(message: string, fields?: Record<string, unknown>): void }
+  /** For tests. Defaults to the wall clock. */
+  readonly now?: () => Date
 }
 
 export interface InboundEmailFaultAnswer {
@@ -99,16 +91,18 @@ export async function inboundEmailNotRecorded(
   const error = err instanceof Error ? err.name : 'UnknownError'
   const placed = mail.rolledBack
   if (placed) {
+    // Held first, before anybody is told: the sender reads a pause, never
+    // the audit row or the alarm.
+    const now = deps.now ? deps.now() : new Date()
+    let paused: boolean
+    try {
+      paused = await deps.pause(placed.orgId, placed.contactId, rolledBackOptOutPauseReason(now), now)
+    } catch {
+      paused = false
+    }
     let audited = true
     try {
-      await deps.audit({
-        orgId: placed.orgId,
-        actor: 'system',
-        action: 'contact.opt_out_not_recorded',
-        subjectType: 'contact',
-        subjectId: placed.contactId,
-        detail: { channel: 'email', why: 'record_failed' },
-      })
+      await deps.audit(rolledBackOptOutAudit(placed))
     } catch {
       audited = false
     }
@@ -116,18 +110,11 @@ export async function inboundEmailNotRecorded(
       error,
       orgId: placed.orgId,
       contactId: placed.contactId,
+      paused,
       audited,
       alarm: 'raised',
     })
-    // The message the reply answered is the touch the alarm names; a reply
-    // matched by its address alone answered none on file.
-    await deps.alarm({
-      kind: 'opt_out_not_recorded',
-      orgId: placed.orgId,
-      touchId: placed.inReplyTo,
-      contactId: placed.contactId,
-      path: 'reply',
-    })
+    await deps.alarm(rolledBackOptOutAlarm(placed))
     return { status: 500, body: { error: 'opt-out not recorded', retry: true } }
   }
   if (looksLikeOptOut(mail.text)) {
@@ -147,9 +134,9 @@ export async function inboundEmailNotRecorded(
  * answers 500 on a fault so Resend retries, but raised no alarm and wrote no
  * row for a stop whose recording threw. This wraps the recorder: it hands
  * the recorder a log that keeps the rolled-back line, and on a throw takes
- * `inboundEmailNotRecorded`'s path (the row, the awaited alarm, the error
- * line naming the fault's class) before rethrowing, so the reader's own 500
- * is unchanged.
+ * `inboundEmailNotRecorded`'s path (the pause, the row, the awaited alarm,
+ * the error line naming the fault's class) before rethrowing, so the
+ * reader's own 500 is unchanged.
  */
 export function raisingOnFault<M extends { readonly text?: string | null; readonly log?: InboundLog }, O>(
   record: (mail: M) => Promise<O>,

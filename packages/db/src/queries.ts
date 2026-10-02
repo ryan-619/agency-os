@@ -25,6 +25,8 @@ export * from './proposals.js'
 export * from './meetings.js'
 export * from './calls.js'
 export * from './outreach.js'
+// A stop whose recording threw, as the webhooks and the IMAP inbox both read it.
+export * from './inbound-fault.js'
 export * from './send-preview.js'
 export * from './pg-errors.js'
 export * from './contacts-ledger.js'
