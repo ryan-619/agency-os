@@ -817,7 +817,8 @@ describe('the SMS opt-out reader', () => {
     'Is it ok to STOP',
     'Do you sell STOP',
     'How do I STOP',
-    'Why did you STOP',
+    'How to STOP',
+    'Can we STOP',
     'Should I reply STOP',
     'Can I STOP NOW',
     'Hi. Why STOP',
@@ -860,10 +861,11 @@ describe('the SMS opt-out reader', () => {
    * What the round 8 fix keeps. A question refuses only the bare word STOP, which a question can end
    * in ("Why STOP"); the keywords that exist only to leave a list are read whatever comes before
    * them ("How do I UNSUBSCRIBE" asks for exactly that), and so is STOP with ALL or a short code. A
-   * request to the sender ("Can you STOP"), a question that is whole before the keyword ("Who is
-   * this STOP"), and one about the texts or the number ("Why are you texting me STOP") end in a
-   * command. "No STOP" and "Do STOP" are commands, so "no" and an auxiliary alone refuse nothing,
-   * and the whole-message and clause readings are unchanged ("Why? Stop").
+   * question that ends before the keyword ends in a command: one addressed to the sender, ending in
+   * "you", "me", "us", "my number", "this" or the texts — a request ("Can you STOP") or a complaint ("When
+   * will you STOP", "Why are you texting me STOP") — one asking who is texting ("Who is this STOP"),
+   * and "how many times". "No STOP" and "Do STOP" are commands, so "no" and an auxiliary alone
+   * refuse nothing, and the whole-message and clause readings are unchanged ("Why? Stop").
    */
   it.each([
     'Can you STOP',
@@ -881,8 +883,20 @@ describe('the SMS opt-out reader', () => {
     'Whos this STOP',
     'What is this STOP',
     'Who is this STOP ACMEIN',
+    'When will you STOP',
+    'Why won’t you STOP',
+    'Why did you STOP',
     'Why are you texting me STOP',
     'Why do you keep messaging us STOP',
+    'Why are you sending me messages STOP',
+    'Why do you keep texting STOP',
+    'When do the messages STOP',
+    'Why so much spam STOP',
+    'Who sent this STOP',
+    'Why do you send these STOP',
+    'How many times do I have to say STOP',
+    'How many times STOP',
+    'What is this nonsense STOP',
     'Who gave you my number STOP',
     'How did you get this number STOP',
     'How do I UNSUBSCRIBE',
@@ -915,6 +929,11 @@ describe('the SMS opt-out reader', () => {
     expect(smsOptOut(long)).toBe(true)
     expect(smsOptOut(`${'a'.repeat(16_000)} STOP`)).toBe(true)
     expect(smsOptOut(`${'A'.repeat(16_000)}STOP`)).toBe(false)
+    // Round 8's question reading reads the last clause's words once, each test on a bounded few.
+    expect(smsOptOut(`Why ${'word '.repeat(3000)}STOP`)).toBe(false)
+    expect(smsOptOut(`Can you ${'please '.repeat(2500)}STOP`)).toBe(true)
+    expect(smsOptOut(`${'u please '.repeat(1800)}STOP`)).toBe(true)
+    expect(smsOptOut(`${'why, '.repeat(3000)}why STOP`)).toBe(false)
     expect(performance.now() - started).toBeLessThan(500)
   })
 })
