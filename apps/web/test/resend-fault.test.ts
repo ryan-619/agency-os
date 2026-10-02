@@ -21,6 +21,7 @@ function harness() {
   const audits: Record<string, unknown>[] = []
   const alarms: NotificationEvent[] = []
   const pauses: { orgId: string; contactId: string; reason: string; now: Date }[] = []
+  const holds: { orgId: string; contactId: string; reason: string; now: Date }[] = []
   const order: string[] = []
   const lines: { message: string; fields?: Readonly<Record<string, unknown>> }[] = []
   const log: InboundLog = { error: (message, fields) => lines.push({ message, fields }) }
@@ -28,6 +29,7 @@ function harness() {
     audits,
     alarms,
     pauses,
+    holds,
     order,
     lines,
     deps: {
@@ -40,6 +42,11 @@ function harness() {
       pause: async (orgId: string, contactId: string, reason: string, now: Date) => {
         order.push('pause')
         pauses.push({ orgId, contactId, reason, now })
+        return true
+      },
+      hold: async (orgId: string, contactId: string, reason: string, now: Date) => {
+        order.push('hold')
+        holds.push({ orgId, contactId, reason, now })
         return true
       },
       alarm: async (event: NotificationEvent) => {
@@ -93,6 +100,42 @@ describe('raisingOnFault', () => {
     expect(JSON.stringify(h.lines)).not.toContain('priya@rentman.io')
   })
 
+  /**
+   * Review round 7, [7]: the recorder says the reply came from somebody
+   * other than the contact it was filing under — a colleague replying all.
+   * The contact is held as any reply holds them, never as an opt-out nobody
+   * recorded, and the row and the alarm are about the sender.
+   */
+  it('holds the contact only as a reply when the stop came from somebody else in the thread', async () => {
+    const h = harness()
+    const record = raisingOnFault(async (mail: { text: string | null; log?: InboundLog }) => {
+      mail.log?.error('OPT-OUT NOT RECORDED — the reply was rolled back; a provider retry records it, otherwise follow up by hand', {
+        orgId: 'org-1',
+        contactId: 'contact-1',
+        inReplyTo: 'touch-1',
+        fromIsContact: false,
+        error: 'DbFault',
+      })
+      throw new DbFault('connection lost: sam@rentman.io said stop')
+    }, h.deps)
+
+    await expect(record({ text: 'Please remove me from your list.' })).rejects.toBeInstanceOf(DbFault)
+    expect(h.pauses).toEqual([])
+    expect(h.holds).toEqual([{ orgId: 'org-1', contactId: 'contact-1', reason: `replied ${NOON.toISOString()}`, now: NOON }])
+    expect(h.audits).toEqual([
+      expect.objectContaining({
+        subjectType: 'touch',
+        subjectId: 'touch-1',
+        detail: { channel: 'email', why: 'record_failed', fromIsContact: false, filedUnder: 'contact-1' },
+      }),
+    ])
+    expect(h.alarms).toEqual([
+      { kind: 'opt_out_not_recorded', orgId: 'org-1', touchId: 'touch-1', contactId: null, path: 'reply', fromIsContact: false },
+    ])
+    expect(h.order).toEqual(['hold', 'audit', 'alarm'])
+    expect(JSON.stringify(h.lines)).not.toContain('sam@rentman.io')
+  })
+
   it('raises no alarm for an ordinary reply whose recording threw, and still rethrows', async () => {
     const h = harness()
     const record = raisingOnFault(async (_mail: { text: string | null; log?: InboundLog }) => {
@@ -117,6 +160,9 @@ describe('raisingOnFault', () => {
     expect(src).toMatch(/alarm: \(event\) => notify\(event\)/)
     expect(src).toMatch(
       /pause: \(orgId, contactId, reason, now\) => pauseContactOverriding\(getDb\(\) as unknown as AgencyDb, orgId, contactId, reason, now\)/,
+    )
+    expect(src).toMatch(
+      /hold: \(orgId, contactId, reason, now\) => pauseContact\(getDb\(\) as unknown as AgencyDb, orgId, contactId, reason, now\)/,
     )
   })
 })

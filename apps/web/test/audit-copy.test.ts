@@ -113,6 +113,9 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'draft.approved': { contactId: SUBJECT, campaignId: SUBJECT, channel: 'email' },
   'draft.denied': { note: 'too pushy', refusalCode: 'needs_approval' },
   'contact.replied': { channel: 'email', paused: true, cancelledQueued: 2, suppressed: false, deal: 'advanced:replied' },
+  // A colleague's stop filed under the contact (review round 7) adds
+  // `fromIsContact: false` and `filedUnder` — the contact never as the
+  // subject or a `contactId` (FROM_SOMEBODY_ELSE below).
   'contact.opt_out_not_recorded': { touchId: SUBJECT, channel: 'email', why: 'unparseable' },
   'contact.created': { companyId: SUBJECT, source: 'manual', hasTimeZone: true },
   // The contacts route's shape, over a reply's own pause. `denyDraft` writes
@@ -576,18 +579,28 @@ describe('sentenceFor', () => {
    * writer never learned whose number it was, and /audit said it came "from
    * a number no single contact holds", so the person following up recorded
    * a bare suppression and never looked for the contact, who stayed neither
-   * paused nor suppressed. It says what is known now: nothing was written,
-   * whose number it was is not known, and the contact who holds it is to be
-   * paused as well.
+   * paused nor suppressed. It says whose number it was is not known, and
+   * that the contact who holds it is to be paused as well.
+   *
+   * Review round 7, [8]: nor can the writer know that NOTHING was written.
+   * A redelivery of a STOP already recorded, or a shared number held in one
+   * org before another threw, reached this row, and "it is NOT on the
+   * suppression list and nobody was paused" sent the person to record and
+   * pause what was done already. It says to check first now.
    */
-  it('words a STOP whose recording failed as not known to be anybody’s, and says to look for the contact', () => {
+  it('words a STOP whose recording failed as not known to be anybody’s, and says to check before recording', () => {
     const failed = sentenceFor(line('contact.opt_out_not_recorded', { channel: 'sms', why: 'record_failed' }, { actor: 'system' }), {})
     expect(failed).toBe(
-      'could not record an opt-out texted in: recording the text failed before anything was written, so whose number it was ' +
-        'is not known — it is NOT on the suppression list and nobody was paused; it was refused so DoveSoft retries, but until ' +
-        "a retry is recorded, read the number from the provider's inbound log, put it on /suppressions and pause whichever " +
-        'contact holds it',
+      'could not record an opt-out texted in: recording the text failed, so whose number it was is not known, and part of ' +
+        'it may already be recorded — by an earlier delivery, or by this one before it failed; it may not be on the ' +
+        'suppression list. It was refused so DoveSoft retries, but until a retry is recorded, check /suppressions for the ' +
+        "number in the provider's inbound log and record it there if it is missing — anybody holding the number may already " +
+        'be paused; pause whoever holds it and is not',
     )
+    // Nothing the writer cannot know.
+    expect(failed).not.toContain('before anything was written')
+    expect(failed).not.toContain('nobody was paused')
+    expect(failed).not.toContain('it is NOT on the suppression list')
     expect(failed).not.toContain('no single contact holds')
     expect(failed).not.toContain('a contact at')
     expect(isAlarm(line('contact.opt_out_not_recorded', { channel: 'sms', why: 'record_failed' }, { actor: 'system' }))).toBe(true)
@@ -598,6 +611,39 @@ describe('sentenceFor', () => {
         'from a number no single contact holds',
       )
     }
+  })
+
+  /**
+   * Review round 7, [7]: a colleague replying all to our message asked to
+   * stop, and the reply was filed under the contact the message went to.
+   * The row names the contact only as `filedUnder` — a row about THEM is
+   * what /inbox reads as their own opt-out nobody recorded — and the
+   * sentence says whose address to record: the sender's, never the
+   * contact's. Two writers: the fault path (`record_failed`, the reply may
+   * yet be recorded by a retry) and the recorder's committed loud path (the
+   * reply is stored, its sender's suppression refused).
+   */
+  it('words a stop from somebody other than the contact it was filed under, and says whose address to record', () => {
+    const FROM_SOMEBODY_ELSE = { channel: 'email', fromIsContact: false, filedUnder: SUBJECT }
+    const say = (d: Record<string, unknown>) =>
+      sentenceFor(line('contact.opt_out_not_recorded', d, { actor: 'system', subjectType: 'touch', subjectId: SUBJECT }), lookups)
+    expect(say({ ...FROM_SOMEBODY_ELSE, why: 'record_failed' })).toBe(
+      'could not record an opt-out from a reply sent by somebody other than the contact at rentman.io it was filed under — ' +
+        'recording the reply failed, so the sender may not be on the suppression list: a retry may record it, but check ' +
+        '/suppressions for the address the reply came from and record it there if it is missing; the contact is not ' +
+        'treated as the one who asked',
+    )
+    expect(say({ ...FROM_SOMEBODY_ELSE, touchId: SUBJECT, why: 'Error' })).toBe(
+      'could not record an opt-out from a reply sent by somebody other than the contact at rentman.io it was filed under — ' +
+        'the sender is NOT on the suppression list; read their address from the reply and record it by hand; the ' +
+        'contact is not treated as the one who asked',
+    )
+    // Never the texted-in sentence, even with no subject to name.
+    const bare = sentenceFor(line('contact.opt_out_not_recorded', { ...FROM_SOMEBODY_ELSE, why: 'record_failed' }, { actor: 'system' }), {})
+    expect(bare).toContain('somebody other than the contact at an unknown company')
+    expect(bare).not.toContain('texted')
+    // Still an alarm: somebody's opt-out is recorded nowhere.
+    expect(isAlarm(line('contact.opt_out_not_recorded', { ...FROM_SOMEBODY_ELSE, why: 'record_failed' }, { actor: 'system' }))).toBe(true)
   })
 
   /**

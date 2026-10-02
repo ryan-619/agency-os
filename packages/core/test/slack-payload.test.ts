@@ -54,20 +54,31 @@ describe('slackOptOutNotRecordedPayload', () => {
 
   /**
    * A STOP texted from a number no single contact holds has no message row
-   * and no contact. The alarm still goes; it names no number (lead data, and
-   * the app holds none to name), says where the number is, and links to the
-   * Compliance page rather than to anything built from it.
+   * and no contact. The alarm still goes; it names no number (lead data),
+   * says where the number is, and links to the Compliance page rather than
+   * to anything built from it.
+   *
+   * And it says only what is known (review round 7, [8]). It read "Nothing
+   * in the app holds the number it came from" — false when a redelivery of
+   * a STOP already recorded, or a shared number held in one org before
+   * another threw, reached this alarm — so the person was sent to suppress
+   * and pause what was done already. Now: check first, record if missing.
    */
-  it('says there is no message on file and links to /compliance, for an alarm with no touch', () => {
+  it('names no message or contact, says to check the suppression list first, and links to /compliance', () => {
     const unplaced: SlackOptOutNotRecordedEvent = { ...EVENT, touchId: null, contactId: null }
-    expect(slackOptOutNotRecordedPayload(unplaced, 'https://app.test/').text).toBe(
+    const text = slackOptOutNotRecordedPayload(unplaced, 'https://app.test/').text
+    expect(text).toBe(
       'OPT-OUT NOT RECORDED. Somebody asked to be left alone through a reply and no suppression row could be written. ' +
         'A person has to record it now.\n' +
-        'no message on file · contact unknown\n' +
-        'Nothing in the app holds the number it came from: read it from the provider’s inbound log and record it on the Suppressions page. ' +
-        'The Compliance page counts it.\n' +
+        'no message or contact named\n' +
+        'Whose number it was is not known here, and it may not be on the suppression list: check the Suppressions page for the ' +
+        'number in the provider’s inbound log, and record it there if it is missing. Anybody holding the number may already be ' +
+        'paused. The Compliance page counts it.\n' +
         'https://app.test/compliance',
     )
+    // Nothing it cannot know.
+    expect(text).not.toContain('Nothing in the app holds')
+    expect(text).not.toContain('no message on file')
     const bare = slackOptOutNotRecordedPayload(unplaced, null).text
     expect(bare).not.toMatch(/https?:/)
     expect(bare).toContain('It is counted on the Compliance page in the app.')
@@ -86,6 +97,31 @@ describe('slackOptOutNotRecordedPayload', () => {
     expect(text).toContain('https://app.test/suppressions')
     expect(text).not.toContain('Nothing in the app holds')
     expect(slackOptOutNotRecordedPayload(placed, null).text).toContain('Record it on the Suppressions page in the app.')
+  })
+
+  /**
+   * Review round 7, [7]: a colleague replying all to our message asked to
+   * stop, the reply was filed under the contact the message went to, and its
+   * recording threw. Suppressing the CONTACT's address would record nobody's
+   * opt-out, so the message names no contact and says whose address to
+   * record — never the address itself.
+   */
+  it('for a stop from somebody other than the contact, says to record the sender’s address and names no contact', () => {
+    const colleague: SlackOptOutNotRecordedEvent = { ...EVENT, contactId: null, fromIsContact: false }
+    expect(slackOptOutNotRecordedPayload(colleague, 'https://app.test').text).toBe(
+      'OPT-OUT NOT RECORDED. Somebody asked to be left alone through a reply and no suppression row could be written. ' +
+        'A person has to record it now.\n' +
+        'touch 00000000-0000-4000-8000-000000000007 · sent by somebody other than the contact\n' +
+        'The reply came from another address than the contact that message went to, so record THAT address, never the ' +
+        'contact’s: read it from the mail itself, check the Suppressions page for it, and record it there if it is missing.\n' +
+        'https://app.test/suppressions',
+    )
+    expect(slackOptOutNotRecordedPayload({ ...colleague, touchId: null }, null).text).toContain(
+      'no message on file · sent by somebody other than the contact\n',
+    )
+    expect(slackOptOutNotRecordedPayload(colleague, null).text).toContain('Record it on the Suppressions page in the app.')
+    // Absent, nothing is said about the sender: every other alarm reads as before.
+    expect(slackOptOutNotRecordedPayload(EVENT, 'https://app.test').text).not.toContain('somebody other than')
   })
 
   /** The builder names its fields; a row with more on it never reaches the channel. */

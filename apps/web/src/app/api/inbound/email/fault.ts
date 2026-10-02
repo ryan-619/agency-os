@@ -1,5 +1,5 @@
 import {
-  keepingRolledBackOptOut, looksLikeOptOut, rolledBackOptOutAlarm, rolledBackOptOutAudit, rolledBackOptOutPauseReason,
+  keepingRolledBackOptOut, looksLikeOptOut, rolledBackOptOutAlarm, rolledBackOptOutAudit, rolledBackOptOutPause,
   type InboundLog, type RolledBackOptOut,
 } from '@agency/db/queries'
 import type { NotificationEvent } from '../../../../lib/slack-message'
@@ -35,6 +35,16 @@ import type { NotificationEvent } from '../../../../lib/slack-message'
  * every other writer of that row pauses. Each write is tried on its own,
  * because the database may be the thing that failed.
  *
+ * Unless the reply came from somebody else (review round 7): a reply
+ * matched by References is filed under the contact our message went to,
+ * whoever answered, and a colleague's "remove me" held that contact as an
+ * opt-out nobody recorded — a pause no Resume lifts and a row /inbox reads
+ * however old — for good, even once the retry suppressed the colleague.
+ * The recorder's line says `fromIsContact`; when it is false the contact
+ * is paused as by any reply (`pauseContact`, `replied <ISO>`, which keeps
+ * a stronger pause), and the row and the alarm are about the message the
+ * sender answered and say whose address to record (inbound-fault.ts).
+ *
  * A fault before the recorder ran — the duplicate check or the match
  * itself — leaves nothing saying whose it was: the words are read with the
  * reply's own opt-out reader, and a stop is said at error with `alarm:
@@ -59,8 +69,8 @@ export interface InboundEmailFaultDeps {
     readonly orgId: string
     readonly actor: 'system'
     readonly action: 'contact.opt_out_not_recorded'
-    readonly subjectType: 'contact'
-    readonly subjectId: string
+    readonly subjectType: 'contact' | 'touch' | null
+    readonly subjectId: string | null
     readonly detail: Record<string, unknown>
   }) => Promise<void>
   /**
@@ -68,6 +78,12 @@ export interface InboundEmailFaultDeps {
    * contact's row took the pause. May throw; the caller says so.
    */
   readonly pause: (orgId: string, contactId: string, reason: string, now: Date) => Promise<boolean>
+  /**
+   * `pauseContact` on the route's database — a pause that keeps one already
+   * there — for a stop from somebody other than the contact it was filed
+   * under, who is held as by any reply. May throw; the caller says so.
+   */
+  readonly hold: (orgId: string, contactId: string, reason: string, now: Date) => Promise<boolean>
   /** Awaited: the opt-out alarm. Bounded and never throws (`notify`). */
   readonly alarm: (event: NotificationEvent) => Promise<void>
   readonly log: { error(message: string, fields?: Record<string, unknown>): void }
@@ -94,9 +110,12 @@ export async function inboundEmailNotRecorded(
     // Held first, before anybody is told: the sender reads a pause, never
     // the audit row or the alarm.
     const now = deps.now ? deps.now() : new Date()
+    const pause = rolledBackOptOutPause(placed, now)
     let paused: boolean
     try {
-      paused = await deps.pause(placed.orgId, placed.contactId, rolledBackOptOutPauseReason(now), now)
+      paused = pause.overriding
+        ? await deps.pause(placed.orgId, placed.contactId, pause.reason, now)
+        : await deps.hold(placed.orgId, placed.contactId, pause.reason, now)
     } catch {
       paused = false
     }
@@ -110,6 +129,9 @@ export async function inboundEmailNotRecorded(
       error,
       orgId: placed.orgId,
       contactId: placed.contactId,
+      // False: a colleague's stop, filed under that contact — who is held
+      // as by a reply, not as the one who asked.
+      fromIsContact: placed.fromIsContact,
       paused,
       audited,
       alarm: 'raised',

@@ -1010,6 +1010,15 @@ export async function replyQueueDraft(
  *    it. This is the reading that survives a fault that failed the
  *    suppression AND the audit row beside it — the `.catch(() => {})` on
  *    that write means the log alone can say nothing. Found by review.
+ *
+ * Not read: a stop from somebody ELSE that was filed under this person — a
+ * colleague replying all to our message (review round 7). Its row is about
+ * the reply, or the message it answered, and names them only as
+ * `filedUnder`, because it was not their opt-out: read here it locked them
+ * out for good, however old, even once the colleague was suppressed. While
+ * the colleague's opted-out reply stands with no suppression row, the
+ * second reading above still holds them; recording the colleague's address
+ * on /suppressions ends it.
  */
 async function optOutNotRecorded(db: AgencyDb, orgId: string, contactId: string): Promise<boolean> {
   const rows = await db
