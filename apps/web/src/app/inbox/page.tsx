@@ -86,6 +86,7 @@ export default async function InboxPage({
         : null,
       dealStage: r.dealStage,
       suppressed: r.suppressed,
+      fromIsContact: r.fromIsContact,
       handled:
         r.handledBy && r.touch.handledAt
           ? { by: r.handledBy.name ?? r.handledBy.email, at: r.touch.handledAt.toISOString() }

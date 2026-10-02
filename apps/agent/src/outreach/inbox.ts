@@ -60,7 +60,7 @@ import { ImapFlow } from 'imapflow'
 import { simpleParser, type HeaderValue, type SimpleParserOptions } from 'mailparser'
 import {
   appendAudit, handleInboundEmail, keepingRolledBackOptOut, pauseContact, pauseContactOverriding, rolledBackOptOutAlarm,
-  rolledBackOptOutAudit, rolledBackOptOutPause, type AgencyDb, type InboundLog, type InboundOutcome,
+  rolledBackOptOutAudit, rolledBackOptOutPause, rolledBackSenderHolds, type AgencyDb, type InboundLog, type InboundOutcome,
   type RolledBackOptOut,
 } from '@agency/db'
 import { MAIL_SIGNAL_HEADERS, MAIL_SIGNAL_LIMITS, htmlToText, type LlmProvider } from '@agency/core'
@@ -359,6 +359,10 @@ const recorderLines: InboundLog = {
  * the row and the alarm say whose address to record: holding the contact
  * as an opt-out nobody recorded locked out somebody who never asked, for
  * good, even once the retry suppressed the colleague (inbound-fault.ts).
+ * The colleague is held instead, when they are a contact here (review
+ * round 8): each the recorder found at their address, named on its line by
+ * id, is paused as the opt-out nobody recorded and audited as theirs
+ * (`rolledBackSenderHolds`), under the same retry-on-next-failure rule.
  */
 async function stopNotRecorded(
   placed: RolledBackOptOut,
@@ -387,6 +391,24 @@ async function stopNotRecorded(
     audited = false
     written = false
   }
+  // The sender of a colleague's stop, when they are contacts here: held as
+  // the one who asked, each write on its own.
+  const holds = rolledBackSenderHolds(placed, now)
+  let sendersHeld = 0
+  let sendersAudited = 0
+  for (const hold of holds) {
+    try {
+      if (await pauseContactOverriding(deps.db, placed.orgId, hold.contactId, hold.reason, now)) sendersHeld++
+    } catch {
+      written = false
+    }
+    try {
+      await appendAudit(deps.db, hold.audit)
+      sendersAudited++
+    } catch {
+      written = false
+    }
+  }
   const alarm = before ? 'already_raised' : deps.optOutAlarm ? 'raised' : 'off'
   // Ids and the fault's CLASS: its message quotes the address and the words.
   deps.log.error('OPT-OUT NOT RECORDED — a reply that asked to stop could not be recorded; it stays unseen and is retried, otherwise follow up by hand', {
@@ -398,6 +420,8 @@ async function stopNotRecorded(
     fromIsContact: placed.fromIsContact,
     paused,
     audited,
+    // The contacts who ARE that colleague, held as the one who asked.
+    ...(placed.fromIsContact ? {} : { senders: holds.length, sendersHeld, sendersAudited }),
     alarm,
   })
   deps.unrecordedStops?.set(key, { written })

@@ -225,6 +225,40 @@ describe('POST /api/inbound/email — a fault while recording', () => {
       for (const said of [JSON.stringify(lines), JSON.stringify(audits), text]) expect(said).not.toContain(COLLEAGUE)
     })
 
+    /**
+     * Review round 8, [2]: when the colleague is a contact here too, nothing
+     * held the person who asked while the retries ran — their approved
+     * message went on the next tick. The recorder names them by id on its
+     * line, and the fault path holds each as the one who asked.
+     */
+    it('holds the colleague as the one who asked when they are a contact here, before the alarm', async () => {
+      const [sam] = await db
+        .insert(schema.contacts)
+        .values({ orgId, companyId: (await db.select().from(schema.companies))[0]!.id, email: 'Sam@Rentman.io', timeZone: 'Europe/London' })
+        .returning({ id: schema.contacts.id })
+      await failOnce(test.pg, { table: 'touches', event: 'INSERT', when: "NEW.direction = 'in'" })
+      const { answer } = await deliver('Please remove me from your list.', [OUR_ID], COLLEAGUE)
+      expect(answer).toEqual({ status: 500, body: { error: 'opt-out not recorded', retry: true } })
+      expect(order).toEqual(['hold', 'audit', 'pause', 'audit', 'alarm'])
+
+      const [held] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, sam!.id))
+      expect(held!.pausedReason).toBe(`opt-out not recorded: reply ${NOON.toISOString()} (record_failed)`)
+      expect(pauseReasonClass(held!.pausedReason)).toBe('opt_out_not_recorded')
+      const [c] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, contactId))
+      expect(c!.pausedReason).toBe(`replied ${NOON.toISOString()}`)
+      expect(audits).toEqual([
+        expect.objectContaining({ subjectType: 'touch', subjectId: sentId }),
+        {
+          orgId, actor: 'system', action: 'contact.opt_out_not_recorded', subjectType: 'contact', subjectId: sam!.id,
+          detail: { channel: 'email', why: 'record_failed' },
+        },
+      ])
+      expect(lines.at(-1)!.fields).toMatchObject({
+        fromIsContact: false, paused: true, audited: true, senders: 1, sendersHeld: 1, sendersAudited: 1,
+      })
+      for (const said of [JSON.stringify(lines), JSON.stringify(audits)]) expect(said.toLowerCase()).not.toContain(COLLEAGUE)
+    })
+
     it('leaves the contact resumable and their own later reply answerable once the retry records it', async () => {
       await failOnce(test.pg, { table: 'touches', event: 'INSERT', when: "NEW.direction = 'in'" })
       await deliver('Please remove me from your list.', [OUR_ID], COLLEAGUE)

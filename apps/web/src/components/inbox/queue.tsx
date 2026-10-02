@@ -4,10 +4,10 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { When } from '@/components/when'
 import { answerElsewhere, answersByTemplate, channelLabel, contactsLinkFor, matchedByWords } from '@/components/inbox/channel'
+import { optedOutNote, optedOutWarning, type OptedOutRow } from '@/components/inbox/opted-out'
 import {
-  ANSWER_BODY_MAX, ANSWER_SUBJECT_MAX, HUMAN_REPLY_KINDS, INBOX_GROUP_LABELS, OPTED_OUT_NOTE,
-  OPTED_OUT_NOT_SUPPRESSED_NOTE, RECLASSIFY_HINT, answerIsLive, answerStateWords, answerSubject,
-  type InboxGroup,
+  ANSWER_BODY_MAX, ANSWER_SUBJECT_MAX, HUMAN_REPLY_KINDS, INBOX_GROUP_LABELS, RECLASSIFY_HINT, answerIsLive,
+  answerStateWords, answerSubject, type InboxGroup,
 } from '@/lib/inbox-view'
 
 /**
@@ -60,7 +60,14 @@ export interface InboxRowView {
     readonly sentAt: string | null
   } | null
   readonly dealStage: string | null
+  /** For a reply that asked to stop, by the address it came from alone (`inboxTouches`). */
   readonly suppressed: boolean
+  /**
+   * False when the reply came from another address than the contact it is
+   * filed under — a colleague replying all to our message (review round 8):
+   * a stop in it is theirs, never the contact's.
+   */
+  readonly fromIsContact: boolean
   readonly handled: { readonly by: string; readonly at: string } | null
   readonly answered: { readonly touchId: string; readonly status: string } | null
 }
@@ -73,6 +80,11 @@ export interface InboxCampaignChoice {
 }
 
 type Drafted = { readonly lines: readonly string[] }
+
+/** What `opted-out.ts` reads off a row to say whose stop it was. */
+function stopOf(row: InboxRowView): OptedOutRow {
+  return { fromIsContact: row.fromIsContact, from: row.from, contactName: row.contact?.name ?? null, suppressed: row.suppressed }
+}
 
 export function InboxQueue({
   groups,
@@ -238,12 +250,11 @@ export function InboxQueue({
 
                     {optedOut ? (
                       <p className="muted" style={{ fontSize: 12.5, margin: '6px 0 0' }}>
-                        {row.contact?.name ?? 'This person'} {OPTED_OUT_NOTE}{' '}
-                        <a href="/suppressions">The suppression list</a>.
+                        {optedOutNote(stopOf(row))} <a href="/suppressions">The suppression list</a>.
                       </p>
                     ) : null}
-                    {optedOut && !row.suppressed ? (
-                      <div className="note note-warn" style={{ marginTop: 8 }}>{OPTED_OUT_NOT_SUPPRESSED_NOTE}</div>
+                    {optedOut && optedOutWarning(stopOf(row)) ? (
+                      <div className="note note-warn" style={{ marginTop: 8 }}>{optedOutWarning(stopOf(row))}</div>
                     ) : null}
 
                     {row.answered ? (

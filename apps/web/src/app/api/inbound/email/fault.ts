@@ -1,6 +1,6 @@
 import {
   keepingRolledBackOptOut, looksLikeOptOut, rolledBackOptOutAlarm, rolledBackOptOutAudit, rolledBackOptOutPause,
-  type InboundLog, type RolledBackOptOut,
+  rolledBackSenderHolds, type InboundLog, type RolledBackOptOut,
 } from '@agency/db/queries'
 import type { NotificationEvent } from '../../../../lib/slack-message'
 
@@ -43,7 +43,12 @@ import type { NotificationEvent } from '../../../../lib/slack-message'
  * The recorder's line says `fromIsContact`; when it is false the contact
  * is paused as by any reply (`pauseContact`, `replied <ISO>`, which keeps
  * a stronger pause), and the row and the alarm are about the message the
- * sender answered and say whose address to record (inbound-fault.ts).
+ * sender answered and say whose address to record (inbound-fault.ts). And
+ * the SENDER is held (review round 8): each contact of the org the
+ * recorder found at the sender's address, named on its line by id, is
+ * paused as the opt-out nobody recorded and audited as theirs
+ * (`rolledBackSenderHolds`) — before, nothing held the person who asked,
+ * and their approved message went while the retries ran.
  *
  * A fault before the recorder ran — the duplicate check or the match
  * itself — leaves nothing saying whose it was: the words are read with the
@@ -125,6 +130,24 @@ export async function inboundEmailNotRecorded(
     } catch {
       audited = false
     }
+    // The sender, when the stop was a colleague's and they are a contact
+    // here: held as the one who asked, each write on its own.
+    const holds = rolledBackSenderHolds(placed, now)
+    let sendersHeld = 0
+    let sendersAudited = 0
+    for (const hold of holds) {
+      try {
+        if (await deps.pause(placed.orgId, hold.contactId, hold.reason, now)) sendersHeld++
+      } catch {
+        // Said by the count below.
+      }
+      try {
+        await deps.audit(hold.audit)
+        sendersAudited++
+      } catch {
+        // Said by the count below.
+      }
+    }
     deps.log.error('OPT-OUT NOT RECORDED — an email that asked to stop could not be recorded; answering 500 so the provider retries, otherwise follow up by hand', {
       error,
       orgId: placed.orgId,
@@ -134,6 +157,8 @@ export async function inboundEmailNotRecorded(
       fromIsContact: placed.fromIsContact,
       paused,
       audited,
+      // The contacts who ARE that colleague, held as the one who asked.
+      ...(placed.fromIsContact ? {} : { senders: holds.length, sendersHeld, sendersAudited }),
       alarm: 'raised',
     })
     await deps.alarm(rolledBackOptOutAlarm(placed))
