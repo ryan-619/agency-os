@@ -18,7 +18,7 @@ import * as q from '../src/queries.js'
 import * as all from '../src/index.js'
 import {
   keepingRolledBackOptOut, rolledBackOptOutAlarm, rolledBackOptOutAudit, rolledBackOptOutPause, rolledBackOptOutPauseReason,
-  type InboundLog,
+  rolledBackSenderHolds, type InboundLog,
 } from '../src/index.js'
 
 const NOON = new Date('2026-09-15T12:00:00.000Z')
@@ -75,6 +75,28 @@ describe('keepingRolledBackOptOut', () => {
     expect(said(undefined)).toBe(true)
     expect(said('false')).toBe(true)
   })
+
+  /**
+   * Review round 8, [2]: the recorder names the contacts who ARE the sender
+   * of a colleague's stop, by id, so the loud path holds them without
+   * reading again from a database that just failed.
+   */
+  it('keeps the contacts who are the sender of a colleague’s stop — ids only, and never the contact it was filed under', () => {
+    const kept = (fields: Record<string, unknown>) => {
+      const recorder = keepingRolledBackOptOut(forwardTo([]))
+      recorder.error('OPT-OUT NOT RECORDED — the reply was rolled back', {
+        orgId: 'org-1', contactId: 'contact-1', inReplyTo: 'touch-1', ...fields,
+      })
+      return recorder.rolledBack()
+    }
+    expect(kept({ fromIsContact: false, senderContactIds: ['sam-1', 7, 'contact-1', 'sam-2'] })).toEqual({
+      ...COLLEAGUE, senderContactIds: ['sam-1', 'sam-2'],
+    })
+    // Not said: nobody to hold. The contact's own stop names nobody else.
+    expect(kept({ fromIsContact: false })).toEqual(COLLEAGUE)
+    expect(kept({ fromIsContact: false, senderContactIds: 'sam-1' })).toEqual(COLLEAGUE)
+    expect(kept({ fromIsContact: true, senderContactIds: ['sam-1'] })).toEqual(PLACED)
+  })
 })
 
 describe('what follows it', () => {
@@ -130,6 +152,24 @@ describe('what follows it', () => {
     expect(rolledBackOptOutAudit({ ...COLLEAGUE, inReplyTo: null })).toMatchObject({ subjectType: null, subjectId: null })
   })
 
+  it('holds each contact who is the sender of a colleague’s stop as the one who asked, and audits it as theirs', () => {
+    const holds = rolledBackSenderHolds({ ...COLLEAGUE, senderContactIds: ['sam-1'] }, NOON)
+    expect(holds).toEqual([
+      {
+        contactId: 'sam-1',
+        reason: rolledBackOptOutPauseReason(NOON),
+        audit: {
+          orgId: 'org-1', actor: 'system', action: 'contact.opt_out_not_recorded', subjectType: 'contact',
+          subjectId: 'sam-1', detail: { channel: 'email', why: 'record_failed' },
+        },
+      },
+    ])
+    expect(pauseReasonClass(holds[0]!.reason)).toBe('opt_out_not_recorded')
+    // Nobody named, nobody held — and the contact's own stop holds them, not this.
+    expect(rolledBackSenderHolds(COLLEAGUE, NOON)).toEqual([])
+    expect(rolledBackSenderHolds({ ...PLACED, senderContactIds: ['sam-1'] }, NOON)).toEqual([])
+  })
+
   it('alarms naming the message the reply answered, or none', () => {
     expect(rolledBackOptOutAlarm(PLACED)).toEqual({
       kind: 'opt_out_not_recorded', orgId: 'org-1', touchId: 'touch-1', contactId: 'contact-1', path: 'reply',
@@ -162,6 +202,7 @@ describe('the module', () => {
     expect(index).toContain(`export * from './inbound-fault.js'`)
     for (const name of [
       'keepingRolledBackOptOut', 'rolledBackOptOutPauseReason', 'rolledBackOptOutPause', 'rolledBackOptOutAudit', 'rolledBackOptOutAlarm',
+      'rolledBackSenderHolds',
     ]) {
       expect(name in q && name in all, name).toBe(true)
     }

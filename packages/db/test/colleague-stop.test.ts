@@ -226,6 +226,20 @@ describe('a stop from a colleague on the thread', () => {
       expect(p.sent).toEqual([])
     })
 
+    it('names the sender’s contacts, by id, on the line a rolled-back reply leaves', async () => {
+      await failOnce(test.pg, { table: 'touches', event: 'INSERT', when: "NEW.direction = 'in'" })
+      await expect(handleInboundEmail(db, fromSam())).rejects.toThrow()
+      expect(lines).toEqual([
+        {
+          message: expect.stringMatching(/^OPT-OUT NOT RECORDED — the reply was rolled back/),
+          fields: expect.objectContaining({ orgId, contactId: priyaId, fromIsContact: false, senderContactIds: [samId] }),
+        },
+      ])
+      expect(JSON.stringify(lines)).not.toContain('@')
+      // Rolled back: nobody was held by the recorder itself. The caller holds them.
+      expect((await contactRow(samId)).pausedAt).toBeNull()
+    })
+
     it('holds nobody when the suppression is written: the suppression is what stops the sender', async () => {
       await claimSams()
       const r = await handleInboundEmail(db, fromSam())

@@ -504,6 +504,39 @@ In-Reply-To: <sent-1@agency.test>`,
     expect(JSON.stringify([lines, rows])).not.toContain('sam@')
   })
 
+  /**
+   * Review round 8, [2], on IMAP: the colleague is a contact here too. The
+   * recorder names them on its rolled-back line, and the first failure holds
+   * them as the one who asked — the retry, which suppresses them, leaves that
+   * standing, as it leaves the contact's own.
+   */
+  it('holds a colleague who is a contact here as the one who asked, on the first failure', async () => {
+    const [sam] = await db
+      .insert(schema.contacts)
+      .values({ orgId, companyId: (await db.select().from(schema.companies))[0]!.id, email: 'sam@rentman.io', timeZone: 'Europe/London' })
+      .returning({ id: schema.contacts.id })
+    await failOnce(test.pg, { table: 'touches', event: 'INSERT', when: "NEW.direction = 'in'" })
+    const box = new FakeMailbox()
+    box.put(8, reply('Please remove me from your list.', '<sam-8@rentman.io>', 'Sam <sam@rentman.io>'))
+    const lines = start(box, db, { retryMs: 20, refreshMs: 60_000 }, [])
+
+    await vi.waitFor(() => expect(box.seen(8)).toBe(true), { timeout: 10_000 })
+    expect(await suppressions()).toEqual([{ kind: 'email', value: 'sam@rentman.io', source: 'reply' }])
+    const [held] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, sam!.id))
+    expect(held!.pausedReason).toBe(`opt-out not recorded: reply ${NOON.toISOString()} (record_failed)`)
+    const rows = await notRecordedRows()
+    expect(rows.map((r) => [r.subjectType, r.subjectId])).toEqual(
+      expect.arrayContaining([['touch', sentId], ['contact', sam!.id]]),
+    )
+    expect(rows).toHaveLength(2)
+    expect((await contactRow()).pausedReason).toBe(`replied ${NOON.toISOString()}`)
+    const loud = said(lines).filter((l) => String(l.msg).startsWith('OPT-OUT NOT RECORDED — a reply that asked to stop'))
+    expect(loud).toEqual([
+      expect.objectContaining({ uid: 8, fromIsContact: false, senders: 1, sendersHeld: 1, sendersAudited: 1 }),
+    ])
+    expect(JSON.stringify([lines, rows])).not.toContain('sam@')
+  })
+
   /** The control: Priya's OWN stop is still held as hers — that lockout is right. */
   it('still holds the contact as an opt-out nobody recorded when the stop was their own', async () => {
     await failOnce(test.pg, { table: 'touches', event: 'INSERT', when: "NEW.direction = 'in'" })
