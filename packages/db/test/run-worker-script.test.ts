@@ -472,6 +472,16 @@ describe.runIf(PTY)('tools/run-worker.sh, answered at its prompts', () => {
     expect(r.transcript).not.toContain(made!)
   })
 
+  it('on a Mac, `new` that the Keychain will not keep: nothing is made, and the clipboard is cleared', async () => {
+    // `security -i` answering 0 for a command it refused: the write is read back, not trusted.
+    writeFileSync(join(bin, 'security'), readFileSync(join(bin, 'security'), 'utf8').replace('printf "%s" "$w" > "$KEYCHAIN/$a"', ':'))
+    const r = await answered(layout(), [], { smtp: true, unsubscribe: 'new', confirmNew: 'y', remember: 'n' })
+    expect(r.transcript).toContain('Could not save a new secret in your Keychain, so none was made')
+    expect(r.transcript).toContain('WITHOUT an unsubscribe header')
+    expect(r.worker.UNSUBSCRIBE_SECRET).toBeUndefined()
+    expect(clipboard()).toBe('')
+  })
+
   it('on a Mac, `new` and a no: nothing is made, and the saved secret is kept', async () => {
     save('DATABASE_URL', DB)
     save('UNSUBSCRIBE_SECRET', UNSUB)

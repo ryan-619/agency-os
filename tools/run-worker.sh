@@ -258,7 +258,8 @@ if [ "$LOADED" = no ]; then
       printf '  Could not put a new secret on the clipboard, so none was made.\n' >&3
       keep_or_none; return 0
     fi
-    if ! kc_put UNSUBSCRIBE_SECRET "$fresh"; then
+    # Read back, not trusted: `security -i` can answer 0 for a command it refused.
+    if ! kc_put UNSUBSCRIBE_SECRET "$fresh" || [ "$(kc_get UNSUBSCRIBE_SECRET || true)" != "$fresh" ]; then
       printf '' | pbcopy || true
       printf '  Could not save a new secret in your Keychain, so none was made.\n' >&3
       keep_or_none; return 0
