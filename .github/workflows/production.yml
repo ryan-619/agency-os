@@ -15,22 +15,25 @@ name: Production
 #              report the ref's migration — DEPLOYING.md, "migrate FIRST"
 #   worker   — deploy apps/agent to Fly.io (fly.toml), one machine that never
 #              stops, and point the web app at it (AGENT_URL and a shared
-#              AGENT_INTERNAL_TOKEN, set on Vercel and redeployed)
+#              AGENT_INTERNAL_TOKEN, set on Vercel and redeployed) — in two
+#              jobs, `worker` and `worker-web`, below
 #
 # Secrets (Settings → Secrets and variables → Actions):
-#   VERCEL_TOKEN             deploy and release. Also how the database URL is
-#                            found: from the Vercel project's own production
+#   VERCEL_TOKEN             deploy, release and worker. Also how the database
+#                            URL is found for status, migrate and release:
+#                            from the Vercel project's own production
 #                            DATABASE_URL, with Neon's `-pooler` taken off
-#   PRODUCTION_DATABASE_URL  optional: Neon's DIRECT string. Needed only when
-#                            Vercel's DATABASE_URL is marked Sensitive, which
-#                            `vercel pull` never returns
+#   PRODUCTION_DATABASE_URL  Neon's DIRECT string. Optional for those three
+#                            — needed only when Vercel's DATABASE_URL is
+#                            marked Sensitive, which `vercel pull` never
+#                            returns — and REQUIRED for worker, whose job
+#                            never runs the Vercel CLI
 #   VERCEL_ORG_ID, VERCEL_PROJECT_ID, VERCEL_TEAM   optional; without them
 #                            the project `agency-os` is found under every
 #                            scope the token reaches
-#   FLY_API_TOKEN            worker: a Fly ORG token. The worker also needs
-#                            PRODUCTION_DATABASE_URL (Neon's DIRECT string),
-#                            and takes any of ANTHROPIC_API_KEY, SECRETS_KEY,
-#                            SMTP_*, MAIL_FROM, IMAP_*, SLACK_WEBHOOK_URL,
+#   FLY_API_TOKEN            worker: a Fly ORG token. The worker also takes
+#                            any of ANTHROPIC_API_KEY, SECRETS_KEY, SMTP_*,
+#                            MAIL_FROM, IMAP_*, SLACK_WEBHOOK_URL,
 #                            UNSUBSCRIBE_SECRET, DOVESOFT_API_KEY and
 #                            DOVESOFT_ENTITY_ID that are set as secrets
 
@@ -59,13 +62,86 @@ env:
   NODE_VERSION: '22'
 
 jobs:
+  # status, migrate, deploy and release: the database and Vercel only.
   production:
     name: production ${{ inputs.action }}
+    if: inputs.action != 'worker'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # So a secret saved under Settings → Environments → production is seen
     # as well as a repository secret.
     environment: production
+    steps:
+      # Where each credential is visible, as true/false only: a value saved
+      # as a Variable instead of a Secret would be printed in the step's env
+      # block, so it is detected here and never read. Only the two this job
+      # uses: naming a secret anywhere in a job, even in a `!= ''`, sends its
+      # value to that job's runner, and this job runs the Vercel CLI.
+      - name: Which credentials this run can see
+        env:
+          TOKEN_SECRET: ${{ secrets.VERCEL_TOKEN != '' }}
+          TOKEN_VARIABLE: ${{ vars.VERCEL_TOKEN != '' }}
+          DB_SECRET: ${{ secrets.PRODUCTION_DATABASE_URL != '' }}
+          DB_VARIABLE: ${{ vars.PRODUCTION_DATABASE_URL != '' }}
+        run: |
+          echo "VERCEL_TOKEN            secret: $TOKEN_SECRET  variable: $TOKEN_VARIABLE"
+          echo "PRODUCTION_DATABASE_URL secret: $DB_SECRET  variable: $DB_VARIABLE"
+          if [ "$TOKEN_VARIABLE" = true ] || [ "$DB_VARIABLE" = true ]; then
+            echo "::error::A credential is saved as a Variable, which is shown in plain text. Delete it there and add it under Secrets instead."
+            exit 1
+          fi
+      - name: Refuse an unconfirmed change
+        if: inputs.action != 'status' && inputs.confirm != inputs.action
+        env:
+          ACTION: ${{ inputs.action }}
+        run: |
+          echo "::error::Type '$ACTION' in the confirm field to run it against production."
+          exit 1
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: ${{ inputs.action }}
+        env:
+          ACTION: ${{ inputs.action }}
+          PRODUCTION_DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TEAM: ${{ secrets.VERCEL_TEAM }}
+        run: tools/production.sh "$ACTION"
+
+  # `worker`, in two JOBS — two fresh VMs — because a step is not a
+  # credential boundary (review round 8, [5]). tools/production.sh hands the
+  # worker's secrets to no program but flyctl, but un-exporting a variable
+  # only changes what a child inherits: every process the runner user starts
+  # can read /proc/<pid>/environ of the shells above it. The Vercel CLI,
+  # which npx installs at run time with no lockfile, and whose `build` runs
+  # the whole web build, must therefore never run on a VM that holds one.
+  #
+  # Job 1: Fly. The worker's own secrets — Fly, the model, the mailboxes,
+  # Slack, DoveSoft — reach this job's script step alone, and that script
+  # (its WORKER_ONLY, which must list every one of them below) never runs
+  # the Vercel CLI: it reads the database URL from PRODUCTION_DATABASE_URL,
+  # and sets the web app's variables through tools/vercel-env.mjs, our own,
+  # from the lockfile.
+  worker:
+    name: worker (Fly)
+    if: inputs.action == 'worker'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    # `true` when the web app must be redeployed. Never a secret, and never
+    # the wiring marker: GitHub drops a job output that contains any secret
+    # value of this job as a substring — SMTP_SECURE or IMAP_SECURE may well
+    # be `true` or `false`, and FLY_ORG may be part of the Fly app's name —
+    # so the marker crosses on Vercel instead (tools/production.sh,
+    # AGENT_INTERNAL_TOKEN_PENDING), and `worker-web` is skipped only on a
+    # `false` that arrived.
+    outputs:
+      redeploy: ${{ steps.worker.outputs.redeploy }}
     steps:
       # Where each credential is visible, as true/false only: a value saved
       # as a Variable instead of a Secret would be printed in the step's env
@@ -99,34 +175,16 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci
-      # A third-party action, in the job that holds every production
-      # credential: pinned to a full commit (the one `master` and `v1` named
-      # when it was pinned), never a branch or a tag, which a push to that
-      # repository could move — and flyctl itself pinned by version.
+      # A third-party action, in the job that holds every worker secret:
+      # pinned to a full commit (the one `master` and `v1` named when it was
+      # pinned), never a branch or a tag, which a push to that repository
+      # could move — and flyctl itself pinned by version.
       - name: Install flyctl
-        if: inputs.action == 'worker'
         uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # v1
         with:
           version: 0.4.111
-      # Two steps, so a credential reaches only the action that uses it:
-      # status, migrate, deploy and release see the database and Vercel
-      # only; the worker's own secrets — Fly, the model, the mailboxes,
-      # Slack, DoveSoft — reach the worker step alone. Inside it,
-      # tools/production.sh hands them to flyctl alone (its WORKER_ONLY,
-      # which must list every one of them below): never to the Vercel CLI,
-      # which npx installs at run time, nor to the web build it runs.
-      - name: ${{ inputs.action }}
-        if: inputs.action != 'worker'
-        env:
-          ACTION: ${{ inputs.action }}
-          PRODUCTION_DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
-          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-          VERCEL_TEAM: ${{ secrets.VERCEL_TEAM }}
-        run: tools/production.sh "$ACTION"
       - name: worker
-        if: inputs.action == 'worker'
+        id: worker
         env:
           PRODUCTION_DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
@@ -156,3 +214,51 @@ jobs:
           DOVESOFT_API_KEY: ${{ secrets.DOVESOFT_API_KEY }}
           DOVESOFT_ENTITY_ID: ${{ secrets.DOVESOFT_ENTITY_ID }}
         run: tools/production.sh worker
+
+  # Job 2: the web app, on a VM that never held a worker secret. VERCEL_*
+  # alone — not even the database URL — for the Vercel CLI's pull, build and
+  # prebuilt deploy; then /api/health?strict=1; then, LAST, the wiring
+  # marker; then the worker seen live from the web app.
+  worker-web:
+    name: worker (web redeploy)
+    needs: worker
+    # Fail-open: a `true` GitHub dropped (above) still redeploys; only a
+    # `false` that arrived skips this job, and a `false` that was dropped
+    # runs it to find nothing of this run waiting.
+    if: needs.worker.outputs.redeploy != 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    steps:
+      # VERCEL_TOKEN only: naming any other secret here, even in a `!= ''`,
+      # would send its value to this job's runner.
+      - name: Which credentials this job can see
+        env:
+          TOKEN_SECRET: ${{ secrets.VERCEL_TOKEN != '' }}
+          TOKEN_VARIABLE: ${{ vars.VERCEL_TOKEN != '' }}
+        run: |
+          echo "VERCEL_TOKEN            secret: $TOKEN_SECRET  variable: $TOKEN_VARIABLE"
+          if [ "$TOKEN_VARIABLE" = true ]; then
+            echo "::error::A credential is saved as a Variable, which is shown in plain text. Delete it there and add it under Secrets instead."
+            exit 1
+          fi
+      - name: Refuse an unconfirmed change
+        if: inputs.action != 'status' && inputs.confirm != inputs.action
+        env:
+          ACTION: ${{ inputs.action }}
+        run: |
+          echo "::error::Type '$ACTION' in the confirm field to run it against production."
+          exit 1
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: worker-web
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TEAM: ${{ secrets.VERCEL_TEAM }}
+        run: tools/production.sh worker-web
