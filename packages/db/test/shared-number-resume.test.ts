@@ -20,10 +20,12 @@ import { fileURLToPath } from 'node:url'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import {
-  addSuppression, contactPauseByHand, contactResumeByHand, isSharedNumberOptOutPause, pauseContactOverriding,
-  pauseReasonClass, previewSend, recordInboundReply, recordInboundSms, schema, sharedNumberHoldReason, sharedNumberOptOutReason,
+  addSuppression, contactPauseByHand, contactResumeByHand, contactsUpdate, isSharedNumberOptOutPause, pauseContactOverriding,
+  pauseReasonClass, previewSend, recordInboundReply, recordInboundSms, removeSuppression, schema, sharedNumberHoldReason,
+  sharedNumberOptOutReason,
   type AgencyDb,
 } from '../src/index.js'
+import { heldForUnrecordedSharedNumber } from '../src/sms.js'
 import { migratedDb, type TestDb } from './helpers.js'
 import { failOnce } from './fault-db.js'
 
@@ -340,6 +342,192 @@ describe('a holder’s stronger pause, and the key an own opt-out was about (rev
     await addSuppression(db, { orgId, kind: 'phone', value: PHONE, reason: 'by hand', source: 'manual' })
     expect(await resume(x)).toMatchObject({ ok: false, reason: 'opt_out_not_recorded' })
     await addSuppression(db, { orgId, kind: 'email', value: 'x@acme.example', reason: 'by hand', source: 'manual' })
+    expect(await resume(x)).toEqual({ ok: true })
+  })
+})
+
+/**
+ * Review round 10. Two ways the round-9 hold read wrongly once it was over,
+ * or was never written down:
+ *
+ *  - [0] + [1]: any `sharedNumber` row that ever listed a contact counted as
+ *    a live hold whenever their phone was unsuppressed — forever. Once a
+ *    person had resumed them after the number was recorded, an owner who
+ *    removed the number's suppression left every LATER pause of theirs
+ *    refused by Resume (RESUME_SHARED_NUMBER_KEPT), a teammate's included.
+ *    A row now stops governing a contact once a `contact.resumed` row for
+ *    them is newer than it — Resume succeeds for a listed holder only once
+ *    the number is recorded.
+ *  - [4]: a holder whose own pause stood (`kept`) was held only by that row,
+ *    appended last and best-effort. When it could not be written, nothing
+ *    held them: Resume lifted their pause while the number's STOP was
+ *    unrecorded. Now a kept pause Resume would lift once the number is
+ *    recorded is replaced by the hard hold when the row cannot be written.
+ */
+describe('a shared-number row that is over, or was never written (review round 10)', () => {
+  const AT = new Date('2026-09-15T06:30:00.000Z')
+  const LATER = new Date('2026-09-15T07:30:00.000Z')
+  const PHONE = '+919812345678'
+  const TEAMMATE = 'waiting on legal (by sam@agency.test)'
+
+  let test: TestDb
+  let db: AgencyDb
+  let orgId: string
+  let userId: string
+  let companyId: string
+  let jo: string
+  let x: string
+
+  beforeEach(async () => {
+    test = await migratedDb()
+    db = drizzle(test.pg, { schema }) as unknown as AgencyDb
+    const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
+    orgId = org!.id
+    const [user] = await db.insert(schema.users).values({ orgId, email: 'owner@agency.test', role: 'owner' }).returning({ id: schema.users.id })
+    userId = user!.id
+    const [company] = await db
+      .insert(schema.companies)
+      .values({ orgId, domain: 'acme.example', timeZone: 'Asia/Kolkata' })
+      .returning({ id: schema.companies.id })
+    companyId = company!.id
+    const [j] = await db
+      .insert(schema.contacts)
+      .values({ orgId, companyId, email: 'jo@acme.example', phone: PHONE, timeZone: 'Asia/Kolkata' })
+      .returning({ id: schema.contacts.id })
+    jo = j!.id
+    const [xx] = await db
+      .insert(schema.contacts)
+      .values({ orgId, companyId, email: 'x@acme.example', phone: PHONE, timeZone: 'Asia/Kolkata' })
+      .returning({ id: schema.contacts.id })
+    x = xx!.id
+    // Jo was texted at the number: a text from it is filed under Jo, and X is a holder.
+    await db.insert(schema.touches).values({
+      orgId, contactId: jo, companyId, channel: 'sms', direction: 'out', status: 'sent', body: 'Hi Jo',
+      recipient: PHONE, sentAt: new Date(AT.getTime() - 86_400_000), providerId: 'ds-1',
+    })
+    // PGlite's clock is millisecond-grained, and what follows turns on which
+    // audit row is newer: every row gets its own second, in the order written.
+    await test.pg.exec(`
+      CREATE SEQUENCE audit_clock;
+      CREATE FUNCTION audit_clock() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        NEW.created_at := timestamptz '2026-09-15 00:00:00+00' + nextval('audit_clock') * interval '1 second';
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER audit_clock BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION audit_clock();
+    `)
+  }, 30_000)
+
+  afterEach(async () => {
+    await test?.close()
+  })
+
+  const contact = async (id: string) => (await db.select().from(schema.contacts).where(eq(schema.contacts.id, id)))[0]!
+  const resume = async (id: string) =>
+    contactResumeByHand(db, { orgId, contact: { id }, expectedReason: (await contact(id)).pausedReason, actor: userId })
+  const sharedRows = async () =>
+    (await db.select().from(schema.auditLog).where(eq(schema.auditLog.action, 'contact.opt_out_not_recorded')))
+      .filter((r) => (r.detail as Record<string, unknown>)['sharedNumber'] === true)
+  /** A STOP from the number, filed under Jo, whose phone suppression faults once. */
+  const stopNotRecorded = async (providerMessageId: string | null, log: { error: (m: string, f?: Record<string, unknown>) => void } = { error: () => {} }) => {
+    await failOnce(test.pg, { table: 'suppressions', event: 'INSERT', when: `NEW.kind = 'phone'` })
+    const r = await recordInboundSms(db, { from: PHONE, text: 'STOP', providerMessageId, orgId, receivedAt: LATER, log })
+    expect(r).toMatchObject({ matched: 'contact', contactId: jo, optOutNotRecorded: true })
+  }
+
+  it('lets Resume lift a later pause of a holder resumed once the number was recorded, after an owner removed it', async () => {
+    await stopNotRecorded('mo-1')
+    expect(isSharedNumberOptOutPause((await contact(x)).pausedReason)).toBe(true)
+    // DoveSoft's retry records the number and eases X; a person resumes X.
+    expect(await recordInboundSms(db, { from: PHONE, text: 'STOP', providerMessageId: 'mo-1', orgId, receivedAt: LATER, log: { error: () => {} } }))
+      .toMatchObject({ duplicate: true, suppressed: true })
+    expect(await resume(x)).toEqual({ ok: true })
+
+    // An owner removes the number's suppression (the reception line, say).
+    const [sup] = await db.select({ id: schema.suppressions.id }).from(schema.suppressions).where(eq(schema.suppressions.kind, 'phone'))
+    expect(await removeSuppression(db, orgId, sup!.id)).not.toBeNull()
+    expect(await sharedRows()).toHaveLength(1)
+    expect(await heldForUnrecordedSharedNumber(db, orgId, await contact(x))).toBe(false)
+
+    // A teammate's pause, later and about something else, is theirs to lift.
+    expect(await contactPauseByHand(db, { orgId, contactId: x, reason: TEAMMATE })).toMatchObject({ ok: true })
+    expect(await resume(x)).toEqual({ ok: true })
+    expect((await contact(x)).pausedAt).toBeNull()
+  })
+
+  it('still refuses a kept holder a row lists who was never resumed since', async () => {
+    await pauseContactOverriding(db, orgId, x, TEAMMATE, AT)
+    await stopNotRecorded('mo-1')
+    expect((await contact(x)).pausedReason).toBe(TEAMMATE)
+    expect(await heldForUnrecordedSharedNumber(db, orgId, await contact(x))).toBe(true)
+    expect(await resume(x)).toMatchObject({ ok: false, reason: 'opt_out_not_recorded' })
+  })
+
+  it('refuses again once a NEWER row lists them, though a person resumed them after the first', async () => {
+    await stopNotRecorded('mo-1')
+    await recordInboundSms(db, { from: PHONE, text: 'STOP', providerMessageId: 'mo-1', orgId, receivedAt: LATER, log: { error: () => {} } })
+    expect(await resume(x)).toEqual({ ok: true })
+    const [sup] = await db.select({ id: schema.suppressions.id }).from(schema.suppressions).where(eq(schema.suppressions.kind, 'phone'))
+    await removeSuppression(db, orgId, sup!.id)
+    // A teammate holds X, and a second STOP from the number fails: X's pause stands, and the new row lists X.
+    await contactPauseByHand(db, { orgId, contactId: x, reason: TEAMMATE })
+    await stopNotRecorded('mo-2')
+    expect((await contact(x)).pausedReason).toBe(TEAMMATE)
+    expect(await sharedRows()).toHaveLength(2)
+    expect(await resume(x)).toMatchObject({ ok: false, reason: 'opt_out_not_recorded' })
+    expect(await contactsUpdate(db, orgId, x, { phone: '' })).toMatchObject({ ok: false, reason: 'shared_number_hold' })
+  })
+
+  /**
+   * [4], the reviewer's probe (r10di/probe-kept-row): the phone suppression
+   * faults, and so does the row's append. X's teammate pause stood, and
+   * nothing listed X: Resume lifted it, and the phone could be changed,
+   * while the number's STOP was unrecorded — with no message id, no retry
+   * comes. Now X is held hard instead, and the line says the row was not
+   * written and names the kept holders.
+   */
+  it('holds a kept holder hard when the row that would list them cannot be written', async () => {
+    const OWN = `opt-out not recorded: reply ${AT.toISOString()} (record_failed)`
+    const UNSUBSCRIBED = `unsubscribed ${AT.toISOString()}`
+    const ERASURE = `erasure requested ${AT.toISOString().slice(0, 10)}; not completed (unreadable_linkedin)`
+    const more = async (email: string, reason: string) => {
+      const [c] = await db.insert(schema.contacts).values({ orgId, companyId, email, phone: PHONE }).returning({ id: schema.contacts.id })
+      await pauseContactOverriding(db, orgId, c!.id, reason, AT)
+      return c!.id
+    }
+    await pauseContactOverriding(db, orgId, x, TEAMMATE, AT)
+    const left = await more('left@acme.example', UNSUBSCRIBED)
+    const own = await more('own@acme.example', OWN)
+    const erased = await more('erased@acme.example', ERASURE)
+
+    await failOnce(test.pg, {
+      table: 'audit_log', event: 'INSERT', when: `NEW.action = 'contact.opt_out_not_recorded' AND NEW.detail->>'sharedNumber' = 'true'`,
+    })
+    const lines: { message: string; fields: Record<string, unknown> }[] = []
+    await stopNotRecorded(null, { error: (message, fields = {}) => lines.push({ message, fields }) })
+    expect(await sharedRows()).toEqual([])
+
+    // The pauses a person may lift once the number is recorded are the hard hold now…
+    const HARD = sharedNumberOptOutReason(LATER, 'suppression_failed')
+    for (const id of [x, left]) expect((await contact(id)).pausedReason).toBe(HARD)
+    // …and the two no Resume lifts stand.
+    expect((await contact(own)).pausedReason).toBe(OWN)
+    expect((await contact(erased)).pausedReason).toBe(ERASURE)
+
+    const r = await resume(x)
+    expect(r).toMatchObject({ ok: false, reason: 'opt_out_not_recorded' })
+    if (!r.ok) expect(r.message).toContain('a number this contact shares')
+    expect(await contactsUpdate(db, orgId, x, { phone: '+919800000001' })).toMatchObject({ ok: false, reason: 'shared_number_hold' })
+    expect((await contact(x)).phone).toBe(PHONE)
+
+    const line = lines.find((l) => l.message.startsWith('OPT-OUT NOT RECORDED') && l.fields['sharedNumber'] === true)
+    expect(line?.fields['rowWritten']).toBe(false)
+    expect([...(line?.fields['keptContactIds'] as string[])].sort()).toEqual([x, left, own, erased].sort())
+    expect([...(line?.fields['heldHardInstead'] as string[])].sort()).toEqual([x, left].sort())
+    expect(JSON.stringify(lines)).not.toContain('9812345678')
+
+    // Recorded by hand, X is a holder like any other: Resume lifts the hold.
+    await addSuppression(db, { orgId, kind: 'phone', value: PHONE, reason: 'by hand', source: 'manual' })
     expect(await resume(x)).toEqual({ ok: true })
   })
 })
