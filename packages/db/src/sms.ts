@@ -20,7 +20,7 @@ import { createHash } from 'node:crypto'
 import { and, eq, inArray, sql, type SQL } from 'drizzle-orm'
 import {
   normalisePhone, pauseReasonClass, renderTemplate, smsOptOut,
-  type ReplyKind, type SendDecision, type SendRefusalCode,
+  type PauseReasonClass, type ReplyKind, type SendDecision, type SendRefusalCode,
 } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
@@ -1052,6 +1052,15 @@ function isSharedNumberHoldPause(reason: string): boolean {
  * not be recorded in their org: a holder whose own pause was stronger, or
  * somebody's to keep, kept it (review round 9), and the row names them all
  * the same. Read in the org's own slice of the log.
+ *
+ * Only while it still governs them (review round 10): a row stops counting
+ * once a `contact.resumed` row for them is NEWER than it. Resume succeeds
+ * for a contact a governing row lists only once the number is recorded, so
+ * a resume after the row is a person having lifted the hold it stood for;
+ * read forever, the row refused every later pause of theirs — a teammate's
+ * included — and froze their phone, once an owner removed the number's
+ * suppression. Compared in SQL against the stored `created_at`s, never a
+ * `Date` read back. A newer row lists them afresh.
  */
 function sharedNumberHolderRow(orgId: string, contactId: string): SQL | undefined {
   return and(
@@ -1059,6 +1068,14 @@ function sharedNumberHolderRow(orgId: string, contactId: string): SQL | undefine
     eq(schema.auditLog.action, 'contact.opt_out_not_recorded'),
     sql`${schema.auditLog.detail}->>'sharedNumber' = 'true'`,
     sql`${schema.auditLog.detail}->'holders' @> ${JSON.stringify([contactId])}::jsonb`,
+    sql`NOT EXISTS (
+      SELECT 1 FROM audit_log resumed
+      WHERE resumed.org_id = ${orgId}
+        AND resumed.action = 'contact.resumed'
+        AND resumed.subject_type = 'contact'
+        AND resumed.subject_id = ${contactId}
+        AND resumed.created_at > ${schema.auditLog.createdAt}
+    )`,
   )
 }
 
@@ -1070,7 +1087,8 @@ export function sharedNumberHolderRowExists(orgId: string, contactId: string): S
 /**
  * Whether this contact holds a number a STOP came from that could not be
  * recorded in their org — the hard hold's shape on their pause, or a row
- * that lists them (`sharedNumberHolderRow`) — AND their phone, the number
+ * that lists them and that no later resume of theirs has spent
+ * (`sharedNumberHolderRow`, review round 10) — AND their phone, the number
  * they held, has no phone suppression in the org today. While it does,
  * nothing that would let a text go to that number may happen to them:
  * Resume refuses whatever paused them, and their phone may not be changed
@@ -1696,6 +1714,14 @@ async function optOutLost(
  * or by one of theirs that stood, which `kept` counts apart — so a shortfall
  * is still a write that failed, for a person to pause by hand.
  *
+ * A kept holder is held only by that row, appended after every hold has
+ * committed. When it cannot be written (review round 10), each kept pause
+ * Resume would lift once the number is recorded — a teammate's, an
+ * unsubscribe's, any other but their own unrecorded opt-out or an
+ * unfinished erasure — is replaced by this pause after all, under the same
+ * lock, and the `OPT-OUT NOT RECORDED` line says the row was not written,
+ * which holders were kept, and which were held hard instead.
+ *
  * The row never names them as its subject or as `detail.contactId`: the
  * inbox reads a row that does as THAT contact's own opt-out nobody
  * recorded, however old, and refused to answer their own email for good
@@ -1717,13 +1743,14 @@ async function sharedNumberOptOutLost(
   },
 ): Promise<void> {
   if (args.contactIds.length === 0) return
+  const reason = sharedNumberOptOutReason(args.now, args.why)
   let paused = 0
-  let kept = 0
+  const kept: string[] = []
   for (const contactId of args.contactIds) {
     try {
-      const held = await holdHard(db, args.orgId, contactId, sharedNumberOptOutReason(args.now, args.why), args.now)
+      const held = await holdHard(db, args.orgId, contactId, reason, args.now)
       if (held !== 'not_held') paused++
-      if (held === 'kept') kept++
+      if (held === 'kept') kept.push(contactId)
     } catch (err) {
       log.error('an opt-out that was not recorded could not pause the contact', {
         contactId,
@@ -1732,7 +1759,7 @@ async function sharedNumberOptOutLost(
       })
     }
   }
-  await appendAudit(db, {
+  const rowWritten = await appendAudit(db, {
     orgId: args.orgId,
     actor: 'system',
     action: 'contact.opt_out_not_recorded',
@@ -1744,16 +1771,41 @@ async function sharedNumberOptOutLost(
       sharedNumber: true,
       contacts: args.contactIds.length,
       paused,
-      ...(kept > 0 ? { kept } : {}),
+      ...(kept.length > 0 ? { kept: kept.length } : {}),
       holders: [...args.contactIds],
     },
-  }).catch(() => {})
+  }).then(
+    () => true,
+    () => false,
+  )
+  // The row is all that holds a KEPT holder: their own pause stood, and
+  // Resume refuses it only while a row lists them. Not written — the
+  // database has just faulted — nothing did, and a push with no message id
+  // brings no retry (review round 10). So each kept pause Resume would lift
+  // once the number is recorded gets the hard hold over it after all, as
+  // before round 9; their own unrecorded opt-out and an unfinished erasure
+  // already hold them harder, and stand.
+  const heldHardInstead: string[] = []
+  if (!rowWritten) {
+    for (const contactId of kept) {
+      try {
+        if ((await holdHard(db, args.orgId, contactId, reason, args.now, true)) === 'paused') heldHardInstead.push(contactId)
+      } catch (err) {
+        log.error('a holder whose own pause stood could not be held hard when the row listing them was not written', {
+          contactId,
+          orgId: args.orgId,
+          error: faultName(err),
+        })
+      }
+    }
+  }
   log.error('OPT-OUT NOT RECORDED — follow up by hand', {
     channel: 'sms',
     orgId: args.orgId,
     contactIds: [...args.contactIds],
     sharedNumber: true,
     why: args.why,
+    ...(rowWritten ? {} : { rowWritten: false, keptContactIds: kept, heldHardInstead }),
   })
 }
 
@@ -1771,6 +1823,12 @@ async function sharedNumberOptOutLost(
  * while the number is unrecorded (`heldForUnrecordedSharedNumber`). One contact
  * per transaction, as each was its own write before: a fault on one leaves
  * the others' pauses written.
+ *
+ * `overResumable` also writes it over a pause Resume would lift once the
+ * number is recorded — a teammate's, an unsubscribe's, any other but the
+ * contact's own unrecorded opt-out or an unfinished erasure — named
+ * exactly, as the rest are: for a holder kept when the row that would list
+ * them could not be written (review round 10).
  */
 async function holdHard(
   db: AgencyDb,
@@ -1778,6 +1836,7 @@ async function holdHard(
   contactId: string,
   reason: string,
   now: Date,
+  overResumable = false,
 ): Promise<'paused' | 'kept' | 'not_held'> {
   return db.transaction(async (transaction) => {
     const tx = transaction as unknown as AgencyDb
@@ -1791,13 +1850,24 @@ async function holdHard(
     const over =
       current.pausedAt === null
         ? {}
-        : was !== null && (pauseReasonClass(was) === 'replied' || isSharedNumberHoldPause(was) || isSharedNumberOptOutPause(was))
+        : was !== null &&
+            (pauseReasonClass(was) === 'replied' ||
+              isSharedNumberHoldPause(was) ||
+              isSharedNumberOptOutPause(was) ||
+              (overResumable && RESUMABLE_ONCE_RECORDED.has(pauseReasonClass(was))))
           ? { replacing: was }
           : null
     if (over === null) return 'kept'
     return (await pauseContact(tx, orgId, contactId, reason, now, over)) ? 'paused' : 'not_held'
   })
 }
+
+/**
+ * The classes of a kept pause Resume lifts once the number is recorded —
+ * never a contact's own unrecorded opt-out or an unfinished erasure, which
+ * Resume refuses whatever is on the list.
+ */
+const RESUMABLE_ONCE_RECORDED: ReadonlySet<PauseReasonClass> = new Set<PauseReasonClass>(['manual', 'unsubscribed', 'other'])
 
 async function auditUnmatched(db: AgencyDb, orgId: string, detail: Record<string, unknown>): Promise<void> {
   await appendAudit(db, {

@@ -645,8 +645,11 @@ describe('what an inbound text is answered with', () => {
    * undone, their drafts since cancelled, another set of rows — on every
    * retry while the write kept failing. Now the same rule: 200 after the
    * awaited alarms, and the line says what is left to a person.
+   *
+   * Only where holders exist (review round 10, [5]): a STOP from a number
+   * no contact holds is answered 500 below, because its retry holds nobody.
    */
-  it.each(['no_contact', 'ambiguous'] as const)(
+  it.each(['ambiguous'] as const)(
     'answers a %s STOP nobody could suppress 200 after the alarm, when the push carried no message id',
     async (why) => {
       const r = run({ matched: 'none', why, optOut: true, suppressed: false, optOutNotRecorded: true, optOutNotRecordedIn: IN_ORG })
@@ -668,6 +671,33 @@ describe('what an inbound text is answered with', () => {
       expect(r.w.everything()).not.toContain('DECOY')
     },
   )
+
+  /**
+   * Review round 10, [5], the reviewer's probe: round 9 answered EVERY
+   * unplaced STOP with no message id 200, a STOP from a number no contact
+   * holds included. Its retry holds and releases nobody — all it does is
+   * re-attempt the suppression in DOVESOFT_ORG_ID's org — so a 200 left a
+   * transient fault's STOP unrecorded for good. It is a 500 again, after the
+   * awaited alarm, so DoveSoft's retry records it.
+   */
+  it.each([
+    ['no message id', fields({ mobile: '919876543210', message: WORDS })],
+    ['a blank message id', fields({ mobile: '919876543210', message: WORDS, messageid: '  ' })],
+  ] as const)('answers a no_contact STOP nobody could suppress 500 with %s, so the retry records it', async (_with, read) => {
+    const r = run({ matched: 'none', why: 'no_contact', optOut: true, suppressed: false, optOutNotRecorded: true, optOutNotRecordedIn: IN_ORG }, read)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(r.alarms).toEqual([UNPLACED_ALARM])
+    expect(r.answered()).toBe(false)
+    r.releaseAlarm()
+    expect(await r.answer).toMatchObject({ status: 500, body: { error: 'opt-out not recorded', why: 'no_contact' } })
+    expect(r.w.logs).toEqual([
+      {
+        level: 'error',
+        message: 'OPT-OUT NOT RECORDED — a STOP from a number no single contact holds could not be suppressed',
+        fields: { why: 'no_contact', orgConfigured: true, alarm: 'raised' },
+      },
+    ])
+  })
 
   it('answers it 200 with a blank id, and with no org to alarm, saying so', async () => {
     const blank = fields({ mobile: '919876543210', message: WORDS, messageid: '  ' })
@@ -1199,6 +1229,30 @@ describe('a STOP from a number two orgs hold, through the real recorder', () => 
     expect(pauseReasonClass((await contact(work)).pausedReason)).toBe('opt_out_not_recorded')
     expect(pauseReasonClass((await contact(inB)).pausedReason)).toBe('other')
     if (status === 200) expect(first.w.logs.at(-1)!.fields).toMatchObject({ why: 'ambiguous', alarm: 'raised', messageId: false })
+  })
+
+  /**
+   * Review round 10, [5], the reviewer's probe: a STOP from a number NO
+   * contact holds, pushed with no message id, whose suppression in the
+   * deployment's org faults once. Round 9 answered it 200 and no retry came,
+   * though a retry holds nobody: it only writes the suppression. Answered
+   * 500, the retry records it, and touches no contact.
+   */
+  it('answers a no-id STOP from a number nobody holds 500, and its retry records the suppression', async () => {
+    const OTHER = '+919800000099'
+    const read = fields({ mobile: '919800000099', message: 'STOP' })
+    await failOnce(test.pg, { table: 'suppressions', event: 'INSERT', when: `NEW.org_id = '${deploymentOrg}'` })
+    const first = await deliver(db, read)
+    expect(first.answer).toMatchObject({ status: 500, body: { error: 'opt-out not recorded', matched: 'none', why: 'no_contact' } })
+    expect(first.alarms).toEqual([{ kind: 'opt_out_not_recorded', orgId: deploymentOrg, touchId: null, contactId: null, path: 'reply' }])
+    const phoneRows = async () => (await db.select().from(schema.suppressions)).filter((r) => r.value === OTHER).map((r) => r.orgId)
+    expect(await phoneRows()).toEqual([])
+
+    const again = await deliver(db, read)
+    expect(again.answer).toEqual({ status: 200, body: { matched: 'none', why: 'no_contact', optOut: true, suppressed: true } })
+    expect(again.alarms).toEqual([])
+    expect(await phoneRows()).toEqual([deploymentOrg])
+    for (const id of [work, inB]) expect((await contact(id)).pausedAt).toBeNull()
   })
 
   /**

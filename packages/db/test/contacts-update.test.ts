@@ -18,8 +18,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import {
-  addSuppression, contactResumeByHand, contactsUpdate, pauseContactOverriding, pauseReasonClass, recordInboundSms, schema,
-  sharedNumberOptOutReason, type AgencyDb,
+  addSuppression, contactPauseByHand, contactResumeByHand, contactsUpdate, pauseContactOverriding, pauseReasonClass, recordInboundSms,
+  removeSuppression, schema, sharedNumberOptOutReason, type AgencyDb,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
 import { failOnce } from './fault-db.js'
@@ -121,6 +121,111 @@ describe('changing the phone of a shared number’s holder (review round 9)', ()
       .returning({ id: schema.contacts.id })
     await stopNotRecorded()
     expect(await contactsUpdate(db, orgId, c!.id, { phone: '+91 98222 22222' })).toMatchObject({ ok: true, changed: ['phone'] })
+  })
+
+  // -------------------------------------------------------------------------
+  // Review round 10, [0] + [1]: a row that listed them governs no longer
+  // -------------------------------------------------------------------------
+
+  /**
+   * PGlite's clock is millisecond-grained, and these tests turn on which
+   * audit row is newer: every row gets its own second, in the order written.
+   */
+  const auditRowsInTheirOwnSeconds = () =>
+    test.pg.exec(`
+      CREATE SEQUENCE audit_clock;
+      CREATE FUNCTION audit_clock() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        NEW.created_at := timestamptz '2026-09-15 00:00:00+00' + nextval('audit_clock') * interval '1 second';
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER audit_clock BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION audit_clock();
+    `)
+
+  /** The number recorded by hand, Bina resumed, and then an owner removes the number's suppression. */
+  const resumedThenUnrecorded = async () => {
+    await auditRowsInTheirOwnSeconds()
+    await stopNotRecorded()
+    expect(await addSuppression(db, { orgId, kind: 'phone', value: PHONE, reason: 'by hand', source: 'manual' })).toMatchObject({ ok: true })
+    const held = await row(bina)
+    expect(await contactResumeByHand(db, { orgId, contact: { id: bina }, expectedReason: held.pausedReason, actor: userId })).toEqual({ ok: true })
+    // "An owner must remove the suppression before it can be changed" — and does.
+    expect(await contactsUpdate(db, orgId, bina, { phone: '+91 99887 76655' })).toMatchObject({ ok: false, reason: 'suppressed' })
+    const [sup] = await db.select({ id: schema.suppressions.id }).from(schema.suppressions).where(eq(schema.suppressions.kind, 'phone'))
+    expect(await removeSuppression(db, orgId, sup!.id)).not.toBeNull()
+  }
+
+  /**
+   * The reviewers' probe: the row listing Bina outlived her resume, so once
+   * an owner removed the number's suppression — the step the `suppressed`
+   * refusal names — every edit of her phone was refused `shared_number_hold`
+   * ("they are held until it is"), false of a contact who is not paused, and
+   * re-adding the suppression brought `suppressed` back: the phone could
+   * never change.
+   */
+  it('lets an owner change the phone of a former holder resumed once the number was recorded, after removing its suppression', async () => {
+    await resumedThenUnrecorded()
+    expect((await row(bina)).pausedAt).toBeNull()
+    expect(await contactsUpdate(db, orgId, bina, { phone: '+91 99887 76655' })).toMatchObject({ ok: true, changed: ['phone'] })
+    expect((await row(bina)).phone).toBe('+919988776655')
+  })
+
+  it('lets them clear it too, though a teammate paused them since: the resume spent the row', async () => {
+    await resumedThenUnrecorded()
+    expect(await contactPauseByHand(db, { orgId, contactId: bina, reason: 'waiting on legal (by sam@agency.test)' })).toMatchObject({ ok: true })
+    expect(await contactsUpdate(db, orgId, bina, { phone: '' })).toMatchObject({ ok: true, changed: ['phone'] })
+    expect((await row(bina)).phone).toBeNull()
+  })
+
+  /**
+   * A holder the row lists whose pause could not be written — the
+   * shortfall `paused` counts — is not paused: there is no hold the edit
+   * could strand, so it is not refused (review round 10).
+   */
+  it('does not refuse an unpaused contact a row lists', async () => {
+    await auditRowsInTheirOwnSeconds()
+    await db.insert(schema.auditLog).values({
+      orgId, actor: 'system', action: 'contact.opt_out_not_recorded', subjectType: null, subjectId: null,
+      detail: { channel: 'sms', why: 'suppression_failed', sharedNumber: true, contacts: 1, paused: 0, holders: [bina] },
+    })
+    expect((await row(bina)).pausedAt).toBeNull()
+    expect(await contactsUpdate(db, orgId, bina, { phone: '+91 99887 76655' })).toMatchObject({ ok: true, changed: ['phone'] })
+  })
+
+  it('still refuses a holder a NEWER row lists, though a person resumed them before it', async () => {
+    await resumedThenUnrecorded()
+    // A teammate holds Bina, and a second STOP from the number fails: her pause stands, and the new row lists her.
+    expect(await contactPauseByHand(db, { orgId, contactId: bina, reason: 'waiting on legal (by sam@agency.test)' })).toMatchObject({ ok: true })
+    await stopNotRecorded()
+    expect((await row(bina)).pausedReason).toBe('waiting on legal (by sam@agency.test)')
+    expect(await contactsUpdate(db, orgId, bina, { phone: '' })).toMatchObject({ ok: false, reason: 'shared_number_hold' })
+    const held = await row(bina)
+    expect(await contactResumeByHand(db, { orgId, contact: { id: bina }, expectedReason: held.pausedReason, actor: userId })).toMatchObject({
+      ok: false, reason: 'opt_out_not_recorded',
+    })
+    expect((await row(bina)).phone).toBe(PHONE)
+  })
+
+  it('fails the edit of a paused contact when a row listing them lands between its read and its write', async () => {
+    await pauseContactOverriding(db, orgId, bina, 'on leave (by sam@agency.test)', AT)
+    let fired = false
+    const racing = new Proxy(db as object, {
+      get(t, p, r) {
+        if (p === 'update' && !fired) {
+          fired = true
+          return (...args: unknown[]) => {
+            void db.insert(schema.auditLog).values({
+              orgId, actor: 'system', action: 'contact.opt_out_not_recorded', subjectType: null, subjectId: null,
+              detail: { channel: 'sms', why: 'suppression_failed', sharedNumber: true, contacts: 1, paused: 1, kept: 1, holders: [bina] },
+            }).then(() => {})
+            return (Reflect.get(t, p, r) as (...a: unknown[]) => unknown).apply(t, args)
+          }
+        }
+        return Reflect.get(t, p, r)
+      },
+    }) as AgencyDb
+    expect(await contactsUpdate(racing, orgId, bina, { phone: '+91 99887 76655' })).toMatchObject({ ok: false, reason: 'changed_meanwhile' })
+    expect((await row(bina)).phone).toBe(PHONE)
   })
 
   it('fails the edit when the hard hold lands between its read and its write', async () => {
