@@ -9,11 +9,11 @@
 #                                 AGENT_INTERNAL_TOKEN on Vercel — refused
 #                                 until production has this checkout's
 #                                 migration (run `release` first). Never runs
-#                                 the Vercel CLI: the web redeploy is
+#                                 the Vercel CLI
 #   tools/production.sh worker-web
-#                                 the second job's — redeploy the web app
-#                                 when `worker` left a wiring of this run
-#                                 waiting, then record it, then check the
+#                                 the worker action's second job: redeploy the
+#                                 web app when `worker` left a wiring of this
+#                                 run waiting, record it, then check the
 #                                 worker is live
 #   tools/production.sh release   migrate, THEN deploy, then check /api/health
 #                                 reports this checkout's migration — the order
@@ -23,7 +23,7 @@
 #                                 (tools/vercel-build-migrate.mjs)
 #
 # Credentials come from the workflow's secrets and are never echoed (§2.3):
-#   VERCEL_TOKEN               deploy and release
+#   VERCEL_TOKEN               deploy, release, worker and worker-web
 #   PRODUCTION_DATABASE_URL    Neon's DIRECT string; optional but for
 #                              `worker`. Without it, `release` lets the Vercel
 #                              build migrate, with the project's own
