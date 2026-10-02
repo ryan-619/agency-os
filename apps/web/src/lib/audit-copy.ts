@@ -504,15 +504,35 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   // `recordInboundReply`, which rolled back, so whose number it was is not
   // known and the contact who holds it is to be looked for (review round 5,
   // [14]; it read "a number no single contact holds", and the person
-  // following up recorded a bare suppression and never paused them).
+  // following up recorded a bare suppression and never paused them). Nor
+  // can it know that nothing was written (review round 7, [8]): a shared
+  // number's holders may have been held in one org before another threw,
+  // and an earlier delivery may have recorded it all — so the sentence says
+  // to CHECK /suppressions, and that the holders may be paused already.
+  //
+  // And a reply's stop from somebody OTHER than the contact it was filed
+  // under (`fromIsContact: false`, review round 7, [7]): a colleague in the
+  // thread replying all. Written about the reply or the message it
+  // answered, with the contact as `filedUnder`, never as the subject — the
+  // inbox reads a row about the contact as THEIR opt-out nobody recorded —
+  // and it names the address to record: the sender's, not the contact's.
   'contact.opt_out_not_recorded': (c) => {
+    if (flag(c.d, 'fromIsContact') === false) {
+      const lead = `could not record an opt-out from a reply sent by somebody other than the contact at ${c.co} it was filed under`
+      const contact = 'the contact is not treated as the one who asked'
+      return word(c.d, 'why') === 'record_failed'
+        ? `${lead} — recording the reply failed, so the sender may not be on the suppression list: a retry may record it, ` +
+            `but check /suppressions for the address the reply came from and record it there if it is missing; ${contact}`
+        : `${lead} — the sender is NOT on the suppression list; read their address from the reply and record it by hand; ${contact}`
+    }
     if (c.row.subjectType !== 'contact' && !has(c.d, 'contactId') && !has(c.d, 'touchId')) {
       if (word(c.d, 'why') === 'record_failed') {
         return (
-          'could not record an opt-out texted in: recording the text failed before anything was written, so whose number ' +
-          'it was is not known — it is NOT on the suppression list and nobody was paused; it was refused so DoveSoft ' +
-          "retries, but until a retry is recorded, read the number from the provider's inbound log, put it on " +
-          '/suppressions and pause whichever contact holds it'
+          'could not record an opt-out texted in: recording the text failed, so whose number it was is not known, and ' +
+          'part of it may already be recorded — by an earlier delivery, or by this one before it failed; it may not be on ' +
+          'the suppression list. It was refused so DoveSoft retries, but until a retry is recorded, check /suppressions ' +
+          "for the number in the provider's inbound log and record it there if it is missing — anybody holding the " +
+          'number may already be paused; pause whoever holds it and is not'
         )
       }
       const why = own(UNPLACED_OPT_OUT_WHY, word(c.d, 'why'))

@@ -1,5 +1,5 @@
 import { NextResponse, after } from 'next/server'
-import { appendAudit, handleInboundEmail, pauseContactOverriding, type AgencyDb } from '@agency/db/queries'
+import { appendAudit, handleInboundEmail, pauseContact, pauseContactOverriding, type AgencyDb } from '@agency/db/queries'
 import { getDb } from '@/lib/db'
 import { env } from '@/lib/env'
 import { log } from '@/lib/logger'
@@ -52,6 +52,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       forward: log,
       audit: (entry) => appendAudit(getDb() as unknown as AgencyDb, entry),
       pause: (orgId, contactId, reason, now) => pauseContactOverriding(getDb() as unknown as AgencyDb, orgId, contactId, reason, now),
+      hold: (orgId, contactId, reason, now) => pauseContact(getDb() as unknown as AgencyDb, orgId, contactId, reason, now),
       alarm: (event) => notify(event),
       log,
     }),

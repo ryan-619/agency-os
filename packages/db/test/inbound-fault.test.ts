@@ -17,12 +17,14 @@ import { pauseReasonClass } from '@agency/core'
 import * as q from '../src/queries.js'
 import * as all from '../src/index.js'
 import {
-  keepingRolledBackOptOut, rolledBackOptOutAlarm, rolledBackOptOutAudit, rolledBackOptOutPauseReason,
+  keepingRolledBackOptOut, rolledBackOptOutAlarm, rolledBackOptOutAudit, rolledBackOptOutPause, rolledBackOptOutPauseReason,
   type InboundLog,
 } from '../src/index.js'
 
 const NOON = new Date('2026-09-15T12:00:00.000Z')
-const PLACED = { orgId: 'org-1', contactId: 'contact-1', inReplyTo: 'touch-1' } as const
+const PLACED = { orgId: 'org-1', contactId: 'contact-1', inReplyTo: 'touch-1', fromIsContact: true } as const
+/** A colleague in the thread replied all, and the reply was filed under the contact our message went to. */
+const COLLEAGUE = { ...PLACED, fromIsContact: false } as const
 
 function forwardTo(lines: { message: string; fields?: Readonly<Record<string, unknown>> }[]): InboundLog {
   return { error: (message, fields) => lines.push({ message, ...(fields ? { fields } : {}) }) }
@@ -50,7 +52,28 @@ describe('keepingRolledBackOptOut', () => {
   it('reads a reply matched by its address alone as answering no message', () => {
     const recorder = keepingRolledBackOptOut(forwardTo([]))
     recorder.error('OPT-OUT NOT RECORDED — the reply was rolled back', { orgId: 'org-1', contactId: 'contact-1', inReplyTo: null })
-    expect(recorder.rolledBack()).toEqual({ orgId: 'org-1', contactId: 'contact-1', inReplyTo: null })
+    expect(recorder.rolledBack()).toEqual({ orgId: 'org-1', contactId: 'contact-1', inReplyTo: null, fromIsContact: true })
+  })
+
+  /**
+   * Review round 7: the recorder says whether the reply came from the
+   * contact it was filing under. Only an explicit false is somebody else;
+   * a line that does not know (null, or no field — a fault before the
+   * recorder read the contact) holds the contact as before.
+   */
+  it('keeps whether the reply came from that contact, reading only an explicit false as somebody else', () => {
+    const said = (fromIsContact: unknown) => {
+      const recorder = keepingRolledBackOptOut(forwardTo([]))
+      recorder.error('OPT-OUT NOT RECORDED — the reply was rolled back', {
+        orgId: 'org-1', contactId: 'contact-1', inReplyTo: 'touch-1', fromIsContact,
+      })
+      return recorder.rolledBack()?.fromIsContact
+    }
+    expect(said(false)).toBe(false)
+    expect(said(true)).toBe(true)
+    expect(said(null)).toBe(true)
+    expect(said(undefined)).toBe(true)
+    expect(said('false')).toBe(true)
   })
 })
 
@@ -59,6 +82,22 @@ describe('what follows it', () => {
     const reason = rolledBackOptOutPauseReason(NOON)
     expect(reason).toBe('opt-out not recorded: reply 2026-09-15T12:00:00.000Z (record_failed)')
     expect(pauseReasonClass(reason)).toBe('opt_out_not_recorded')
+  })
+
+  it('holds the contact over any earlier pause when the stop was their own', () => {
+    expect(rolledBackOptOutPause(PLACED, NOON)).toEqual({ reason: rolledBackOptOutPauseReason(NOON), overriding: true })
+  })
+
+  /**
+   * Review round 7, [7]: a colleague's "remove me" filed under the contact
+   * our message went to held THAT contact as an opt-out nobody recorded —
+   * a pause no Resume lifts — for good. They are held as any reply holds
+   * them now: a pause a person lifts, written only where none is.
+   */
+  it('holds the contact only as any reply would when the stop came from somebody else', () => {
+    const pause = rolledBackOptOutPause(COLLEAGUE, NOON)
+    expect(pause).toEqual({ reason: `replied ${NOON.toISOString()}`, overriding: false })
+    expect(pauseReasonClass(pause.reason)).toBe('replied')
   })
 
   it('audits ids, the channel and a reason class', () => {
@@ -72,11 +111,36 @@ describe('what follows it', () => {
     })
   })
 
+  /**
+   * About the message the sender answered, and never about the contact:
+   * the inbox reads a row whose subject or `contactId` is the contact as
+   * THEIR opt-out nobody recorded, however old. The contact is `filedUnder`.
+   */
+  it('audits a stop from somebody else about the message it answered, with the contact only as filedUnder', () => {
+    const row = rolledBackOptOutAudit(COLLEAGUE)
+    expect(row).toEqual({
+      orgId: 'org-1',
+      actor: 'system',
+      action: 'contact.opt_out_not_recorded',
+      subjectType: 'touch',
+      subjectId: 'touch-1',
+      detail: { channel: 'email', why: 'record_failed', fromIsContact: false, filedUnder: 'contact-1' },
+    })
+    expect(row.detail).not.toHaveProperty('contactId')
+    expect(rolledBackOptOutAudit({ ...COLLEAGUE, inReplyTo: null })).toMatchObject({ subjectType: null, subjectId: null })
+  })
+
   it('alarms naming the message the reply answered, or none', () => {
     expect(rolledBackOptOutAlarm(PLACED)).toEqual({
       kind: 'opt_out_not_recorded', orgId: 'org-1', touchId: 'touch-1', contactId: 'contact-1', path: 'reply',
     })
     expect(rolledBackOptOutAlarm({ ...PLACED, inReplyTo: null })).toMatchObject({ touchId: null, contactId: 'contact-1' })
+  })
+
+  it('alarms a stop from somebody else naming no contact — the contact’s address is the wrong one to record', () => {
+    expect(rolledBackOptOutAlarm(COLLEAGUE)).toEqual({
+      kind: 'opt_out_not_recorded', orgId: 'org-1', touchId: 'touch-1', contactId: null, path: 'reply', fromIsContact: false,
+    })
   })
 })
 
@@ -96,7 +160,9 @@ describe('the module', () => {
     const index = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'index.ts'), 'utf8')
     expect(queries).toContain(`export * from './inbound-fault.js'`)
     expect(index).toContain(`export * from './inbound-fault.js'`)
-    for (const name of ['keepingRolledBackOptOut', 'rolledBackOptOutPauseReason', 'rolledBackOptOutAudit', 'rolledBackOptOutAlarm']) {
+    for (const name of [
+      'keepingRolledBackOptOut', 'rolledBackOptOutPauseReason', 'rolledBackOptOutPause', 'rolledBackOptOutAudit', 'rolledBackOptOutAlarm',
+    ]) {
       expect(name in q && name in all, name).toBe(true)
     }
   })

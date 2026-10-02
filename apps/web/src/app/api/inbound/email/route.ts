@@ -1,6 +1,8 @@
 import { NextResponse, after } from 'next/server'
 import { mailSignalInput } from '@agency/core'
-import { appendAudit, handleInboundEmail, pauseContactOverriding, type AgencyDb, type InboundOutcome } from '@agency/db/queries'
+import {
+  appendAudit, handleInboundEmail, pauseContact, pauseContactOverriding, type AgencyDb, type InboundOutcome,
+} from '@agency/db/queries'
 import { getDb } from '@/lib/db'
 import { env } from '@/lib/env'
 import { log } from '@/lib/logger'
@@ -71,7 +73,8 @@ import { inboundEmailNotRecorded, keepingRolledBackOptOut } from './fault'
  * whole. The line names the fault's class only. A "stop" whose recording
  * threw also takes the loud path — the contact paused, an audit row and the
  * AWAITED alarm, under the contact the recorder was filing it under
- * (`./fault.ts`).
+ * (`./fault.ts`); a stop from somebody else in the thread holds that
+ * contact only as any reply would, and says whose address to record.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -131,6 +134,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     const answer = await inboundEmailNotRecorded(err, { text, rolledBack: recorder.rolledBack() }, {
       audit: (entry) => appendAudit(getDb() as unknown as AgencyDb, entry),
       pause: (orgId, contactId, reason, now) => pauseContactOverriding(getDb() as unknown as AgencyDb, orgId, contactId, reason, now),
+      hold: (orgId, contactId, reason, now) => pauseContact(getDb() as unknown as AgencyDb, orgId, contactId, reason, now),
       alarm: (event) => notify(event),
       log,
     })

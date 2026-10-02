@@ -59,8 +59,8 @@
 import { ImapFlow } from 'imapflow'
 import { simpleParser, type HeaderValue, type SimpleParserOptions } from 'mailparser'
 import {
-  appendAudit, handleInboundEmail, keepingRolledBackOptOut, pauseContactOverriding, rolledBackOptOutAlarm,
-  rolledBackOptOutAudit, rolledBackOptOutPauseReason, type AgencyDb, type InboundLog, type InboundOutcome,
+  appendAudit, handleInboundEmail, keepingRolledBackOptOut, pauseContact, pauseContactOverriding, rolledBackOptOutAlarm,
+  rolledBackOptOutAudit, rolledBackOptOutPause, type AgencyDb, type InboundLog, type InboundOutcome,
   type RolledBackOptOut,
 } from '@agency/db'
 import { MAIL_SIGNAL_HEADERS, MAIL_SIGNAL_LIMITS, htmlToText, type LlmProvider } from '@agency/core'
@@ -352,6 +352,13 @@ const recorderLines: InboundLog = {
  * awaited. Each write is tried on its own, because the database may be the
  * thing that failed; one that threw is tried again on the message's next
  * failure, and the alarm is raised once (`UnrecordedStops`). Never throws.
+ *
+ * A stop from somebody other than the contact it was filed under — a
+ * colleague replying all to our message (review round 7) — holds that
+ * contact only as any reply would (`pauseContact`, `replied <ISO>`), and
+ * the row and the alarm say whose address to record: holding the contact
+ * as an opt-out nobody recorded locked out somebody who never asked, for
+ * good, even once the retry suppressed the colleague (inbound-fault.ts).
  */
 async function stopNotRecorded(
   placed: RolledBackOptOut,
@@ -363,10 +370,13 @@ async function stopNotRecorded(
   const before = deps.unrecordedStops?.get(key)
   if (before?.written) return
   const now = deps.now ? deps.now() : new Date()
+  const pause = rolledBackOptOutPause(placed, now)
   let paused = false
   let written = true
   try {
-    paused = await pauseContactOverriding(deps.db, placed.orgId, placed.contactId, rolledBackOptOutPauseReason(now), now)
+    paused = pause.overriding
+      ? await pauseContactOverriding(deps.db, placed.orgId, placed.contactId, pause.reason, now)
+      : await pauseContact(deps.db, placed.orgId, placed.contactId, pause.reason, now)
   } catch {
     written = false
   }
@@ -384,6 +394,8 @@ async function stopNotRecorded(
     error: err instanceof Error ? err.name : 'UnknownError',
     orgId: placed.orgId,
     contactId: placed.contactId,
+    // False: a colleague's stop, filed under that contact.
+    fromIsContact: placed.fromIsContact,
     paused,
     audited,
     alarm,

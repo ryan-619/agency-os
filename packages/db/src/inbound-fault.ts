@@ -19,6 +19,18 @@
  * One reader of the line now, and one shape for what follows it, so a
  * person in /audit or the Slack channel cannot tell which process noticed.
  *
+ * The contact it was filing under is not always who asked (review round
+ * 7). A reply matched by References is filed under the contact OUR message
+ * went to, whoever answered it, so a colleague in the thread replying all
+ * "please remove me" was held as the contact's own opt-out nobody recorded
+ * — a pause no Resume lifts and a row the inbox reads however old — and
+ * the contact, who never asked to stop, was locked out for good, even once
+ * the retry suppressed the colleague. The line says `fromIsContact` now,
+ * and when the sender was somebody else everything below is about THEM:
+ * the contact is paused as by any reply, the row is about the message
+ * they answered with the contact only as `filedUnder`, and the alarm says
+ * whose address to record.
+ *
  * Pure: no I/O, no database, no clock. The callers write; this says what.
  */
 import type { SlackOptOutNotRecordedEvent } from '@agency/core'
@@ -30,6 +42,13 @@ export interface RolledBackOptOut {
   readonly contactId: string
   /** The message the reply answered, when it was matched by one. */
   readonly inReplyTo: string | null
+  /**
+   * Whether the reply came from that contact. False only when the recorder
+   * said so — a sender shown to be another address, such as a colleague in
+   * the thread; a line that does not say (the fault came before the
+   * recorder read the contact) is true, which holds the contact as before.
+   */
+  readonly fromIsContact: boolean
 }
 
 /**
@@ -50,7 +69,12 @@ export function keepingRolledBackOptOut(
       const contactId = fields?.['contactId']
       if (message.startsWith('OPT-OUT NOT RECORDED') && typeof orgId === 'string' && typeof contactId === 'string') {
         const inReplyTo = fields?.['inReplyTo']
-        kept = { orgId, contactId, inReplyTo: typeof inReplyTo === 'string' ? inReplyTo : null }
+        kept = {
+          orgId,
+          contactId,
+          inReplyTo: typeof inReplyTo === 'string' ? inReplyTo : null,
+          fromIsContact: fields?.['fromIsContact'] !== false,
+        }
       }
     },
     rolledBack: () => kept,
@@ -69,15 +93,50 @@ export function rolledBackOptOutPauseReason(now: Date): string {
   return `opt-out not recorded: reply ${now.toISOString()} (record_failed)`
 }
 
+/**
+ * How the contact is held until a retry records the reply.
+ *
+ * Their own stop: the reason above, `overriding` any earlier one. A stop
+ * from somebody else is not theirs to be held for (review round 7): they
+ * are paused as the recorded reply would have paused them, `replied <ISO>`,
+ * and only if nothing holds them already (`pauseContact`, which keeps a
+ * stronger reason) — a pause a person lifts, and one the retry's own pause
+ * finds in place and keeps.
+ */
+export function rolledBackOptOutPause(
+  placed: RolledBackOptOut,
+  now: Date,
+): { readonly reason: string; readonly overriding: boolean } {
+  return placed.fromIsContact
+    ? { reason: rolledBackOptOutPauseReason(now), overriding: true }
+    : { reason: `replied ${now.toISOString()}`, overriding: false }
+}
+
 /** The audit row: ids, the channel and a reason class — never the address or the words (§2.3). */
 export function rolledBackOptOutAudit(placed: RolledBackOptOut): {
   readonly orgId: string
   readonly actor: 'system'
   readonly action: 'contact.opt_out_not_recorded'
-  readonly subjectType: 'contact'
-  readonly subjectId: string
-  readonly detail: { readonly channel: 'email'; readonly why: 'record_failed' }
+  readonly subjectType: 'contact' | 'touch' | null
+  readonly subjectId: string | null
+  readonly detail:
+    | { readonly channel: 'email'; readonly why: 'record_failed' }
+    | { readonly channel: 'email'; readonly why: 'record_failed'; readonly fromIsContact: false; readonly filedUnder: string }
 } {
+  if (!placed.fromIsContact) {
+    // About the message they answered, which names the company, and never
+    // the contact: a row whose subject or `contactId` is the contact is
+    // what /inbox and /contacts read as the contact's OWN opt-out nobody
+    // recorded, for good. `filedUnder` is the id, for a person to follow.
+    return {
+      orgId: placed.orgId,
+      actor: 'system',
+      action: 'contact.opt_out_not_recorded',
+      subjectType: placed.inReplyTo ? 'touch' : null,
+      subjectId: placed.inReplyTo,
+      detail: { channel: 'email', why: 'record_failed', fromIsContact: false, filedUnder: placed.contactId },
+    }
+  }
   return {
     orgId: placed.orgId,
     actor: 'system',
@@ -91,9 +150,21 @@ export function rolledBackOptOutAudit(placed: RolledBackOptOut): {
 /**
  * The alarm. The touch it names is the message the reply answered; a reply
  * matched by its address alone answered none on file, and the message then
- * says so and names the contact (`slackOptOutNotRecordedPayload`).
+ * says so and names the contact (`slackOptOutNotRecordedPayload`). A stop
+ * from somebody else names no contact — suppressing the contact's address
+ * would record nobody's opt-out — and says the sender was another address.
  */
 export function rolledBackOptOutAlarm(placed: RolledBackOptOut): SlackOptOutNotRecordedEvent {
+  if (!placed.fromIsContact) {
+    return {
+      kind: 'opt_out_not_recorded',
+      orgId: placed.orgId,
+      touchId: placed.inReplyTo,
+      contactId: null,
+      path: 'reply',
+      fromIsContact: false,
+    }
+  }
   return {
     kind: 'opt_out_not_recorded',
     orgId: placed.orgId,
