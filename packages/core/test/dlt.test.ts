@@ -570,4 +570,70 @@ describe('the SMS opt-out reader', () => {
     expect(smsOptOut(null)).toBe(false)
     expect(smsOptOut(undefined)).toBe(false)
   })
+
+  /**
+   * Review round 6, finding [8]: the reader was whole-message only, so a STOP that stood as its own
+   * clause beside another sentence was read by neither reader and stored as an ordinary reply —
+   * paused, never suppressed, and resumable. A clause is what sentence punctuation, a comma or a
+   * line break sets apart; one that is a strong whole-message form on its own is an opt-out.
+   */
+  it.each([
+    'Not interested. Stop',
+    'Stop. Not interested',
+    'Wrong number, stop',
+    'No thanks, stop texting me',
+    'Who is this? Stop texting me',
+    'Not interested\nStop',
+    'Not interested\r\nSTOP 56161',
+    'Wrong person. STOP ACMEIN',
+    'Not my number; please remove me',
+    'Hi. Unsubscribe me please',
+    'We are not looking for this — stop. Thanks',
+    'Who? Stop sending me messages!!',
+    'Not interested. Opt me out 🙏',
+  ])('reads %j as an opt-out — a STOP standing as its own clause', (text) => {
+    expect(smsOptOut(text)).toBe(true)
+  })
+
+  it.each([
+    'stop spamming me',
+    'Stop spamming me!',
+    'remove my number',
+    'Please remove my number',
+    'Remove my number from your list',
+    'stop stop stop',
+    'STOP STOP',
+    'Stop please thank you',
+    'stop pls thanks',
+    'Who is this? Stop spamming me',
+  ])('reads %j as an opt-out — spamming, my number, a repeated stop and chained politeness', (text) => {
+    expect(smsOptOut(text)).toBe(true)
+  })
+
+  /**
+   * A clause alone is read only by the STRONG forms: CANCEL, END and QUIT are opt-outs only as the
+   * whole message, and a keyword's trailing token is a short code or a brand keyword in capitals —
+   * never a word, so "stop worrying" and "stop by" beside another sentence are still prose.
+   */
+  it.each([
+    'Not interested, cancel',
+    'Thanks. End',
+    'No. Quit',
+    'Cancel, please',
+    'All good, stop worrying',
+    'Sure, stop by',
+    'Sure, stop in. Thanks',
+    'Great! Stop by on Friday',
+    'Do not stop, this is great',
+    'Don’t stop. Texting me is fine',
+    'stop by tomorrow, thanks',
+    'No worries, I will stop at 5',
+    'Never stop. Thanks',
+    'please do not stop, thanks',
+    'Remove my number from the invite please',
+    'Remove the 3pm, thanks',
+    'Sounds good. See you then',
+  ])('does not read %j as an opt-out — a clause is read by the strong forms only', (text) => {
+    expect(smsOptOut(text)).toBe(false)
+  })
 })
