@@ -37,7 +37,7 @@ import type { AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
 import type { ConsentRow, ContactRow } from './contacts.js'
 import { isUniqueViolation } from './pg-errors.js'
-import { heldForUnrecordedSharedNumber, sharedNumberHolderRowExists } from './sms.js'
+import { heldForUnrecordedSharedNumber, resumeAsksSharedNumber, sharedNumberHolderRowExists } from './sms.js'
 
 export type ConsentWriteChannel = 'email' | 'sms' | 'voice' | 'whatsapp'
 
@@ -457,9 +457,12 @@ function blankIsNull(v: string | null): string | null {
  * phone, and no later text from the number found them. A change of spelling
  * that keeps the number is allowed. Repeated in the UPDATE: a hard hold or a
  * row naming them that lands between the check and the write fails the edit.
- * Only while they are paused, and only by a row that still governs them —
- * one no later resume of theirs has spent (review round 10): an unpaused
- * contact has no hold to strand.
+ * Paused or not, while a row that still governs them lists them — one no
+ * later resume of theirs has spent (review round 10): the row governs every
+ * later pause of theirs, judged against whatever phone they have then
+ * (review round 11). Not over a pause Resume refuses before it asks — their
+ * own unrecorded opt-out, an unfinished erasure — which nothing the
+ * number's suppression lifts (review round 12).
  */
 export async function contactsUpdate(
   db: AgencyDb,
@@ -579,8 +582,15 @@ export async function contactsUpdate(
   // unpaused had a later pause Resume could never lift — the number that
   // asked to stop was no longer theirs to record. A person resumed after the
   // number was recorded is not held: that resume spent the row.
+  //
+  // Not over a pause Resume refuses before it asks (`resumeAsksSharedNumber`,
+  // review round 12): their own unrecorded opt-out or an unfinished erasure
+  // is never lifted by Resume, so it strands nothing the number's
+  // suppression would lift — refused, the phone stayed frozen for good
+  // behind "resume them first", which Resume would never do.
   const phoneDropped = dropping.some((k) => k.kind === 'phone')
-  if (phoneDropped && (await heldForUnrecordedSharedNumber(db, orgId, old))) {
+  const sharedNumberGuard = phoneDropped && (old.pausedAt === null || resumeAsksSharedNumber(old.pausedReason))
+  if (sharedNumberGuard && (await heldForUnrecordedSharedNumber(db, orgId, old))) {
     return {
       ok: false,
       reason: 'shared_number_hold',
@@ -629,12 +639,8 @@ export async function contactsUpdate(
             : []),
           // The pause and the rows the shared-number check read, when it ran:
           // a row listing them that landed since fails the edit.
-          ...(phoneDropped
-            ? [
-                sql`${schema.contacts.pausedReason} IS NOT DISTINCT FROM ${old.pausedReason}`,
-                sql`NOT ${sharedNumberHolderRowExists(orgId, id)}`,
-              ]
-            : []),
+          ...(phoneDropped ? [sql`${schema.contacts.pausedReason} IS NOT DISTINCT FROM ${old.pausedReason}`] : []),
+          ...(sharedNumberGuard ? [sql`NOT ${sharedNumberHolderRowExists(orgId, id)}`] : []),
         ),
       )
       .returning()

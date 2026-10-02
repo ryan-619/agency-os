@@ -27,7 +27,7 @@ tested against a fetch that records and never sends, and against PGlite —
 never against DoveSoft itself, whose push formats and `mobiles` format are
 assumptions to confirm before a real send. Calls
 and WhatsApp over DoveSoft are not built: DoveSoft publishes no API for
-either. Eleven review rounds, and the follow-ups they left open, have been fixed
+either. Twelve review rounds, and the follow-ups they left open, have been fixed
 on top of both releases; each fix is stated below where the rule it changed
 lives.
 
@@ -1013,12 +1013,16 @@ pause of a holder a governing row lists only once the number is recorded,
 so a later resume is a person having lifted the hold, and read for ever
 the row refused every later pause of theirs, a teammate's included, and
 froze their phone once an owner removed the number's suppression. A newer
-row lists them afresh. Any writer of `contact.resumed` spends it —
-`/inbox`'s answer and `dispatchTouch`'s recovered-send lift as well, though
-each lifts only a `replied` pause, which a listed holder holds only when
-the hold itself could not be written for them (the row's `paused`
-shortfall), so there was no hold to protect — and `/contacts` Resume and
-the inbox's answer, which disagreed about such a holder, now agree. Both
+row lists them afresh. Every writer of `contact.resumed` asks the same
+question first (review round 12): `/inbox`'s answer (`replyQueueDraft`)
+refuses `opt_out_not_recorded` with `SHARED_NUMBER_HELD` — record the
+number, then answer — and `dispatchTouch`'s recovered-send lift
+(`liftRecoveryPause`) keeps the re-pause, both under the contact's lock,
+because each lifted a listed holder's `replied` pause past the gate —
+reachable through the `paused` shortfall or a Resume that landed before
+the row committed — and its `contact.resumed` spent the row while the
+number was still unrecorded. So `/contacts` Resume, the inbox's answer and
+the recovery agree about such a holder. Both
 resume paths lift only the pause they were asked about
 (`resumeContact`'s `expectedReason`,
 in the UPDATE's predicate): the inbox the pause it READ under its locks,
@@ -1527,7 +1531,11 @@ that drops the number's key is refused `shared_number_hold` (409 from
 `PATCH /api/contacts/[id]`), and the UPDATE repeats the condition — the
 pause it read, and `NOT EXISTS (<a governing row>)` — because the hold is
 lifted by the NUMBER's suppression, read off their phone, and a contact
-moved off it held a pause nothing could lift. Paused or not (review round
+moved off it held a pause nothing could lift. Not over a pause Resume
+refuses before it asks (`resumeAsksSharedNumber`, review round 12): their
+own unrecorded opt-out or an unfinished erasure is never lifted by Resume,
+so it strands nothing, and refused, the phone froze for good behind "resume
+them first". Paused or not (review round
 11, undoing round 10's "only while paused"): a row that lists a contact
 governs every LATER pause of theirs too, judged against whatever phone they
 have then, so an unpaused listed contact moved off the number — the
@@ -3887,7 +3895,7 @@ absent.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 6407 tests in 214 files: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice + the 0018 release + DoveSoft SMS (0019) + eleven review rounds
+npm test                 # 6407 tests in 214 files: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice + the 0018 release + DoveSoft SMS (0019) + twelve review rounds
 npx vitest run --maxWorkers=1 --minWorkers=1   # the same suite on a machine short of memory
 npm run build            # packages, then the Next app
 
@@ -4011,7 +4019,7 @@ process, keeps the finished data directory, and hands each test a COPY via
 a new instance rather than attaching to one. Measured: the whole suite went
 from **290s to 97s** single-worker, with the same tests passing, and
 `apps/voice` alone from 9.8s to 4.4s. The suite has grown several times
-over since: at 0019, after DoveSoft and eleven review rounds, it is 6,407
+over since: at 0019, after DoveSoft and twelve review rounds, it is 6,407
 tests in 214 files, and the full single-worker run at `676d890` took
 1,569 s — every test green. (At 0018 it was 4,246 in 154 and took 1,088 s.)
 

@@ -770,6 +770,11 @@ const PAUSED_ELSEWHERE =
   'This person is paused for another reason, not by this reply. Resume them on /contacts first, if that is right — ' +
   'answering a reply only ends the pause the reply itself caused. Nothing was drafted.'
 
+const SHARED_NUMBER_HELD =
+  'A text from a number this contact shares asked to stop, and it could not be recorded. Until it is, nobody who ' +
+  'holds the number can be resumed — and answering this reply would resume them. Record the number on /suppressions ' +
+  '(it is in the provider’s inbound log), then answer. Nothing was drafted.'
+
 /**
  * The audit actions that mean "somebody asked to stop, and it was NOT
  * recorded": a reply's suppression that could not be written, a one-click
@@ -940,6 +945,15 @@ export async function replyQueueDraft(
       // somebody else's decision, and undoing it is theirs to make on /contacts.
       if (contact.pausedAt && pauseReasonClass(contact.pausedReason) !== 'replied') {
         refuse('paused_for_another_reason', PAUSED_ELSEWHERE)
+      }
+      // A shared number's holder, whose own reply's pause it is (review round
+      // 12): Resume on /contacts refuses any pause of theirs until the
+      // number's STOP is recorded, and answering resumed them past it — and,
+      // writing `contact.resumed`, spent the row that held them, with the
+      // number still unrecorded. Asked under the contact's lock, as Resume
+      // asks it; refused, the draft never exists.
+      if (contact.pausedAt && (await heldForUnrecordedSharedNumber(tx, args.orgId, contact))) {
+        refuse('opt_out_not_recorded', SHARED_NUMBER_HELD)
       }
 
       const live = await tx

@@ -763,6 +763,17 @@ async function liftRecoveryPause(
     .limit(1)
   if (newerReply.length > 0) return false
 
+  // A shared number's holder (review round 12): Resume refuses any pause of
+  // theirs until the number's STOP is recorded, and this lift — writing
+  // `contact.resumed` — would also spend the row that holds them. The
+  // re-pause stays, the conservative direction; the caller holds the lock.
+  const [held] = await db
+    .select({ id: schema.contacts.id, phone: schema.contacts.phone, pausedReason: schema.contacts.pausedReason })
+    .from(schema.contacts)
+    .where(and(eq(schema.contacts.orgId, orgId), eq(schema.contacts.id, contactId)))
+    .limit(1)
+  if (!held || (await heldForUnrecordedSharedNumber(db, orgId, held))) return false
+
   const reason = replyPauseReason(reply)
   if (!(await resumeContact(db, orgId, contactId, { expectedReason: reason }))) return false
   await appendAudit(db, {
