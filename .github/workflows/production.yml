@@ -74,20 +74,19 @@ jobs:
     steps:
       # Where each credential is visible, as true/false only: a value saved
       # as a Variable instead of a Secret would be printed in the step's env
-      # block, so it is detected here and never read.
+      # block, so it is detected here and never read. Only the two this job
+      # uses: naming a secret anywhere in a job, even in a `!= ''`, sends its
+      # value to that job's runner, and this job runs the Vercel CLI.
       - name: Which credentials this run can see
         env:
           TOKEN_SECRET: ${{ secrets.VERCEL_TOKEN != '' }}
           TOKEN_VARIABLE: ${{ vars.VERCEL_TOKEN != '' }}
           DB_SECRET: ${{ secrets.PRODUCTION_DATABASE_URL != '' }}
           DB_VARIABLE: ${{ vars.PRODUCTION_DATABASE_URL != '' }}
-          FLY_SECRET: ${{ secrets.FLY_API_TOKEN != '' }}
-          FLY_VARIABLE: ${{ vars.FLY_API_TOKEN != '' }}
         run: |
           echo "VERCEL_TOKEN            secret: $TOKEN_SECRET  variable: $TOKEN_VARIABLE"
           echo "PRODUCTION_DATABASE_URL secret: $DB_SECRET  variable: $DB_VARIABLE"
-          echo "FLY_API_TOKEN           secret: $FLY_SECRET  variable: $FLY_VARIABLE"
-          if [ "$TOKEN_VARIABLE" = true ] || [ "$DB_VARIABLE" = true ] || [ "$FLY_VARIABLE" = true ]; then
+          if [ "$TOKEN_VARIABLE" = true ] || [ "$DB_VARIABLE" = true ]; then
             echo "::error::A credential is saved as a Variable, which is shown in plain text. Delete it there and add it under Secrets instead."
             exit 1
           fi
@@ -231,6 +230,8 @@ jobs:
     timeout-minutes: 30
     environment: production
     steps:
+      # VERCEL_TOKEN only: naming any other secret here, even in a `!= ''`,
+      # would send its value to this job's runner.
       - name: Which credentials this job can see
         env:
           TOKEN_SECRET: ${{ secrets.VERCEL_TOKEN != '' }}
