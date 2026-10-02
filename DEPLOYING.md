@@ -189,7 +189,7 @@ variable and never the value.
 | `RESEND_API_KEY` | the same route's fetch of each received message — a key that can READ received email | `/api/inbound/resend` answers 503 |
 | `SECRETS_KEY` | storing a connector's credential (Settings → Connectors) and re-entering one (Settings → Credentials). **The same value on the worker** | both refuse with 503; Settings → Deployment reads "not set", or "set, not a valid key" |
 | `DOVESOFT_WEBHOOK_SECRET` | DoveSoft's two pushes, a delivery report and a text a contact sends back (see "SMS through DoveSoft"). `openssl rand -hex 32` — hex needs no escaping in a URL; a secret with any other character must be percent-encoded where it stands in `?token=` (a `+` is `%2B`). At least 32 characters | `/api/inbound/dovesoft/dlr` and `/sms` answer 503: no report is recorded, and no text back — a STOP included — reaches this deployment |
-| `DOVESOFT_ORG_ID` | the FALLBACK org (a uuid). A text back is matched against contacts' numbers in every org first, and filed under the one contact anywhere who holds the number — or, when several do, the one this system texted at it, preferring this org's only when texted contacts sit in several orgs (several still left are each paused, and the text is filed under nobody); this org is where a text from a number NO contact holds is audited and its STOP suppressed, where an unmatched report or an unreadable push is audited, and where the Slack alarm is filed when a STOP filed under nobody could not be recorded. A holder in this org is no evidence on its own: when nobody was texted, it narrows nothing | a text from a number no contact holds is logged and filed under no org, and a STOP from it is recorded nowhere: it is answered 500 and logged `OPT-OUT NOT RECORDED`, for a person to record by hand, with no Slack alarm — the error line says `alarm: 'not_raised_no_org'` |
+| `DOVESOFT_ORG_ID` | the FALLBACK org (a uuid), and nothing else. A text back is matched against contacts' numbers in every org first, and filed under the one contact anywhere who holds the number — or, when several do, the one this system texted at it, with every other holder paused and their waiting messages cancelled; when it texted none of them or more than one, the text is filed under nobody and every holder is paused. This org decides nothing about a number a contact holds — every org texts through the one DoveSoft account, so a holder here is no evidence of whose text it is. It is where a text from a number NO contact holds is audited and its STOP suppressed, where an unmatched report or an unreadable push is audited, and where the Slack alarm is filed for a STOP that could not be recorded from a number nobody holds or that could not be read, or whose recording failed before anybody was matched — any other failed STOP's alarm goes to the org whose contact holds the number | a text from a number no contact holds is logged and filed under no org, and a STOP from it is recorded nowhere: it is answered 500 and logged `OPT-OUT NOT RECORDED`, for a person to record by hand, with no Slack alarm — the error line says `alarm: 'not_raised_no_org'` |
 
 **`DATABASE_POOL_MAX=1` matters.** Each serverless instance keeps its own pool,
 and they do not share. At the default of 10, a few concurrent instances
@@ -550,16 +550,47 @@ are the load-bearing lines.
 workflow, action `worker`, confirm `worker`. It needs `FLY_API_TOKEN` (a Fly
 ORG token, on an org with a payment method) and `PRODUCTION_DATABASE_URL`
 (Neon's direct string — a `-pooler` host is turned into the direct one) as
-Actions secrets, beside `VERCEL_TOKEN`. It creates the app (or reuses one
-named from `fly.toml`'s `app`, suffixed when that global name is taken),
-imports the secrets over stdin, deploys one machine with `--ha=false`, waits
-for `/readyz`, and — when either side lacks it — generates a shared
-`AGENT_INTERNAL_TOKEN`, sets it and `AGENT_URL` on Vercel and redeploys the
-web app, then waits for `/api/health` to report the worker `live`. Any of
-`ANTHROPIC_API_KEY`, `SECRETS_KEY`, `SMTP_*`, `MAIL_FROM`, `IMAP_*`,
+Actions secrets, beside `VERCEL_TOKEN`. **It refuses first, before anything
+is created, staged or deployed, unless production's database already has
+the checkout's `EXPECTED_MIGRATION` applied** (read with the migrator's
+`status`): the worker deploys this checkout, and a re-wiring redeploys the
+web app from it, so neither may run ahead of its schema. It never migrates
+— run `release` from the same ref first. Then it creates the app (or
+reuses one named from `fly.toml`'s `app`, suffixed when that global name is
+taken), stages the secrets over stdin, deploys one machine with
+`--ha=false` and waits for `/readyz`. It keeps the existing
+`AGENT_INTERNAL_TOKEN` only when Vercel has `AGENT_URL`,
+`AGENT_INTERNAL_TOKEN` and a marker, `AGENT_INTERNAL_TOKEN_WIRED`, equal to
+`<fly app>:<Fly's own digest of AGENT_INTERNAL_TOKEN>` — an encrypted,
+readable Vercel production variable that holds no secret and that nothing
+in the app reads. Otherwise it generates a new token, stages it on Fly,
+deploys, sets it and `AGENT_URL` on Vercel, redeploys the web app, waits
+for `/api/health?strict=1`, and only then writes the marker, so a run cut
+off part-way — Fly re-tokened and Vercel not, or Vercel set and never
+redeployed — is rewired by the next run rather than read as done, where it
+used to see only that the names existed and go green with every web call
+to the worker refused. **The first `worker` run from a checkout that writes
+the marker therefore rotates the token once and redeploys the web app**,
+because no marker exists on Vercel yet. A hand edit of
+`AGENT_INTERNAL_TOKEN` on Fly is noticed (it changes Fly's digest); one on
+Vercel, outside the action, is not. An error from the Vercel API while
+reading the variables stops the run rather than reading as "missing", and
+if Fly reports no digest the run warns and the next one rotates again —
+safe, but noisy. It then waits for `/api/health` to report the worker
+`live`. Any of `ANTHROPIC_API_KEY`, `ANTHROPIC_WORKSPACE_ID`,
+`AGENT_MODEL`, `SECRETS_KEY`, `SMTP_*`, `MAIL_FROM`, `IMAP_*`,
 `SLACK_WEBHOOK_URL`, `UNSUBSCRIBE_SECRET`, `DOVESOFT_API_KEY` and
 `DOVESOFT_ENTITY_ID` set as Actions secrets is passed to the worker too;
-`WEB_PUBLIC_URL` is set to the site. By hand, the same steps:
+`WEB_PUBLIC_URL` is set to the site. Those, and `FLY_API_TOKEN` and
+`FLY_ORG`, reach only the workflow step that runs `worker`: `status`,
+`migrate`, `deploy` and `release` run in a step that sees
+`PRODUCTION_DATABASE_URL` and the `VERCEL_*` secrets alone. The step that
+installs flyctl is pinned to a commit of `superfly/flyctl-actions`
+(`setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1`, its `v1`), never
+a branch or a tag that a push there could move, and flyctl itself to
+`0.4.111` through the action's `version` input — upgrading flyctl is
+editing that line in `.github/workflows/production.yml`. By hand, the same
+steps:
 
 ```bash
 fly launch --no-deploy --copy-config     # once; keeps this fly.toml
@@ -578,11 +609,11 @@ Everything else turns a feature on, and the worker says which at boot.
 | `ANTHROPIC_API_KEY` | chat | `chat_disabled`; **everything else still runs** |
 | `SECRETS_KEY` | connectors with credentials | those connectors are skipped, with a reason |
 | `SMTP_HOST`, `MAIL_FROM`, `SMTP_*` | sending | `outreach: disabled` |
-| `IMAP_HOST`, `IMAP_USER`, `IMAP_PASSWORD` | reply detection: new mail is read as it arrives, and the mailbox again every ten minutes. A message the worker could not record stays unread and is retried — five attempts over about a quarter of an hour — then marked read and logged `INBOUND MESSAGE ABANDONED — handle it by hand`, with only its UID: find it in the mailbox | `outreach: send-only` — replies never pause a sequence |
+| `IMAP_HOST`, `IMAP_USER`, `IMAP_PASSWORD` | reply detection: new mail is read as it arrives, and the mailbox again every ten minutes. A message the worker could not record stays unread and is retried — five attempts over about a quarter of an hour — then marked read and logged `INBOUND MESSAGE ABANDONED — handle it by hand`, with only its UID: find it in the mailbox. A reply that asked to stop does not wait for those retries: on its first failure the contact is paused, a `contact.opt_out_not_recorded` row is written and the Slack alarm raised, once per message while the worker runs | `outreach: send-only` — replies never pause a sequence |
 | `UNSUBSCRIBE_SECRET` | the RFC 8058 one-click `List-Unsubscribe` header on every email. **The same value as Vercel's** | no header, and one warn line at boot — `unsubscribe: headers off`, naming the missing variable (logged only when SMTP is configured) |
 | `WEB_PUBLIC_URL` | where that header's link points: the web app's public https origin, e.g. `https://myagencyos.in`. In production the worker **refuses to boot** on a value that is not `https:` on a public multi-label host — RFC 8058 one-click needs an HTTPS URI, and mailbox providers ignore any other | as above — the header needs both |
 | `OUTREACH_BOUNCE_PAUSE_PCT` | the hard-bounce rate past which an email campaign pauses itself — over 30 days, once it has written to at least 20 people. `100` turns it off | `5`. The boot log says `bounce auto-pause: on` |
-| `SLACK_WEBHOOK_URL` | the one alarm the worker raises itself: a reply read over IMAP that said stop and whose suppression could not be written. **The same value as Vercel's**; set `WEB_PUBLIC_URL` beside it so the message links into the app | the IMAP opt-out failure is still audited and logged `OPT-OUT NOT RECORDED`, and `/compliance` and the next digest count it — it just does not reach the channel in real time |
+| `SLACK_WEBHOOK_URL` | the one alarm the worker raises itself: a reply read over IMAP that said stop and whose suppression could not be written, or whose recording failed outright. **The same value as Vercel's**; set `WEB_PUBLIC_URL` beside it so the message links into the app | the IMAP opt-out failure is still audited and logged `OPT-OUT NOT RECORDED`, the contact paused, and `/compliance` and the next digest count it — it just does not reach the channel in real time |
 | `DOVESOFT_API_KEY`, `DOVESOFT_ENTITY_ID` | sending SMS through DoveSoft — BOTH, or SMS is off (see "SMS through DoveSoft") | approved SMS wait in the queue; the boot log says `sms: dovesoft off` and names the missing variable, at warn when only one is set |
 | `DOVESOFT_BASE_URL` | where DoveSoft's send API is. Leave it unset | DoveSoft's own API. In production the worker **refuses to boot** on a value that is not `https:` on a public multi-label host, because the key is sent to it |
 
@@ -696,7 +727,8 @@ It has two halves, set up in this order:
    `DOVESOFT_ORG_ID` (the org's id: `SELECT id, name FROM orgs` in Neon's
    SQL editor). Texts are matched against contacts in every org first;
    `DOVESOFT_ORG_ID` is only the fallback — where a text from a number no
-   contact holds is filed, and its STOP suppressed. Redeploy.
+   contact holds is filed, and its STOP suppressed — and decides nothing
+   about a number somebody holds. Redeploy.
 5. **Register the two webhook URLs with DoveSoft's account manager.**
    **Settings → Deployment** prints both, built from `AUTH_URL`:
 
@@ -739,20 +771,28 @@ DoveSoft console before sending it again.
 
 **What the two routes answer.** 503 while `DOVESOFT_WEBHOOK_SECRET` is
 unset, 401 for a wrong token. A delivery report that was read is 200,
-matched or not. A text back filed under exactly one contact is 200, after
-the opt-out alarm when its STOP could not be written. A payload either route
-cannot read is 400 (413 when larger than 16 KB) — never 200, because an
-unread text might have been a STOP — with an `sms.*_unreadable` audit row and
-an error line, so DoveSoft retries. A STOP from a number no single contact
-holds whose suppression could not be written is 500, so it is retried too;
-that one, and a STOP from a number that cannot be read (400), also raise the
-Slack opt-out alarm before answering — with no message and no number in it,
-linking `/compliance` — filed under `DOVESOFT_ORG_ID`, and not raised
-without it. A fault while recording — a dropped connection, a timeout — is
-500 on either route, so DoveSoft retries, and the error line names the
-fault's class only, never the number or the words; when the text asked to
-stop, the same opt-out alarm is raised and a `contact.opt_out_not_recorded`
-row written under `DOVESOFT_ORG_ID`. A NUL character in a pushed text, id
+matched or not. A text back filed under one contact is 200, after an
+opt-out alarm for each org where its STOP could not be written — that
+contact's, and any other org whose contacts hold the number. A payload
+either route cannot read is 400 (413 when larger than 16 KB) — never 200,
+because an unread text might have been a STOP — with an `sms.*_unreadable`
+audit row and an error line, so DoveSoft retries. A STOP from a number no
+single contact holds whose suppression could not be written is 500, so it
+is retried too; that one, and a STOP from a number that cannot be read
+(400), also raise the Slack opt-out alarm before answering, one in each org
+where it failed, naming a contact there who holds the number and linking
+`/suppressions`. Where nobody holds it, or it could not be read, the alarm
+carries no message, no contact and no number, links `/compliance`, and is
+filed under `DOVESOFT_ORG_ID` — not raised without it. A redelivery of a
+text filed under nobody pauses nobody again; for a STOP it only writes a
+suppression still missing. A fault while recording — a dropped connection,
+a timeout — is 500 on either route, so DoveSoft retries, and the error line
+names the fault's class only, never the number or the words. When the text
+asked to stop and the recorder had already matched the contact, a
+`contact.opt_out_not_recorded` row is written under that contact in their
+org, they are paused, and the alarm names them; a fault before anybody was
+matched writes that row with no contact under `DOVESOFT_ORG_ID` and raises
+the alarm with none. A NUL character in a pushed text, id
 or reason (some gateways decode GSM-7's `@` as one) is stored as U+FFFD
 rather than failing every retry.
 
