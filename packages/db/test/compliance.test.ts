@@ -23,8 +23,8 @@ import {
   complianceDisclosure, complianceDraftsOnStaleEvidence, complianceEvidenceFreshness,
   complianceHumanCanResolve, complianceLateApprovals, complianceOptOutsNotRecorded,
   complianceOptOutsWithoutSuppression, complianceRefusalsByCode, complianceSummary,
-  complianceSuppressionsBySource, DIGEST_OPT_OUT_FAILURES, recordInboundReply, recordUnsubscribe, schema,
-  type AgencyDb,
+  complianceSuppressionsBySource, DIGEST_OPT_OUT_FAILURES, recordInboundReply, recordUnsubscribe, rolledBackOptOutAudit,
+  schema, type AgencyDb,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
 
@@ -577,6 +577,24 @@ describe('the compliance counts', () => {
       const r = await complianceOptOutsNotRecorded(db, orgId, null)
       expect(r.count).toBe(2)
       expect(r.rows.map((x) => x.companyDomain).sort()).toEqual(['never.test', null].sort())
+    })
+
+    /**
+     * Review round 7, [7]: a colleague's stop filed under a contact is
+     * written about the message it answered, never about the contact — so
+     * the inbox does not read it as the contact's own. It is still somebody's
+     * opt-out recorded nowhere, so the page counts it, at the company of the
+     * conversation it arrived in.
+     */
+    it('counts a stop from somebody other than the contact it was filed under, at the company of the message it answered', async () => {
+      const priya = await contact(orgId, fresh, 'priya@fresh.test')
+      const ours = await touch({ orgId, contactId: priya, companyId: fresh, channel: 'email', direction: 'out', status: 'sent', sentAt: ago(2) })
+      await appendAudit(db, rolledBackOptOutAudit({ orgId, contactId: priya, inReplyTo: ours, fromIsContact: false }))
+      const r = await complianceOptOutsNotRecorded(db, orgId, null)
+      expect(r.count).toBe(1)
+      expect(r.rows[0]).toMatchObject({
+        action: 'contact.opt_out_not_recorded', channel: 'email', why: 'record_failed', companyDomain: 'fresh.test',
+      })
     })
 
     it('counts the audit rows inside the window and all time', async () => {
