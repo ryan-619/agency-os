@@ -12,23 +12,37 @@
  *   RUN_ID=… node tools/vercel-env.mjs pending <KEY>
  *                                              exit 0 when KEY holds a record
  *                                              that run RUN_ID wrote
+ *   RUN_ID=… node tools/vercel-env.mjs superseded <KEY>
+ *                                              exit 0 when KEY holds a record
+ *                                              that a LATER run wrote
  *   RUN_ID=… node tools/vercel-env.mjs promote <FROM> <TO>
  *                                              set TO (encrypted) to what run
  *                                              RUN_ID recorded in FROM
  *
- * `has`, `equals` and `pending` answer 1 for "no" and 2 when the API could
+ * `has`, `equals`, `pending` and `superseded` answer 1 for "no" and 2 when the API could
  * not be asked — and a caller must never read a 2 as "no" (review round 6,
  * [10]): the worker action did, and a transient API error rotated the
  * worker's token. `equals` is for the one non-secret value the worker
  * action reads back (its wiring marker), and compares without printing
  * either side.
  *
+ * "Could not be asked" includes a request that never got an answer — a DNS
+ * failure, a reset connection, the 15 s timeout — and an answer whose body
+ * could not be read (review round 9, [8]). A rejected `fetch` used to escape
+ * as an unhandled rejection, which Node exits with 1: "no". The worker-web
+ * job then read a timeout as "nothing of this run is waiting", skipped the
+ * redeploy and went green with the live web app on the old token.
+ *
  * `pending` and `promote` carry that marker from the Production workflow's
  * `worker` job, which holds the worker's secrets, to its `worker-web` job,
  * which redeploys the web app and must write the marker LAST (review round
  * 8, [5]). A record is "<run id>/<value>", written with `set`; only the run
  * that wrote it can promote it, so a re-run of an old job never records a
- * newer run's wiring. `promote` answers 0 when TO was set, 1 when there is
+ * newer run's wiring. `superseded` tells the one innocent way a run's record
+ * can be missing — a later run has written its own since, as when an old
+ * run's second job is re-run — from a record that should be there and is
+ * not (review round 9, [8]). GitHub's run ids grow, so "later" is a larger
+ * id. `promote` answers 0 when TO was set, 1 when there is
  * nothing of this run's to record (no record, another run's, or an empty
  * value), and 2 when the API could not be asked or refused the write. It
  * prints neither value.
@@ -41,29 +55,58 @@ const { VERCEL_TOKEN: token, VERCEL_ORG_ID: org, VERCEL_PROJECT_ID: project, VAL
 const [cmd, key, type] = process.argv.slice(2)
 if (!token || !org || !project || !cmd || !key) {
   console.error(
-    'usage: VALUE=… node tools/vercel-env.mjs set <KEY> <sensitive|encrypted> | has <KEY> | equals <KEY> | pending <KEY> | promote <FROM> <TO>',
+    'usage: VALUE=… node tools/vercel-env.mjs set <KEY> <sensitive|encrypted> | has <KEY> | equals <KEY> | pending <KEY> | superseded <KEY> | promote <FROM> <TO>',
   )
   process.exit(2)
 }
 // A personal account's projects take no teamId; a team's need it.
 const scope = org.startsWith('team_') ? `teamId=${encodeURIComponent(org)}` : ''
 
+/**
+ * Why a request got no answer, as words that carry nothing from it: the
+ * error's class and, for a network failure, its system code. Never its
+ * message or cause text, which can quote the URL.
+ */
+function unanswered(err) {
+  const name = err instanceof Error ? err.name : 'Error'
+  const code = err instanceof Error && typeof err.cause?.code === 'string' ? err.cause.code : null
+  return code ? `${name} (${code})` : name
+}
+
+/**
+ * One request. `json` is null when the body was not JSON; `unreadable` says
+ * the body could not be READ at all — the timeout fired mid-body, or the
+ * connection dropped — which the readers below never take for an answer.
+ * A request that got no answer stops the script here, with 2.
+ */
 async function api(method, path, body) {
   const sep = path.includes('?') ? '&' : '?'
-  const res = await fetch(`https://api.vercel.com${path}${scope ? sep + scope : ''}`, {
-    method,
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined,
-    redirect: 'error',
-    signal: AbortSignal.timeout(15_000),
-  })
+  let res
+  try {
+    res = await fetch(`https://api.vercel.com${path}${scope ? sep + scope : ''}`, {
+      method,
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+      redirect: 'error',
+      signal: AbortSignal.timeout(15_000),
+    })
+  } catch (err) {
+    console.error(`::error::the Vercel API could not be asked (${method} ${path.split('?')[0]}): ${unanswered(err)}`)
+    process.exit(2)
+  }
+  let text = null
+  try {
+    text = await res.text()
+  } catch {
+    text = null
+  }
   let json = null
   try {
-    json = await res.json()
+    json = text === null ? null : JSON.parse(text)
   } catch {
     json = null
   }
-  return { status: res.status, json, code: json?.error?.code ?? null }
+  return { status: res.status, json, unreadable: text === null, code: json?.error?.code ?? null }
 }
 
 /** The production entry for `name`, or null; exits 2 when the list cannot be read. */
@@ -73,8 +116,13 @@ async function productionEntry(name = key) {
     console.error(`::error::listing the project's variables failed: HTTP ${r.status}${r.code ? ` (${r.code})` : ''}`)
     process.exit(2)
   }
+  // A list that did not arrive whole is not a list without the name.
+  if (!Array.isArray(r.json?.envs)) {
+    console.error(`::error::listing the project's variables failed: the answer could not be read${r.unreadable ? ' (it was cut off)' : ''}`)
+    process.exit(2)
+  }
   return (
-    (r.json?.envs ?? []).find(
+    r.json.envs.find(
       (e) => e.key === name && (Array.isArray(e.target) ? e.target.includes('production') : e.target === 'production'),
     ) ?? null
   )
@@ -95,7 +143,12 @@ async function productionValue(name = key) {
     console.error(`::error::reading ${name} failed: HTTP ${r.status}${r.code ? ` (${r.code})` : ''}`)
     process.exit(2)
   }
-  return typeof r.json?.value === 'string' ? r.json.value : null
+  // An answer that could not be read is not a value that never comes back.
+  if (r.json === null || typeof r.json !== 'object') {
+    console.error(`::error::reading ${name} failed: the answer could not be read${r.unreadable ? ' (it was cut off)' : ''}`)
+    process.exit(2)
+  }
+  return typeof r.json.value === 'string' ? r.json.value : null
 }
 
 /** Upsert a production variable; exits `failure` when Vercel refuses it. */
@@ -113,15 +166,28 @@ async function setProduction(name, to, kind, failure) {
   console.log(`vercel: ${name} set for production`)
 }
 
-/** What run RUN_ID recorded in `name` — '' for an empty record — or null when it recorded nothing there. */
-async function recordOfThisRun(name) {
+/** RUN_ID, checked: a workflow run id, or the script stops with 2. */
+function thisRun() {
   if (!runId || !/^[0-9]+$/.test(runId)) {
     console.error('::error::RUN_ID is not a workflow run id')
     process.exit(2)
   }
+  return runId
+}
+
+/** What run RUN_ID recorded in `name` — '' for an empty record — or null when it recorded nothing there. */
+async function recordOfThisRun(name) {
+  const prefix = `${thisRun()}/`
   const stored = await productionValue(name)
-  const prefix = `${runId}/`
   return typeof stored === 'string' && stored.startsWith(prefix) ? stored.slice(prefix.length) : null
+}
+
+/** Whether `name` holds a record written by a run with a larger id than RUN_ID's. */
+async function recordOfALaterRun(name) {
+  const mine = BigInt(thisRun())
+  const stored = await productionValue(name)
+  const m = typeof stored === 'string' ? /^([0-9]+)\//.exec(stored) : null
+  return m !== null && BigInt(m[1]) > mine
 }
 
 if (cmd === 'has') {
@@ -139,6 +205,10 @@ if (cmd === 'equals') {
 
 if (cmd === 'pending') {
   process.exit((await recordOfThisRun(key)) === null ? 1 : 0)
+}
+
+if (cmd === 'superseded') {
+  process.exit((await recordOfALaterRun(key)) ? 0 : 1)
 }
 
 if (cmd === 'promote') {

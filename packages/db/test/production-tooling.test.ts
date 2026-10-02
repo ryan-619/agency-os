@@ -44,6 +44,16 @@
  *       secret. And because GitHub DROPS a job output that contains any
  *       secret value of its job, the harness drops outputs the way the
  *       runner does, so the hand-over between the jobs is tested against it.
+ *
+ * Review round 9:
+ *
+ *  [8]  vercel-env.mjs let a rejected `fetch` — a DNS failure, a reset, its
+ *       own 15 s timeout — escape, and Node exits 1 on that: "no". So
+ *       worker-web read a timeout as "nothing of this run is waiting",
+ *       skipped the redeploy and went green with the live web app on the
+ *       old token. Now the helper answers 2, and worker-web is handed the
+ *       worker job's `redeploy` output: an arrived `true` with no record of
+ *       this run stops the job, unless a later run has written its own.
  */
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -231,8 +241,8 @@ esac
 
 /**
  * tools/vercel-env.mjs's stand-in: production variables in a JSON file; an
- * API error on request. `pending` and `promote` read "<run id>/<value>", as
- * the real one does (its own tests are below).
+ * API error on request. `pending`, `superseded` and `promote` read "<run
+ * id>/<value>", as the real one does (its own tests are below).
  */
 const VERCEL_ENV_STUB = `#!/usr/bin/env node
 import fs from 'node:fs'
@@ -253,6 +263,10 @@ if (cmd === 'has') process.exit(key in vars ? 0 : 1)
 if (cmd === 'equals') process.exit(vars[key] === process.env.VALUE ? 0 : 1)
 if (cmd === 'set') { vars[key] = process.env.VALUE; save(); console.log('vercel: ' + key + ' set'); process.exit(0) }
 if (cmd === 'pending') process.exit(ofThisRun() === null ? 1 : 0)
+if (cmd === 'superseded') {
+  const m = /^([0-9]+)\\//.exec(vars[key] ?? '')
+  process.exit(m && BigInt(m[1]) > BigInt(process.env.RUN_ID) ? 0 : 1)
+}
 if (cmd === 'promote') {
   const record = ofThisRun()
   if (!record) process.exit(1)
@@ -392,9 +406,10 @@ describe('the worker action', () => {
   /**
    * Run one job of the workflow: `tools/production.sh <arg>` with what the
    * job's script step hands it — each `${{ secrets.X }}` in its env, '' when
-   * unset — plus the runner's own variables.
+   * unset, and each `${{ needs.worker.outputs.X }}` from `needs`, '' when it
+   * did not arrive — plus the runner's own variables.
    */
-  function runJob(jobId: string, arg: string, secrets: Secrets, runId: string): JobRun {
+  function runJob(jobId: string, arg: string, secrets: Secrets, runId: string, needs: Record<string, string> = {}): JobRun {
     for (const f of ['calls.log', 'env.log', 'environ.log']) writeFileSync(join(state, f), '')
     const output = join(dir, 'runner', `${jobId}.output`)
     writeFileSync(output, '')
@@ -412,6 +427,7 @@ describe('the worker action', () => {
     const step = scriptStepOf(jobOf(jobId))
     expect(step).toContain(`run: tools/production.sh ${arg}\n`)
     for (const m of step.matchAll(/^ {10}([A-Z_]+): \$\{\{ secrets\.([A-Z_]+) \}\}$/gm)) env[m[1]!] = secrets[m[2]!] ?? ''
+    for (const m of step.matchAll(/^ {10}([A-Z_]+): \$\{\{ needs\.worker\.outputs\.([a-z_]+) \}\}$/gm)) env[m[1]!] = needs[m[2]!] ?? ''
     const r = spawnSync('bash', [script, arg], { cwd: dir, env, encoding: 'utf8', timeout: 60_000 })
     const read = (f: string) => readFileSync(join(state, f), 'utf8')
     return {
@@ -430,7 +446,7 @@ describe('the worker action', () => {
    * actions/runner JobExtension.cs): no minimum length, as a substring.
    * `worker-web`'s `if:` is then evaluated from production.yml itself.
    */
-  function runWorkflow(secrets: Secrets = {}, runId = String(nextRun++)): WorkflowRun {
+  function runWorkflow(secrets: Secrets = {}, runId = String(nextRun++), between: () => void = () => {}): WorkflowRun {
     const all = { ...BASE_SECRETS, ...secrets }
     const worker = runJob('worker', 'worker', all, runId)
     const job = jobOf('worker')
@@ -454,7 +470,8 @@ describe('the worker action', () => {
         else outputs[m[1]!] = value
       }
     }
-    const web = worker.status === 0 && webJobRuns(outputs) ? runJob('worker-web', 'worker-web', all, runId) : null
+    between()
+    const web = worker.status === 0 && webJobRuns(outputs) ? runJob('worker-web', 'worker-web', all, runId, outputs) : null
     return { runId, worker, outputs, dropped, web }
   }
 
@@ -645,14 +662,85 @@ describe('the worker action', () => {
       const newer = runWorkflow()
       expectBothJobs(newer)
       const recorded = vercelVars()[MARKER]
-      // "Re-run failed jobs" on the old run: same run id, the old outputs.
-      const rerun = runJob('worker-web', 'worker-web', BASE_SECRETS, old.runId)
+      // "Re-run failed jobs" on the old run: same run id, the old outputs —
+      // an arrived `true`, and a later run's record where its own was.
+      expect(old.outputs).toEqual({ redeploy: 'true' })
+      const rerun = runJob('worker-web', 'worker-web', BASE_SECRETS, old.runId, old.outputs)
       expect(rerun.status, rerun.out).toBe(0)
       expect(rerun.out).toContain('nothing of this run is waiting to be recorded')
+      expect(rerun.out).toContain('a later run has wired since')
       expect(webDeploys(rerun)).toEqual([])
       expect(promotes(rerun)).toEqual([])
       expect(vercelVars()[MARKER]).toBe(recorded)
     })
+  })
+
+  describe('the web job never reads a missing record as "kept" when the worker job wired ([8], round 9)', () => {
+    const withoutRecord = () => {
+      const v = vercelVars()
+      delete v[PENDING]
+      setVercel(v)
+    }
+
+    it('an arrived `true` and no record of this run: the web job stops, deploying and recording nothing — and the next run wires', () => {
+      const r = runWorkflow({}, undefined, withoutRecord)
+      expect(r.worker.status, r.worker.out).toBe(0)
+      expect(r.outputs).toEqual({ redeploy: 'true' })
+      expect(r.web, 'worker-web ran').not.toBeNull()
+      expect(r.web!.status).not.toBe(0)
+      expect(r.web!.out).toContain(`no record of this run can be read from ${PENDING}`)
+      expect(r.web!.out).not.toContain('kept the existing wiring')
+      expect(webDeploys(r.web)).toEqual([])
+      expect(promotes(r.web)).toEqual([])
+      expect(vercelVars()[MARKER]).toBeUndefined()
+
+      const next = runWorkflow()
+      expectBothJobs(next)
+      expect(webDeploys(next.web)).toHaveLength(1)
+      expectWiredTogether()
+    })
+
+    it('an EARLIER run’s record where this run’s should be is no record of this run', () => {
+      wired()
+      const before = vercelVars()[PENDING]!
+      // The token Vercel is wired to is rotated: the marker names another app.
+      setVercel({ ...vercelVars(), [MARKER]: `${APP}-old:x` })
+      const r = runWorkflow({}, undefined, () => setVercel({ ...vercelVars(), [PENDING]: before }))
+      expect(r.outputs).toEqual({ redeploy: 'true' })
+      expect(r.web!.status).not.toBe(0)
+      expect(r.web!.out).toContain('no record of this run can be read')
+      expect(webDeploys(r.web)).toEqual([])
+    })
+
+    it('a Vercel API error in the web job stops it before anything is deployed or recorded', () => {
+      const r = runWorkflow({}, undefined, () => flag('vercel-api-down'))
+      expect(r.web!.status).not.toBe(0)
+      expect(r.web!.out).toMatch(/Could not read the Vercel project's variables/)
+      expect(webDeploys(r.web)).toEqual([])
+      expect(promotes(r.web)).toEqual([])
+    })
+
+    it('with the real helper: a request that never answers (the 15 s timeout) stops the web job, never reads as "nothing waiting"', () => {
+      const r = runWorkflow({}, undefined, () => {
+        // tools/vercel-env.mjs itself, its `fetch` rejecting as
+        // AbortSignal.timeout's does — the probe that found [8].
+        copyFileSync(vercelEnv, join(dir, 'tools/vercel-env.mjs'))
+        writeFileSync(
+          join(dir, 'fetch-throws.mjs'),
+          "globalThis.fetch = async () => { throw new DOMException('The operation was aborted due to timeout', 'TimeoutError') }\n",
+        )
+        writeFileSync(join(dir, 'bin/node'), NODE.replace('exec "$REAL_NODE" "$@"', `exec "$REAL_NODE" --import "${join(dir, 'fetch-throws.mjs')}" "$@"`))
+      })
+      expect(r.outputs).toEqual({ redeploy: 'true' })
+      expect(r.web!.status).not.toBe(0)
+      expect(r.web!.out).toContain('the Vercel API could not be asked')
+      expect(r.web!.out).toContain('TimeoutError')
+      expect(r.web!.out).toMatch(/Could not read the Vercel project's variables/)
+      expect(r.web!.out).not.toContain('nothing of this run is waiting')
+      expect(webDeploys(r.web)).toEqual([])
+      expect(r.web!.out).not.toContain('vercel-token-stub')
+    })
+
   })
 
   describe('the Vercel CLI never runs on a VM that holds a worker secret ([5])', () => {
@@ -893,11 +981,18 @@ describe('vercel-env.mjs', () => {
   })
 
   /**
-   * Run the real script with `fetch` answering from `routes` — a path
-   * prefix, or `POST <prefix>` for a write, → [status, body] — and every
-   * request it made logged.
+   * How a request can go without an answer: `timeout` rejects as
+   * AbortSignal.timeout does, `reset` as undici does on a dropped connection,
+   * and `cut` answers 200 and then fails while the body is read.
    */
-  function run(args: string[], routes: Record<string, [number, unknown]>, env: Record<string, string> = {}) {
+  type NoAnswer = 'timeout' | 'reset' | 'cut'
+
+  /**
+   * Run the real script with `fetch` answering from `routes` — a path
+   * prefix, or `POST <prefix>` for a write, → [status, body] or a NoAnswer —
+   * and every request it made logged.
+   */
+  function run(args: string[], routes: Record<string, [number, unknown] | NoAnswer>, env: Record<string, string> = {}) {
     const hook = join(dir, 'fetch.mjs')
     const log = join(dir, 'requests.log')
     writeFileSync(log, '')
@@ -911,7 +1006,18 @@ globalThis.fetch = async (url, init = {}) => {
   fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify({ method, path, body: init.body ? JSON.parse(init.body) : null }) + '\\n')
   const match = (p) => (p.startsWith('POST ') ? method === 'POST' && path.startsWith(p.slice(5)) : path.startsWith(p))
   const hit = Object.keys(routes).filter(match).sort((a, b) => b.length - a.length)[0]
-  const [status, body] = hit ? routes[hit] : [404, {}]
+  const answer = hit ? routes[hit] : [404, {}]
+  if (answer === 'timeout') throw new DOMException('The operation was aborted due to timeout', 'TimeoutError')
+  if (answer === 'reset') throw new TypeError('fetch failed', { cause: Object.assign(new Error('read ECONNRESET api.vercel.com'), { code: 'ECONNRESET' }) })
+  if (answer === 'cut') {
+    return new Response(new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('{"envs":[{"id":"env_1","key":"AGENT_INTERNAL_TOKEN_WIRED","value":"agency-os'))
+        c.error(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+      },
+    }), { status: 200 })
+  }
+  const [status, body] = answer
   return new Response(JSON.stringify(body), { status })
 }
 `,
@@ -1015,6 +1121,80 @@ globalThis.fetch = async (url, init = {}) => {
       expect(run(['promote', 'AGENT_INTERNAL_TOKEN_PENDING'], routes(200, '42/x'), { RUN_ID: '42' }).status).toBe(2)
     })
   })
+
+  describe('a request that gets no answer is 2, never "no" ([8], round 9)', () => {
+    const TOKEN = 'vercel-token-never-printed-4410'
+    const listRoute = '/v10/projects/prj/env'
+
+    it('a rejected fetch — the timeout, a reset — is 2 for every command, saying why and printing no value or token', () => {
+      for (const failure of ['timeout', 'reset'] as const) {
+        const cases: [string[], Record<string, [number, unknown] | NoAnswer>, Record<string, string>][] = [
+          [['has', 'AGENT_URL'], { [listRoute]: failure }, {}],
+          [['equals', 'AGENT_INTERNAL_TOKEN_WIRED'], { [listRoute]: failure }, { VALUE: 'agency-os-agent:0123abcd' }],
+          [['equals', 'AGENT_INTERNAL_TOKEN_WIRED'], { [listRoute]: [200, list], '/v1/projects/prj/env/env_1': failure }, { VALUE: 'agency-os-agent:0123abcd' }],
+          [['pending', 'AGENT_INTERNAL_TOKEN_PENDING'], { [listRoute]: failure }, { RUN_ID: '42' }],
+          [['pending', 'AGENT_INTERNAL_TOKEN_PENDING'], { [listRoute]: [200, list], '/v1/projects/prj/env/env_2': failure }, { RUN_ID: '42' }],
+          [['superseded', 'AGENT_INTERNAL_TOKEN_PENDING'], { [listRoute]: failure }, { RUN_ID: '42' }],
+          [['promote', 'AGENT_INTERNAL_TOKEN_PENDING', 'AGENT_INTERNAL_TOKEN_WIRED'], { [listRoute]: failure }, { RUN_ID: '42' }],
+          [
+            ['promote', 'AGENT_INTERNAL_TOKEN_PENDING', 'AGENT_INTERNAL_TOKEN_WIRED'],
+            { [listRoute]: [200, list], '/v1/projects/prj/env/env_2': [200, { value: '42/agency-os-agent:0123abcd' }], [`POST ${listRoute}`]: failure },
+            { RUN_ID: '42' },
+          ],
+          [['set', 'AGENT_URL', 'encrypted'], { [`POST ${listRoute}`]: failure }, { VALUE: 'https://agency-os-agent.fly.dev' }],
+        ]
+        for (const [args, routes, env] of cases) {
+          const r = run(args, routes, { VERCEL_TOKEN: TOKEN, ...env })
+          const what = `${failure}: ${args.join(' ')} ${Object.keys(routes).join(', ')}`
+          expect(r.status, `${what}\n${r.out}`).toBe(2)
+          expect(r.out, what).toContain('the Vercel API could not be asked')
+          expect(r.out, what).toContain(failure === 'timeout' ? 'TimeoutError' : 'TypeError (ECONNRESET)')
+          for (const never of [TOKEN, '0123abcd', 'fly.dev', 'read ECONNRESET']) expect(r.out, what).not.toContain(never)
+        }
+      }
+    })
+
+    it('an answer cut off while its body is read is 2, never an empty list or a value that never comes back', () => {
+      expect(run(['has', 'AGENT_INTERNAL_TOKEN_WIRED'], { [listRoute]: 'cut' }).status).toBe(2)
+      const cutValue = { [listRoute]: [200, list] as [number, unknown], '/v1/projects/prj/env/env_2': 'cut' as const }
+      const pending = run(['pending', 'AGENT_INTERNAL_TOKEN_PENDING'], cutValue, { RUN_ID: '42' })
+      expect(pending.status).toBe(2)
+      expect(pending.out).toContain('the answer could not be read (it was cut off)')
+      expect(pending.out).not.toContain('agency-os')
+      const equals = run(['equals', 'AGENT_INTERNAL_TOKEN_PENDING'], cutValue, { VALUE: '42/x' })
+      expect(equals.status).toBe(2)
+      // Control: an answer that arrived whole without a value — a Sensitive
+      // variable — is still "never equal", 1.
+      expect(run(['equals', 'AGENT_INTERNAL_TOKEN_PENDING'], { [listRoute]: [200, list], '/v1/projects/prj/env/env_2': [200, {}] }, { VALUE: '42/x' }).status).toBe(1)
+    })
+  })
+
+  describe('superseded: whether a LATER run has written its own record ([8], round 9)', () => {
+    const routes = (value: unknown): Record<string, [number, unknown]> => ({
+      '/v10/projects/prj/env': [200, list],
+      '/v1/projects/prj/env/env_2': [200, { value }],
+    })
+    const superseded = (value: unknown, runId: string) => run(['superseded', 'AGENT_INTERNAL_TOKEN_PENDING'], routes(value), { RUN_ID: runId })
+
+    it('0 for a later run’s record — compared as numbers, not as text — and printing no value', () => {
+      const later = superseded('43/agency-os-agent:0123abcd', '42')
+      expect(later.status).toBe(0)
+      expect(later.out).not.toContain('0123abcd')
+      expect(superseded('100/', '99').status).toBe(0)
+      expect(superseded('12345678901234567890/x', '12345678901234567889').status).toBe(0)
+    })
+
+    it('1 for this run’s record, an earlier run’s, a value that is not a record, or none; 2 without a run id', () => {
+      expect(superseded('42/x', '42').status).toBe(1)
+      expect(superseded('41/x', '42').status).toBe(1)
+      expect(superseded('99/x', '100').status).toBe(1)
+      expect(superseded('agency-os-agent:0123abcd', '42').status).toBe(1)
+      expect(superseded(undefined, '42').status).toBe(1)
+      expect(run(['superseded', 'AGENT_URL'], routes('43/x'), { RUN_ID: '42' }).status).toBe(1)
+      expect(superseded('43/x', '').status).toBe(2)
+      expect(superseded('43/x', 'abc').status).toBe(2)
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -1080,8 +1260,11 @@ describe('the Production workflow', () => {
     expect(new Set(envOf(scriptStepOf(jobOf('worker'))))).toEqual(new Set([...WORKER_ONLY, 'PRODUCTION_DATABASE_URL', ...VERCEL_SECRETS]))
     // The web job: Vercel's and nothing else, anywhere in the job — not even
     // the database URL, which it does not need.
+    // And REDEPLOY, the worker job's one output — a word, never a secret
+    // (round 9, [8]).
     const web = jobOf('worker-web')
-    expect(new Set(envOf(scriptStepOf(web)))).toEqual(new Set(VERCEL_SECRETS))
+    expect(new Set(envOf(scriptStepOf(web)))).toEqual(new Set([...VERCEL_SECRETS, 'REDEPLOY']))
+    expect(scriptStepOf(web)).toMatch(/^ {10}REDEPLOY: \$\{\{ needs\.worker\.outputs\.redeploy \}\}$/m)
     expect(new Set(secretsReferencedBy(web))).toEqual(new Set(VERCEL_SECRETS))
   })
 

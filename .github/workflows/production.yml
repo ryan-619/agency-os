@@ -255,10 +255,14 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci
+      # REDEPLOY is not a secret: the worker job's one output, a word, as it
+      # arrived ('' when GitHub dropped it). An arrived `true` with no record
+      # of this run on Vercel stops the job rather than reading as "kept".
       - name: worker-web
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
           VERCEL_TEAM: ${{ secrets.VERCEL_TEAM }}
+          REDEPLOY: ${{ needs.worker.outputs.redeploy }}
         run: tools/production.sh worker-web
