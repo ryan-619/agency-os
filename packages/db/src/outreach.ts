@@ -2124,8 +2124,11 @@ export async function pauseContact(
  * could not finish. That is the reason that matters now, and left behind an
  * older `replied …` it let answering that reply in /inbox resume a person who
  * had asked to stop (the inbox ends only a reply's own pause). The one
- * writer, shared by the three paths that need it: a reply's opt-out whose
- * suppression failed (`recordInboundReply`), a one-click unsubscribe that
+ * writer, shared by every path that knows an opt-out failed to store: a
+ * reply's opt-out whose suppression failed (`recordInboundReply`, and
+ * sms.ts for a number's other holders), a stop whose whole recording threw
+ * (the two email webhooks, the DoveSoft text route and the worker's IMAP
+ * inbox, through inbound-fault.ts's reason), a one-click unsubscribe that
  * could not be recorded (unsubscribe.ts), and an erasure rolled back whole
  * (erasure.ts). Each gives a reason `pauseReasonClass` reads as
  * `opt_out_not_recorded` or `erasure`.
@@ -2199,8 +2202,33 @@ export async function resumeContact(
  * that does not pause is a genuine auto-reply, and "genuine" is decided by
  * the BROAD reader, `mentionsRemovalOrDeparture` — see `recordInboundReply`.)
  */
-const OPT_OUT =
-  /^\s*(?:please\s+)?(?:stop|unsubscribe(?:\s+me)?|remove\s+me|opt(?:\s+me)?[\s-]?out|do\s+not\s+(?:contact|email)\s+me(?:\s+again)?|no\s+more\s+emails?|take\s+me\s+off\s+(?:your|the)\s+list|leave\s+me\s+alone)\b[\s.!,]*$/i
+const LIST = String.raw`(?:your|the|this)\s+(?:(?:mailing|e-?mail(?:ing)?|contact)\s+)?list`
+/**
+ * The sentences above, whole. Review round 6 found "Please stop emailing me."
+ * read as an ordinary reply — paused, never suppressed — so the commonest
+ * ways to say it in a mail are listed: stop emailing / contacting / messaging
+ * me, don't email me, remove or unsubscribe me from your list. Still a whole
+ * first line (or a whole short message), with an optional please / kindly in
+ * front and one please / thanks after, so "stop by", "stop the migration" and
+ * a sentence that only mentions a list are not read.
+ */
+const OPT_OUT = new RegExp(
+  String.raw`^\s*(?:(?:please|pls|kindly)[\s,]+)?(?:` +
+    [
+      String.raw`stop`,
+      String.raw`stop\s+(?:e-?mailing|mailing|contacting|messaging|writing\s+to|spamming)(?:\s+me)?(?:\s+(?:again|any\s*more))?`,
+      String.raw`stop\s+sending\s+(?:me\s+)?(?:e-?mails?|mails?|messages?)(?:\s+to\s+me)?`,
+      String.raw`unsubscribe(?:\s+me)?(?:\s+from\s+${LIST})?`,
+      String.raw`remove\s+me(?:\s+from\s+${LIST})?`,
+      String.raw`opt(?:\s+me)?[\s-]?out(?:\s+of\s+${LIST})?`,
+      String.raw`(?:do\s+not|don['’]?t)\s+(?:contact|e-?mail|message|mail)\s+me(?:\s+(?:again|any\s*more))?`,
+      String.raw`no\s+more\s+e-?mails?`,
+      String.raw`take\s+me\s+off\s+${LIST}`,
+      String.raw`leave\s+me\s+alone`,
+    ].join('|') +
+    String.raw`)(?:[\s,.]+(?:please|pls|thanks|thank\s+you|thx))?[\s.!,]*$`,
+  'i',
+)
 
 export function looksLikeOptOut(body: string | null | undefined): boolean {
   if (!body) return false
