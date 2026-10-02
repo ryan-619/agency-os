@@ -1,4 +1,4 @@
-import type { InboundSmsOutcome } from '@agency/db/queries'
+import type { InboundSmsOutcome, SmsOptOutLost } from '@agency/db/queries'
 import type { NotificationEvent } from '../../../../lib/slack-message'
 
 /**
@@ -43,7 +43,10 @@ type OptOutAlarm = Extract<NotificationEvent, { kind: 'opt_out_not_recorded' }>
  * — §2.1's Phase 4 obligation said to a person, the event the email,
  * unsubscribe and erasure paths send, with `path: 'reply'` (a text that said
  * stop is a reply). Each AWAITED by the route. None for every other outcome,
- * including a retry that wrote nothing it lacked.
+ * including a retry that wrote nothing it lacked — but a retry that
+ * re-attempted a suppression and failed AGAIN raises it again (review round
+ * 7), as the first delivery did: the recorder reports that on a duplicate
+ * only then.
  *
  * ONE PER ORG WHERE IT FAILED, filed under that org (review round 6). A
  * STOP filed under a contact whose own suppression failed names the message
@@ -59,7 +62,7 @@ type OptOutAlarm = Extract<NotificationEvent, { kind: 'opt_out_not_recorded' }>
  */
 export function smsOptOutAlarms(outcome: InboundSmsOutcome): readonly OptOutAlarm[] {
   const alarms: OptOutAlarm[] = []
-  if (outcome.matched === 'contact' && outcome.optOutNotRecorded && !outcome.duplicate) {
+  if (outcome.matched === 'contact' && outcome.optOutNotRecorded) {
     alarms.push({
       kind: 'opt_out_not_recorded',
       orgId: outcome.orgId,
@@ -68,10 +71,19 @@ export function smsOptOutAlarms(outcome: InboundSmsOutcome): readonly OptOutAlar
       path: 'reply',
     })
   }
-  for (const lost of outcome.optOutNotRecordedIn) {
-    alarms.push({ kind: 'opt_out_not_recorded', orgId: lost.orgId, touchId: null, contactId: lost.contactId, path: 'reply' })
-  }
+  for (const lost of outcome.optOutNotRecordedIn) alarms.push(smsLostOptOutNotification(lost))
   return alarms
+}
+
+/**
+ * The alarm for one org where a STOP could not be suppressed and no message
+ * row there names it: one of its contacts holding the number, or none.
+ * Shared by an outcome's `optOutNotRecordedIn` and by a recording that threw
+ * after the recorder had taken the loud path in other orgs
+ * (`SmsOptOutNotRecorded`, review round 7).
+ */
+export function smsLostOptOutNotification(lost: SmsOptOutLost): OptOutAlarm {
+  return { kind: 'opt_out_not_recorded', orgId: lost.orgId, touchId: null, contactId: lost.contactId, path: 'reply' }
 }
 
 /**

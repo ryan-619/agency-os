@@ -245,6 +245,47 @@ describe('a text from a number several contacts hold (review round 6)', () => {
     expect((await contact(one)).pausedReason).toBe(sharedNumberHoldReason(NOON_IST))
   })
 
+  /**
+   * Review round 7, [2]: the same, for a holder still paused by that earlier
+   * reply. `pauseContact` kept the reply's `replied <ISO>`, so answering the
+   * reply from /inbox — which ends a reply's own pause — lifted the hold.
+   * The hold now replaces a reply's pause, and says so on its row.
+   */
+  it('replaces the pause an unanswered reply caused, so answering that reply does not lift the hold', async () => {
+    const one = await holder(a, 'Jo')
+    await holder(a, 'Jo (personal)')
+    await db.update(schema.contacts).set({ email: 'jo@rentman.in' }).where(eq(schema.contacts.id, one))
+    const earlier = await recordInboundReply(db, {
+      orgId: a.orgId, contactId: one, channel: 'email', from: 'jo@rentman.in', subject: 'Re: hello', body: 'Tell me more',
+      providerId: '<r1@mail.test>', now: new Date(NOON_IST.getTime() - 3_600_000),
+    })
+    expect(pauseReasonClass((await contact(one)).pausedReason)).toBe('replied')
+    const [email] = await db
+      .insert(schema.campaigns)
+      .values({ orgId: a.orgId, name: 'Replies', channel: 'email', autoSend: false, status: 'active' })
+      .returning({ id: schema.campaigns.id })
+    expect(await inbound()).toMatchObject({ matched: 'none', why: 'ambiguous' })
+    expect((await contact(one)).pausedReason).toBe(sharedNumberHoldReason(NOON_IST))
+    const answer = await replyQueueDraft(db, {
+      orgId: a.orgId, inboundTouchId: earlier.touchId, subject: 'Re: hello', body: 'Happy to.', campaignId: email!.id, actor: a.userId, now: NOON_IST,
+    })
+    expect(answer).toMatchObject({ ok: false, reason: 'paused_for_another_reason' })
+    expect((await contact(one)).pausedReason).toBe(sharedNumberHoldReason(NOON_IST))
+    const [row] = await audits('sms.inbound_unmatched')
+    expect(row?.detail).toMatchObject({ contacts: 2, paused: 2, replacedPauseFor: 'replied', replacedPauses: 1 })
+  })
+
+  it('keeps any other pause a holder already had, and says nothing replaced', async () => {
+    const one = await holder(a, 'Jo')
+    await holder(a, 'Jo (personal)')
+    await db.update(schema.contacts).set({ pausedAt: NOON_IST, pausedReason: 'on leave until October' }).where(eq(schema.contacts.id, one))
+    expect(await inbound()).toMatchObject({ matched: 'none', why: 'ambiguous' })
+    expect((await contact(one)).pausedReason).toBe('on leave until October')
+    const [row] = await audits('sms.inbound_unmatched')
+    expect(row?.detail).toMatchObject({ contacts: 2, paused: 1 })
+    expect(row?.detail).not.toHaveProperty('replacedPauseFor')
+  })
+
   // -------------------------------------------------------------------------
   // [3] + [6]: a suppression that failed in another org is that org's alarm
   // -------------------------------------------------------------------------
@@ -392,6 +433,45 @@ describe('a text from a number several contacts hold (review round 6)', () => {
     expect(await suppressedIn()).toEqual([a.orgId, b.orgId].sort())
   })
 
+  /**
+   * Review round 7, [1]/[3]: the filed org's OWN suppression is re-attempted
+   * on a redelivery too, so the 500 the route answers for it is finished by
+   * DoveSoft's retry like another org's.
+   */
+  it('re-attempts on a redelivery the filed org’s own suppression that failed, and records it', async () => {
+    const inA = await holder(a, 'Jo')
+    await texted(a, inA)
+    await failOnce(test.pg, { table: 'suppressions', event: 'INSERT' })
+    expect(await inbound({ text: 'STOP', log: log() })).toMatchObject({ contactId: inA, suppressed: false, optOutNotRecorded: true })
+    expect(await suppressedIn()).toEqual([])
+    const again = await inbound({ text: 'STOP', log: log() })
+    expect(again).toMatchObject({ contactId: inA, duplicate: true, suppressed: true, optOutNotRecorded: false, optOutNotRecordedIn: [] })
+    expect(await suppressedIn()).toEqual([a.orgId])
+    // Recorded as a suppression a person can read; the contact stays paused saying it was not recorded at the time.
+    expect((await audits('suppression.added')).map((r) => [r.orgId, r.actor, (r.detail as Record<string, unknown>)['kind']])).toEqual([
+      [a.orgId, 'system', 'phone'],
+    ])
+    expect(pauseReasonClass((await contact(inA)).pausedReason)).toBe('opt_out_not_recorded')
+    // Nothing left to write: a third delivery writes nothing.
+    expect(await inbound({ text: 'STOP' })).toMatchObject({ duplicate: true, optOutNotRecorded: false })
+    expect(await audits('suppression.added')).toHaveLength(1)
+  })
+
+  it('takes the loud path again, naming the filed contact, when the redelivery’s re-attempt fails too', async () => {
+    const inA = await holder(a, 'Jo')
+    await texted(a, inA)
+    await failOnce(test.pg, { table: 'suppressions', event: 'INSERT' })
+    await failOnce(test.pg, { table: 'suppressions', event: 'INSERT' })
+    await inbound({ text: 'STOP', log: log() })
+    const l = log()
+    expect(await inbound({ text: 'STOP', log: l })).toMatchObject({ duplicate: true, suppressed: false, optOutNotRecorded: true, optOutNotRecordedIn: [] })
+    expect((await audits('contact.opt_out_not_recorded')).map((r) => [r.orgId, r.subjectId])).toEqual([
+      [a.orgId, inA],
+      [a.orgId, inA],
+    ])
+    expect(l.lines.map((x) => x.message)).toContain('OPT-OUT NOT RECORDED — follow up by hand')
+  })
+
   it('does nothing more on a redelivery of an ordinary reply', async () => {
     const inA = await holder(a, 'Jo')
     const inB = await holder(b, 'Jo')
@@ -401,5 +481,211 @@ describe('a text from a number several contacts hold (review round 6)', () => {
     expect(await inbound()).toMatchObject({ matched: 'contact', duplicate: true, optOutNotRecordedIn: [] })
     expect((await contact(inB)).pausedAt).toBeNull()
     expect(await audits('sms.inbound_unmatched')).toHaveLength(1)
+  })
+
+  // -------------------------------------------------------------------------
+  // Review round 7, [0] + [4]: a STOP whose recording throws leaves nobody
+  // holding the number resumable and unrecorded
+  // -------------------------------------------------------------------------
+
+  /** What a test reads off a recording that threw. */
+  const thrown = (p: Promise<unknown>): Promise<Record<string, unknown>> =>
+    p.then(
+      () => {
+        throw new Error('expected the recording to throw')
+      },
+      (err: unknown) => err as Record<string, unknown>,
+    )
+
+  /**
+   * The reviewer's probe: `work` was texted, `twin` holds the number in the
+   * same org, `inB` in another org with an approved SMS — and the STOP's
+   * inbound insert faults. The holds came first and the rest after the
+   * reply, so the twin and inB kept a `held:` pause a teammate could lift,
+   * and org B had no suppression, no row and no alarm. Now org B's
+   * suppression is written before the reply, and the twin — whose org's one
+   * suppression rolled back with the reply — takes the loud path.
+   */
+  it('suppresses the other org before the reply, and takes the loud path for a twin, when recording a STOP throws', async () => {
+    const work = await holder(a, 'Jo (work)')
+    const twin = await holder(a, 'Jo (personal)')
+    const inB = await holder(b, 'Jo')
+    await texted(a, work)
+    const waitingB = await approved(b, inB)
+    await failOnce(test.pg, { table: 'touches', event: 'INSERT', when: `NEW.direction = 'in'` })
+    const err = await thrown(inbound({ text: 'Wrong number. STOP', log: log() }))
+    expect(err).toMatchObject({
+      name: 'SmsOptOutNotRecorded',
+      fault: expect.any(String),
+      filingUnder: { orgId: a.orgId, contactId: work },
+      optOutNotRecordedIn: [],
+    })
+    // §2.3: the error carries ids and a class — never the number or the words.
+    expect(JSON.stringify({ ...err, message: err['message'] })).not.toContain('9876543210')
+    expect(String(err['message'])).not.toContain('Wrong number')
+
+    // Org B was told to stop: its suppression is written, its row says so,
+    // and nothing can go to inB even if a teammate lifts the hold.
+    expect(await suppressedIn()).toEqual([b.orgId])
+    expect(await touch(waitingB)).toMatchObject({ status: 'refused', refusalCode: 'paused' })
+    expect((await audits('sms.inbound_unmatched')).map((r) => [r.orgId, r.detail])).toEqual([
+      [b.orgId, { why: 'ambiguous', optOut: true, contacts: 1, paused: 1, cancelledQueued: 1, filedUnder: 'another_org', suppressed: true }],
+    ])
+    const heldB = await contact(inB)
+    expect(await contactResumeByHand(db, { orgId: b.orgId, contact: { id: inB }, expectedReason: heldB.pausedReason, actor: b.userId })).toMatchObject({ ok: true })
+    expect(
+      await smsDraft(db, { orgId: b.orgId, contactId: inB, campaignId: b.campaignId, templateId: b.templateId, vars: ['Jo', '3pm'], createdBy: b.userId, now: NOON_IST }),
+    ).toMatchObject({ ok: false, reason: 'refused', code: 'suppressed' })
+
+    // The twin: org A's one suppression rolled back with the reply, so the
+    // twin is paused saying the opt-out was not recorded, which Resume refuses.
+    const t = await contact(twin)
+    expect(pauseReasonClass(t.pausedReason)).toBe('opt_out_not_recorded')
+    expect(await contactResumeByHand(db, { orgId: a.orgId, contact: { id: twin }, expectedReason: t.pausedReason, actor: a.userId })).toMatchObject({
+      ok: false, reason: 'opt_out_not_recorded',
+    })
+    expect((await audits('contact.opt_out_not_recorded')).map((r) => [r.orgId, r.subjectId, r.detail])).toEqual([
+      [a.orgId, twin, { channel: 'sms', why: 'record_failed' }],
+    ])
+
+    // DoveSoft retries and the STOP is recorded, in both orgs.
+    expect(await inbound({ text: 'Wrong number. STOP', log: log() })).toMatchObject({
+      matched: 'contact', contactId: work, duplicate: false, suppressed: true, optOutNotRecordedIn: [],
+    })
+    expect(await suppressedIn()).toEqual([a.orgId, b.orgId].sort())
+  })
+
+  it('names another org whose suppression failed too, after its loud path ran, for the route to alarm', async () => {
+    const work = await holder(a, 'Jo')
+    const inB = await holder(b, 'Jo')
+    await texted(a, work)
+    await failOnce(test.pg, { table: 'suppressions', event: 'INSERT', when: `NEW.org_id = '${b.orgId}'` })
+    await failOnce(test.pg, { table: 'touches', event: 'INSERT', when: `NEW.direction = 'in'` })
+    const err = await thrown(inbound({ text: 'STOP', log: log() }))
+    expect(err).toMatchObject({
+      name: 'SmsOptOutNotRecorded',
+      filingUnder: { orgId: a.orgId, contactId: work },
+      optOutNotRecordedIn: [{ orgId: b.orgId, contactId: inB }],
+    })
+    expect(await suppressedIn()).toEqual([])
+    const held = await contact(inB)
+    expect(pauseReasonClass(held.pausedReason)).toBe('opt_out_not_recorded')
+    expect(await contactResumeByHand(db, { orgId: b.orgId, contact: { id: inB }, expectedReason: held.pausedReason, actor: b.userId })).toMatchObject({ ok: false })
+    expect((await audits('contact.opt_out_not_recorded')).map((r) => [r.orgId, r.subjectId])).toEqual([[b.orgId, inB]])
+  })
+
+  it('throws the fault itself for an ordinary text whose recording failed — nothing to be loud about', async () => {
+    const work = await holder(a, 'Jo')
+    await holder(b, 'Jo')
+    await texted(a, work)
+    await failOnce(test.pg, { table: 'touches', event: 'INSERT', when: `NEW.direction = 'in'` })
+    const err = await thrown(inbound({ text: 'Who is this?' }))
+    expect(err['name']).not.toBe('SmsOptOutNotRecorded')
+    expect(await suppressedIn()).toEqual([])
+    expect(await audits('contact.opt_out_not_recorded')).toEqual([])
+  })
+
+  // -------------------------------------------------------------------------
+  // Review round 7, [8]: a fault after something was written is not "nothing
+  // was written"
+  // -------------------------------------------------------------------------
+
+  /** Raise the Nth `UPDATE` of `contacts` an engine fault, and no other. */
+  async function failNthContactUpdate(n: number): Promise<void> {
+    await test.pg.exec(`
+      CREATE SEQUENCE nth_contact_update_seq;
+      CREATE FUNCTION nth_contact_update() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF nextval('nth_contact_update_seq') = ${n} THEN
+          RAISE EXCEPTION 'injected fault on UPDATE contacts';
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER nth_contact_update BEFORE UPDATE ON contacts FOR EACH ROW EXECUTE FUNCTION nth_contact_update();
+    `)
+  }
+
+  /**
+   * The holds are one transaction per org: the first org's committed and
+   * the second's faulted. The route's "nobody was paused" was false of the
+   * first, and its contacts kept a `held:` pause anyone could lift. A STOP
+   * now takes the loud path for every holder, and says which orgs were held.
+   */
+  it('takes the loud path for every holder of a STOP whose holds failed part way, and says which org was held', async () => {
+    const inA = await holder(a, 'Jo')
+    const inB = await holder(b, 'Jo')
+    await failNthContactUpdate(2)
+    const err = await thrown(inbound({ text: 'STOP', log: log() }))
+    expect(err).toMatchObject({ name: 'SmsOptOutNotRecorded', filingUnder: null })
+    expect(err['heldIn']).toHaveLength(1)
+    expect([a.orgId, b.orgId]).toContain((err['heldIn'] as string[])[0])
+    expect((err['optOutNotRecordedIn'] as { orgId: string }[]).map((l) => l.orgId).sort()).toEqual([a.orgId, b.orgId].sort())
+    for (const id of [inA, inB]) expect(pauseReasonClass((await contact(id)).pausedReason)).toBe('opt_out_not_recorded')
+    expect((await audits('contact.opt_out_not_recorded')).map((r) => r.subjectId).sort()).toEqual([inA, inB].sort())
+    // Nothing was filed under nobody yet, so the retry is not a redelivery: it records the STOP.
+    expect(await inbound({ text: 'STOP', log: log() })).toMatchObject({ matched: 'none', why: 'ambiguous', suppressed: true })
+    expect(await suppressedIn()).toEqual([a.orgId, b.orgId].sort())
+  })
+
+  it('takes the loud path for the others, and names whose it was being filed under, when the holds fail before the reply', async () => {
+    const work = await holder(a, 'Jo')
+    const inB = await holder(b, 'Jo')
+    await texted(a, work)
+    await failOnce(test.pg, { table: 'contacts', event: 'UPDATE' })
+    const err = await thrown(inbound({ text: 'STOP', log: log() }))
+    expect(err).toMatchObject({
+      name: 'SmsOptOutNotRecorded',
+      filingUnder: { orgId: a.orgId, contactId: work },
+      heldIn: [],
+      optOutNotRecordedIn: [{ orgId: b.orgId, contactId: inB }],
+    })
+    expect(pauseReasonClass((await contact(inB)).pausedReason)).toBe('opt_out_not_recorded')
+    // The filed contact is the route's to pause and alarm, from the error.
+    expect((await contact(work)).pausedAt).toBeNull()
+  })
+
+  /** A database whose Nth top-level `select` throws — the reads `finishRedelivered` makes. */
+  function failingSelect(n: number): AgencyDb {
+    let selects = 0
+    return new Proxy(db as object, {
+      get(t, p, r) {
+        if (p === 'select') {
+          return (...args: unknown[]) => {
+            if (++selects === n) throw Object.assign(new Error(`Failed query: select … params: ${PHONE},STOP`), { name: 'DrizzleQueryError' })
+            return (Reflect.get(t, p, r) as (...a: unknown[]) => unknown).apply(t, args)
+          }
+        }
+        return Reflect.get(t, p, r)
+      },
+    }) as AgencyDb
+  }
+
+  /**
+   * The probe: a STOP recorded and suppressed, then a redelivery whose
+   * finishing read faults. It escaped as a bare fault, and the route filed
+   * "recording the text failed before anything was written … nobody was
+   * paused" while the suppression and the pause existed.
+   */
+  it('says a redelivery could not be finished, naming the text it was, when finishing it faults', async () => {
+    const inA = await holder(a, 'Jo')
+    await texted(a, inA)
+    expect(await inbound({ text: 'STOP' })).toMatchObject({ suppressed: true })
+    const err = await thrown(
+      recordInboundSms(failingSelect(2), { from: PHONE, text: 'STOP', providerMessageId: 'mo-1', receivedAt: NOON_IST, log: log() }),
+    )
+    expect(err).toMatchObject({ name: 'SmsRedeliveryIncomplete', fault: 'DrizzleQueryError', orgId: a.orgId, contactId: inA })
+    expect(String(err['message'])).not.toContain('9876543210')
+    expect(await audits('contact.opt_out_not_recorded')).toEqual([])
+  })
+
+  it('says so for a redelivered STOP filed under nobody, too', async () => {
+    await holder(a, 'Jo')
+    await holder(b, 'Jo')
+    expect(await inbound({ text: 'STOP' })).toMatchObject({ matched: 'none', why: 'ambiguous', suppressed: true })
+    // findInbound, holdersOf, filedUnderNobodyBefore — then the read of what is missing.
+    const err = await thrown(
+      recordInboundSms(failingSelect(4), { from: PHONE, text: 'STOP', providerMessageId: 'mo-1', receivedAt: NOON_IST, log: log() }),
+    )
+    expect(err).toMatchObject({ name: 'SmsRedeliveryIncomplete', fault: 'DrizzleQueryError', orgId: null, contactId: null })
   })
 })

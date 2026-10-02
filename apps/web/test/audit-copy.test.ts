@@ -246,6 +246,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'sms.delivery_unmatched': { why: 'unknown_id', status: 'delivered' },
   'sms.inbound_unmatched': {
     why: 'ambiguous', optOut: true, contacts: 2, suppressed: true, paused: 2, cancelledQueued: 1, messageHash: 'a'.repeat(64),
+    replacedPauseFor: 'replied', replacedPauses: 1,
   },
   'sms.dlr_unreadable': { why: 'missing_fields', missing: ['messageid'] },
   'sms.inbound_unreadable': { why: 'missing_fields', missing: ['from', 'text'] },
@@ -446,7 +447,7 @@ describe('sentenceFor', () => {
       'refused an SMS to a contact at rentman.io: not its registered template; nothing was sent',
     )
     expect(say('sms.inbound_unmatched')).toBe(
-      'received a text from a number more than one contact has, so it was filed under nobody; both contacts holding the number were paused and 1 queued message cancelled; it asked to stop, and the number was put on the suppression list',
+      'received a text from a number more than one contact has, so it was filed under nobody; both contacts holding the number were paused and 1 queued message cancelled; the hold replaced the pause a reply had caused for 1 of them; it asked to stop, and the number was put on the suppression list',
     )
     expect(say('sms.inbound_unmatched', { why: 'ambiguous', paused: 1, cancelledQueued: 0 })).toBe(
       'received a text from a number more than one contact has, so it was filed under nobody; a contact holding the number was paused',
@@ -520,6 +521,18 @@ describe('sentenceFor', () => {
         'received a text from a number 2 contacts here hold, and filed it under a contact in another organisation that this system had texted; it asked to stop, and the number is NOT on the suppression list — follow up by hand',
       )
       expect(isAlarm(line('sms.inbound_unmatched', { optOut: true, filedUnder: 'another_org', suppressed: false }, { actor: 'system' }))).toBe(true)
+    })
+
+    /** Review round 7, [2]: a reply's pause the hold replaced, so answering that reply no longer lifts the hold. */
+    it('says the hold replaced the pause a holder’s reply had caused, and nothing when it replaced none', () => {
+      expect(say({ why: 'ambiguous', optOut: false, contacts: 1, paused: 1, cancelledQueued: 0, filedUnder: 'another_contact', replacedPauseFor: 'replied', replacedPauses: 1 })).toBe(
+        'received a text from a number more than one contact here holds, and filed it under the one this system had texted; the other contact holding it was paused; the hold replaced the pause their reply had caused',
+      )
+      expect(say({ why: 'ambiguous', optOut: false, contacts: 3, paused: 3, cancelledQueued: 0, replacedPauseFor: 'replied', replacedPauses: 2 })).toBe(
+        `${NOBODY}; all 3 contacts holding the number were paused; the hold replaced the pause a reply had caused for 2 of them`,
+      )
+      expect(say({ why: 'ambiguous', optOut: false, contacts: 2, paused: 1, cancelledQueued: 0 })).not.toContain('replaced')
+      expect(say({ why: 'ambiguous', optOut: false, contacts: 2, paused: 1, cancelledQueued: 0, replacedPauseFor: 'manual', replacedPauses: 1 })).not.toContain('replaced')
     })
 
     it('says a twin in the same org was held beside the contact it was filed under', () => {

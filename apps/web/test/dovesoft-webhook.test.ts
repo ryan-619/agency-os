@@ -21,7 +21,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import {
-  appendAudit, pauseContactOverriding, pauseReasonClass, recordInboundSms, schema,
+  SmsOptOutNotRecorded, SmsRedeliveryIncomplete, appendAudit, contactResumeByHand, pauseContactOverriding, pauseReasonClass,
+  recordInboundSms, schema,
   type AgencyDb, type InboundSmsOutcome, type SmsDeliveryOutcome,
 } from '@agency/db/queries'
 import { migratedDb, type TestDb } from '../../../packages/db/test/helpers.js'
@@ -409,9 +410,10 @@ describe('what an inbound text is answered with', () => {
    * §2.1's Phase 4 obligation: a STOP whose suppression could not be written
    * reaches a person. AWAITED — the answer does not leave until the alarm
    * has been posted (or has failed), because a host without `waitUntil`
-   * drops anything scheduled after it.
+   * drops anything scheduled after it. And refused (review round 7): the
+   * redelivery a 500 brings re-attempts the suppression; a 200 never did.
    */
-  it('awaits the opt_out_not_recorded alarm before it answers, in place of the reply notice', async () => {
+  it('awaits the opt_out_not_recorded alarm before it answers 500, in place of the reply notice', async () => {
     const r = run(filed({ replyKind: 'opted_out', optOutNotRecorded: true }))
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(r.alarms).toEqual([
@@ -425,8 +427,19 @@ describe('what an inbound text is answered with', () => {
     ])
     expect(r.answered()).toBe(false)
     r.releaseAlarm()
-    expect((await r.answer).status).toBe(200)
+    expect(await r.answer).toEqual({
+      status: 500,
+      body: { error: 'opt-out not recorded', matched: 'contact', duplicate: false, paused: true, suppressed: false },
+    })
     expect(r.later).toEqual([])
+    expect(r.w.logs).toEqual([
+      {
+        level: 'error',
+        message:
+          'OPT-OUT NOT RECORDED — a STOP filed under a contact could not be suppressed in every org holding the number; it was refused so DoveSoft retries',
+        fields: { duplicate: false, orgs: 1, alarm: 'raised' },
+      },
+    ])
   })
 
   it('raises nothing for a retried push', async () => {
@@ -436,14 +449,30 @@ describe('what an inbound text is answered with', () => {
     expect(r.later).toEqual([])
   })
 
+  /** The retry the 500 asked for, whose re-attempt failed again: alarmed again, refused again, announced never. */
+  it('answers 500 again, and raises the alarm again, for a retry whose re-attempt failed again', async () => {
+    const ORG_B = '00000000-0000-4000-8000-00000000000b'
+    const CONTACT_B = '00000000-0000-4000-8000-0000000000b1'
+    const r = run(filed({ duplicate: true, replyKind: 'opted_out', suppressed: true, optOutNotRecordedIn: [{ orgId: ORG_B, contactId: CONTACT_B }] }))
+    r.releaseAlarm()
+    expect(await r.answer).toMatchObject({ status: 500, body: { duplicate: true } })
+    expect(r.alarms).toEqual([{ kind: 'opt_out_not_recorded', orgId: ORG_B, touchId: null, contactId: CONTACT_B, path: 'reply' }])
+    expect(r.later).toEqual([])
+    expect(r.w.logs[0]!.fields).toEqual({ duplicate: true, orgs: 1, alarm: 'raised' })
+  })
+
   /**
    * Review round 6, findings [3] and [6]: a STOP filed under a contact in
    * one org, whose suppression failed in ANOTHER org holding the number,
    * raised one alarm naming the filed contact — whose number IS suppressed
    * — and dropped the filed org's reply notice. Now the other org gets the
    * alarm, naming its own contact, and the filed org keeps its notice.
+   *
+   * Review round 7, [1]/[3]/[9]: it was answered 200, so DoveSoft never
+   * redelivered and the missing suppression was never written. It is a 500
+   * now, after the alarm and the notice.
    */
-  it('alarms the org whose suppression failed, naming its contact, and keeps the filed org’s reply notice', async () => {
+  it('alarms the org whose suppression failed, naming its contact, keeps the filed org’s reply notice, and answers 500', async () => {
     const ORG_B = '00000000-0000-4000-8000-00000000000b'
     const CONTACT_B = '00000000-0000-4000-8000-0000000000b1'
     const r = run(filed({ replyKind: 'opted_out', suppressed: true, optOutNotRecordedIn: [{ orgId: ORG_B, contactId: CONTACT_B }] }))
@@ -451,7 +480,7 @@ describe('what an inbound text is answered with', () => {
     expect(r.alarms).toEqual([{ kind: 'opt_out_not_recorded', orgId: ORG_B, touchId: null, contactId: CONTACT_B, path: 'reply' }])
     expect(r.answered()).toBe(false)
     r.releaseAlarm()
-    expect((await r.answer).status).toBe(200)
+    expect(await r.answer).toMatchObject({ status: 500, body: { error: 'opt-out not recorded', matched: 'contact', suppressed: true } })
     expect(r.later).toEqual([expect.objectContaining({ kind: 'reply', orgId: ORG, suppressed: true })])
     // Its record holds the number: the message names the contact and links /suppressions.
     const wire = JSON.stringify(slackMessage(r.alarms[0]!, 'https://x.test'))
@@ -465,7 +494,7 @@ describe('what an inbound text is answered with', () => {
     const ORG_B = '00000000-0000-4000-8000-00000000000b'
     const r = run(filed({ replyKind: 'opted_out', optOutNotRecorded: true, optOutNotRecordedIn: [{ orgId: ORG_B, contactId: null }] }))
     r.releaseAlarm()
-    expect((await r.answer).status).toBe(200)
+    expect((await r.answer).status).toBe(500)
     expect(r.alarms.map((a) => a.kind === 'opt_out_not_recorded' && [a.orgId, a.touchId, a.contactId])).toEqual([
       [ORG, '00000000-0000-4000-8000-000000000002', '00000000-0000-4000-8000-000000000001'],
       [ORG_B, null, null],
@@ -789,6 +818,85 @@ describe('a fault while recording', () => {
     expect(r.alarms).toEqual([UNPLACED_ALARM])
   })
 
+  /**
+   * Review round 7, [0]/[4]/[8]: the recorder now says what it had written
+   * when a STOP's recording threw. The contact it was filing under takes
+   * the placed path — from the error, with no rolled-back line needed — and
+   * every other org it had already taken the loud path in gets an alarm.
+   */
+  function typedMo(err: Error, orgId: string | null = ORG) {
+    const w = world(orgId)
+    const alarms: NotificationEvent[] = []
+    const answer = handleDoveSoftMo(fields({ mobile: '919876543210', message: 'Wrong number. STOP' }), shape, NOW, {
+      ...w.deps,
+      record: async () => {
+        throw err
+      },
+      alarm: async (event) => {
+        alarms.push(event)
+      },
+      later: () => {
+        throw new Error('no reply notice for a text nobody recorded')
+      },
+    })
+    return { w, alarms, answer }
+  }
+  const ORG_B = '00000000-0000-4000-8000-0000000000b0'
+  const CONTACT_B = '00000000-0000-4000-8000-0000000000b1'
+
+  it('takes the placed path for the contact a STOP was being filed under, and alarms every other org the recorder named', async () => {
+    const r = typedMo(new SmsOptOutNotRecorded('DrizzleQueryError', { orgId: THEIR_ORG, contactId: THEIR_CONTACT }, [{ orgId: ORG_B, contactId: CONTACT_B }], [ORG_B]))
+    expect(await r.answer).toEqual({ status: 500, body: { error: 'opt-out not recorded' } })
+    expect(r.w.filed).toEqual([{ orgId: THEIR_ORG, action: 'contact.opt_out_not_recorded', subjectType: 'contact', subjectId: THEIR_CONTACT }])
+    expect(r.w.paused).toEqual([{ orgId: THEIR_ORG, contactId: THEIR_CONTACT, reason: `opt-out not recorded: reply ${NOW.toISOString()} (record_failed)` }])
+    expect(r.alarms).toEqual([
+      { kind: 'opt_out_not_recorded', orgId: THEIR_ORG, touchId: null, contactId: THEIR_CONTACT, path: 'reply' },
+      { kind: 'opt_out_not_recorded', orgId: ORG_B, touchId: null, contactId: CONTACT_B, path: 'reply' },
+    ])
+    expect(r.w.logs.at(-1)!.fields).toEqual({
+      error: 'DrizzleQueryError', orgId: THEIR_ORG, contactId: THEIR_CONTACT, audited: true, paused: true, alarm: 'raised', otherOrgs: 1,
+    })
+  })
+
+  it('never says nothing was written when the recorder held and loud-pathed contacts before the fault', async () => {
+    const r = typedMo(new SmsOptOutNotRecorded('DrizzleQueryError', null, [{ orgId: THEIR_ORG, contactId: THEIR_CONTACT }, { orgId: ORG_B, contactId: CONTACT_B }], [THEIR_ORG]))
+    expect(await r.answer).toEqual({ status: 500, body: { error: 'opt-out not recorded' } })
+    // No subject-less row in DOVESOFT_ORG_ID: the recorder wrote each one under its contact.
+    expect(r.w.filed).toEqual([])
+    expect(r.w.paused).toEqual([])
+    expect(r.alarms).toEqual([
+      { kind: 'opt_out_not_recorded', orgId: THEIR_ORG, touchId: null, contactId: THEIR_CONTACT, path: 'reply' },
+      { kind: 'opt_out_not_recorded', orgId: ORG_B, touchId: null, contactId: CONTACT_B, path: 'reply' },
+    ])
+    expect(r.w.logs).toEqual([
+      {
+        level: 'error',
+        message: 'OPT-OUT NOT RECORDED — a text that asked to stop could not be recorded; follow up by hand',
+        fields: { error: 'DrizzleQueryError', heldIn: 1, orgs: 2, alarm: 'raised' },
+      },
+    ])
+    expect(JSON.stringify(r.alarms.map((a) => slackMessage(a, 'https://x.test')))).not.toContain('Nothing in the app holds')
+  })
+
+  /** Review round 7, [8]: a redelivery whose finishing faulted is not a STOP nobody recorded. */
+  it('refuses a redelivery it could not finish 500, with no opt_out_not_recorded row and no alarm', async () => {
+    for (const [orgId, contactId] of [[THEIR_ORG, THEIR_CONTACT], [null, null]] as const) {
+      const r = typedMo(new SmsRedeliveryIncomplete('DrizzleQueryError', orgId, contactId))
+      expect(await r.answer).toEqual({ status: 500, body: { error: 'inbound text not finished' } })
+      expect(r.w.audits).toEqual([])
+      expect(r.w.paused).toEqual([])
+      expect(r.alarms).toEqual([])
+      expect(r.w.logs).toEqual([
+        {
+          level: 'error',
+          message: 'DoveSoft redelivered a text already recorded, and finishing it failed; it was refused so DoveSoft retries',
+          fields: { error: 'DrizzleQueryError', orgId, contactId, bytes: 120, contentType: 'application/x-www-form-urlencoded' },
+        },
+      ])
+      expect(r.w.everything()).not.toContain('9876543210')
+    }
+  })
+
   it('keeps the rolled-back line, and forwards every line it is handed', () => {
     const forwarded: string[] = []
     const kept = keepingRolledBackSmsOptOut({ error: (m) => forwarded.push(m) })
@@ -868,6 +976,178 @@ describe('a STOP whose recording threw, through the real recorder', () => {
   })
 })
 
+/**
+ * Review round 7, through the REAL recorder and faults the engine raises:
+ * a number two orgs hold, a STOP filed under the one this system texted.
+ */
+describe('a STOP from a number two orgs hold, through the real recorder', () => {
+  let test: TestDb
+  let db: AgencyDb
+  let orgA: string
+  let orgB: string
+  let deploymentOrg: string
+  let work: string
+  let inB: string
+
+  async function contactIn(orgId: string, firstName: string): Promise<string> {
+    const [co] = await db
+      .insert(schema.companies)
+      .values({ orgId, domain: 'acme.example' })
+      .onConflictDoNothing()
+      .returning({ id: schema.companies.id })
+    const companyId = co?.id ?? (await db.select().from(schema.companies).where(eq(schema.companies.orgId, orgId)))[0]!.id
+    const [c] = await db.insert(schema.contacts).values({ orgId, companyId, firstName, phone: NUMBER }).returning({ id: schema.contacts.id })
+    return c!.id
+  }
+
+  beforeEach(async () => {
+    test = await migratedDb()
+    db = drizzle(test.pg, { schema }) as unknown as AgencyDb
+    const org = async (name: string) => (await db.insert(schema.orgs).values({ name }).returning({ id: schema.orgs.id }))[0]!.id
+    orgA = await org('Agency A')
+    orgB = await org('Agency B')
+    deploymentOrg = await org('The DoveSoft account’s org')
+    work = await contactIn(orgA, 'Jo (work)')
+    inB = await contactIn(orgB, 'Jo')
+    // This system texted `work`: the evidence a reply from the number is theirs.
+    await db.insert(schema.touches).values({
+      orgId: orgA, contactId: work, channel: 'sms', direction: 'out', status: 'sent', body: 'Hi Jo', recipient: NUMBER,
+      sentAt: new Date(NOW.getTime() - 86_400_000), providerId: 'ds-work',
+    })
+  }, 30_000)
+
+  afterEach(async () => {
+    await test?.close()
+  })
+
+  async function deliver(recorderDb: AgencyDb = db) {
+    const w = world(deploymentOrg)
+    const alarms: NotificationEvent[] = []
+    const later: NotificationEvent[] = []
+    const answer = await handleDoveSoftMo(fields({ mobile: '919876543210', message: 'Wrong number. STOP', messageid: 'mo-1' }), shape, NOW, {
+      ...w.deps,
+      audit: async (entry) => {
+        w.filed.push({ orgId: entry.orgId, action: entry.action, subjectType: entry.subjectType, subjectId: entry.subjectId })
+        await appendAudit(db, entry)
+      },
+      record: (args) => recordInboundSms(recorderDb, args),
+      pause: (p) => pauseContactOverriding(db, p.orgId, p.contactId, p.reason, p.now),
+      alarm: async (event) => {
+        alarms.push(event)
+      },
+      later: (event) => {
+        later.push(event)
+      },
+    })
+    return { answer, w, alarms, later }
+  }
+  const suppressedIn = async () =>
+    (await db.select().from(schema.suppressions)).filter((r) => r.kind === 'phone' && r.value === NUMBER).map((r) => r.orgId).sort()
+  const notRecorded = async () =>
+    (await db.select().from(schema.auditLog))
+      .filter((r) => r.action === 'contact.opt_out_not_recorded')
+      .map((r) => [r.orgId, r.subjectId])
+      .sort()
+  const contact = async (id: string) => (await db.select().from(schema.contacts).where(eq(schema.contacts.id, id)))[0]!
+
+  /** Review round 7, [1]/[3]/[9]: the 500 brings the redelivery, and the redelivery writes what was missing. */
+  it('answers 500 when another org’s suppression failed, and the redelivery writes it and answers 200', async () => {
+    await failOnce(test.pg, { table: 'suppressions', event: 'INSERT', when: `NEW.org_id = '${orgB}'` })
+    const first = await deliver()
+    expect(first.answer).toMatchObject({ status: 500, body: { error: 'opt-out not recorded', matched: 'contact', duplicate: false, suppressed: true } })
+    expect(first.alarms).toEqual([{ kind: 'opt_out_not_recorded', orgId: orgB, touchId: null, contactId: inB, path: 'reply' }])
+    // Org A's reply was recorded whole: its notice stands.
+    expect(first.later).toEqual([expect.objectContaining({ kind: 'reply', orgId: orgA, contactId: work, suppressed: true })])
+    expect(await suppressedIn()).toEqual([orgA])
+
+    const again = await deliver()
+    expect(again.answer).toEqual({ status: 200, body: { matched: 'contact', duplicate: true, paused: false, suppressed: true } })
+    expect(again.alarms).toEqual([])
+    expect(again.later).toEqual([])
+    expect(await suppressedIn()).toEqual([orgA, orgB].sort())
+  })
+
+  /**
+   * Review round 7, [0]/[4], the reviewer's probe: a twin of `work` in org
+   * A, and the STOP's inbound insert faults. The twin and inB were left
+   * with a hold a teammate could lift; org B had no suppression and no row.
+   */
+  it('leaves the twin unresumable and org B suppressed when the STOP’s recording throws, and alarms only org A', async () => {
+    const twin = await contactIn(orgA, 'Jo (personal)')
+    await failOnce(test.pg, { table: 'touches', event: 'INSERT', when: `NEW.direction = 'in'` })
+    const first = await deliver()
+    expect(first.answer).toEqual({ status: 500, body: { error: 'opt-out not recorded' } })
+    expect(first.alarms).toEqual([{ kind: 'opt_out_not_recorded', orgId: orgA, touchId: null, contactId: work, path: 'reply' }])
+    expect(await suppressedIn()).toEqual([orgB])
+    expect(await notRecorded()).toEqual([[orgA, twin], [orgA, work]].sort())
+    // No subject-less row: whose it was is known.
+    expect(first.w.filed.filter((f) => f.orgId === deploymentOrg)).toEqual([])
+    for (const id of [work, twin]) expect(pauseReasonClass((await contact(id)).pausedReason)).toBe('opt_out_not_recorded')
+    const t = await contact(twin)
+    expect(await contactResumeByHand(db, { orgId: orgA, contact: { id: twin }, expectedReason: t.pausedReason, actor: 'someone' })).toMatchObject({ ok: false })
+    // DoveSoft retries; the STOP is recorded in both orgs.
+    const again = await deliver()
+    expect(again.answer).toMatchObject({ status: 200, body: { matched: 'contact', duplicate: false, suppressed: true } })
+    expect(await suppressedIn()).toEqual([orgA, orgB].sort())
+  })
+
+  /**
+   * Review round 7, [8], the probe: the STOP was recorded, and a redelivery's
+   * finishing read faults. It took the subject-less path — "nothing was
+   * written … nobody was paused" in DOVESOFT_ORG_ID, and an alarm saying
+   * nothing in the app holds the number — while both stood.
+   */
+  it('refuses a redelivery whose finishing faulted, with no false row and no alarm', async () => {
+    expect((await deliver()).answer.status).toBe(200)
+    let selects = 0
+    const faulty = new Proxy(db as object, {
+      get(t, p, r) {
+        if (p === 'select') {
+          return (...args: unknown[]) => {
+            if (++selects === 2) throw Object.assign(new Error(`Failed query … params: ${NUMBER},STOP`), { name: 'DrizzleQueryError' })
+            return (Reflect.get(t, p, r) as (...a: unknown[]) => unknown).apply(t, args)
+          }
+        }
+        return Reflect.get(t, p, r)
+      },
+    }) as AgencyDb
+    const again = await deliver(faulty)
+    expect(again.answer).toEqual({ status: 500, body: { error: 'inbound text not finished' } })
+    expect(again.alarms).toEqual([])
+    expect(await notRecorded()).toEqual([])
+    expect(again.w.logs).toEqual([
+      expect.objectContaining({ level: 'error', fields: expect.objectContaining({ error: 'DrizzleQueryError', orgId: orgA, contactId: work }) }),
+    ])
+    expect(again.w.everything()).not.toContain('9876543210')
+    // The truth it no longer contradicts.
+    expect(await suppressedIn()).toEqual([orgA, orgB].sort())
+    expect((await contact(work)).pausedAt).not.toBeNull()
+  })
+
+  /** Review round 7, [8]'s second route: holds that committed in one org before the next one's faulted. */
+  it('alarms each org, and files no subject-less row, when the holds of a STOP filed under nobody fail part way', async () => {
+    // Nobody texted: the STOP is filed under nobody, and both are held — the first org's hold commits, the second's faults.
+    await db.delete(schema.touches)
+    await test.pg.exec(`
+      CREATE SEQUENCE second_contact_update_seq;
+      CREATE FUNCTION second_contact_update() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF nextval('second_contact_update_seq') = 2 THEN RAISE EXCEPTION 'injected fault on UPDATE contacts'; END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER second_contact_update BEFORE UPDATE ON contacts FOR EACH ROW EXECUTE FUNCTION second_contact_update();
+    `)
+    const first = await deliver()
+    expect(first.answer).toEqual({ status: 500, body: { error: 'opt-out not recorded' } })
+    expect(first.alarms.map((a) => a.kind === 'opt_out_not_recorded' && [a.orgId, a.contactId]).sort()).toEqual([[orgA, work], [orgB, inB]].sort())
+    expect(first.w.filed).toEqual([])
+    expect(await notRecorded()).toEqual([[orgA, work], [orgB, inB]].sort())
+    expect(first.w.logs.at(-1)!.fields).toMatchObject({ heldIn: 1, orgs: 2, alarm: 'raised' })
+    const again = await deliver()
+    expect(again.answer).toMatchObject({ status: 200, body: { matched: 'none', why: 'ambiguous', suppressed: true } })
+  })
+})
+
 describe('the Slack events an inbound text raises', () => {
   const outcome: InboundSmsOutcome & { decoy: string } = {
     matched: 'contact',
@@ -903,7 +1183,13 @@ describe('the Slack events an inbound text raises', () => {
       { kind: 'opt_out_not_recorded', orgId: ORG, touchId: outcome.touchId, contactId: outcome.contactId, path: 'reply' },
     ])
     expect(smsReplyNotification({ ...outcome, optOutNotRecorded: true })).toBeNull()
-    expect(smsOptOutAlarms({ ...outcome, optOutNotRecorded: true, duplicate: true })).toEqual([])
+    // A duplicate says it only when its re-attempt failed again (review
+    // round 7), and that is raised again, as the first delivery's was.
+    expect(smsOptOutAlarms({ ...outcome, duplicate: true })).toEqual([])
+    expect(smsOptOutAlarms({ ...outcome, optOutNotRecorded: true, duplicate: true })).toEqual([
+      { kind: 'opt_out_not_recorded', orgId: ORG, touchId: outcome.touchId, contactId: outcome.contactId, path: 'reply' },
+    ])
+    expect(smsReplyNotification({ ...outcome, optOutNotRecorded: true, duplicate: true })).toBeNull()
   })
 
   /** Filed under nobody: no touch, no contact, in the org where it failed — and none with no org. */
