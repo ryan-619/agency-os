@@ -60,7 +60,9 @@ const STANDING_WORDS: Record<ConsentLedger['suppression']['email'], string> = {
  * `sharedNumberHold` is previewSend's fact (review round 10, [2]): they hold
  * a number whose STOP could not be recorded, and their own pause stood
  * instead of the hold, so Resume refuses it until the number is recorded —
- * whatever its class says. Said after the class's own words.
+ * whatever its class says. Said after the class's own words — except for a
+ * reply's pause, whose /inbox promise `replyQueueDraft` refuses then too,
+ * where the words go in place of that promise (review round 13).
  */
 function pauseWords(pausedFor: PauseReasonClass, reason: string | null, channel: string, sharedNumberHold = false): string {
   const why = (reason ?? 'no reason recorded').slice(0, 200)

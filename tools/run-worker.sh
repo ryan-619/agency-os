@@ -17,7 +17,10 @@
 # So run this and the live site gains everything except the chat panel, with
 # no port open, no tunnel, and nothing on this laptop reachable from the
 # internet. Chat is a separate decision with separate consequences; see
-# DEPLOYING.md.
+# DEPLOYING.md. Answer yes to the CHAT question and this script starts an
+# ngrok tunnel to the worker's API port (bearer-token gated) on your ngrok
+# static domain, and runs the worker with your Anthropic API key — every
+# chat turn your teammates take is billed to that key.
 #
 #   ./tools/run-worker.sh                 run (asks, or reads what you saved)
 #   ./tools/run-worker.sh --reconfigure   ask every question again
@@ -58,7 +61,8 @@ esac
 SERVICE="agency-os-worker"
 SAVED_NAMES=(DATABASE_URL SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASSWORD MAIL_FROM
   DOVESOFT_API_KEY DOVESOFT_ENTITY_ID IMAP_HOST IMAP_USER IMAP_PASSWORD
-  WEB_PUBLIC_URL UNSUBSCRIBE_SECRET SLACK_WEBHOOK_URL)
+  WEB_PUBLIC_URL UNSUBSCRIBE_SECRET SLACK_WEBHOOK_URL
+  CHAT_URL ANTHROPIC_API_KEY AGENT_INTERNAL_TOKEN)
 
 have_keychain() { [ "$(uname -s)" = Darwin ] && command -v security >/dev/null 2>&1; }
 
@@ -226,6 +230,9 @@ if [ "$LOADED" = no ]; then
   if have_keychain; then SAVED_UNSUBSCRIBE=$(kc_get UNSUBSCRIBE_SECRET) || SAVED_UNSUBSCRIBE=""; fi
   CAN_MAKE=no
   if have_keychain && command -v pbcopy >/dev/null 2>&1; then CAN_MAKE=yes; fi
+  # The name of a new secret this run put on the clipboard, and not yet
+  # replaced: a second one must not overwrite it before it is in Vercel.
+  ON_CLIPBOARD=""
 
   # What Enter means: the saved secret where there is one, else no header.
   keep_or_none() {
@@ -266,6 +273,7 @@ if [ "$LOADED" = no ]; then
     fi
     export UNSUBSCRIBE_SECRET="$fresh"
     SAVED_UNSUBSCRIBE="$fresh"
+    ON_CLIPBOARD=UNSUBSCRIBE_SECRET
     printf '  A new secret is on your clipboard (it is not shown) and saved in your Keychain.\n' >&3
     printf '  Paste it into Vercel → Settings → Environment Variables → UNSUBSCRIBE_SECRET\n' >&3
     printf '  (Production), then redeploy. Until the site has the same value, every link\n' >&3
@@ -308,6 +316,88 @@ if [ "$LOADED" = no ]; then
   read -r -s V <&3; printf '\n' >&3
   [ -n "${V:-}" ] && export SLACK_WEBHOOK_URL="$V"
   unset V
+
+  # ── Chat (optional): the one inbound route ───────────────────────────────
+  # The live site's chat panel calls the worker's API port, so chat needs a
+  # public address: an ngrok tunnel on the operator's free STATIC domain,
+  # which never changes, so Vercel's AGENT_URL is set once. Three values make
+  # it: the domain (not a secret), the Anthropic API key every turn is billed
+  # to, and AGENT_INTERNAL_TOKEN, the bearer the site presents and which
+  # Vercel must hold too. The token is made here, never typed: on the
+  # clipboard for Vercel and saved at once, the unsubscribe secret's rule.
+  # ngrok's own authtoken is ngrok's — `ngrok config add-authtoken` keeps it
+  # in ngrok's config, and it is never asked for or passed here.
+  SAVED_CHAT_TOKEN=""; SAVED_CHAT_KEY=""
+  if have_keychain; then
+    SAVED_CHAT_TOKEN=$(kc_get AGENT_INTERNAL_TOKEN) || SAVED_CHAT_TOKEN=""
+    SAVED_CHAT_KEY=$(kc_get ANTHROPIC_API_KEY) || SAVED_CHAT_KEY=""
+  fi
+  unset CHAT_URL
+  printf 'Turn on CHAT on the live site, through an ngrok tunnel to this Mac? [y/N]: ' >&3
+  read -r ANSWER <&3
+  case "$ANSWER" in
+    [yY]*)
+      printf '  Your ngrok static domain (dashboard.ngrok.com → Domains, e.g. calm-otter-42.ngrok-free.app): ' >&3
+      read -r V <&3
+      V="${V#https://}"; V="${V#http://}"; V="${V%%/*}"
+      if [[ "$V" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; then
+        export CHAT_URL="https://$V"
+      else
+        printf '  That is not a domain name, so chat stays off. Run with --reconfigure to try again.\n' >&3
+      fi
+      unset V
+      ;;
+  esac
+  if [ -n "${CHAT_URL:-}" ]; then
+    if [ -n "$SAVED_CHAT_KEY" ]; then
+      printf '  Anthropic API key (hidden; Enter keeps the saved one): ' >&3
+    else
+      printf '  Anthropic API key, from console.anthropic.com (hidden): ' >&3
+    fi
+    read -r -s V <&3; printf '\n' >&3
+    if [ -n "${V:-}" ]; then export ANTHROPIC_API_KEY="$V"
+    elif [ -n "$SAVED_CHAT_KEY" ]; then export ANTHROPIC_API_KEY="$SAVED_CHAT_KEY"
+    fi
+    unset V
+    if [ -n "$SAVED_CHAT_TOKEN" ]; then
+      export AGENT_INTERNAL_TOKEN="$SAVED_CHAT_TOKEN"
+      printf '  Kept the AGENT_INTERNAL_TOKEN saved in your Keychain — Vercel must hold the same one.\n' >&3
+    elif [ "$CAN_MAKE" = yes ]; then
+      if [ -n "$ON_CLIPBOARD" ]; then
+        printf '  The new %s is still on your clipboard. Paste it into Vercel first,\n' "$ON_CLIPBOARD" >&3
+        printf '  then press Enter: ' >&3
+        read -r _ <&3
+      fi
+      fresh=$(openssl rand -hex 32)
+      if printf '%s' "$fresh" | pbcopy \
+        && kc_put AGENT_INTERNAL_TOKEN "$fresh" && [ "$(kc_get AGENT_INTERNAL_TOKEN || true)" = "$fresh" ]; then
+        export AGENT_INTERNAL_TOKEN="$fresh"
+        ON_CLIPBOARD=AGENT_INTERNAL_TOKEN
+        printf '  A new AGENT_INTERNAL_TOKEN is on your clipboard (it is not shown) and saved in your Keychain.\n' >&3
+        printf '  In Vercel → Settings → Environment Variables (Production), add:\n' >&3
+        printf '    AGENT_INTERNAL_TOKEN = paste the clipboard (mark it Sensitive)\n' >&3
+        printf '    AGENT_URL            = %s\n' "$CHAT_URL" >&3
+        printf '  then redeploy. Press Enter once both are saved: ' >&3
+        read -r _ <&3
+      else
+        printf '' | pbcopy || true
+        printf '  Could not put a token on the clipboard and in your Keychain, so chat stays off.\n' >&3
+      fi
+      unset fresh
+    else
+      printf '  Paste the AGENT_INTERNAL_TOKEN Vercel holds (hidden; Enter leaves chat off): ' >&3
+      read -r -s V <&3; printf '\n' >&3
+      [ -n "${V:-}" ] && export AGENT_INTERNAL_TOKEN="$V"
+      unset V
+    fi
+  else
+    # Chat off this time; carry what was saved over all the same, so
+    # remembering these answers does not delete the two values that can never
+    # be shown back — Vercel keeps the token Sensitive, and Anthropic shows a
+    # key once. The worker is not handed the key while chat is off (below).
+    [ -n "$SAVED_CHAT_TOKEN" ] && export AGENT_INTERNAL_TOKEN="$SAVED_CHAT_TOKEN"
+    [ -n "$SAVED_CHAT_KEY" ] && export ANTHROPIC_API_KEY="$SAVED_CHAT_KEY"
+  fi
 
   if have_keychain; then
     printf 'Remember these answers in your Keychain, so the next run asks nothing? [Y/n]: ' >&3
@@ -370,6 +460,43 @@ SENDING=no;   [ -n "${SMTP_HOST:-}" ] && [ -n "${MAIL_FROM:-}" ] && SENDING=yes
 SMS=no;       [ -n "${DOVESOFT_API_KEY:-}" ] && [ -n "${DOVESOFT_ENTITY_ID:-}" ] && SMS=yes
 RECEIVING=no; [ -n "${IMAP_HOST:-}" ] && [ -n "${IMAP_USER:-}" ] && [ -n "${IMAP_PASSWORD:-}" ] && RECEIVING=yes
 
+# ── Chat: the tunnel, before the summary says it is on ───────────────────────
+CHAT=no; CHAT_WHY=""
+if [ -n "${CHAT_URL:-}" ]; then
+  if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+    CHAT_WHY="no Anthropic API key was given ('$0 --reconfigure' to add one)"
+  elif [ -z "${AGENT_INTERNAL_TOKEN:-}" ]; then
+    CHAT_WHY="no AGENT_INTERNAL_TOKEN ('$0 --reconfigure' to make one)"
+  elif ! command -v ngrok >/dev/null 2>&1; then
+    CHAT_WHY="ngrok is not installed: 'brew install ngrok', then 'ngrok config add-authtoken <your token>' once"
+  else
+    # The worker's API is the port after its health port (apps/agent/src/
+    # worker.ts). Only that port is tunnelled: it answers /internal/* to the
+    # bearer alone, and /livez and /readyz, which say nothing usable.
+    API_PORT=$(( ${AGENT_PORT:-3001} + 1 ))
+    CHAT_HOST="${CHAT_URL#https://}"
+    # A tunnel an earlier run left behind holds the domain, and ngrok refuses
+    # a second endpoint on it. Only this exact command is stopped.
+    pkill -f "ngrok http 127.0.0.1:$API_PORT --url=$CHAT_URL" >/dev/null 2>&1 || true
+    NGROK_LOG="$(mktemp -t agency-ngrok.XXXXXX)"
+    # From an EMPTY environment: everything this script exported — the
+    # database URL, the mail passwords, the Anthropic key — would otherwise
+    # be inherited by a third party's binary. ngrok needs only PATH, and HOME
+    # for its own config, where its authtoken lives.
+    env -i PATH="$PATH" HOME="$HOME" USER="${USER:-}" \
+      ngrok http "127.0.0.1:$API_PORT" --url="$CHAT_URL" --log=stdout --log-level=warn >"$NGROK_LOG" 2>&1 &
+    NGROK_PID=$!
+    sleep 3
+    if kill -0 "$NGROK_PID" 2>/dev/null; then
+      CHAT=yes
+    else
+      echo "ngrok stopped at once — the last lines it wrote:" >&2
+      tail -n 5 "$NGROK_LOG" >&2 || true
+      CHAT_WHY="ngrok could not open $CHAT_HOST (is 'ngrok config add-authtoken' done, and is it your domain?)"
+    fi
+  fi
+fi
+
 echo
 echo "── What this worker will and will not do ──────────────────────────"
 echo "  always:   recover stuck sends, expire approvals, sweep expired"
@@ -400,20 +527,38 @@ fi
 if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
   echo "  alarm:    ON  — an opt-out that cannot be recorded is posted to Slack"
 fi
-echo "  chat:     OFF — no inbound route. The site's chat panel says no worker"
-echo "            is connected, which is true."
+if [ "$CHAT" = yes ]; then
+  echo "  chat:     ON  — the live site reaches this Mac at $CHAT_URL (ngrok),"
+  echo "            and every turn is billed to your Anthropic API key. Vercel needs"
+  echo "            AGENT_URL=$CHAT_URL and the same AGENT_INTERNAL_TOKEN."
+elif [ -n "${CHAT_URL:-}" ]; then
+  echo "  chat:     OFF — $CHAT_WHY."
+else
+  echo "  chat:     OFF — no inbound route. The site's chat panel says no worker"
+  echo "            is connected, which is true."
+fi
 echo
 echo "  The worker logs its own verdict as 'outreach: <mode>' and"
 echo "  'sms: dovesoft on|off' at boot. If that disagrees with this, trust it."
 echo "  Closing this window stops it; queued mail waits for the next run."
 echo
 
-# Required by the worker's schema, and with no tunnel nothing ever presents it:
-# the web app only sends this header when it calls /internal/*, which it cannot
-# reach. A fresh random value per run is therefore correct — it is a shared
-# secret with nobody. If you later expose chat, set the SAME value here and in
-# Vercel, and this line is what you replace.
-AGENT_INTERNAL_TOKEN="$(openssl rand -base64 32)" \
+# AGENT_INTERNAL_TOKEN is required by the worker's schema. With chat on it is
+# the saved one Vercel holds; with no tunnel nothing ever presents it — the
+# web app only sends it when it calls /internal/*, which it cannot reach — so
+# a fresh random value per run is correct, a shared secret with nobody. And
+# with chat off the worker is not handed an Anthropic key at all.
+if [ "$CHAT" = yes ]; then
+  WORKER_TOKEN="$AGENT_INTERNAL_TOKEN"
+  # Haiku unless told otherwise: about an eighth of the default model's price.
+  export AGENT_MODEL="${AGENT_MODEL:-claude-haiku-4-5}"
+else
+  WORKER_TOKEN="$(openssl rand -base64 32)"
+  unset ANTHROPIC_API_KEY
+fi
+# ngrok, when started, is in this process group: Ctrl-C and closing the
+# window stop it with the worker.
+AGENT_INTERNAL_TOKEN="$WORKER_TOKEN" \
   NODE_ENV=production \
   AGENT_BIND=127.0.0.1 \
   exec node_modules/.bin/tsx apps/agent/src/index.ts

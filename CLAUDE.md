@@ -27,14 +27,17 @@ tested against a fetch that records and never sends, and against PGlite —
 never against DoveSoft itself, whose push formats and `mobiles` format are
 assumptions to confirm before a real send. Calls
 and WhatsApp over DoveSoft are not built: DoveSoft publishes no API for
-either. Thirteen review rounds, and the follow-ups they left open, have been fixed
+either. Fourteen review rounds, and the follow-ups they left open, have been fixed
 on top of both releases; each fix is stated below where the rule it changed
 lives.
 
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
 machine"), which needs no public address, because everything but chat is
-the worker reaching out. **Fly.io is the path once it rents a machine**
+the worker reaching out. Chat is the script's one opt-in inbound route: an
+ngrok tunnel on the operator's free static domain to the worker's API port,
+with `AGENT_URL` and the same `AGENT_INTERNAL_TOKEN` set in Vercel once
+(DEPLOYING.md, "If you do want chat on the live site"). **Fly.io is the path once it rents a machine**
 (`fly.toml` at the repo root), and its
 defaults are the dangerous part: Fly scales a machine to zero between
 requests, which is Vercel's problem wearing a different hat — the advisory
@@ -713,7 +716,8 @@ The fourteen added with 0018, one line each:
   pause's class. When the send path's own `paused` code is the reason, the
   summary leads with words for that class (`pauseReasonClass`, the inbox's
   exact reading): only `replied` — exactly `replied <ISO instant>` —
-  promises an /inbox answer and is called "not a refusal of <channel>";
+  promises an /inbox answer (unless `sharedNumberHold` holds, below) and is
+  called "not a refusal of <channel>";
   `manual` says answering a reply does not lift it; `unsubscribed` is their
   opt-out; `opt_out_not_recorded` and `erasure` say to record the opt-out or
   finish the erasure, and never to resume them — except a shared number's
@@ -727,7 +731,13 @@ The fourteen added with 0018, one line each:
   been them — so Resume is refused until a person records the number on
   /suppressions; do not suggest resuming them before that.", and its data
   carries `facts.sharedNumberHold`; before, a teammate's pause there read
-  "until a person resumes them on /contacts", which Resume refused.
+  "until a person resumes them on /contacts", which Resume refused. For a
+  `replied` pause, whose /inbox answer `replyQueueDraft` refuses then too,
+  the summary drops that promise and appends `SHARED_NUMBER_HOLD_REPLIED_WORDS`
+  instead — "…so neither answering their reply from /inbox nor Resume on
+  /contacts lifts the pause until a person records the number on
+  /suppressions; do not suggest either before that." — in both branches
+  (review round 13).
   `get_consent`'s first line for such a person reads "paused: nothing is
   sent to them, and they cannot be resumed until a person records a phone
   number they share on /suppressions — a text from it asked to stop and
@@ -1061,6 +1071,10 @@ page's People still decide the note by the pause's SHAPE alone
 with no note, and Resume's 409 (`RESUME_SHARED_NUMBER_KEPT`) is what says
 what to do — giving them the fact would be one
 `heldForUnrecordedSharedNumber` read per paused row on unbounded lists.
+`/inbox`'s answer composer is the same (review round 14): for a listed
+holder paused by their own reply it still offers Answer and says "Drafting
+resumes <name>", and the draft's 409 (`SHARED_NUMBER_HELD`: record the
+number, then answer) is what says what to do — nothing is drafted or sent.
 And `/suppressions`' paused list opens "Held from every campaign — most
 often because they replied; each row says why", where it read "A contact
 who replied.", false of a holder who may have sent nothing; since review
@@ -3902,7 +3916,7 @@ absent.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 6411 tests in 216 files: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice + the 0018 release + DoveSoft SMS (0019) + thirteen review rounds
+npm test                 # 6411 tests in 216 files: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice + the 0018 release + DoveSoft SMS (0019) + fourteen review rounds
 npx vitest run --maxWorkers=1 --minWorkers=1   # the same suite on a machine short of memory
 npm run build            # packages, then the Next app
 
@@ -3947,7 +3961,11 @@ npm run smoke:agent -- --connector deepwiki   # the Phase 3 gate (§6's "no rest
                               # UNSUBSCRIBE_SECRET (Enter keeps the saved one or sends no unsubscribe header;
                               # a new one only when `new` is typed and confirmed, on a Mac) and SLACK_WEBHOOK_URL,
                               # and on a Mac keeps it awake (caffeinate -is) and can keep its answers in the
-                              # login Keychain, each value base64 on security's stdin, never its argv
+                              # login Keychain, each value base64 on security's stdin, never its argv.
+                              # CHAT is optional: an ngrok tunnel on the operator's static domain to the
+                              # worker's API port, started from an EMPTY environment, the Anthropic key and
+                              # an AGENT_INTERNAL_TOKEN made onto the clipboard for Vercel (with AGENT_URL);
+                              # with chat off the worker is handed no Anthropic key
 ./tools/run-worker.sh --reconfigure   # ask every question again
 ./tools/run-worker.sh --forget        # delete the saved answers
 ./tools/add-teammate.sh       # grant somebody access — or Settings → Team, in the browser

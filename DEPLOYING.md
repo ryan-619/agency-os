@@ -564,12 +564,15 @@ a database nobody can sign in to yet.
 That is the one feature needing an inbound route, and it changes the picture
 in two ways worth deciding deliberately rather than discovering:
 
-1. **Your machine becomes internet-reachable.** A tunnel
-   (`cloudflared tunnel --url http://127.0.0.1:3002`) publishes the internal
-   API. It is bearer-token gated, and `/livez` and `/readyz` on that port are
-   not — they would answer anyone. Set `AGENT_URL` and the SAME
-   `AGENT_INTERNAL_TOKEN` in Vercel, and note a quick tunnel's URL changes
-   on every restart, so each restart means updating Vercel and redeploying.
+1. **Your machine becomes internet-reachable.** A tunnel publishes the
+   worker's internal API port (3002). It is bearer-token gated, and `/livez`
+   and `/readyz` on that port are not — they would answer anyone, and say
+   nothing usable. Set `AGENT_URL` and the SAME `AGENT_INTERNAL_TOKEN` in
+   Vercel. A Cloudflare quick tunnel (`cloudflared tunnel --url
+   http://127.0.0.1:3002`) needs no account, but its URL changes on every
+   restart, so each restart means updating Vercel and redeploying; an ngrok
+   free STATIC domain never changes, so Vercel is set once — which is what
+   `run-worker.sh` does, below.
 2. **Every teammate's chat turn runs on whatever credential that worker
    holds.** With `ANTHROPIC_API_KEY` that is a bill. With
    `AGENT_USE_LOCAL_LOGIN` it is one person's personal subscription backing a
@@ -579,6 +582,24 @@ in two ways worth deciding deliberately rather than discovering:
 
 Chat against your own login, on your own machine, against your own data is a
 different thing from that, and is what the local development path is for.
+
+**`run-worker.sh` does it for you through ngrok.** Once, by hand: sign up at
+ngrok.com (free), claim the free static domain under Domains,
+`brew install ngrok`, and `ngrok config add-authtoken <your token>` — that
+token lives in ngrok's own config and the script never asks for it. Then
+`./tools/run-worker.sh --reconfigure` and answer yes to CHAT: it asks for
+the domain and the Anthropic API key (hidden, saved in the Keychain), and,
+the first time, makes an `AGENT_INTERNAL_TOKEN`, puts it on the clipboard
+(after any new unsubscribe secret is pasted — it waits for you) and saves
+it, and tells you to add `AGENT_INTERNAL_TOKEN` (Sensitive) and `AGENT_URL`
+(the domain, `https://…`) in Vercel, then redeploy. Every later run starts
+`ngrok http 127.0.0.1:3002 --url=<domain>` from an EMPTY environment — the
+database URL, the mail passwords and the Anthropic key are never inherited
+by ngrok — and the worker with the key and the saved token, on
+`claude-haiku-4-5` unless `AGENT_MODEL` says otherwise. If ngrok is
+missing, or stops at once (no authtoken, a domain that is not yours), chat
+stays off, the summary says why, and the worker is handed no key; with
+chat off it never is. Ctrl-C or closing the window stops both.
 
 ## The worker, on Fly.io
 
