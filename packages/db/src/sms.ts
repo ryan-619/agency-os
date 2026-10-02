@@ -1825,9 +1825,10 @@ async function sharedNumberOptOutLost(
  * the others' pauses written.
  *
  * `overResumable` also writes it over a pause Resume would lift once the
- * number is recorded — a teammate's, an unsubscribe's, any other that is
- * not the ordinary hold — named exactly, as the rest are: for a holder kept
- * when the row that would list them could not be written (review round 10).
+ * number is recorded — a teammate's, an unsubscribe's, any other but the
+ * contact's own unrecorded opt-out or an unfinished erasure — named
+ * exactly, as the rest are: for a holder kept when the row that would list
+ * them could not be written (review round 10).
  */
 async function holdHard(
   db: AgencyDb,
