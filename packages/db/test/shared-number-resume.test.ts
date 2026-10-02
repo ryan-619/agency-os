@@ -15,6 +15,8 @@
  * unrecorded opt-out is unchanged: Resume still refuses it outright.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import {
@@ -339,5 +341,31 @@ describe('a holder’s stronger pause, and the key an own opt-out was about (rev
     expect(await resume(x)).toMatchObject({ ok: false, reason: 'opt_out_not_recorded' })
     await addSuppression(db, { orgId, kind: 'email', value: 'x@acme.example', reason: 'by hand', source: 'manual' })
     expect(await resume(x)).toEqual({ ok: true })
+  })
+})
+
+/**
+ * The hard hold is written under the holder's lock, in the strength every
+ * shared-number writer takes (review round 8, lock-order.test.ts): FOR NO
+ * KEY UPDATE, never FOR UPDATE, one holder per transaction, and no message
+ * touched — so the one lock order holds trivially.
+ */
+describe('the holders’ loud path’s lock', () => {
+  it('reads each holder’s reason FOR NO KEY UPDATE before writing it, and touches no message', () => {
+    const src = readFileSync(fileURLToPath(new URL('../src/sms.ts', import.meta.url)), 'utf8')
+    const start = src.indexOf('async function holdHard(')
+    expect(start).toBeGreaterThan(-1)
+    const fn = src.slice(start, src.indexOf('\n}\n', start))
+    expect(fn).toContain('db.transaction(')
+    const lock = fn.indexOf(".for('no key update')")
+    expect(lock).toBeGreaterThan(fn.indexOf('.from(schema.contacts)'))
+    expect(fn.indexOf('pauseContact(tx')).toBeGreaterThan(lock)
+    expect(fn).not.toContain(".for('update')")
+    expect(fn).not.toContain('schema.touches')
+    expect(fn).not.toContain('pauseContactOverriding')
+    // And the loud path pauses through it, never over any reason.
+    const lost = src.slice(src.indexOf('async function sharedNumberOptOutLost('))
+    expect(lost.slice(0, lost.indexOf('\n}\n'))).toContain('holdHard(')
+    expect(lost.slice(0, lost.indexOf('\n}\n'))).not.toContain('pauseContactOverriding')
   })
 })
