@@ -57,6 +57,7 @@ export const templateCreateSchema = z.object({
   name: z.string().max(200, 'The name is at most 200 characters.').nullish(),
   language: z.string().max(35, 'The language is at most 35 characters.').nullish(),
 })
+export type TemplateCreateInput = z.infer<typeof templateCreateSchema>
 
 export const templatePatchSchema = z.object({
   active: z.boolean('Say whether the template is on or off.'),
