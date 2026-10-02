@@ -27,7 +27,7 @@ tested against a fetch that records and never sends, and against PGlite —
 never against DoveSoft itself, whose push formats and `mobiles` format are
 assumptions to confirm before a real send. Calls
 and WhatsApp over DoveSoft are not built: DoveSoft publishes no API for
-either. Ten review rounds, and the follow-ups they left open, have been fixed
+either. Eleven review rounds, and the follow-ups they left open, have been fixed
 on top of both releases; each fix is stated below where the rule it changed
 lives.
 
@@ -1466,8 +1466,11 @@ reports `pausedReason`, `pausedFor` (the reason's class), `consentRecorded`
 `evidenceSuperseded` and, since review round 10, `sharedNumberHold` —
 Resume's own answer (`heldForUnrecordedSharedNumber`), asked in
 `sendFactsFor` for a paused contact only, one `audit_log` read per send
-attempt to one, and false when they are not paused; `consentLedgerFor`
-carries it too — for a screen to say, and decides through
+attempt to one, and false when they are not paused, and since review round
+11 only for a pause Resume asks that question about
+(`resumeAsksSharedNumber` in `sms.ts`): never their own unrecorded opt-out
+or an unfinished erasure, which Resume refuses first, so no reader tells a
+person the number would unlock them; `consentLedgerFor` carries it too — for a screen to say, and decides through
 `decideGathered`, so a dry run words a superseded scan, and a shared
 number's kept holder, exactly as the sender does.
 
@@ -1519,18 +1522,23 @@ would suppress an address that may belong to somebody who never asked. Phones
 are stored as E.164 on edit, a LinkedIn URL must be one `normaliseLinkedIn`
 can read, and changing the email clears a bounce mark in the same UPDATE.
 Nor off a number held for an unrecorded shared-number STOP (review round
-9): while the contact is PAUSED and `heldForUnrecordedSharedNumber`
-holds, a phone change or clear that drops the number's key is refused
-`shared_number_hold` (409 from `PATCH /api/contacts/[id]`), and the UPDATE
-repeats the condition — the pause it read, and `(paused_at IS NULL OR NOT
-EXISTS (<a governing row>))` — because the hold is lifted by the NUMBER's
-suppression, read off their phone, and a contact moved off it held a pause
-nothing could lift. Only while paused (review round 10, `old.pausedAt !==
-null`): an unpaused contact has no hold to strand, and read as held, a
-contact any row had ever listed — resumed once the number was recorded —
-could never have their phone changed or cleared after an owner removed the
-number's suppression; and only by a row no later resume of theirs has
-spent (§2, "The send path"). A change of spelling that keeps the number
+9): while `heldForUnrecordedSharedNumber` holds, a phone change or clear
+that drops the number's key is refused `shared_number_hold` (409 from
+`PATCH /api/contacts/[id]`), and the UPDATE repeats the condition — the
+pause it read, and `NOT EXISTS (<a governing row>)` — because the hold is
+lifted by the NUMBER's suppression, read off their phone, and a contact
+moved off it held a pause nothing could lift. Paused or not (review round
+11, undoing round 10's "only while paused"): a row that lists a contact
+governs every LATER pause of theirs too, judged against whatever phone they
+have then, so an unpaused listed contact moved off the number — the
+`paused` shortfall, or a Resume that landed before the row committed — had
+a later pause Resume could never lift, and it asked for a number that never
+said STOP to be recorded. Such a contact hears `SHARED_NUMBER_HOLD_EDIT_UNPAUSED`:
+record the number on /suppressions, then pause and resume them on
+/contacts, which spends the row. Round 10's own case stays fixed by the
+row's spending rule alone: a contact resumed once the number was recorded
+is not held, so an owner who then removes the suppression can change the
+phone (§2, "The send path"). A change of spelling that keeps the number
 goes through; once the number is suppressed, moving the phone off it is
 the owner's decision above.
 
@@ -2897,9 +2905,9 @@ one rather than replace it (review round 9, `/settings/templates` below).
   number's holder is found, by a later delivery and by Resume alike,
   through their CURRENT phone, and one whose phone was edited after the
   STOP was eased by no delivery and refused by Resume for good — so
-  `contactsUpdate` refuses that edit while they are held and paused
-  (`shared_number_hold`, §2, "The send path"; only while paused since
-  review round 10).
+  `contactsUpdate` refuses that edit while they are held, paused or not
+  (`shared_number_hold`, §2, "The send path"; round 10 narrowed it to
+  paused contacts and review round 11 put it back).
 
 **`/settings/templates`** records registrations and registers nothing: add
 one by hand, switch one off or on (idempotent, audited
@@ -3879,7 +3887,7 @@ absent.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 6405 tests in 214 files: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice + the 0018 release + DoveSoft SMS (0019) + ten review rounds
+npm test                 # 6407 tests in 214 files: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice + the 0018 release + DoveSoft SMS (0019) + eleven review rounds
 npx vitest run --maxWorkers=1 --minWorkers=1   # the same suite on a machine short of memory
 npm run build            # packages, then the Next app
 
@@ -4003,9 +4011,9 @@ process, keeps the finished data directory, and hands each test a COPY via
 a new instance rather than attaching to one. Measured: the whole suite went
 from **290s to 97s** single-worker, with the same tests passing, and
 `apps/voice` alone from 9.8s to 4.4s. The suite has grown several times
-over since: at 0019, after DoveSoft and ten review rounds, it is 6,405
-tests in 214 files, and the full single-worker run at `aa77b37` took
-1,501 s — every test green. (At 0018 it was 4,246 in 154 and took 1,088 s.)
+over since: at 0019, after DoveSoft and eleven review rounds, it is 6,407
+tests in 214 files, and the full single-worker run at `676d890` took
+1,569 s — every test green. (At 0018 it was 4,246 in 154 and took 1,088 s.)
 
 `freshDb()` remains and `migrations.test.ts` and `schema-parity.test.ts`
 still use it — a test about applying migrations cannot start from a database

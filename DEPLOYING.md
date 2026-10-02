@@ -923,9 +923,9 @@ hold), which stands and is counted `kept` on the audit row — except when
 that audit row could not be written, and then a teammate's or an
 unsubscribe's pause is replaced by the hold after all, because the row is
 what held them; Resume then
-refuses whatever paused them until the number is recorded, and while they
-are paused their phone cannot be moved off the number or cleared on
-`/contacts`. A person's Resume after that ends what the row says about
+refuses whatever paused them until the number is recorded, and until a
+person resumes them after that, paused or not, their phone cannot be moved
+off the number or cleared on `/contacts`. A person's Resume after that ends what the row says about
 them, so a later pause of theirs is an ordinary one. The
 next delivery from the number that finds it suppressed — the retry, or any
 later text, whatever it says — eases the hard hold to an ordinary one, and
