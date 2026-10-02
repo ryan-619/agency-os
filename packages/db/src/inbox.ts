@@ -68,6 +68,7 @@ import type { AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
 import { looksLikeOptOut, pauseContact, replyIsFromTheContact, resumeContact, type TouchRow } from './outreach.js'
 import { previewSend } from './send-preview.js'
+import { isSharedNumberOptOutPause } from './sms.js'
 
 /** A group on the inbox: a stored kind, or the rows nobody has classified. */
 export type InboxKindFilter = ReplyKind | 'unclassified'
@@ -1177,6 +1178,16 @@ const RESUME_NOT_RECORDED =
   'for it. Record it by hand on /suppressions if it is not there yet. An opt-out is not something to resume, so the ' +
   'pause stays. Nothing was changed.'
 
+/**
+ * A holder of a shared number whose STOP could not be recorded
+ * (`sharedNumberOptOutReason` in sms.ts): they may never have sent it, so the
+ * sentence does not say they asked — and recording the NUMBER is what lifts it.
+ */
+const RESUME_SHARED_NUMBER =
+  'A text from a number this contact shares asked to stop, and it could not be recorded — this pause holds everyone ' +
+  'who holds the number until it is. Record the number on /suppressions (it is in the provider’s inbound log); ' +
+  'then this pause can be lifted, or the next text from the number lifts it to an ordinary hold. Nothing was changed.'
+
 const RESUME_ERASURE =
   'This person asked to be erased, and the erasure did not complete — this pause is what holds them until it does. ' +
   'An owner finishes it with Erase… on /contacts. Nothing was changed.'
@@ -1281,7 +1292,17 @@ export async function contactResumeByHand(
     if (!contact.pausedAt) return { ok: false, reason: 'not_paused', message: RESUME_NOT_PAUSED } as const
 
     const pausedFor = pauseReasonClass(contact.pausedReason)
-    if (pausedFor === 'opt_out_not_recorded') {
+    // A shared number's holder (review round 8, the follow-up r9-sms named):
+    // held hard while the number's STOP is unrecorded, and released once a
+    // person has recorded the number — a hand-recorded number with no later
+    // text from it left them refused for good, the lockout round 8 removed
+    // for a retry. The contact's own unrecorded opt-out is unchanged below.
+    if (pausedFor === 'opt_out_not_recorded' && isSharedNumberOptOutPause(contact.pausedReason)) {
+      const numberKeys = contact.phone ? (suppressionKeysFor(contact.phone, 'sms') ?? []) : []
+      if (numberKeys.length === 0 || !(await anySuppressed(tx, args.orgId, numberKeys))) {
+        return { ok: false, reason: 'opt_out_not_recorded', message: RESUME_SHARED_NUMBER } as const
+      }
+    } else if (pausedFor === 'opt_out_not_recorded') {
       return { ok: false, reason: 'opt_out_not_recorded', message: RESUME_NOT_RECORDED } as const
     }
     if (pausedFor === 'erasure') return { ok: false, reason: 'erasure', message: RESUME_ERASURE } as const
@@ -1343,8 +1364,8 @@ const ALREADY_PAUSED: Record<Exclude<PauseReasonClass, 'replied'>, string> = {
     'reason should change. Nothing was changed.',
   unsubscribed: 'This contact unsubscribed and is already paused for it; that pause stands. Nothing was changed.',
   opt_out_not_recorded:
-    'This contact is already paused because they asked to stop and the opt-out could not be recorded; that pause ' +
-    'stands. Record the opt-out on /suppressions. Nothing was changed.',
+    'This contact is already paused because an opt-out could not be recorded — theirs, or a text from a number they ' +
+    'share; that pause stands. Record it on /suppressions. Nothing was changed.',
   erasure:
     'This contact is already paused because their erasure did not complete; that pause stands. Nothing was changed.',
   other: 'This contact is already paused, and that pause stands — /contacts shows why. Nothing was changed.',
