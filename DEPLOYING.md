@@ -189,7 +189,7 @@ variable and never the value.
 | `RESEND_API_KEY` | the same route's fetch of each received message — a key that can READ received email | `/api/inbound/resend` answers 503 |
 | `SECRETS_KEY` | storing a connector's credential (Settings → Connectors) and re-entering one (Settings → Credentials). **The same value on the worker** | both refuse with 503; Settings → Deployment reads "not set", or "set, not a valid key" |
 | `DOVESOFT_WEBHOOK_SECRET` | DoveSoft's two pushes, a delivery report and a text a contact sends back (see "SMS through DoveSoft"). `openssl rand -hex 32` — hex needs no escaping in a URL; a secret with any other character must be percent-encoded where it stands in `?token=` (a `+` is `%2B`). At least 32 characters | `/api/inbound/dovesoft/dlr` and `/sms` answer 503: no report is recorded, and no text back — a STOP included — reaches this deployment |
-| `DOVESOFT_ORG_ID` | the FALLBACK org (a uuid), and nothing else. A text back is matched against contacts' numbers in every org first, and filed under the one contact anywhere who holds the number — or, when several do, the one this system texted at it, with every other holder paused and their waiting messages cancelled; when it texted none of them or more than one, the text is filed under nobody and every holder is paused. This org decides nothing about a number a contact holds — every org texts through the one DoveSoft account, so a holder here is no evidence of whose text it is. It is where a text from a number NO contact holds is audited and its STOP suppressed, where an unmatched report or an unreadable push is audited, and where the Slack alarm is filed for a STOP that could not be recorded from a number nobody holds or that could not be read, or whose recording failed before anybody was matched — any other failed STOP's alarm goes to the org whose contact holds the number | a text from a number no contact holds is logged and filed under no org, and a STOP from it is recorded nowhere: it is answered 500 and logged `OPT-OUT NOT RECORDED`, for a person to record by hand, with no Slack alarm — the error line says `alarm: 'not_raised_no_org'` |
+| `DOVESOFT_ORG_ID` | the FALLBACK org (a uuid), and nothing else. A text back is matched against contacts' numbers in every org first, and filed under the one contact anywhere who holds the number — or, when several do, the one this system texted at it, with every other holder paused and their waiting messages cancelled; when it texted none of them or more than one, the text is filed under nobody and every holder is paused. This org decides nothing about a number a contact holds — every org texts through the one DoveSoft account, so a holder here is no evidence of whose text it is. It is where a text from a number NO contact holds is audited and its STOP suppressed, where an unmatched report or an unreadable push is audited, and where the Slack alarm is filed for a STOP that could not be recorded from a number nobody holds or that could not be read, or whose recording failed before the recorder wrote anything or named anybody — any other failed STOP's alarm goes to the org whose contact holds the number | a text from a number no contact holds is logged and filed under no org, and a STOP from it is recorded nowhere: it is answered 500 and logged `OPT-OUT NOT RECORDED`, for a person to record by hand, with no Slack alarm — the error line says `alarm: 'not_raised_no_org'` |
 
 **`DATABASE_POOL_MAX=1` matters.** Each serverless instance keeps its own pool,
 and they do not share. At the default of 10, a few concurrent instances
@@ -406,13 +406,17 @@ nothing.
 fetched gets 502 and a recording failure 500, so Resend retries both;
 everything the route did read — a non-match, a message with no sender — gets
 200, because a 2xx for a message nobody read could swallow a "stop". The
-generic `/api/inbound/email` keeps the same rule: a recording failure there
-is a 500 too. On both, a reply that said stop and whose recording failed
-once it was matched to a contact also writes a `contact.opt_out_not_recorded`
-row under that contact and raises the Slack opt-out alarm before the 500
-(one that failed before it was matched is logged at error with `alarm:
+generic `/api/inbound/email` keeps the same rule: a recording failure there is
+a 500 too. On both, a reply that said stop and whose recording failed once it
+was matched to a contact also writes a `contact.opt_out_not_recorded` row
+under that contact, pauses them, and raises the Slack opt-out alarm before the
+500 (one that failed before it was matched is logged at error with `alarm:
 'not_raised_unplaced'`), and the error line names the fault's class only,
-never the address or the words.
+never the address or the words. A stop sent by somebody else in the thread — a
+colleague replying all to the message the contact was sent — is not the
+contact's: they are paused only as any reply pauses them, the row is about
+that message, and the alarm names no contact and says to record the address
+the reply came from on `/suppressions`.
 
 Two limits, stated rather than discovered:
 
@@ -584,12 +588,32 @@ safe, but noisy. It then waits for `/api/health` to report the worker
 `WEB_PUBLIC_URL` is set to the site. Those, and `FLY_API_TOKEN` and
 `FLY_ORG`, reach only the workflow step that runs `worker`: `status`,
 `migrate`, `deploy` and `release` run in a step that sees
-`PRODUCTION_DATABASE_URL` and the `VERCEL_*` secrets alone. The step that
-installs flyctl is pinned to a commit of `superfly/flyctl-actions`
-(`setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1`, its `v1`), never
-a branch or a tag that a push there could move, and flyctl itself to
-`0.4.111` through the action's `version` input — upgrading flyctl is
-editing that line in `.github/workflows/production.yml`. By hand, the same
+`PRODUCTION_DATABASE_URL` and the `VERCEL_*` secrets alone. **Inside that
+step, `tools/production.sh` hands them to no program but flyctl.** One
+array at the top of the script, `WORKER_ONLY`, names every one of them,
+and the script un-exports them all for the whole run, so nothing it starts
+— its node helpers (`tools/vercel-env.mjs`, `vercel-project.mjs`,
+`production-env.mjs`), the migrator's CLI, `npx tsc`, curl — inherits one.
+The Vercel CLI (`npx --yes vercel@62.1.0`, installed at run time with no
+lockfile and floating transitive ranges) also runs under `env -u` for each,
+a second guard that holds if a later edit exports one again, so neither it
+nor the web build its `vercel build` runs ever sees one. flyctl is handed
+`FLY_API_TOKEN` alone, on each call; every other secret reaches Fly over
+stdin; and once `flyctl secrets import --stage` succeeds, every one but
+`FLY_API_TOKEN` is unset. **Adding a worker secret is two edits**: its name
+in the workflow's worker-step `env` AND in `WORKER_ONLY`, which both builds
+the staged list and strips — `packages/db/test/production-tooling.test.ts`
+fails when the two lists differ. This contains what a compromised Vercel
+CLI release could read; it does not prevent one, and that CLI still holds
+`VERCEL_TOKEN`, which reaches the project's production variables on its
+own. The further step, not taken because it adds a dependency, is to pin
+the CLI through the lockfile as a devDependency and run it from
+`node_modules/.bin`. The step that installs flyctl is pinned to a commit of
+`superfly/flyctl-actions`
+(`setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1`, its `v1`), never a
+branch or a tag that a push there could move, and flyctl itself to `0.4.111`
+through the action's `version` input — upgrading flyctl is editing that line
+in `.github/workflows/production.yml`. By hand, the same
 steps:
 
 ```bash
@@ -771,30 +795,39 @@ DoveSoft console before sending it again.
 
 **What the two routes answer.** 503 while `DOVESOFT_WEBHOOK_SECRET` is
 unset, 401 for a wrong token. A delivery report that was read is 200,
-matched or not. A text back filed under one contact is 200, after an
-opt-out alarm for each org where its STOP could not be written — that
-contact's, and any other org whose contacts hold the number. A payload
-either route cannot read is 400 (413 when larger than 16 KB) — never 200,
-because an unread text might have been a STOP — with an `sms.*_unreadable`
-audit row and an error line, so DoveSoft retries. A STOP from a number no
-single contact holds whose suppression could not be written is 500, so it
-is retried too; that one, and a STOP from a number that cannot be read
-(400), also raise the Slack opt-out alarm before answering, one in each org
-where it failed, naming a contact there who holds the number and linking
-`/suppressions`. Where nobody holds it, or it could not be read, the alarm
-carries no message, no contact and no number, links `/compliance`, and is
-filed under `DOVESOFT_ORG_ID` — not raised without it. A redelivery of a
+matched or not. A text back filed under one contact is 200 — unless it was a
+STOP that could not be suppressed in that contact's org or in any other org
+whose contacts hold the number: that is 500, after an opt-out alarm for each
+org where it could not be written, so DoveSoft redelivers it, and the
+redelivery — a duplicate, which pauses nobody and announces nothing — writes
+the suppression still missing, alarming and refusing again if it fails
+again. A payload either route cannot read is 400 (413 when larger than
+16 KB) — never 200, because an unread text might have been a STOP — with an
+`sms.*_unreadable` audit row and an error line, so DoveSoft retries. A STOP
+from a number no single contact holds whose suppression could not be written
+is 500, so it is retried too; that one, and a STOP from a number that cannot
+be read (400), also raise the Slack opt-out alarm before answering, one in
+each org where it failed, naming a contact there who holds the number and
+linking `/suppressions`. Where nobody holds it, or it could not be read, the
+alarm carries no message, no contact and no number, links `/compliance`, and
+is filed under `DOVESOFT_ORG_ID` — not raised without it. A redelivery of a
 text filed under nobody pauses nobody again; for a STOP it only writes a
-suppression still missing. A fault while recording — a dropped connection,
-a timeout — is 500 on either route, so DoveSoft retries, and the error line
+suppression still missing. A fault while recording — a dropped connection, a
+timeout — is 500 on either route, so DoveSoft retries, and the error line
 names the fault's class only, never the number or the words. When the text
 asked to stop and the recorder had already matched the contact, a
 `contact.opt_out_not_recorded` row is written under that contact in their
-org, they are paused, and the alarm names them; a fault before anybody was
-matched writes that row with no contact under `DOVESOFT_ORG_ID` and raises
-the alarm with none. A NUL character in a pushed text, id
-or reason (some gateways decode GSM-7's `@` as one) is stored as U+FFFD
-rather than failing every retry.
+org, they are paused, and the alarm names them; each other org where the
+recorder had already paused the contacts holding the number as an opt-out
+not recorded gets an alarm of its own. Only a fault before the recorder
+wrote anything or named anybody writes that row with no contact under
+`DOVESOFT_ORG_ID` and raises the alarm with none, which then tells the
+person to check `/suppressions` first, because an earlier delivery may have
+recorded part of it. A redelivery whose finishing faults is 500 too, with an
+error line and no new row or alarm: the first delivery recorded the STOP and
+alarmed where it could not. A NUL character in a pushed text, id or reason
+(some gateways decode GSM-7's `@` as one) is stored as U+FFFD rather than
+failing every retry.
 
 ## Every deploy after the first: migrate FIRST
 
