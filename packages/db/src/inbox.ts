@@ -510,8 +510,58 @@ async function reclassify(
     return { ok: false, reason: 'opt_out_is_not_a_choice' }
   }
   const now = args.now ?? new Date()
+  // A reply's contact changes only when that contact is deleted or erased
+  // (ON DELETE SET NULL), so a second pass reads it NULL and locks nobody; the
+  // bound is for a writer nobody has written yet.
+  for (let attempt = 1; ; attempt++) {
+    const outcome = await reclassifyOnce(db, args, now, expected)
+    if (outcome !== CONTACT_CHANGED) return outcome
+    if (attempt >= 3) throw new Error('the reply’s contact changed under every attempt to reclassify it')
+  }
+}
+
+/** `reclassifyOnce`'s answer when the reply's contact changed between its read and its lock: start again. */
+const CONTACT_CHANGED = Symbol('contact changed')
+
+/**
+ * One attempt at `reclassify`, in one transaction.
+ *
+ * Contact before touch (review round 6, [14]), the order every writer that
+ * holds a person and their messages takes. The reply row is READ to learn
+ * whose it is, that person is locked, and only then is the reply locked —
+ * and checked to be theirs still. Locking the reply first held it while the
+ * pause below waited for the person, and an erasure holds the person while
+ * it scrubs that very reply: the two deadlocked on a real Postgres, and the
+ * erasure took the loud "could not keep its suppression" path. When the
+ * reply's contact changed in between — deleted or erased — the attempt is
+ * given up whole and the caller starts again, so the lock it would need is
+ * never taken after the reply's.
+ */
+async function reclassifyOnce(
+  db: AgencyDb,
+  args: ReclassifyArgs,
+  now: Date,
+  expected: ReplyKind | null | undefined,
+): Promise<ReplyReclassifyOutcome | ReplyReclassifyChangedMeanwhile | typeof CONTACT_CHANGED> {
   return db.transaction(async (transaction) => {
     const tx = transaction as unknown as AgencyDb
+    const replyIs = and(
+      eq(schema.touches.id, args.touchId),
+      eq(schema.touches.orgId, args.orgId),
+      eq(schema.touches.direction, 'in'),
+    )
+    const [seen] = await tx.select({ contactId: schema.touches.contactId }).from(schema.touches).where(replyIs).limit(1)
+    if (!seen) return { ok: false, reason: 'not_found' } as const
+    const contact = seen.contactId
+      ? (
+          await tx
+            .select({ email: schema.contacts.email, phone: schema.contacts.phone, linkedinUrl: schema.contacts.linkedinUrl })
+            .from(schema.contacts)
+            .where(and(eq(schema.contacts.id, seen.contactId), eq(schema.contacts.orgId, args.orgId)))
+            .limit(1)
+            .for('update')
+        )[0] ?? null
+      : null
     const current = await tx
       .select({
         id: schema.touches.id,
@@ -524,13 +574,12 @@ async function reclassify(
         createdAt: schema.touches.createdAt,
       })
       .from(schema.touches)
-      .where(
-        and(eq(schema.touches.id, args.touchId), eq(schema.touches.orgId, args.orgId), eq(schema.touches.direction, 'in')),
-      )
+      .where(replyIs)
       .limit(1)
       .for('update')
     const row = current[0]
     if (!row) return { ok: false, reason: 'not_found' } as const
+    if (row.contactId !== seen.contactId) return CONTACT_CHANGED
     // `replyReclassifyIfStill`: read under the row lock, so a kind set a
     // moment ago is seen and stands.
     if (expected !== undefined && (row.replyKind ?? null) !== expected) {
@@ -539,15 +588,6 @@ async function reclassify(
     if (row.replyKind === 'opted_out') return { ok: false, reason: 'opt_out_is_not_a_choice' } as const
     if (row.replyKind === null && looksLikeOptOut(row.body)) return { ok: false, reason: 'reads_as_opt_out' } as const
 
-    const contact = row.contactId
-      ? (
-          await tx
-            .select({ email: schema.contacts.email, phone: schema.contacts.phone, linkedinUrl: schema.contacts.linkedinUrl })
-            .from(schema.contacts)
-            .where(and(eq(schema.contacts.id, row.contactId), eq(schema.contacts.orgId, args.orgId)))
-            .limit(1)
-        )[0] ?? null
-      : null
     if (await anySuppressed(tx, args.orgId, replyKeys(row.channel as Channel, contact, row.recipient))) {
       return { ok: false, reason: 'suppressed' } as const
     }
@@ -745,18 +785,31 @@ export async function replyQueueDraft(
   try {
     return await db.transaction(async (transaction) => {
       const tx = transaction as unknown as AgencyDb
-      const locked = await tx
-        .select()
-        .from(schema.touches)
-        .where(
-          and(
-            eq(schema.touches.id, args.inboundTouchId),
-            eq(schema.touches.orgId, args.orgId),
-            eq(schema.touches.direction, 'in'),
-          ),
-        )
-        .limit(1)
-        .for('update')
+      const replyIs = and(
+        eq(schema.touches.id, args.inboundTouchId),
+        eq(schema.touches.orgId, args.orgId),
+        eq(schema.touches.direction, 'in'),
+      )
+      // Contact before touch (review round 6, [14]), the order every writer
+      // that holds a person and their messages takes. The reply is READ to
+      // learn whose it is, that person is locked — every check below is about
+      // them, and the resume at the end lifts only the pause read here
+      // (review round 3) — and only then is the reply locked, which is what
+      // serialises two people answering it. Locking the reply first held it
+      // while waiting for the person, and an erasure holds the person while
+      // it scrubs that very reply: the two deadlocked on a real Postgres, and
+      // the answer to a person being erased could be the one that committed.
+      const [seen] = await tx.select({ contactId: schema.touches.contactId }).from(schema.touches).where(replyIs).limit(1)
+      if (!seen) refuse('not_found', 'That reply is not in this inbox.')
+      const contacts = seen?.contactId
+        ? await tx
+            .select()
+            .from(schema.contacts)
+            .where(and(eq(schema.contacts.id, seen.contactId), eq(schema.contacts.orgId, args.orgId)))
+            .limit(1)
+            .for('update')
+        : []
+      const locked = await tx.select().from(schema.touches).where(replyIs).limit(1).for('update')
       const reply = locked[0] ?? refuse('not_found', 'That reply is not in this inbox.')
       // 0019: on SMS and WhatsApp an answer is a registered template, never
       // free text — 0019's CHECK would refuse this row as a 500. An opt-out
@@ -768,15 +821,13 @@ export async function replyQueueDraft(
       const contactId =
         reply.contactId ??
         refuse('no_contact', 'This reply is not attached to a contact, so there is nobody to address an answer to.')
-
-      // Locked, like the reply: every check below is about this row, and the
-      // resume at the end lifts only the pause read here (review round 3).
-      const contacts = await tx
-        .select()
-        .from(schema.contacts)
-        .where(and(eq(schema.contacts.id, contactId), eq(schema.contacts.orgId, args.orgId)))
-        .limit(1)
-        .for('update')
+      // Somebody else's now, between the read and the lock: the person locked
+      // above is not the one this reply names, and nothing below may be
+      // decided about either. A contact is only ever taken off a reply by its
+      // deletion or erasure, which the line above already answers.
+      if (contactId !== seen?.contactId) {
+        refuse('no_contact', 'The contact this reply came from changed while the answer was being drafted. Nothing was drafted; reload the inbox.')
+      }
       const contact = contacts[0] ?? refuse('no_contact', 'The contact this reply came from is no longer in the CRM.')
 
       // The campaign: the one the message they answered went out under, unless

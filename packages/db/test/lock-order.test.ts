@@ -18,18 +18,29 @@
  * contact, and only then UPDATEs the answer — and the one new writer this
  * round adds, `dispatchTouch`'s correction of a recovered answer
  * (`recordRecoveredSend`), takes the same order.
+ *
+ * Review round 6, [13] and [14]: four more writers held a touch while they
+ * waited for its person, each against an erasure, which locks the person
+ * and then scrubs every row of theirs (reproduced on Postgres 16). `settle`
+ * UPDATEd an answer and then re-paused; the stuck-send recovery marked
+ * every claim `failed` and then re-paused; the inbox's answer
+ * (`replyQueueDraft`) and its reclassify locked the REPLY row and then the
+ * contact. Each now takes the person first.
  */
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-const src = readFileSync(fileURLToPath(new URL('../src/outreach.ts', import.meta.url)), 'utf8')
+const read = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), 'utf8')
+const src = read('../src/outreach.ts')
+const inbox = read('../src/inbox.ts')
+const reconcile = read('../../../apps/agent/src/boot/reconcile.ts')
 
 /** The body of one top-level function, comments stripped, so a comment naming a call cannot satisfy the test. */
-function body(signature: string): string {
-  const start = src.indexOf(signature)
+function body(signature: string, file = src): string {
+  const start = file.indexOf(signature)
   expect(start, signature).toBeGreaterThan(-1)
-  const rest = src.slice(start)
+  const rest = file.slice(start)
   return rest
     .slice(0, rest.indexOf('\n}\n'))
     .replace(/\/\*[\s\S]*?\*\//g, '')
@@ -67,6 +78,69 @@ describe('contact before touch', () => {
     expect(lock).toBeLessThan(update)
     expect(recovered.indexOf('liftRecoveryPause(tx')).toBeGreaterThan(update)
   })
+
+  it('settle locks the reply’s contact before it UPDATEs an answer it ends', () => {
+    const settle = body('async function settle(')
+    const tx = settle.indexOf('db.transaction(')
+    const lock = settle.indexOf('lockReplyContact(tx')
+    const write = settle.indexOf('await write(tx)')
+    expect(tx).toBeGreaterThan(-1)
+    expect(lock).toBeGreaterThan(tx)
+    expect(write).toBeGreaterThan(lock)
+    expect(settle.indexOf('repauseForUnansweredReply(tx')).toBeGreaterThan(write)
+  })
+
+  it('several people are locked in one statement, in id order, and never their replies', () => {
+    const helper = body('export async function lockReplyContacts(')
+    const contacts = helper.indexOf('.from(schema.contacts)')
+    expect(contacts).toBeGreaterThan(-1)
+    expect(helper.indexOf('.orderBy(asc(schema.contacts.id))')).toBeGreaterThan(contacts)
+    expect(helper.match(/\.for\('update'\)/g)).toHaveLength(1)
+    expect(helper.indexOf(".for('update')")).toBeGreaterThan(helper.indexOf('.orderBy(asc(schema.contacts.id))'))
+  })
+
+  it('the stuck-send recovery reads the claims, locks the people, and only then writes the claims', () => {
+    const recover = body('export async function recoverStuckSends(', reconcile)
+    const find = recover.indexOf('findStuckRows(tx')
+    const lock = recover.indexOf('lockReplyContacts(')
+    const write = recover.indexOf('recoverStuckRows(tx')
+    expect(find).toBeGreaterThan(-1)
+    expect(lock).toBeGreaterThan(find)
+    expect(write).toBeGreaterThan(lock)
+    expect(recover.indexOf('repauseForUnansweredReply(tx')).toBeGreaterThan(write)
+    // The read takes no lock; the write is the only statement that does.
+    const reader = body('async function findStuckRows(', reconcile)
+    expect(reader).toContain('.select(')
+    expect(reader).not.toContain('.for(')
+    expect(reader).not.toContain('.update(')
+    const writer = body('async function recoverStuckRows(', reconcile)
+    expect(writer).toContain('.update(schema.touches)')
+    // …and it writes only the rows read, still claimed.
+    expect(writer).toContain('inArray(schema.touches.id')
+    expect(writer).toContain('claimedBefore(bootAt)')
+  })
+
+  for (const [name, signature] of [
+    ['the answer (replyQueueDraft)', 'export async function replyQueueDraft('],
+    ['the reclassify', 'async function reclassifyOnce('],
+  ] as const) {
+    it(`${name} reads the reply, locks its contact, and only then locks the reply`, () => {
+      const fn = body(signature, inbox)
+      const contact = fn.indexOf('.from(schema.contacts)')
+      expect(contact).toBeGreaterThan(-1)
+      const contactLock = fn.indexOf(".for('update')", contact)
+      expect(contactLock).toBeGreaterThan(contact)
+      // The first lock taken is the person's: nothing before it locks a row.
+      expect(fn.slice(0, contactLock)).not.toContain(".for('update')")
+      // The reply was read before, to learn whose it is…
+      expect(fn.slice(0, contact)).toContain('.from(schema.touches)')
+      // …and is locked after, and checked to be theirs still.
+      const replyLock = fn.indexOf(".for('update')", contactLock + 1)
+      expect(replyLock).toBeGreaterThan(contactLock)
+      expect(fn.slice(contactLock, replyLock)).toContain('.from(schema.touches)')
+      expect(fn.slice(replyLock)).toMatch(/contactId !== /)
+    })
+  }
 
   it('the re-pause still re-takes the contact lock before it reads the log', () => {
     const repause = body('export async function repauseForUnansweredReply(')

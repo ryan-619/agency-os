@@ -34,9 +34,9 @@
  * predicate above is what stops the second boot cancelling the first worker's
  * live turns.
  */
-import { and, eq, lt, sql } from 'drizzle-orm'
+import { and, eq, inArray, lt, sql } from 'drizzle-orm'
 import {
-  appendAudit, appendChatMessage, clearInterruptedTurns, repauseForUnansweredReply, schema,
+  appendAudit, appendChatMessage, clearInterruptedTurns, lockReplyContacts, repauseForUnansweredReply, schema,
   type AgencyDb, type InterruptedTurn,
 } from '@agency/db'
 import type { Logger } from '../logger.js'
@@ -224,12 +224,26 @@ export async function sweepExpired(db: AgencyDb, log: Logger): Promise<number> {
  * with their reply possibly unanswered — the conservative direction, under
  * the helper's own guard (this answer resumed them, nobody resumed them
  * since, no other answer of theirs is live).
+ *
+ * Contact before touch (review round 6, [13]), the order every writer that
+ * holds a person and their messages takes: the stuck rows are READ, the
+ * people whose answers are among them are locked (`lockReplyContacts`, in
+ * id order), and only then are the rows written. Marking every row first
+ * held each answer's row while the re-pause waited for its person — and an
+ * erasure holds the person while it scrubs that row, so a boot racing an
+ * erasure deadlocked on a real Postgres.
  */
 export async function recoverStuckSends(db: AgencyDb, bootAt: Date, log: Logger): Promise<number> {
   try {
     return await db.transaction(async (transaction) => {
       const tx = transaction as unknown as AgencyDb
-      const stuck = await recoverStuckRows(tx, bootAt)
+      const found = await findStuckRows(tx, bootAt)
+      if (found.length === 0) return 0
+      await lockReplyContacts(
+        tx,
+        found.flatMap((r) => (r.answersTouchId ? [{ orgId: r.orgId, answersTouchId: r.answersTouchId }] : [])),
+      )
+      const stuck = await recoverStuckRows(tx, bootAt, found.map((r) => r.id))
       const now = new Date()
       for (const row of stuck) {
         if (!row.answersTouchId) continue
@@ -275,10 +289,31 @@ export const STUCK_SEND_ERRORS = {
     'The worker restarted while this was being sent. It may or may not have gone; check with the provider before drafting it again.',
 } as const
 
-async function recoverStuckRows(
-  db: AgencyDb,
-  bootAt: Date,
-): Promise<{ id: string; orgId: string; answersTouchId: string | null }[]> {
+type StuckRow = { id: string; orgId: string; answersTouchId: string | null }
+
+/**
+ * A claim older than this boot. `updated_at` is set by a trigger on UPDATE
+ * and is NULL until then; the claim itself is an update, so it is normally
+ * set — but a row that was inserted as `sending` (nothing does, today)
+ * would be invisible to a bare comparison. Coalesce, so "older than the
+ * boot" is answered for every row.
+ */
+const claimedBefore = (bootAt: Date) =>
+  and(
+    eq(schema.touches.status, 'sending'),
+    lt(sql`coalesce(${schema.touches.updatedAt}, ${schema.touches.createdAt})`, bootAt),
+  )
+
+/** The rows the last worker left mid-send — read, never locked: the people come first. */
+async function findStuckRows(db: AgencyDb, bootAt: Date): Promise<StuckRow[]> {
+  return db
+    .select({ id: schema.touches.id, orgId: schema.touches.orgId, answersTouchId: schema.touches.answersTouchId })
+    .from(schema.touches)
+    .where(claimedBefore(bootAt))
+}
+
+/** Mark those rows `failed` — only while each is still the claim it was read as. */
+async function recoverStuckRows(db: AgencyDb, bootAt: Date, ids: readonly string[]): Promise<StuckRow[]> {
   return db
     .update(schema.touches)
     .set({
@@ -289,16 +324,6 @@ async function recoverStuckRows(
         WHEN 'linkedin' THEN ${STUCK_SEND_ERRORS.linkedin}
         ELSE ${STUCK_SEND_ERRORS.other} END`,
     })
-    // `updated_at` is set by a trigger on UPDATE and is NULL until then; the
-    // claim itself is an update, so it is normally set — but a row that
-    // was inserted as `sending` (nothing does, today) would be invisible
-    // to a bare comparison. Coalesce, so "older than the boot" is answered
-    // for every row.
-    .where(
-      and(
-        eq(schema.touches.status, 'sending'),
-        lt(sql`coalesce(${schema.touches.updatedAt}, ${schema.touches.createdAt})`, bootAt),
-      ),
-    )
+    .where(and(inArray(schema.touches.id, [...ids]), claimedBefore(bootAt)))
     .returning({ id: schema.touches.id, orgId: schema.touches.orgId, answersTouchId: schema.touches.answersTouchId })
 }
