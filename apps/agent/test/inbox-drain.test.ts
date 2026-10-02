@@ -225,6 +225,39 @@ describe('drainUnseen', () => {
   })
 
   /**
+   * The stops already said out loud are remembered beside the count, and
+   * forgotten with it: a UID handled, unreadable or abandoned is settled,
+   * and one still to be retried keeps its entry, so its retry alarms nobody
+   * twice.
+   */
+  it('forgets a stop it said out loud once the message is settled, and keeps it while it is retried', async () => {
+    const unrecordedStops = new Map<string, { readonly written: boolean }>([
+      ['1', { written: true }], ['2', { written: true }], ['3', { written: true }], ['4', { written: false }],
+    ])
+    attempts.set(3, INBOUND_MAX_ATTEMPTS - 1)
+    box.put(1, 'recorded now')
+    box.put(2, 'unreadable')
+    box.put(3, 'abandoned')
+    await drainUnseen(box, {
+      log,
+      attempts,
+      unrecordedStops,
+      handle: async (source) => {
+        const said = source.toString()
+        if (said === 'unreadable') throw new UnreadableInboundMessage('TypeError')
+        if (said === 'abandoned') throw dbFault()
+        return null
+      },
+    })
+    expect([...unrecordedStops.keys()]).toEqual(['4'])
+
+    box.put(4, 'still failing')
+    await drainUnseen(box, { log, attempts, unrecordedStops, handle: async () => { throw dbFault() } })
+    expect(box.seen(4)).toBe(false)
+    expect(unrecordedStops.get('4')).toEqual({ written: false })
+  })
+
+  /**
    * A database that is down fails every message, and charging each would
    * abandon the whole inbox to one outage; and one message that will never
    * record must not hold up a "stop" behind it.
