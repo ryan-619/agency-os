@@ -12,9 +12,12 @@
  *   RUN_ID=… node tools/vercel-env.mjs pending <KEY>
  *                                              exit 0 when KEY holds a record
  *                                              that run RUN_ID wrote
- *   RUN_ID=… node tools/vercel-env.mjs superseded <KEY>
- *                                              exit 0 when KEY holds a record
- *                                              that a LATER run wrote
+ *   RUN_ID=… node tools/vercel-env.mjs superseded <FROM> <TO>
+ *                                              exit 0 when FROM holds a record
+ *                                              that a LATER run wrote AND
+ *                                              promoted to TO; prints that
+ *                                              run's id whenever FROM holds
+ *                                              a later run's record
  *   RUN_ID=… node tools/vercel-env.mjs promote <FROM> <TO>
  *                                              set TO (encrypted) to what run
  *                                              RUN_ID recorded in FROM
@@ -42,10 +45,18 @@
  * can be missing — a later run has written its own since, as when an old
  * run's second job is re-run — from a record that should be there and is
  * not (review round 9, [8]). GitHub's run ids grow, so "later" is a larger
- * id. `promote` answers 0 when TO was set, 1 when there is
- * nothing of this run's to record (no record, another run's, or an empty
- * value), and 2 when the API could not be asked or refused the write. It
- * prints neither value.
+ * id. A later run's record is written by that run's FIRST job, so it says
+ * only that the run set a newer token on Fly and Vercel — not that its web
+ * job redeployed the web app: `superseded` answers 0 only when that record
+ * has also been promoted to TO, and 1 otherwise, printing the run's id for
+ * the caller to name (review round 10, [3]). An empty record ("<run id>/",
+ * Fly gave no digest) can never be promoted, so whether its web job
+ * finished cannot be checked: that is 0, with a warning. The id — a
+ * workflow run's, which carries nothing of the record's value — is the one
+ * thing printed on stdout, and never on a 2. `promote` answers 0 when TO
+ * was set, 1 when there is nothing of this run's to record (no record,
+ * another run's, or an empty value), and 2 when the API could not be asked
+ * or refused the write. It prints neither value.
  *
  * The VALUE travels in the environment, never on argv (a process list shows
  * argv). Needs VERCEL_TOKEN, VERCEL_ORG_ID and VERCEL_PROJECT_ID, which
@@ -55,7 +66,7 @@ const { VERCEL_TOKEN: token, VERCEL_ORG_ID: org, VERCEL_PROJECT_ID: project, VAL
 const [cmd, key, type] = process.argv.slice(2)
 if (!token || !org || !project || !cmd || !key) {
   console.error(
-    'usage: VALUE=… node tools/vercel-env.mjs set <KEY> <sensitive|encrypted> | has <KEY> | equals <KEY> | pending <KEY> | superseded <KEY> | promote <FROM> <TO>',
+    'usage: VALUE=… node tools/vercel-env.mjs set <KEY> <sensitive|encrypted> | has <KEY> | equals <KEY> | pending <KEY> | superseded <FROM> <TO> | promote <FROM> <TO>',
   )
   process.exit(2)
 }
@@ -182,12 +193,15 @@ async function recordOfThisRun(name) {
   return typeof stored === 'string' && stored.startsWith(prefix) ? stored.slice(prefix.length) : null
 }
 
-/** Whether `name` holds a record written by a run with a larger id than RUN_ID's. */
+/**
+ * The record `name` holds when a run with a larger id than RUN_ID's wrote it
+ * — that run's id, and what it recorded ('' for an empty record) — or null.
+ */
 async function recordOfALaterRun(name) {
   const mine = BigInt(thisRun())
   const stored = await productionValue(name)
-  const m = typeof stored === 'string' ? /^([0-9]+)\//.exec(stored) : null
-  return m !== null && BigInt(m[1]) > mine
+  const m = typeof stored === 'string' ? /^([0-9]+)\/(.*)$/s.exec(stored) : null
+  return m !== null && BigInt(m[1]) > mine ? { run: m[1], record: m[2] } : null
 }
 
 if (cmd === 'has') {
@@ -208,7 +222,20 @@ if (cmd === 'pending') {
 }
 
 if (cmd === 'superseded') {
-  process.exit((await recordOfALaterRun(key)) ? 0 : 1)
+  if (!type) {
+    console.error('::error::superseded needs the variable a record is promoted to: superseded <FROM> <TO>')
+    process.exit(2)
+  }
+  const later = await recordOfALaterRun(key)
+  if (!later) process.exit(1)
+  const promoted = later.record === '' || (await productionValue(type)) === later.record
+  console.log(later.run)
+  if (later.record === '') {
+    console.error(
+      `::warning::run ${later.run} left ${key} with no digest, so whether its web job finished cannot be checked; if it did not, re-run that run's worker-web job, or the worker action`,
+    )
+  }
+  process.exit(promoted ? 0 : 1)
 }
 
 if (cmd === 'promote') {
