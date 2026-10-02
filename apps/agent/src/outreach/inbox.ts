@@ -637,6 +637,34 @@ export async function drainUnseen(
 }
 
 /**
+ * Why a connection failed, in words that name no value: the error's code
+ * (`ENOTFOUND`, `ECONNREFUSED`, imapflow's `NoConnection`), the server's
+ * bracketed response code (`AUTHENTICATIONFAILED`), and a hint for the two
+ * a person can fix. Never the message, which can quote the host, the user or
+ * what the server said back. "Error" alone was every line a mistyped host or
+ * a refused password ever produced, for as long as the worker ran.
+ */
+export function imapFailure(err: unknown): { reason?: string; hint?: string } {
+  if (typeof err !== 'object' || err === null) return {}
+  const e = err as { code?: unknown; serverResponseCode?: unknown; authenticationFailed?: unknown }
+  const token = (v: unknown): string | undefined =>
+    typeof v === 'string' && /^[A-Za-z][A-Za-z0-9_]{1,39}$/.test(v) ? v : undefined
+  const reason =
+    e.authenticationFailed === true ? 'authentication_failed' : (token(e.serverResponseCode) ?? token(e.code))
+  if (reason === undefined) return {}
+  if (reason === 'authentication_failed' || reason === 'AUTHENTICATIONFAILED') {
+    return {
+      reason,
+      hint: 'the mailbox refused IMAP_USER or IMAP_PASSWORD — Google needs the whole address and an app password',
+    }
+  }
+  if (reason === 'ENOTFOUND' || reason === 'EAI_AGAIN') {
+    return { reason, hint: 'IMAP_HOST is not a server name that resolves — e.g. imap.gmail.com' }
+  }
+  return { reason }
+}
+
+/**
  * Listen for replies until stopped.
  *
  * Returns a stop function. The loop inside reconnects forever with back-off;
@@ -680,6 +708,7 @@ export function startInbox(deps: InboxDeps): () => Promise<void> {
         if (stopped) break
         deps.log.warn('inbox connection dropped; reconnecting', {
           error: err instanceof Error ? err.name : 'UnknownError',
+          ...imapFailure(err),
           inMs: backoff,
         })
         await new Promise<void>((r) => setTimeout(r, backoff))

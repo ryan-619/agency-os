@@ -17,10 +17,11 @@
 # So run this and the live site gains everything except the chat panel, with
 # no port open, no tunnel, and nothing on this laptop reachable from the
 # internet. Chat is a separate decision with separate consequences; see
-# DEPLOYING.md. Answer yes to the CHAT question and this script starts an
-# ngrok tunnel to the worker's API port (bearer-token gated) on your ngrok
-# static domain, and runs the worker with your Anthropic API key — every
-# chat turn your teammates take is billed to that key.
+# DEPLOYING.md. Answer yes to the CHAT question and this script points a
+# Tailscale Funnel at the worker's API port (bearer-token gated) — this Mac's
+# own https://<name>.<tailnet>.ts.net address, which does not change — and
+# runs the worker with your Anthropic API key: every chat turn your teammates
+# take is billed to that key.
 #
 #   ./tools/run-worker.sh                 run (asks, or reads what you saved)
 #   ./tools/run-worker.sh --reconfigure   ask every question again
@@ -80,6 +81,74 @@ kc_put() {
 }
 
 kc_del() { security delete-generic-password -s "$SERVICE" -a "$1" >/dev/null 2>&1 || true; }
+
+# ── Tailscale (chat's tunnel) ───────────────────────────────────────────────
+#
+# The CLI is `tailscale` on PATH (the Standalone app's "Install CLI", or
+# Homebrew), or the App Store and Standalone apps' own executable. It only
+# talks to the local Tailscale service, so it runs from an EMPTY environment:
+# everything this script exports — the database URL, the mail passwords, the
+# Anthropic key — would otherwise be inherited by a third party's binary.
+TS=""
+ts_find() {
+  if command -v tailscale >/dev/null 2>&1; then TS=$(command -v tailscale)
+  elif [ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]; then TS=/Applications/Tailscale.app/Contents/MacOS/Tailscale
+  else TS=""
+  fi
+  [ -n "$TS" ]
+}
+ts_run() { env -i PATH="$PATH" HOME="$HOME" USER="${USER:-}" "$TS" "$@"; }
+
+# This Mac's name on the tailnet — the Funnel's host — when Tailscale is
+# signed in and running; nothing, and a failure, otherwise.
+ts_host() {
+  ts_run status --json 2>/dev/null | node -e '
+    let s = ""
+    process.stdin.on("data", (d) => (s += d)).on("end", () => {
+      try {
+        const j = JSON.parse(s)
+        const n = String((j.Self && j.Self.DNSName) || "").replace(/\.$/, "")
+        if (j.BackendState !== "Running" || !/^[a-z0-9.-]+\.ts\.net$/i.test(n)) process.exit(1)
+        process.stdout.write(n.toLowerCase())
+      } catch { process.exit(1) }
+    })'
+}
+
+# Whether a Funnel on <host>:443 is open to the internet and proxies to this
+# worker's API port.
+ts_funnel_serving() {
+  ts_run funnel status --json 2>/dev/null | node -e '
+    let s = ""
+    process.stdin.on("data", (d) => (s += d)).on("end", () => {
+      try {
+        const j = JSON.parse(s)
+        const key = process.argv[1] + ":443"
+        const open = (j.AllowFunnel || {})[key] === true
+        const proxies = JSON.stringify((j.Web || {})[key] || {}).includes("127.0.0.1:" + process.argv[2])
+        process.exit(open && proxies ? 0 : 1)
+      } catch { process.exit(1) }
+    })' "$1" "$2"
+}
+
+# A tailscale command with a deadline, its output to a file: `funnel` waits,
+# for as long as it takes, for Funnel to be approved for the tailnet, and an
+# unattended start must not wait with it. 124 when the deadline passed.
+ts_deadline() {
+  local secs=$1 log=$2 pid i=0
+  shift 2
+  ts_run "$@" >"$log" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$i" -ge "$secs" ]; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 124
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  wait "$pid"
+}
 
 if [ "$MODE" = forget ]; then
   if ! have_keychain; then echo "Nothing is saved outside a Mac's Keychain; nothing to forget."; exit 0; fi
@@ -154,6 +223,23 @@ ask_open() {
   fi
 }
 
+# A server name, asked until it is one: an address typed where the server
+# goes ("you@example.com") is a mailbox no worker can ever connect to, and it
+# reconnects every five minutes for ever with nothing on screen saying why.
+ask_host() {
+  local prompt=$1 default=$2 v
+  while :; do
+    printf '  %s [%s]: ' "$prompt" "$default" >&3
+    read -r v <&3
+    v="${v:-$default}"
+    if [[ "$v" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; then
+      printf '%s' "$v"
+      return 0
+    fi
+    printf '    That is not a server name (it should look like %s). Try again.\n' "$default" >&3
+  done
+}
+
 if [ "$LOADED" = no ]; then
   ask_open
 
@@ -173,7 +259,7 @@ if [ "$LOADED" = no ]; then
   read -r ANSWER <&3
   case "$ANSWER" in
     [yY]*)
-      printf '  SMTP host [smtp.resend.com]: ' >&3;               read -r V <&3; export SMTP_HOST="${V:-smtp.resend.com}"
+      SMTP_HOST=$(ask_host 'SMTP host' smtp.resend.com); export SMTP_HOST
       printf '  SMTP port [465]: ' >&3;                           read -r V <&3; export SMTP_PORT="${V:-465}"
       printf '  SMTP username [resend]: ' >&3;                    read -r V <&3; export SMTP_USER="${V:-resend}"
       printf '  SMTP password (Resend: an API key — hidden): ' >&3; read -r -s V <&3; printf '\n' >&3
@@ -200,8 +286,17 @@ if [ "$LOADED" = no ]; then
   read -r ANSWER <&3
   case "$ANSWER" in
     [yY]*)
-      printf '  IMAP host [imap.gmail.com]: ' >&3;   read -r V <&3; export IMAP_HOST="${V:-imap.gmail.com}"
-      printf '  IMAP username (the mailbox, e.g. hello@myagencyos.in): ' >&3; read -r V <&3
+      IMAP_HOST=$(ask_host 'IMAP host' imap.gmail.com); export IMAP_HOST
+      # Gmail and Google Workspace sign in with the WHOLE address; a bare
+      # name is refused by the server on every reconnect.
+      while :; do
+        printf '  IMAP username (the whole mailbox address, e.g. hello@myagencyos.in): ' >&3; read -r V <&3
+        case "$IMAP_HOST:${V:-}" in
+          imap.gmail.com:*@*.* | imap.gmail.com: ) break ;;
+          imap.gmail.com:*) printf '    Google needs the whole address, e.g. %s@yourdomain. Try again.\n' "$V" >&3 ;;
+          *) break ;;
+        esac
+      done
       [ -n "${V:-}" ] && export IMAP_USER="$V"
       printf '  IMAP password (hidden — a Google APP password, not the account one): ' >&3
       read -r -s V <&3; printf '\n' >&3
@@ -319,31 +414,34 @@ if [ "$LOADED" = no ]; then
 
   # ── Chat (optional): the one inbound route ───────────────────────────────
   # The live site's chat panel calls the worker's API port, so chat needs a
-  # public address: an ngrok tunnel on the operator's free STATIC domain,
-  # which never changes, so Vercel's AGENT_URL is set once. Three values make
-  # it: the domain (not a secret), the Anthropic API key every turn is billed
-  # to, and AGENT_INTERNAL_TOKEN, the bearer the site presents and which
-  # Vercel must hold too. The token is made here, never typed: on the
+  # public address: a Tailscale Funnel on this Mac's own tailnet name,
+  # https://<name>.<tailnet>.ts.net, which does not change, so Vercel's
+  # AGENT_URL is set once. Three values make it: that address (read from
+  # Tailscale, not typed, and not a secret), the Anthropic API key every turn
+  # is billed to, and AGENT_INTERNAL_TOKEN, the bearer the site presents and
+  # which Vercel must hold too. The token is made here, never typed: on the
   # clipboard for Vercel and saved at once, the unsubscribe secret's rule.
-  # ngrok's own authtoken is ngrok's — `ngrok config add-authtoken` keeps it
-  # in ngrok's config, and it is never asked for or passed here.
+  # Tailscale's own sign-in is the Tailscale app's, and is never asked for or
+  # passed here.
   SAVED_CHAT_TOKEN=""; SAVED_CHAT_KEY=""
   if have_keychain; then
     SAVED_CHAT_TOKEN=$(kc_get AGENT_INTERNAL_TOKEN) || SAVED_CHAT_TOKEN=""
     SAVED_CHAT_KEY=$(kc_get ANTHROPIC_API_KEY) || SAVED_CHAT_KEY=""
   fi
   unset CHAT_URL
-  printf 'Turn on CHAT on the live site, through an ngrok tunnel to this Mac? [y/N]: ' >&3
+  printf 'Turn on CHAT on the live site, through Tailscale Funnel on this Mac? [y/N]: ' >&3
   read -r ANSWER <&3
   case "$ANSWER" in
     [yY]*)
-      printf '  Your ngrok static domain (dashboard.ngrok.com → Domains, e.g. calm-otter-42.ngrok-free.app): ' >&3
-      read -r V <&3
-      V="${V#https://}"; V="${V#http://}"; V="${V%%/*}"
-      if [[ "$V" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; then
-        export CHAT_URL="https://$V"
+      if ! ts_find; then
+        printf '  Tailscale is not installed. Install it from tailscale.com/download/mac, sign in,\n' >&3
+        printf '  then run this again with --reconfigure. Chat stays off.\n' >&3
+      elif ! V=$(ts_host); then
+        printf '  Tailscale is installed but not signed in and running. Open the Tailscale app,\n' >&3
+        printf '  sign in, then run this again with --reconfigure. Chat stays off.\n' >&3
       else
-        printf '  That is not a domain name, so chat stays off. Run with --reconfigure to try again.\n' >&3
+        export CHAT_URL="https://$V"
+        printf '  This Mac'"'"'s address on the internet will be %s\n' "$CHAT_URL" >&3
       fi
       unset V
       ;;
@@ -361,7 +459,9 @@ if [ "$LOADED" = no ]; then
     unset V
     if [ -n "$SAVED_CHAT_TOKEN" ]; then
       export AGENT_INTERNAL_TOKEN="$SAVED_CHAT_TOKEN"
-      printf '  Kept the AGENT_INTERNAL_TOKEN saved in your Keychain — Vercel must hold the same one.\n' >&3
+      printf '  Kept the AGENT_INTERNAL_TOKEN saved in your Keychain — Vercel must hold the same one,\n' >&3
+      printf '  and AGENT_URL = %s (Production). If it says anything else, change it\n' "$CHAT_URL" >&3
+      printf '  there and redeploy.\n' >&3
     elif [ "$CAN_MAKE" = yes ]; then
       if [ -n "$ON_CLIPBOARD" ]; then
         printf '  The new %s is still on your clipboard. Paste it into Vercel first,\n' "$ON_CLIPBOARD" >&3
@@ -461,39 +561,48 @@ SMS=no;       [ -n "${DOVESOFT_API_KEY:-}" ] && [ -n "${DOVESOFT_ENTITY_ID:-}" ]
 RECEIVING=no; [ -n "${IMAP_HOST:-}" ] && [ -n "${IMAP_USER:-}" ] && [ -n "${IMAP_PASSWORD:-}" ] && RECEIVING=yes
 
 # ── Chat: the tunnel, before the summary says it is on ───────────────────────
+# The worker's API is the port after its health port (apps/agent/src/
+# worker.ts). Only that port is funnelled: it answers /internal/* to the
+# bearer alone, and /livez and /readyz, which say nothing usable.
+API_PORT=$(( ${AGENT_PORT:-3001} + 1 ))
 CHAT=no; CHAT_WHY=""
 if [ -n "${CHAT_URL:-}" ]; then
   if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
     CHAT_WHY="no Anthropic API key was given ('$0 --reconfigure' to add one)"
   elif [ -z "${AGENT_INTERNAL_TOKEN:-}" ]; then
     CHAT_WHY="no AGENT_INTERNAL_TOKEN ('$0 --reconfigure' to make one)"
-  elif ! command -v ngrok >/dev/null 2>&1; then
-    CHAT_WHY="ngrok is not installed: 'brew install ngrok', then 'ngrok config add-authtoken <your token>' once"
+  elif ! ts_find; then
+    CHAT_WHY="Tailscale is not installed: install it from tailscale.com/download/mac and sign in"
+  elif ! CHAT_HOST=$(ts_host); then
+    CHAT_WHY="Tailscale is not signed in and running on this Mac: open the Tailscale app and sign in"
+  elif [ "https://$CHAT_HOST" != "$CHAT_URL" ]; then
+    # Vercel calls the address it was given; a Funnel on another name would
+    # be a chat panel calling nobody while this said ON.
+    CHAT_WHY="this Mac's Tailscale address is now https://$CHAT_HOST, not $CHAT_URL — set AGENT_URL to it in Vercel, redeploy, and run '$0 --reconfigure'"
   else
-    # The worker's API is the port after its health port (apps/agent/src/
-    # worker.ts). Only that port is tunnelled: it answers /internal/* to the
-    # bearer alone, and /livez and /readyz, which say nothing usable.
-    API_PORT=$(( ${AGENT_PORT:-3001} + 1 ))
-    CHAT_HOST="${CHAT_URL#https://}"
-    # A tunnel an earlier run left behind holds the domain, and ngrok refuses
-    # a second endpoint on it. Only this exact command is stopped.
-    pkill -f "ngrok http 127.0.0.1:$API_PORT --url=$CHAT_URL" >/dev/null 2>&1 || true
-    NGROK_LOG="$(mktemp -t agency-ngrok.XXXXXX)"
-    # From an EMPTY environment: everything this script exported — the
-    # database URL, the mail passwords, the Anthropic key — would otherwise
-    # be inherited by a third party's binary. ngrok needs only PATH, and HOME
-    # for its own config, where its authtoken lives.
-    env -i PATH="$PATH" HOME="$HOME" USER="${USER:-}" \
-      ngrok http "127.0.0.1:$API_PORT" --url="$CHAT_URL" --log=stdout --log-level=warn >"$NGROK_LOG" 2>&1 &
-    NGROK_PID=$!
-    sleep 3
-    if kill -0 "$NGROK_PID" 2>/dev/null; then
+    # --bg: Tailscale keeps the Funnel itself, so nothing is left running
+    # here. Pointing it again at the same port is a no-op. The first time,
+    # Tailscale prints a link to approve Funnel for the tailnet and waits.
+    FUNNEL_LOG="$(mktemp -t agency-funnel.XXXXXX)"
+    if ts_deadline 20 "$FUNNEL_LOG" funnel --bg "http://127.0.0.1:$API_PORT" \
+      && ts_funnel_serving "$CHAT_HOST" "$API_PORT"; then
       CHAT=yes
     else
-      echo "ngrok stopped at once — the last lines it wrote:" >&2
-      tail -n 5 "$NGROK_LOG" >&2 || true
-      CHAT_WHY="ngrok could not open $CHAT_HOST (is 'ngrok config add-authtoken' done, and is it your domain?)"
+      echo "Tailscale Funnel did not start — the last lines it wrote:" >&2
+      tail -n 8 "$FUNNEL_LOG" >&2 || true
+      CHAT_WHY="Tailscale Funnel did not start (if it printed a link above, open it, approve Funnel for your tailnet, and run this again)"
     fi
+    rm -f "$FUNNEL_LOG"
+  fi
+fi
+# With chat off, a Funnel an earlier run pointed at this port is closed: the
+# port would answer the internet for a worker holding a token nobody has.
+if [ "$CHAT" != yes ] && ts_find && OPEN_HOST=$(ts_host) && ts_funnel_serving "$OPEN_HOST" "$API_PORT"; then
+  if ts_deadline 20 /dev/null funnel "http://127.0.0.1:$API_PORT" off && ! ts_funnel_serving "$OPEN_HOST" "$API_PORT"; then
+    echo "Closed the Tailscale Funnel an earlier run left on this worker's port."
+  else
+    echo "A Tailscale Funnel an earlier run opened still points at this worker's port;" >&2
+    echo "'tailscale funnel reset' closes it." >&2
   fi
 fi
 
@@ -528,9 +637,12 @@ if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
   echo "  alarm:    ON  — an opt-out that cannot be recorded is posted to Slack"
 fi
 if [ "$CHAT" = yes ]; then
-  echo "  chat:     ON  — the live site reaches this Mac at $CHAT_URL (ngrok),"
-  echo "            and every turn is billed to your Anthropic API key. Vercel needs"
-  echo "            AGENT_URL=$CHAT_URL and the same AGENT_INTERNAL_TOKEN."
+  echo "  chat:     ON  — the live site reaches this Mac at $CHAT_URL"
+  echo "            (Tailscale Funnel), and every turn is billed to your Anthropic"
+  echo "            API key. Vercel needs AGENT_URL=$CHAT_URL and the same"
+  echo "            AGENT_INTERNAL_TOKEN. The Funnel stays open when this window"
+  echo "            closes, answering an error until the worker runs again; a run"
+  echo "            with chat off, or 'tailscale funnel reset', closes it."
 elif [ -n "${CHAT_URL:-}" ]; then
   echo "  chat:     OFF — $CHAT_WHY."
 else
@@ -556,8 +668,6 @@ else
   WORKER_TOKEN="$(openssl rand -base64 32)"
   unset ANTHROPIC_API_KEY
 fi
-# ngrok, when started, is in this process group: Ctrl-C and closing the
-# window stop it with the worker.
 AGENT_INTERNAL_TOKEN="$WORKER_TOKEN" \
   NODE_ENV=production \
   AGENT_BIND=127.0.0.1 \

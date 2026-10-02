@@ -570,9 +570,10 @@ in two ways worth deciding deliberately rather than discovering:
    nothing usable. Set `AGENT_URL` and the SAME `AGENT_INTERNAL_TOKEN` in
    Vercel. A Cloudflare quick tunnel (`cloudflared tunnel --url
    http://127.0.0.1:3002`) needs no account, but its URL changes on every
-   restart, so each restart means updating Vercel and redeploying; an ngrok
-   free STATIC domain never changes, so Vercel is set once — which is what
-   `run-worker.sh` does, below.
+   restart, so each restart means updating Vercel and redeploying; a
+   Tailscale Funnel on the machine's own tailnet name
+   (`https://<name>.<tailnet>.ts.net`, free) does not change, so Vercel is
+   set once — which is what `run-worker.sh` does, below.
 2. **Every teammate's chat turn runs on whatever credential that worker
    holds.** With `ANTHROPIC_API_KEY` that is a bill. With
    `AGENT_USE_LOCAL_LOGIN` it is one person's personal subscription backing a
@@ -583,23 +584,33 @@ in two ways worth deciding deliberately rather than discovering:
 Chat against your own login, on your own machine, against your own data is a
 different thing from that, and is what the local development path is for.
 
-**`run-worker.sh` does it for you through ngrok.** Once, by hand: sign up at
-ngrok.com (free), claim the free static domain under Domains,
-`brew install ngrok`, and `ngrok config add-authtoken <your token>` — that
-token lives in ngrok's own config and the script never asks for it. Then
-`./tools/run-worker.sh --reconfigure` and answer yes to CHAT: it asks for
-the domain and the Anthropic API key (hidden, saved in the Keychain), and,
+**`run-worker.sh` does it for you through Tailscale Funnel.** Once, by
+hand: install Tailscale (tailscale.com/download/mac) and sign in — its
+sign-in is the Tailscale app's own, and the script never asks for it. Then
+`./tools/run-worker.sh --reconfigure` and answer yes to CHAT: it reads this
+Mac's address from Tailscale (`https://<name>.<tailnet>.ts.net`, shown, not
+typed), asks for the Anthropic API key (hidden, saved in the Keychain), and,
 the first time, makes an `AGENT_INTERNAL_TOKEN`, puts it on the clipboard
 (after any new unsubscribe secret is pasted — it waits for you) and saves
 it, and tells you to add `AGENT_INTERNAL_TOKEN` (Sensitive) and `AGENT_URL`
-(the domain, `https://…`) in Vercel, then redeploy. Every later run starts
-`ngrok http 127.0.0.1:3002 --url=<domain>` from an EMPTY environment — the
-database URL, the mail passwords and the Anthropic key are never inherited
-by ngrok — and the worker with the key and the saved token, on
-`claude-haiku-4-5` unless `AGENT_MODEL` says otherwise. If ngrok is
-missing, or stops at once (no authtoken, a domain that is not yours), chat
-stays off, the summary says why, and the worker is handed no key; with
-chat off it never is. Ctrl-C or closing the window stops both.
+(that address) in Vercel, then redeploy. A token kept from an earlier run is
+not shown again, and the script names the `AGENT_URL` Vercel must hold
+beside it. Every later run points a Funnel at the API port —
+`tailscale funnel --bg http://127.0.0.1:3002` — with Tailscale run from an
+EMPTY environment, so the database URL, the mail passwords and the
+Anthropic key are never inherited by it, and checks with `tailscale funnel
+status` that the Funnel is open on that port; then it runs the worker with
+the key and the saved token, on `claude-haiku-4-5` unless `AGENT_MODEL`
+says otherwise. The first time, Tailscale prints a link to approve Funnel
+for your tailnet and waits; the script gives it 20 seconds, prints what
+Tailscale said, and leaves chat off — open the link, approve, run again.
+Chat also stays off, the summary says why, and the worker is handed no key
+when Tailscale is missing or signed out, or when this Mac's tailnet address
+is no longer the `AGENT_URL` it was set up with; with chat off it never is.
+**The Funnel outlives the window** (`--bg` means Tailscale keeps it, so
+nothing is left running here): with the worker stopped, the address
+answers an error. The next run with chat off closes a Funnel left on the
+worker's port, and `tailscale funnel reset` closes it by hand.
 
 ## The worker, on Fly.io
 
@@ -763,7 +774,7 @@ Everything else turns a feature on, and the worker says which at boot.
 | `ANTHROPIC_API_KEY` | chat | `chat_disabled`; **everything else still runs** |
 | `SECRETS_KEY` | connectors with credentials | those connectors are skipped, with a reason |
 | `SMTP_HOST`, `MAIL_FROM`, `SMTP_*` | sending | `outreach: disabled` |
-| `IMAP_HOST`, `IMAP_USER`, `IMAP_PASSWORD` | reply detection: new mail is read as it arrives, and the mailbox again every ten minutes. A message the worker could not record stays unread and is retried — five attempts over about a quarter of an hour — then marked read and logged `INBOUND MESSAGE ABANDONED — handle it by hand`, with only its UID: find it in the mailbox. A reply that asked to stop does not wait for those retries: on its first failure the contact is paused, a `contact.opt_out_not_recorded` row is written and the Slack alarm raised, once per message while the worker runs | `outreach: send-only` — replies never pause a sequence |
+| `IMAP_HOST`, `IMAP_USER`, `IMAP_PASSWORD` | reply detection — at Google (Gmail or Workspace) `imap.gmail.com`, the WHOLE address as the user and an app password; a connection that fails is retried with back-off, logged `inbox connection dropped` with a `reason` (`ENOTFOUND`, `authentication_failed`, …) and a `hint`: new mail is read as it arrives, and the mailbox again every ten minutes. A message the worker could not record stays unread and is retried — five attempts over about a quarter of an hour — then marked read and logged `INBOUND MESSAGE ABANDONED — handle it by hand`, with only its UID: find it in the mailbox. A reply that asked to stop does not wait for those retries: on its first failure the contact is paused, a `contact.opt_out_not_recorded` row is written and the Slack alarm raised, once per message while the worker runs | `outreach: send-only` — replies never pause a sequence |
 | `UNSUBSCRIBE_SECRET` | the RFC 8058 one-click `List-Unsubscribe` header on every email. **The same value as Vercel's** | no header, and one warn line at boot — `unsubscribe: headers off`, naming the missing variable (logged only when SMTP is configured) |
 | `WEB_PUBLIC_URL` | where that header's link points: the web app's public https origin, e.g. `https://myagencyos.in`. In production the worker **refuses to boot** on a value that is not `https:` on a public multi-label host — RFC 8058 one-click needs an HTTPS URI, and mailbox providers ignore any other | as above — the header needs both |
 | `OUTREACH_BOUNCE_PAUSE_PCT` | the hard-bounce rate past which an email campaign pauses itself — over 30 days, once it has written to at least 20 people. `100` turns it off | `5`. The boot log says `bounce auto-pause: on` |

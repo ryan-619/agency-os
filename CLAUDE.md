@@ -34,10 +34,19 @@ lives.
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
 machine"), which needs no public address, because everything but chat is
-the worker reaching out. Chat is the script's one opt-in inbound route: an
-ngrok tunnel on the operator's free static domain to the worker's API port,
-with `AGENT_URL` and the same `AGENT_INTERNAL_TOKEN` set in Vercel once
-(DEPLOYING.md, "If you do want chat on the live site"). **Fly.io is the path once it rents a machine**
+the worker reaching out. Chat is the script's one opt-in inbound route: a
+Tailscale Funnel on the Mac's own tailnet name
+(`https://<name>.<tailnet>.ts.net`) to the worker's API port, with
+`AGENT_URL` and the same `AGENT_INTERNAL_TOKEN` set in Vercel once
+(DEPLOYING.md, "If you do want chat on the live site"). It is ON only when
+`tailscale funnel status` shows the Funnel open on that port at the address
+Vercel was told, and a run with chat off closes one an earlier run left. The
+script asks a server name until it is one and Google's IMAP username until
+it is a whole address, because a mistyped host reconnected every five
+minutes for ever; and the worker's reconnect line now carries `reason` (the
+error's code or the server's, e.g. `ENOTFOUND`, `authentication_failed`)
+and a `hint`, never the message (`imapFailure` in
+`apps/agent/src/outreach/inbox.ts`), where it said only `Error`. **Fly.io is the path once it rents a machine**
 (`fly.toml` at the repo root), and its
 defaults are the dangerous part: Fly scales a machine to zero between
 requests, which is Vercel's problem wearing a different hat — the advisory
@@ -3962,8 +3971,8 @@ npm run smoke:agent -- --connector deepwiki   # the Phase 3 gate (§6's "no rest
                               # a new one only when `new` is typed and confirmed, on a Mac) and SLACK_WEBHOOK_URL,
                               # and on a Mac keeps it awake (caffeinate -is) and can keep its answers in the
                               # login Keychain, each value base64 on security's stdin, never its argv.
-                              # CHAT is optional: an ngrok tunnel on the operator's static domain to the
-                              # worker's API port, started from an EMPTY environment, the Anthropic key and
+                              # CHAT is optional: a Tailscale Funnel on the Mac's tailnet name to the
+                              # worker's API port, Tailscale run from an EMPTY environment, the Anthropic key and
                               # an AGENT_INTERNAL_TOKEN made onto the clipboard for Vercel (with AGENT_URL);
                               # with chat off the worker is handed no Anthropic key
 ./tools/run-worker.sh --reconfigure   # ask every question again
