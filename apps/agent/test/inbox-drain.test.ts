@@ -13,10 +13,18 @@
  * against a fake mailbox, a real migrated database, and a fault the engine
  * raises, for the whole loop. The fake's `idle()` behaves as imapflow's does:
  * it resolves on a command (NOOP, LOGOUT) and never on an EXISTS.
+ *
+ * And a "stop" the drain cannot record takes the webhooks' loud path on its
+ * first failure (review round 6): the contact paused, a
+ * `contact.opt_out_not_recorded` row, and the awaited alarm — once per
+ * message, however often it is retried. Before, it was retried and then
+ * abandoned with log lines only: nothing paused them, nothing alarmed, and
+ * /compliance and the digest counted nothing.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
-import { eq } from 'drizzle-orm'
+import { and, eq } from 'drizzle-orm'
+import { pauseReasonClass, type SlackOptOutNotRecordedEvent } from '@agency/core'
 import { schema, type AgencyDb } from '@agency/db'
 import { migratedDb, type TestDb } from '../../../packages/db/test/helpers.js'
 import { failOnce, throughTransactions } from '../../../packages/db/test/fault-db.js'
@@ -25,6 +33,7 @@ import {
   INBOUND_MAX_ATTEMPTS,
   UnreadableInboundMessage,
   drainUnseen,
+  handleInboundMessage,
   startInbox,
   type InboxClient,
 } from '../src/outreach/inbox.js'
@@ -241,6 +250,9 @@ describe('startInbox', () => {
   let test: TestDb
   let db: AgencyDb
   let stop: (() => Promise<void>) | null
+  let orgId: string
+  let contactId: string
+  let sentId: string
 
   const raw = (headers: string, body: string): string => `${headers.trim()}\r\n\r\n${body}`
   const reply = (body: string, id: string): string =>
@@ -258,7 +270,7 @@ In-Reply-To: <sent-1@agency.test>`,
     db = drizzle(test.pg, { schema }) as unknown as AgencyDb
     stop = null
     const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
-    const orgId = org!.id
+    orgId = org!.id
     const [company] = await db
       .insert(schema.companies)
       .values({ orgId, domain: 'rentman.io', timeZone: 'Europe/London' })
@@ -267,11 +279,13 @@ In-Reply-To: <sent-1@agency.test>`,
       .insert(schema.contacts)
       .values({ orgId, companyId: company!.id, email: 'priya@rentman.io', timeZone: 'Europe/London' })
       .returning({ id: schema.contacts.id })
-    await db.insert(schema.touches).values({
-      orgId, contactId: contact!.id, companyId: company!.id, channel: 'email', direction: 'out', status: 'sent',
+    contactId = contact!.id
+    const [sent] = await db.insert(schema.touches).values({
+      orgId, contactId, companyId: company!.id, channel: 'email', direction: 'out', status: 'sent',
       recipient: 'priya@rentman.io', sentAt: NOON, providerId: '<sent-1@agency.test>',
       subject: 'A gap on your security page', body: 'Hello.',
-    })
+    }).returning({ id: schema.touches.id })
+    sentId = sent!.id
     // `recordInboundReply` says OPT-OUT NOT RECORDED on stderr when a stop is rolled back.
     vi.spyOn(console, 'error').mockImplementation(() => {})
     vi.spyOn(console, 'log').mockImplementation(() => {})
@@ -283,13 +297,22 @@ In-Reply-To: <sent-1@agency.test>`,
     await test?.close()
   })
 
-  const start = (box: FakeMailbox, target: AgencyDb, timing: { retryMs: number; refreshMs: number }) => {
+  const start = (
+    box: FakeMailbox,
+    target: AgencyDb,
+    timing: { retryMs: number; refreshMs: number },
+    alarms: SlackOptOutNotRecordedEvent[] | null = null,
+  ) => {
     const { log, lines } = captureLog()
     stop = startInbox({
       db: target,
       log,
       config: { host: 'imap.test', port: 993, secure: true, user: 'outreach', password: 'x', mailbox: 'INBOX' },
-      optOutAlarm: null,
+      optOutAlarm: alarms
+        ? async (event) => {
+            alarms.push(event)
+          }
+        : null,
       now: () => NOON,
       connect: () => box,
       timing,
@@ -298,6 +321,26 @@ In-Reply-To: <sent-1@agency.test>`,
   }
   const suppressions = async () =>
     (await db.select().from(schema.suppressions)).map((s) => ({ kind: s.kind, value: s.value, source: s.source }))
+  const notRecordedRows = async () =>
+    db
+      .select()
+      .from(schema.auditLog)
+      .where(and(eq(schema.auditLog.orgId, orgId), eq(schema.auditLog.action, 'contact.opt_out_not_recorded')))
+  const contactRow = async () => (await db.select().from(schema.contacts).where(eq(schema.contacts.id, contactId)))[0]!
+  /** Every write of an inbound row fails, whatever transaction it is in; everything else works. */
+  const refusingReplies = (): AgencyDb =>
+    throughTransactions(db, {
+      get(target, prop, receiver) {
+        if (prop === 'insert') {
+          return (table: unknown) => {
+            if (table === schema.touches) throw Object.assign(new Error('the database is down'), { name: 'DatabaseError' })
+            return (target as AgencyDb).insert(table as typeof schema.suppressions)
+          }
+        }
+        return Reflect.get(target, prop, receiver)
+      },
+    })
+  const said = (lines: string[]) => lines.map((l) => JSON.parse(l) as Record<string, unknown>)
 
   /**
    * The probe: a "stop" whose transaction the engine aborts. Before, it was
@@ -308,7 +351,8 @@ In-Reply-To: <sent-1@agency.test>`,
     await failOnce(test.pg, { table: 'contacts', event: 'UPDATE' })
     const box = new FakeMailbox()
     box.put(7, reply('Stop', '<stop-7@rentman.io>'))
-    const lines = start(box, db, { retryMs: 20, refreshMs: 60_000 })
+    const alarms: SlackOptOutNotRecordedEvent[] = []
+    const lines = start(box, db, { retryMs: 20, refreshMs: 60_000 }, alarms)
 
     await vi.waitFor(() => expect(box.seen(7)).toBe(true), { timeout: 10_000 })
     expect(box.searches).toBeGreaterThanOrEqual(2)
@@ -317,6 +361,101 @@ In-Reply-To: <sent-1@agency.test>`,
     expect(inbound.map((t) => t.replyKind)).toEqual(['opted_out'])
     expect(lines.some((l) => l.includes('left unseen to retry') && l.includes('"uid":7'))).toBe(true)
     expect(lines.join('\n')).not.toContain('ABANDONED')
+    // The first failure was said out loud, as the webhooks say it — once —
+    // and the pause it wrote stands over the retry's.
+    expect(alarms).toEqual([{ kind: 'opt_out_not_recorded', orgId, touchId: sentId, contactId, path: 'reply' }])
+    expect(await notRecordedRows()).toHaveLength(1)
+    expect(pauseReasonClass((await contactRow()).pausedReason)).toBe('opt_out_not_recorded')
+  })
+
+  /**
+   * The probe (review round 6): a "stop" that never records. It used to be
+   * retried and abandoned with log lines only — the contact live, nothing
+   * in /audit, nothing in Slack. Now its FIRST failure pauses them, writes
+   * the row /compliance and the digest count and raises the alarm, and the
+   * retries and the abandonment say nothing more.
+   */
+  it(`pauses, audits and alarms a "stop" it cannot record on its first failure — once in ${INBOUND_MAX_ATTEMPTS} attempts`, async () => {
+    const box = new FakeMailbox()
+    box.put(9, reply('Please unsubscribe me.', '<stop-9@rentman.io>'))
+    const alarms: SlackOptOutNotRecordedEvent[] = []
+    const lines = start(box, refusingReplies(), { retryMs: 2, refreshMs: 60_000 }, alarms)
+
+    await vi.waitFor(() => expect(box.seen(9)).toBe(true), { timeout: 10_000 })
+    const out = said(lines)
+    expect(out.filter((l) => String(l.msg).startsWith('INBOUND MESSAGE ABANDONED'))).toHaveLength(1)
+
+    expect(alarms).toEqual([{ kind: 'opt_out_not_recorded', orgId, touchId: sentId, contactId, path: 'reply' }])
+    const rows = await notRecordedRows()
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      actor: 'system', subjectType: 'contact', subjectId: contactId, detail: { channel: 'email', why: 'record_failed' },
+    })
+    const contact = await contactRow()
+    expect(contact.pausedAt).toEqual(NOON)
+    expect(contact.pausedReason).toBe(`opt-out not recorded: reply ${NOON.toISOString()} (record_failed)`)
+
+    // Said once, before the first retry was asked for — ids, never the words.
+    const loud = out.filter((l) => String(l.msg).startsWith('OPT-OUT NOT RECORDED — a reply that asked to stop'))
+    expect(loud).toEqual([
+      {
+        level: 'error',
+        msg: expect.stringContaining('could not be recorded'),
+        uid: 9, error: 'DatabaseError', orgId, contactId, paused: true, audited: true, alarm: 'raised',
+      },
+    ])
+    expect(out.indexOf(loud[0]!)).toBeLessThan(out.findIndex((l) => l.msg === 'could not record an inbound message; left unseen to retry'))
+    // The recorder's own rolled-back line still goes where it always went.
+    const stderr = vi.mocked(console.error).mock.calls.map((c) => String(c[0]))
+    expect(stderr.filter((l) => l.includes('the reply was rolled back'))).toHaveLength(INBOUND_MAX_ATTEMPTS)
+    expect(JSON.stringify([lines, stderr, rows])).not.toContain('priya@')
+    expect(JSON.stringify([lines, stderr, rows])).not.toContain('unsubscribe me')
+  })
+
+  it('writes on a later failure the row the first could not, and raises the alarm only once', async () => {
+    await failOnce(test.pg, { table: 'audit_log', event: 'INSERT', when: `NEW.action = 'contact.opt_out_not_recorded'` })
+    const box = new FakeMailbox()
+    box.put(9, reply('Stop', '<stop-9@rentman.io>'))
+    const alarms: SlackOptOutNotRecordedEvent[] = []
+    const lines = start(box, refusingReplies(), { retryMs: 2, refreshMs: 60_000 }, alarms)
+
+    await vi.waitFor(() => expect(box.seen(9)).toBe(true), { timeout: 10_000 })
+    expect(alarms).toHaveLength(1)
+    expect(await notRecordedRows()).toHaveLength(1)
+    const loud = said(lines).filter((l) => String(l.msg).startsWith('OPT-OUT NOT RECORDED — a reply that asked to stop'))
+    expect(loud.map((l) => [l.audited, l.alarm])).toEqual([
+      [false, 'raised'],
+      [true, 'already_raised'],
+    ])
+  })
+
+  it('pauses nobody and raises nothing for an ordinary reply it cannot record', async () => {
+    const box = new FakeMailbox()
+    box.put(9, reply('Thursday works — send an invite.', '<yes-9@rentman.io>'))
+    const alarms: SlackOptOutNotRecordedEvent[] = []
+    const lines = start(box, refusingReplies(), { retryMs: 2, refreshMs: 60_000 }, alarms)
+
+    await vi.waitFor(() => expect(box.seen(9)).toBe(true), { timeout: 10_000 })
+    expect(alarms).toEqual([])
+    expect(await notRecordedRows()).toEqual([])
+    expect((await contactRow()).pausedAt).toBeNull()
+    expect(lines.join('\n')).not.toContain('OPT-OUT NOT RECORDED')
+  })
+
+  /** A caller with no inbox around it — nothing to remember a UID — takes the loud path on every failure. */
+  it('takes the loud path from handleInboundMessage itself, before rethrowing the fault', async () => {
+    const { log } = captureLog()
+    const alarms: SlackOptOutNotRecordedEvent[] = []
+    const deps = {
+      db: refusingReplies(), log, now: () => NOON,
+      optOutAlarm: async (event: SlackOptOutNotRecordedEvent) => {
+        alarms.push(event)
+      },
+    }
+    await expect(handleInboundMessage(reply('Stop', '<stop-3@rentman.io>'), 3, deps)).rejects.toMatchObject({ name: 'DatabaseError' })
+    expect(alarms).toHaveLength(1)
+    expect(await notRecordedRows()).toHaveLength(1)
+    expect(pauseReasonClass((await contactRow()).pausedReason)).toBe('opt_out_not_recorded')
   })
 
   /**
@@ -346,18 +485,7 @@ In-Reply-To: <sent-1@agency.test>`,
   })
 
   it(`abandons a message that never records, after ${INBOUND_MAX_ATTEMPTS} attempts, and says so`, async () => {
-    // Every write of an inbound row fails, whatever transaction it is in.
-    const failing = throughTransactions(db, {
-      get(target, prop, receiver) {
-        if (prop === 'insert') {
-          return (table: unknown) => {
-            if (table === schema.touches) throw Object.assign(new Error('the database is down'), { name: 'DatabaseError' })
-            return (target as AgencyDb).insert(table as typeof schema.suppressions)
-          }
-        }
-        return Reflect.get(target, prop, receiver)
-      },
-    })
+    const failing = refusingReplies()
     const box = new FakeMailbox()
     box.put(9, reply('Please unsubscribe me.', '<stop-9@rentman.io>'))
     const lines = start(box, failing, { retryMs: 2, refreshMs: 60_000 })
