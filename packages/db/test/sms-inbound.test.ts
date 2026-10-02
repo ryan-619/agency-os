@@ -21,8 +21,8 @@ import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import { REFUSALS_A_CORRECTION_RESOLVES, pausedSentence } from '@agency/core'
 import {
-  approveDraft, contactResumeByHand, pauseReasonClass, previewSend, recordInboundReply, recordInboundSms, resumeContact,
-  schema, sharedNumberHoldReason, smsDraft,
+  approveDraft, contactResumeByHand, pauseReasonClass, previewSend, recordInboundReply, recordInboundSms, replyQueueDraft,
+  resumeContact, schema, sharedNumberHoldReason, smsDraft,
   type AgencyDb, type InboundLog,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
@@ -221,6 +221,28 @@ describe('a text from a number several contacts hold (review round 6)', () => {
     expect(resumed).toMatchObject({ ok: true })
     expect((await contact(two)).pausedAt).toBeNull()
     expect((await contact(one)).pausedAt).not.toBeNull()
+  })
+
+  /** Answering an older reply of theirs from /inbox ends only a reply's own pause — never the hold. */
+  it('is not lifted by answering an earlier reply from /inbox', async () => {
+    const one = await holder(a, 'Jo')
+    await holder(a, 'Jo (personal)')
+    await db.update(schema.contacts).set({ email: 'jo@rentman.in' }).where(eq(schema.contacts.id, one))
+    const earlier = await recordInboundReply(db, {
+      orgId: a.orgId, contactId: one, channel: 'email', from: 'jo@rentman.in', subject: 'Re: hello', body: 'Tell me more',
+      providerId: '<r1@mail.test>', now: new Date(NOON_IST.getTime() - 3_600_000),
+    })
+    await resumeContact(db, a.orgId, one)
+    const [email] = await db
+      .insert(schema.campaigns)
+      .values({ orgId: a.orgId, name: 'Replies', channel: 'email', autoSend: false, status: 'active' })
+      .returning({ id: schema.campaigns.id })
+    expect(await inbound()).toMatchObject({ matched: 'none', why: 'ambiguous' })
+    const answer = await replyQueueDraft(db, {
+      orgId: a.orgId, inboundTouchId: earlier.touchId, subject: 'Re: hello', body: 'Happy to.', campaignId: email!.id, actor: a.userId, now: NOON_IST,
+    })
+    expect(answer).toMatchObject({ ok: false, reason: 'paused_for_another_reason' })
+    expect((await contact(one)).pausedReason).toBe(sharedNumberHoldReason(NOON_IST))
   })
 
   // -------------------------------------------------------------------------
