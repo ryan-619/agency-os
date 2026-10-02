@@ -858,6 +858,44 @@ describe('the SMS opt-out reader', () => {
   })
 
   /**
+   * Review round 9, finding [0]/[4]: round 8 read an auxiliary or a modal with ANY word after it as
+   * a question, so negative commands and refusals — "Do not disturb STOP", "Am not interested STOP",
+   * among the commonest in Indian SMS and opt-outs in round 7 — were recorded as ordinary replies.
+   * An auxiliary opens a question only with its subject after it, and a wh-word that opens an
+   * exclamation ("What nonsense", "How dare you") ends in the command.
+   */
+  it.each([
+    'Am not interested STOP',
+    'Do not disturb STOP',
+    'Do not contact STOP',
+    'Do not call STOP',
+    'Did not subscribe STOP',
+    'Am busy STOP',
+    'Will not buy STOP',
+    'Was never interested STOP',
+    'Do not message me again STOP',
+    'Dont disturb STOP',
+    'What nonsense STOP',
+    'What the hell STOP',
+    'What a waste STOP',
+    'How dare you STOP',
+    'How annoying STOP',
+  ])('reads %j as an opt-out — a command or a complaint, not a question (round 9)', (text) => {
+    expect(smsOptOut(text)).toBe(true)
+  })
+
+  it.each([
+    'Can I STOP',
+    'Do you sell STOP',
+    'Is it ok to STOP',
+    'Does it STOP',
+    'Will the bus STOP',
+    'Why STOP',
+  ])('still does not read %j as an opt-out — a question with its subject (round 9 keeps round 8)', (text) => {
+    expect(smsOptOut(text)).toBe(false)
+  })
+
+  /**
    * What the round 8 fix keeps. A question refuses only the bare word STOP, which a question can end
    * in ("Why STOP"); the keywords that exist only to leave a list are read whatever comes before
    * them ("How do I UNSUBSCRIBE" asks for exactly that), and so is STOP with ALL or a short code. A

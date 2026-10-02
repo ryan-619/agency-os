@@ -836,11 +836,30 @@ const SMS_STOP_PARTICLE = /^(?:BY|IN|OVER|OFF)$/u
  * wh-word makes a question of whatever follows it ("Why STOP", "Who said
  * STOP", "When does it STOP"); an auxiliary or a modal does only with its
  * subject after it ("Can I STOP", "Is it ok to STOP") — alone before the
- * keyword it is an emphatic command ("Do STOP"). Contractions of the wh-words
- * are read as them ("What's", "Hows").
+ * keyword it is an emphatic command ("Do STOP"), and before anything but a
+ * subject (`SMS_QUESTION_SUBJECT`) it opens a command or a refusal ("Do not
+ * disturb STOP", "Am busy STOP"). Contractions of the wh-words are read as
+ * them ("What's", "Hows").
  */
 const SMS_WH_WORD = /^(?:why|who|whom|whose|what|when|where|which|how)(?:['’]?s)?$/iu
 const SMS_QUESTION_AUX = /^(?:can|could|should|shall|will|would|may|might|is|are|am|was|were|do|does|did)$/iu
+/**
+ * What must follow an auxiliary for it to open a question: its SUBJECT — a
+ * pronoun or a determiner (review round 9). Round 8 counted any second word,
+ * so "Do not disturb STOP", "Am not interested STOP", "Did not subscribe
+ * STOP" and "Am busy STOP" — negative commands and refusals, among the
+ * commonest in Indian SMS, and opt-outs in round 7 — were read as questions
+ * and recorded as ordinary replies: paused, never suppressed, resumable.
+ */
+const SMS_QUESTION_SUBJECT =
+  /^(?:i|you|u|ya|ye|we|they|he|she|it|this|that|these|those|there|my|your|ur|our|their|his|her|the|a|an|someone|anyone|somebody|anybody|everyone|everybody)$/iu
+/**
+ * A wh-word that opens an exclamation, not a question: "What nonsense STOP",
+ * "What the hell STOP", "How dare you STOP", "How annoying STOP" (review
+ * round 9) — complaints that end in the command.
+ */
+const SMS_WH_EXCLAMATION =
+  /^(?:what\s+(?:a|an|the|nonsense|rubbish|spam|crap|bs|bullshit|non-sense|waste|joke|torture|harassment|nuisance)|how\s+(?:dare|annoying|irritating|rude|stupid|disgusting))$/iu
 
 /**
  * The question shapes that END before the keyword, so the STOP after them is
@@ -990,7 +1009,10 @@ function asksAQuestion(before: string): boolean {
     .filter((word) => word !== '')
   const opener = clause[0]
   if (opener === undefined) return false
-  if (!SMS_WH_WORD.test(opener) && !(SMS_QUESTION_AUX.test(opener) && clause.length > 1)) return false
+  const second = clause[1]
+  const auxQuestion = SMS_QUESTION_AUX.test(opener) && second !== undefined && SMS_QUESTION_SUBJECT.test(second)
+  if (!SMS_WH_WORD.test(opener) && !auxQuestion) return false
+  if (second !== undefined && SMS_WH_EXCLAMATION.test(`${opener} ${second}`)) return false
   const opening = clause.slice(0, 4).join(' ')
   if (SMS_WHO_IS_TEXTING.test(opening) || SMS_HOW_MANY_TIMES.test(opening)) return false
   let end = clause.length
