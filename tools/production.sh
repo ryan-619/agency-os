@@ -5,7 +5,9 @@
 #   tools/production.sh migrate   apply what is pending, then status
 #   tools/production.sh deploy    build and deploy this checkout to Vercel prod
 #   tools/production.sh worker    deploy apps/agent to Fly.io (fly.toml) and
-#                                 point the web app at it
+#                                 point the web app at it — refused until
+#                                 production has this checkout's migration
+#                                 (run `release` first)
 #   tools/production.sh release   migrate, THEN deploy, then check /api/health
 #                                 reports this checkout's migration — the order
 #                                 DEPLOYING.md requires ("migrate FIRST"). With
@@ -146,8 +148,18 @@ verify() {
 #
 # One app, ONE machine that never stops (fly.toml's header says why), its
 # secrets imported from this run's environment over stdin and never echoed,
-# then the web app pointed at it. The internal token is generated here and
-# written to both sides only when either lacks it, so a re-run keeps it.
+# then the web app pointed at it.
+#
+# The internal token is generated here, and a run that stages a new one on
+# Fly sets it on Vercel and redeploys the web app in the same run. A run cut
+# off part-way — Fly re-tokened and Vercel not set, or Vercel set and the web
+# app never redeployed — must not read as wired to the next one, which only
+# saw that the names existed and went green with every web call to the
+# worker refused (review round 6, [10]). So the LAST step of a complete
+# wiring records a marker on Vercel: the Fly app and Fly's own digest of the
+# token it holds, neither of them secret. A run that does not find exactly
+# that marker, beside both names, rotates the token and wires both sides
+# again; one that does keeps the token.
 
 APP=
 fly_app() {
@@ -180,30 +192,74 @@ fly_app() {
   echo "fly: created app $APP"
 }
 
-fly_secret_names() {
+# "<name> <digest>" per secret on the app. The digest is Fly's own hash of
+# the value — never the value, which Fly does not return to anybody.
+fly_secrets() {
   flyctl secrets list --app "$APP" --json | node -e '
     let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
-      for (const x of JSON.parse(s || "[]") || []) console.log(x.Name ?? x.name)
+      for (const x of JSON.parse(s || "[]") || []) console.log(`${x.Name ?? x.name} ${x.Digest ?? x.digest ?? ""}`)
     })'
 }
 
+# Fly's digest of AGENT_INTERNAL_TOKEN, empty when it has none. Called in a
+# command substitution, so it fails rather than dying: `die` there would
+# print its sentence into the caller's variable.
+fly_token_digest() {
+  local secrets
+  secrets=$(fly_secrets) || return 1
+  sed -n 's/^AGENT_INTERNAL_TOKEN \([^ ]*\)$/\1/p' <<<"$secrets"
+}
+
+# Exit 0 yes, 1 no — and an API error STOPS the run, never reads as "no".
+vercel_env() {
+  local rc=0
+  node tools/vercel-env.mjs "$@" || rc=$?
+  case $rc in
+    0 | 1) return $rc ;;
+    *) die "Could not read the Vercel project's variables (the line above says why); nothing was changed." ;;
+  esac
+}
+
+# The worker deploys this checkout, and a re-wiring redeploys the web app
+# from it too; neither may run ahead of its schema (DEPLOYING.md, "migrate
+# FIRST"). Asked of the database itself, before anything is created or
+# deployed. Migrating stays `release`'s job, so there is one place that
+# migrates (review round 6, [11] and [17]).
+schema_ready() {
+  local want out
+  want=$(expected_migration)
+  [ -n "$want" ] || die "Could not read EXPECTED_MIGRATION."
+  out=$(mktemp "${RUNNER_TEMP:-/tmp}/status.XXXXXX")
+  db status >"$out" || die "Could not read which migrations production has applied."
+  cat "$out"
+  grep -qE "^[[:space:]]*\[x\] ${want}_" "$out" \
+    || die "Production has not applied migration $want, which this checkout expects. Run the 'release' action from this ref first — it migrates, then deploys the web app — and then 'worker'. Nothing was deployed."
+  echo "schema: production has migration $want applied, as this checkout expects"
+}
+
+MARKER=AGENT_INTERNAL_TOKEN_WIRED
+
 worker() {
-  fly_app
+  [ -n "${FLY_API_TOKEN:-}" ] || die "The FLY_API_TOKEN secret is not set (an ORG token: fly.io → Tokens)."
   database_url
+  schema_ready
+  fly_app
   vercel_ids
-  local names lines="" token=""
-  names=$(fly_secret_names)
+  local lines="" token="" digest
   add() { lines+="$1=$2"$'\n'; }
   add DATABASE_URL "$(cat "$DB_FILE")"
   add WEB_PUBLIC_URL "$SITE"
-  local wire=false
-  if ! grep -qx AGENT_INTERNAL_TOKEN <<<"$names" \
-    || ! node tools/vercel-env.mjs has AGENT_INTERNAL_TOKEN \
-    || ! node tools/vercel-env.mjs has AGENT_URL; then
+  local wire=true
+  digest=$(fly_token_digest) || die "Could not list the Fly app's secrets."
+  if [ -n "$digest" ] && vercel_env has AGENT_INTERNAL_TOKEN && vercel_env has AGENT_URL \
+    && VALUE="$APP:$digest" vercel_env equals "$MARKER"; then
+    wire=false
+    echo "wiring: Vercel was wired to this app's current token by a run that finished; keeping it"
+  else
     token=$(openssl rand -hex 32)
     echo "::add-mask::$token"
     add AGENT_INTERNAL_TOKEN "$token"
-    wire=true
+    echo "wiring: no record that both sides hold the same token; a new one goes to Fly AND Vercel in this run"
   fi
   # Everything optional, only when this run was handed it.
   local n
@@ -226,6 +282,13 @@ worker() {
     # A new deployment is what picks the variables up.
     deploy
     verify
+    # Last: only a run that got this far may say both sides agree.
+    digest=$(fly_token_digest) || digest=
+    if [ -n "$digest" ]; then
+      VALUE="$APP:$digest" node tools/vercel-env.mjs set "$MARKER" encrypted
+    else
+      echo "::warning::Fly reported no digest for AGENT_INTERNAL_TOKEN, so the wiring could not be recorded; the next run will rotate the token and wire both sides again."
+    fi
   fi
   worker_seen
 }
