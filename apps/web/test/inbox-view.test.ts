@@ -17,6 +17,7 @@ import {
   answerIsLive, answerSchema, answerStateWords, answerSubject, firstIssue, groupInbox, inboxActionSchema,
   inboxDeploymentNotes, inboxGroupOf, personName,
 } from '../src/lib/inbox-view'
+import { optedOutNote, optedOutWarning } from '../src/components/inbox/opted-out'
 
 const BARE: Deployment = {
   worker: false, mailIsLocalSink: false, inbound: 'none', cron: false, slack: false, unsubscribe: false,
@@ -93,6 +94,58 @@ describe('reclassifying (§2.1: opted_out is the reader’s alone)', () => {
   it('tells a person the choice is missing on purpose', () => {
     expect(RECLASSIFY_HINT).toBe('an opt-out is decided by the person’s own words, never here.')
     expect(OPTED_OUT_NOTE).toBe('asked to stop — do not answer. The suppression row is what enforces it.')
+  })
+})
+
+/**
+ * Review round 8, [8]. A colleague on the thread replied all "please remove
+ * me", and the reply was filed under the contact our message went to. The
+ * row read "Priya Shah asked to stop — do not answer", and its warning told
+ * a person to add a suppression for "this person" — which suppressing
+ * PRIYA's address satisfied, while the sender stayed unrecorded.
+ */
+describe('a reply that asked to stop, and whose it was', () => {
+  const own = { fromIsContact: true, from: 'priya@rentman.io', contactName: 'Priya Shah', suppressed: true }
+  const colleague = { fromIsContact: false, from: 'sam@rentman.io', contactName: 'Priya Shah', suppressed: true }
+
+  it('words the contact’s own stop exactly as before', () => {
+    expect(optedOutNote(own)).toBe(`Priya Shah ${OPTED_OUT_NOTE}`)
+    expect(optedOutWarning(own)).toBeNull()
+    expect(optedOutWarning({ ...own, suppressed: false })).toBe(
+      'This reply asked to stop, but no suppression row matches this person. Add one on the suppressions page — ' +
+        'until then nothing but the pause stands between them and the next message.',
+    )
+    expect(optedOutNote({ ...own, contactName: null })).toBe(`This person ${OPTED_OUT_NOTE}`)
+  })
+
+  it('never says the contact asked to stop when somebody else on the thread did', () => {
+    const note = optedOutNote(colleague)
+    expect(note).not.toContain('Priya Shah asked to stop')
+    expect(note).toBe(
+      'A reply from another address on this thread (sam@rentman.io) asked to stop — do not answer it. Priya Shah did ' +
+        'not ask, and is not treated as the one who asked; the address on the suppression list must be the one the ' +
+        'reply came from.',
+    )
+    expect(optedOutWarning(colleague)).toBeNull()
+  })
+
+  it('sends a person to record the sender’s address, never the contact’s', () => {
+    const warning = optedOutWarning({ ...colleague, suppressed: false })
+    expect(warning).toBe(
+      'This reply asked to stop, but no suppression row matches the address it came from (sam@rentman.io), which is ' +
+        'not Priya Shah’s. Record THAT address on the suppressions page — never Priya Shah’s: recording theirs does ' +
+        'not record this opt-out. Until it is recorded, Priya Shah cannot be resumed or answered.',
+    )
+    expect(warning).not.toContain('matches this person')
+  })
+
+  it('is fed by the page from the row, never worked out on the client', () => {
+    const page = readFileSync(fileURLToPath(new URL('../src/app/inbox/page.tsx', import.meta.url)), 'utf8')
+    expect(page).toContain('fromIsContact: r.fromIsContact')
+    const queue = readFileSync(fileURLToPath(new URL('../src/components/inbox/queue.tsx', import.meta.url)), 'utf8')
+    expect(queue).toContain('optedOutNote(stopOf(row))')
+    expect(queue).toContain('optedOutWarning(stopOf(row))')
+    expect(queue).not.toContain('OPTED_OUT_NOTE')
   })
 })
 

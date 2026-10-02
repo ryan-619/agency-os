@@ -32,7 +32,7 @@ import type { NotificationEvent } from '../../../../lib/slack-message'
  */
 export function replyNotification(outcome: InboundOutcome): Extract<NotificationEvent, { kind: 'reply' }> | null {
   if (outcome.matched === 'none' || outcome.duplicate || outcome.optOutNotRecorded) return null
-  return {
+  const event: Extract<NotificationEvent, { kind: 'reply' }> = {
     kind: 'reply',
     orgId: outcome.orgId,
     contactId: outcome.contactId,
@@ -42,6 +42,12 @@ export function replyNotification(outcome: InboundOutcome): Extract<Notification
     paused: outcome.paused,
     suppressed: outcome.suppressed,
   }
+  // A colleague's reply filed under the contact our mail went to (review
+  // round 8): "they asked to stop" beside the contact's id pointed a person
+  // at somebody who never asked. Said only when it is so; a reply of the
+  // contact's own posts the bytes it always did.
+  if (outcome.fromIsContact === false) event.fromIsContact = false
+  return event
 }
 
 /**

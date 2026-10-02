@@ -89,6 +89,19 @@ describe('the reply hook (POST /api/inbound/email)', () => {
     expect(replyNotification({ matched: 'none', why: 'no contact has this address' })).toBeNull()
   })
 
+  /**
+   * Review round 8, [8]: a colleague's reply filed under the contact our
+   * mail went to says so, as a boolean — never the address.
+   */
+  it('says when the reply came from somebody other than the contact, and only then', () => {
+    const event = replyNotification({ ...recorded, replyKind: 'opted_out', suppressed: true, fromIsContact: false })
+    expect(event).toMatchObject({ kind: 'reply', fromIsContact: false, contactId: recorded.contactId })
+    expect(slackMessage(event!, ORIGIN).text).toContain('somebody else on the thread asked to stop')
+    expectNoLeadData(event!)
+    expect(replyNotification({ ...recorded, fromIsContact: true })).not.toHaveProperty('fromIsContact')
+    expect(replyNotification({ ...recorded, fromIsContact: null })).not.toHaveProperty('fromIsContact')
+  })
+
   it('carries the suppression through, so the channel is told not to answer', () => {
     const event = replyNotification({ ...recorded, replyKind: 'opted_out', suppressed: true })
     expect(event?.suppressed).toBe(true)

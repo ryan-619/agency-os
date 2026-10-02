@@ -124,6 +124,49 @@ describe('slackMessage', () => {
     expect(payload.text).not.toContain('sequence is paused')
   })
 
+  /**
+   * Review round 8, [8]: a colleague on the thread replied all, and the
+   * reply was filed under the contact our message went to. "They asked to
+   * stop" beside the contact's id pointed a person at somebody who never
+   * asked.
+   */
+  describe('a reply from somebody else on the thread', () => {
+    const colleague = (over: Partial<Extract<NotificationEvent, { kind: 'reply' }>> = {}): NotificationEvent => ({
+      kind: 'reply', orgId: ORG, contactId: 'c', touchId: 't', companyDomain: 'acme.example', replyKind: 'opted_out',
+      paused: true, suppressed: true, fromIsContact: false, ...over,
+    })
+
+    it('says somebody else asked to stop, and not to suppress the contact', () => {
+      const text = slackMessage(colleague(), ORIGIN).text
+      expect(text).toContain('Reply from acme.example — somebody else on the thread asked to stop.')
+      expect(text).toContain('The sender’s address is on the suppression list — do not answer them.')
+      expect(text).toContain('did not ask to stop: do not suppress them')
+      expect(text).toContain('touch t · filed under contact c · sent by somebody other than the contact')
+      expect(text).not.toContain('They asked to stop')
+    })
+
+    it('says whose words another kind was, and that the contact is held only as any reply holds them', () => {
+      const text = slackMessage(colleague({ replyKind: 'interested', suppressed: false }), ORIGIN).text
+      expect(text).toContain('Reply from acme.example — interested, from somebody else on the thread.')
+      expect(text).toContain('The contact it was filed under is paused, as any reply pauses them')
+    })
+
+    it('posts the contact’s own reply byte for byte as before', () => {
+      const own = slackMessage(
+        { kind: 'reply', orgId: ORG, contactId: 'c', touchId: 't', companyDomain: 'acme.example', replyKind: 'opted_out', paused: true, suppressed: true },
+        ORIGIN,
+      ).text
+      expect(own).toBe(
+        [
+          'Reply from acme.example — asked to stop.',
+          'They asked to stop — do not answer. The address is on the suppression list.',
+          'touch t · contact c',
+          `${ORIGIN}/companies/acme.example`,
+        ].join('\n'),
+      )
+    })
+  })
+
   it('says a paused reply is waiting on a person', () => {
     const payload = slackMessage(
       { kind: 'reply', orgId: ORG, contactId: 'c', touchId: 't', companyDomain: 'acme.example', replyKind: 'not_now', paused: true, suppressed: false },
