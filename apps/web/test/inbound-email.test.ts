@@ -19,7 +19,9 @@ import { fileURLToPath } from 'node:url'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { handleInboundEmail, schema, type AgencyDb } from '@agency/db/queries'
+import {
+  handleInboundEmail, pauseContactOverriding, pauseReasonClass, previewSend, schema, type AgencyDb,
+} from '@agency/db/queries'
 import { migratedDb, type TestDb } from '../../../packages/db/test/helpers.js'
 import { failOnce } from '../../../packages/db/test/fault-db.js'
 import {
@@ -41,14 +43,24 @@ describe('POST /api/inbound/email — a fault while recording', () => {
   let lines: { message: string; fields: Record<string, unknown> }[]
   let audits: Parameters<InboundEmailFaultDeps['audit']>[0][]
   let alarms: NotificationEvent[]
+  /** What the fault path did, in order: the pause must land before the alarm goes. */
+  let order: string[]
   const deps = (): InboundEmailFaultDeps => ({
     audit: async (entry) => {
+      order.push('audit')
       audits.push(entry)
     },
+    // The route's own wiring: the real writer, on the same database.
+    pause: async (orgId, contactId, reason, now) => {
+      order.push('pause')
+      return pauseContactOverriding(db, orgId, contactId, reason, now)
+    },
     alarm: async (event) => {
+      order.push('alarm')
       alarms.push(event)
     },
     log: { error: (message, fields = {}) => lines.push({ message, fields }) },
+    now: () => NOON,
   })
   /** The route's own wiring: the recorder's lines forwarded, a rolled-back stop kept. */
   const recorderFor = () => keepingRolledBackOptOut({ error: (message, fields = {}) => lines.push({ message, fields: { ...fields } }) })
@@ -59,6 +71,7 @@ describe('POST /api/inbound/email — a fault while recording', () => {
     lines = []
     audits = []
     alarms = []
+    order = []
     const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
     orgId = org!.id
     const [company] = await db
@@ -99,7 +112,7 @@ describe('POST /api/inbound/email — a fault while recording', () => {
     throw new Error('the fault did not fire')
   }
 
-  it('answers a stop it could not record 500, audits it and awaits the alarm — and logs no address or words', async () => {
+  it('answers a stop it could not record 500, pauses the contact, audits it and awaits the alarm — and logs no address or words', async () => {
     // The reply's own INSERT refused: the statement whose parameters are the
     // address and the words.
     await failOnce(test.pg, { table: 'touches', event: 'INSERT' })
@@ -119,17 +132,68 @@ describe('POST /api/inbound/email — a fault while recording', () => {
     expect(alarms).toEqual([{ kind: 'opt_out_not_recorded', orgId, touchId: sentId, contactId, path: 'reply' }])
     expect(lines.at(-1)).toEqual({
       message: expect.stringContaining('OPT-OUT NOT RECORDED — an email that asked to stop could not be recorded'),
-      fields: { error: 'Error', orgId, contactId, audited: true, alarm: 'raised' },
+      fields: { error: 'Error', orgId, contactId, paused: true, audited: true, alarm: 'raised' },
     })
+    expect(order).toEqual(['pause', 'audit', 'alarm'])
     for (const said of [JSON.stringify(lines), JSON.stringify(audits), JSON.stringify(slackMessage(alarms[0]!, 'https://x.test'))]) {
       expect(said).not.toContain(ADDRESS)
       expect(said).not.toContain('DECOY-WORDS')
       expect(said).not.toContain('07700')
     }
-    // Nothing was stored: the retry records it all.
+    // Nothing about the reply was stored: the retry records it all.
     expect((await db.select().from(schema.touches)).filter((t) => t.direction === 'in')).toEqual([])
+    // But the contact is held until it does — in words /inbox and /contacts
+    // read as an opt-out nobody recorded, which no answer and no Resume lifts.
     const [c] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, contactId))
-    expect(c!.pausedAt).toBeNull()
+    expect(c!.pausedAt).toEqual(NOON)
+    expect(c!.pausedReason).toBe(`opt-out not recorded: reply ${NOON.toISOString()} (record_failed)`)
+    expect(pauseReasonClass(c!.pausedReason)).toBe('opt_out_not_recorded')
+  })
+
+  /**
+   * The probe (review round 6): a "stop" whose recording threw left the
+   * contact live, and their approved follow-up was due. The sender's own
+   * dry run is the judge: before, it passed them; now it refuses `paused`.
+   */
+  it('holds back the follow-up the contact had approved, until a retry records the stop', async () => {
+    const [campaign] = await db
+      .insert(schema.campaigns)
+      .values({ orgId, name: 'Follow-ups', channel: 'email', status: 'active' })
+      .returning({ id: schema.campaigns.id })
+    await failOnce(test.pg, { table: 'touches', event: 'INSERT' })
+    await deliver('Please unsubscribe me.')
+    // The sender's own dry run: a pause outranks everything after consent.
+    const preview = await previewSend(db, { orgId, contactId, campaignId: campaign!.id, now: NOON })
+    expect(preview).toMatchObject({ ok: true, decision: { allowed: false, code: 'paused' } })
+
+    // And the retry records the reply over that pause: the suppression is
+    // written, and the pause it found stands.
+    const outcome = await handleInboundEmail(db, {
+      from: ADDRESS, subject: 'Re: A gap on your security page', text: 'Please unsubscribe me.',
+      messageId: '<reply-1@rentman.io>', references: [OUR_ID], now: NOON, log: recorderFor(),
+    })
+    expect(outcome).toMatchObject({ matched: 'message', suppressed: true })
+    const [after] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, contactId))
+    expect(pauseReasonClass(after!.pausedReason)).toBe('opt_out_not_recorded')
+  })
+
+  it('still audits and alarms when the pause itself cannot be written, and says so', async () => {
+    await failOnce(test.pg, { table: 'touches', event: 'INSERT' })
+    const recorder = recorderFor()
+    const err = await handleInboundEmail(db, {
+      from: ADDRESS, subject: null, text: 'Stop', messageId: '<reply-3@rentman.io>', references: [OUR_ID], now: NOON, log: recorder,
+    }).catch((e: unknown) => e)
+    const answer = await inboundEmailNotRecorded(err, { text: 'Stop', rolledBack: recorder.rolledBack() }, {
+      ...deps(),
+      pause: async () => {
+        throw new Error('Connection terminated unexpectedly: priya@rentman.io')
+      },
+    })
+    expect(answer).toEqual({ status: 500, body: { error: 'opt-out not recorded', retry: true } })
+    expect(audits).toHaveLength(1)
+    expect(alarms).toHaveLength(1)
+    expect(lines.at(-1)!.fields).toMatchObject({ paused: false, audited: true, alarm: 'raised' })
+    expect(JSON.stringify(lines)).not.toContain(ADDRESS)
   })
 
   it('names no touch for a stop matched by its address alone', async () => {
@@ -138,12 +202,15 @@ describe('POST /api/inbound/email — a fault while recording', () => {
     expect(alarms).toEqual([{ kind: 'opt_out_not_recorded', orgId, touchId: null, contactId, path: 'reply' }])
   })
 
-  it('answers an ordinary reply it could not record 500, with the fault’s class and no alarm', async () => {
+  it('answers an ordinary reply it could not record 500, with the fault’s class, no alarm and no pause', async () => {
     await failOnce(test.pg, { table: 'contacts', event: 'UPDATE' })
     const { answer } = await deliver('Yes, send pricing — DECOY-WORDS')
     expect(answer).toEqual({ status: 500, body: { error: 'the message could not be recorded', retry: true } })
     expect(audits).toEqual([])
     expect(alarms).toEqual([])
+    expect(order).toEqual([])
+    const [c] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, contactId))
+    expect(c!.pausedAt).toBeNull()
     expect(lines).toEqual([{ message: 'inbound email could not be recorded; answering 500 so it is retried', fields: { error: 'Error' } }])
   })
 
@@ -152,6 +219,8 @@ describe('POST /api/inbound/email — a fault while recording', () => {
     expect(answer.status).toBe(500)
     expect(audits).toEqual([])
     expect(alarms).toEqual([])
+    // Nothing says whose it was, so nobody is paused on a guess.
+    expect(order).toEqual([])
     expect(lines).toEqual([
       {
         message: expect.stringContaining('nothing says whose it was'),
@@ -175,7 +244,7 @@ describe('POST /api/inbound/email — a fault while recording', () => {
     })
     expect(answer.status).toBe(500)
     expect(alarms).toHaveLength(1)
-    expect(lines.at(-1)!.fields).toMatchObject({ audited: false, alarm: 'raised' })
+    expect(lines.at(-1)!.fields).toMatchObject({ paused: true, audited: false, alarm: 'raised' })
   })
 
   it('forwards every line the recorder says, and keeps only an opt-out it names an org and a contact for', () => {
@@ -200,6 +269,12 @@ describe('the route, as it wires it (read from the source)', () => {
     expect(route).toMatch(/\} catch \(err\) \{\s*const answer = await inboundEmailNotRecorded\(err, \{ text, rolledBack: recorder\.rolledBack\(\) \}/)
     expect(route).toContain('return NextResponse.json(answer.body, { status: answer.status })')
     expect(route).toContain(`from './fault'`)
+  })
+
+  it('wires the pause to the real writer, on the same database', () => {
+    expect(route).toMatch(
+      /pause: \(orgId, contactId, reason, now\) => pauseContactOverriding\(getDb\(\) as unknown as AgencyDb, orgId, contactId, reason, now\)/,
+    )
   })
 
   it('never hands the error itself to a log line', () => {
