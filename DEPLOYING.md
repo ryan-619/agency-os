@@ -461,7 +461,26 @@ other job is this worker reaching out. So:
 asks for the production connection string at a hidden prompt and runs the
 worker against Neon with **nothing on the machine exposed** — no port open, no
 tunnel, no inbound route. The chat panel keeps saying no worker is connected,
-which is true.
+which is true. It needs Node.js 22 and `npm ci` in the checkout, and builds
+the packages itself before it starts, because they run as compiled JavaScript
+and a `git pull` would otherwise run stale code.
+
+**On a Mac it can remember the answers.** At the end of the questions it
+offers to keep them in the login Keychain (service `agency-os-worker`, one
+item per variable), and every later run starts with no questions. Each value
+reaches `security` base64-encoded on its STDIN, never on its command line,
+where `ps` would show it to every user on the machine (§2.3).
+`./tools/run-worker.sh --reconfigure` asks again; `--forget` deletes them. It
+also keeps the Mac from idling to sleep while it runs (`caffeinate -is`; the
+display may sleep, and closing the lid on battery still sleeps it).
+
+Besides the mailbox and SMS, it asks for the web app's public address
+(default `https://myagencyos.in`), the `UNSUBSCRIBE_SECRET` Vercel holds —
+the worker adds one-click unsubscribe headers only with both, and the site
+verifies the link with its own copy, so the two must be the same value;
+pressing Enter makes a new one and puts it on the clipboard to paste into
+Vercel — and an optional Slack webhook for the opt-out alarm. Port 465 is
+implicit TLS (Resend's `smtp.resend.com:465`), any other port STARTTLS.
 
 It then asks whether to configure **sending** (SMTP), **SMS through
 DoveSoft** and **reply detection** (IMAP), and this is not optional
