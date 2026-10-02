@@ -2,9 +2,10 @@
  * The Production workflow's `worker` action (tools/production.sh,
  * tools/vercel-env.mjs, .github/workflows/production.yml), driven against
  * stubs: a `flyctl`, `npx` (tsc and the Vercel CLI), `curl` and `sleep` on
- * PATH, and stand-ins for the repo's own helper scripts in a scratch copy of
- * the layout the script reads — so the REAL script runs, and nothing it
- * calls reaches Fly, Vercel, a database or the network.
+ * PATH, a `node` in front of the real one, and stand-ins for the repo's own
+ * helper scripts in a scratch copy of the layout the script reads — so the
+ * REAL script runs, and nothing it calls reaches Fly, Vercel, a database or
+ * the network.
  *
  * Review round 6:
  *
@@ -18,6 +19,16 @@
  *       migration — code ahead of its schema, against "migrate FIRST".
  *  [9]  setup-flyctl ran on `@master` in the job holding every production
  *       credential, and every worker secret reached every action's step.
+ *
+ * Review round 7:
+ *
+ *  [6]  Inside the worker step, every worker secret — SECRETS_KEY, Fly's org
+ *       token, the model key, both mailbox passwords, DoveSoft's key — stayed
+ *       in the environment of everything the script ran after Fly had them,
+ *       the Vercel CLI included: `npx` installs it at run time with no
+ *       lockfile, and `vercel build` runs the whole web build. Every stub
+ *       here records the NAMES in its environment, and only flyctl may see
+ *       one, FLY_API_TOKEN alone.
  */
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -34,6 +45,22 @@ const EXPECTED = /EXPECTED_MIGRATION = '(\d+)'/.exec(readFileSync(resolve(root, 
 const PASSWORD = 'db-password-never-printed-5521'
 const APP = 'agency-os-agent'
 
+/**
+ * The worker step's own secrets (.github/workflows/production.yml), which
+ * production.sh's WORKER_ONLY must list exactly: the workflow hands them to
+ * the `worker` step alone, and the script hands them to flyctl alone.
+ */
+const WORKER_ONLY = [
+  'FLY_API_TOKEN', 'FLY_ORG', 'ANTHROPIC_API_KEY', 'ANTHROPIC_WORKSPACE_ID', 'AGENT_MODEL', 'SECRETS_KEY',
+  'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASSWORD', 'SMTP_SECURE', 'MAIL_FROM',
+  'IMAP_HOST', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASSWORD', 'IMAP_SECURE', 'IMAP_MAILBOX',
+  'SLACK_WEBHOOK_URL', 'UNSUBSCRIBE_SECRET', 'DOVESOFT_API_KEY', 'DOVESOFT_ENTITY_ID',
+]
+/** What Fly is handed over stdin: everything but Fly's own two, which are flyctl's. */
+const STAGED = WORKER_ONLY.filter((n) => n !== 'FLY_API_TOKEN' && n !== 'FLY_ORG')
+/** A value no output may carry, for each. */
+const secretOf = (name: string) => `${name.toLowerCase()}-value-never-printed-8813`
+
 /** Fly's digest, as the stub computes it: a hash of the value, never the value. */
 const digestOf = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 16)
 
@@ -41,9 +68,28 @@ const digestOf = (value: string) => createHash('sha256').update(value).digest('h
 // The stubs
 // ---------------------------------------------------------------------------
 
+/**
+ * Every bash stub, and the `node` in front of the real one, appends
+ * `<who>\t<the names in its environment>` to env.log: names, never values.
+ */
+const RECORD = `record() { printf '%s\\t%s\\n' "$1" "$(compgen -e | tr '\\n' ' ')" >>"$STUB_STATE/env.log"; }`
+
+/** `node`: records which script it runs (or `-e`), then runs the real one. */
+const NODE = `#!/usr/bin/env bash
+${RECORD}
+record "node \${1##*/}"
+exec "$REAL_NODE" "$@"
+`
+
+/** `flyctl`'s launcher: records itself, then runs flyctl.js on the real node (so it is not recorded twice). */
+const FLYCTL_LAUNCHER = `#!/usr/bin/env bash
+${RECORD}
+record "flyctl $*"
+exec "$REAL_NODE" "$(dirname "$0")/../flyctl.js" "$@"
+`
+
 /** `flyctl`: apps, secrets (name → value, listed as name + digest), deploy, scale. */
-const FLYCTL = `#!/usr/bin/env node
-const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto')
+const FLYCTL = `const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto')
 const state = process.env.STUB_STATE
 const args = process.argv.slice(2)
 fs.appendFileSync(path.join(state, 'calls.log'), 'flyctl ' + args.join(' ') + '\\n')
@@ -69,12 +115,18 @@ if (a === 'deploy' && fs.existsSync(path.join(state, 'fly-deploy-fails'))) proce
 process.exit(0)
 `
 
-/** `npx`: \`tsc --build\` does nothing; the Vercel CLI's pull, build and deploy are recorded. */
+/**
+ * `npx`: \`tsc --build\` does nothing; the Vercel CLI's pull, build and deploy
+ * are recorded. A pull writes the project's DATABASE_URL, as `vercel pull`
+ * does where it is not Sensitive.
+ */
 const NPX = `#!/usr/bin/env bash
+${RECORD}
+record "npx $*"
 echo "npx $*" >>"$STUB_STATE/calls.log"
 if [ "$1" = tsc ]; then exit 0; fi
 case " $* " in
-  *" pull "*) mkdir -p .vercel && : >.vercel/.env.production.local ;;
+  *" pull "*) mkdir -p .vercel && echo "DATABASE_URL=postgres://owner:${PASSWORD}@db.example/neondb" >.vercel/.env.production.local ;;
   *" build "*) mkdir -p .vercel/output/functions ;;
   *" deploy "*) [ -e "$STUB_STATE/web-deploy-fails" ] && exit 1 ;;
 esac
@@ -83,6 +135,8 @@ exit 0
 
 /** `curl`: the worker answers /readyz, and the site reports the checkout's schema and a live worker. */
 const CURL = `#!/usr/bin/env bash
+${RECORD}
+record curl
 url="\${@: -1}"
 case "$*" in
   *"%{http_code}"*) printf 200 ;;
@@ -108,11 +162,18 @@ if (cmd === 'set') { vars[key] = process.env.VALUE; fs.writeFileSync(file, JSON.
 process.exit(2)
 `
 
-/** tools/production-env.mjs's stand-in: the database URL comes from the secret. */
+/** tools/production-env.mjs's stand-in: the database URL comes from the secret, else from the pulled file. */
 const PRODUCTION_ENV_STUB = `#!/usr/bin/env node
 import fs from 'node:fs'
-const [cmd, , out] = process.argv.slice(2)
-if (cmd === 'database-url') fs.writeFileSync(out, process.env.PRODUCTION_DATABASE_URL)
+const [cmd, file, out] = process.argv.slice(2)
+const pulled = () => /^DATABASE_URL=(.*)$/m.exec(fs.readFileSync(file, 'utf8'))[1]
+if (cmd === 'database-url') fs.writeFileSync(out, process.env.PRODUCTION_DATABASE_URL ?? pulled())
+`
+
+/** tools/vercel-project.mjs's stand-in: the ids the API would answer with. */
+const VERCEL_PROJECT_STUB = `#!/usr/bin/env node
+console.log('VERCEL_ORG_ID=team_stub')
+console.log('VERCEL_PROJECT_ID=prj_stub')
 `
 
 /** packages/db/dist/cli.js's stand-in: \`status\` lists the migrations up to the one applied. */
@@ -146,12 +207,15 @@ describe('the worker action', () => {
       writeFileSync(join(dir, path), body)
       chmodSync(join(dir, path), 0o755)
     }
-    exe('bin/flyctl', FLYCTL)
+    exe('bin/node', NODE)
+    exe('bin/flyctl', FLYCTL_LAUNCHER)
+    writeFileSync(join(dir, 'flyctl.js'), FLYCTL)
     exe('bin/npx', NPX)
     exe('bin/curl', CURL)
     exe('bin/sleep', '#!/usr/bin/env bash\nexit 0\n')
     exe('tools/vercel-env.mjs', VERCEL_ENV_STUB)
     exe('tools/production-env.mjs', PRODUCTION_ENV_STUB)
+    exe('tools/vercel-project.mjs', VERCEL_PROJECT_STUB)
     writeFileSync(join(dir, 'packages/db/dist/cli.js'), CLI_STUB)
     copyFileSync(resolve(root, 'packages/db/src/schema-version.ts'), join(dir, 'packages/db/src/schema-version.ts'))
     writeFileSync(join(dir, 'fly.toml'), `app = "${APP}"\n`)
@@ -177,13 +241,16 @@ describe('the worker action', () => {
   const setVercel = (vars: Record<string, string>) => writeFileSync(join(state, 'vercel-vars.json'), JSON.stringify(vars))
   const flag = (name: string, on = true) => (on ? writeFileSync(join(state, name), '') : rmSync(join(state, name), { force: true }))
 
-  function run(): Run {
+  /** Run `worker`; `extra` adds to the environment, and an `undefined` takes a name out of it. */
+  function run(extra: Record<string, string | undefined> = {}): Run {
     rmSync(join(state, 'calls.log'), { force: true })
     writeFileSync(join(state, 'calls.log'), '')
-    const env: Record<string, string> = {
+    writeFileSync(join(state, 'env.log'), '')
+    const env: Record<string, string | undefined> = {
       PATH: `${join(dir, 'bin')}:${process.env.PATH ?? ''}`,
       HOME: process.env.HOME ?? dir,
       STUB_STATE: state,
+      REAL_NODE: process.execPath,
       EXPECTED,
       RUNNER_TEMP: join(dir, 'runner'),
       PRODUCTION_URL: 'https://site.example',
@@ -192,7 +259,9 @@ describe('the worker action', () => {
       VERCEL_ORG_ID: 'team_stub',
       VERCEL_PROJECT_ID: 'prj_stub',
       FLY_API_TOKEN: 'fly-token-stub',
+      ...extra,
     }
+    for (const [k, v] of Object.entries(env)) if (v === undefined) delete env[k]
     const r = spawnSync('bash', [script, 'worker'], { cwd: dir, env, encoding: 'utf8', timeout: 60_000 })
     const calls = readFileSync(join(state, 'calls.log'), 'utf8').split('\n').filter(Boolean)
     return { status: r.status, out: `${r.stdout}${r.stderr}`, calls }
@@ -314,6 +383,102 @@ describe('the worker action', () => {
     })
   })
 
+  describe('the worker’s secrets reach flyctl alone ([6])', () => {
+    interface Seen {
+      readonly who: string
+      readonly names: readonly string[]
+    }
+    /** What each process this run started had in its environment, by name. */
+    const seen = (): Seen[] =>
+      readFileSync(join(state, 'env.log'), 'utf8')
+        .split('\n')
+        .filter(Boolean)
+        .map((line) => {
+          const [who = '', names = ''] = line.split('\t')
+          return { who, names: names.split(' ').filter(Boolean) }
+        })
+    const leaked = (s: Seen) => s.names.filter((n) => WORKER_ONLY.includes(n))
+    const everySecret = Object.fromEntries(WORKER_ONLY.map((n) => [n, secretOf(n)]))
+
+    /** Nothing but flyctl saw a worker secret, and flyctl saw FLY_API_TOKEN and nothing else of them. */
+    function expectContained(r: Run) {
+      expect(r.status, r.out).toBe(0)
+      const all = seen()
+      const fly = all.filter((s) => s.who.startsWith('flyctl '))
+      const rest = all.filter((s) => !s.who.startsWith('flyctl '))
+      for (const s of rest) expect(leaked(s), s.who).toEqual([])
+      expect(fly.length).toBeGreaterThan(0)
+      for (const s of fly) expect(leaked(s), s.who).toEqual(['FLY_API_TOKEN'])
+      // Fly was still handed every one, over stdin, with its value.
+      const onFly = flySecrets()
+      for (const n of STAGED) expect(onFly[n], n).toBe(secretOf(n))
+      expect(onFly.FLY_API_TOKEN).toBeUndefined()
+      expect(onFly.FLY_ORG).toBeUndefined()
+      for (const n of WORKER_ONLY) expect(r.out, n).not.toContain(secretOf(n))
+      return all
+    }
+    const whos = (all: Seen[]) => all.map((s) => s.who)
+
+    it('on a wiring run: the Vercel CLI’s pull, build and deploy, and every helper of ours, see none of them', () => {
+      const all = expectContained(run(everySecret))
+      const vercel = whos(all).filter((w) => /^npx --yes vercel@\S+ /.test(w))
+      // Not vacuous: the run did reach every Vercel CLI call and every helper.
+      for (const verb of ['pull', 'build', 'deploy']) expect(vercel.some((w) => w.includes(` ${verb} `)), verb).toBe(true)
+      for (const helper of ['node vercel-env.mjs', 'node production-env.mjs', 'node cli.js', 'node -e', 'npx tsc --build', 'curl']) {
+        expect(whos(all), helper).toContain(helper)
+      }
+      expect(whos(all).some((w) => w.startsWith('flyctl secrets import'))).toBe(true)
+      expect(whos(all).some((w) => w.startsWith('flyctl deploy'))).toBe(true)
+    })
+
+    it('when the database URL and the project ids come from Vercel: the pull BEFORE staging sees none of them either', () => {
+      const all = expectContained(run({ ...everySecret, PRODUCTION_DATABASE_URL: undefined, VERCEL_ORG_ID: undefined, VERCEL_PROJECT_ID: undefined }))
+      const pull = whos(all).findIndex((w) => /^npx --yes vercel@\S+ pull /.test(w))
+      expect(pull).toBeGreaterThan(-1)
+      expect(pull).toBeLessThan(whos(all).findIndex((w) => w.startsWith('flyctl secrets import')))
+      expect(whos(all)).toContain('node vercel-project.mjs')
+    })
+
+    it('on a run that keeps the wiring: no Vercel CLI call, and flyctl still gets its token', () => {
+      wired()
+      const all = expectContained(run(everySecret))
+      expect(whos(all).filter((w) => w.startsWith('npx --yes vercel@'))).toEqual([])
+      expect(whos(all).filter((w) => w.startsWith('flyctl ')).length).toBeGreaterThan(2)
+    })
+
+    it('the Vercel CLI’s own command line strips every one, even one a later edit exported again', () => {
+      // The script's prelude up to the VERCEL array, then every name exported
+      // again by hand — the second guard must hold without the first.
+      const body = readFileSync(script, 'utf8')
+      const start = body.indexOf('\nVERCEL=(')
+      expect(start).toBeGreaterThan(0)
+      const end = body.indexOf('\n', start + 1)
+      writeFileSync(
+        join(dir, 'prelude.sh'),
+        `${body.slice(0, end + 1)}for n in "\${WORKER_ONLY[@]}"; do export "$n"; done\n"\${VERCEL[@]}" pull --yes\n`,
+      )
+      writeFileSync(join(state, 'env.log'), '')
+      const r = spawnSync('bash', [join(dir, 'prelude.sh'), 'status'], {
+        cwd: dir,
+        env: { PATH: `${join(dir, 'bin')}:${process.env.PATH ?? ''}`, STUB_STATE: state, ...everySecret },
+        encoding: 'utf8',
+        timeout: 30_000,
+      })
+      expect(r.status, `${r.stdout}${r.stderr}`).toBe(0)
+      const vercel = seen().filter((s) => s.who.startsWith('npx --yes vercel@'))
+      expect(vercel).toHaveLength(1)
+      expect(leaked(vercel[0]!)).toEqual([])
+    })
+
+    it('lists exactly the worker step’s own secrets, so a new one cannot be staged without being stripped', () => {
+      const body = readFileSync(script, 'utf8')
+      const array = /^WORKER_ONLY=\(([^)]*)\)/m.exec(body)?.[1] ?? ''
+      const names = array.replace(/#.*$/gm, '').split(/\s+/).filter(Boolean)
+      expect(new Set(names)).toEqual(new Set(WORKER_ONLY))
+      expect(names).toHaveLength(WORKER_ONLY.length)
+    })
+  })
+
   describe('the schema comes first ([11], [17])', () => {
     it('refuses — before anything is created, staged or deployed — when production lacks the checkout’s migration', () => {
       applied(String(Number(EXPECTED) - 1).padStart(4, '0'))
@@ -411,12 +576,6 @@ describe('the Production workflow', () => {
     .split(/\n {6}- /)
     .slice(1)
   const envOf = (step: string) => [...step.matchAll(/^ {10}([A-Z_]+): /gm)].map((m) => m[1]!)
-  const WORKER_ONLY = [
-    'FLY_API_TOKEN', 'FLY_ORG', 'ANTHROPIC_API_KEY', 'ANTHROPIC_WORKSPACE_ID', 'AGENT_MODEL', 'SECRETS_KEY',
-    'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASSWORD', 'SMTP_SECURE', 'MAIL_FROM',
-    'IMAP_HOST', 'IMAP_PORT', 'IMAP_USER', 'IMAP_PASSWORD', 'IMAP_SECURE', 'IMAP_MAILBOX',
-    'SLACK_WEBHOOK_URL', 'UNSUBSCRIBE_SECRET', 'DOVESOFT_API_KEY', 'DOVESOFT_ENTITY_ID',
-  ]
 
   it('pins every third-party action to a full commit, and flyctl to a version', () => {
     const uses = [...yml.matchAll(/uses: (\S+)/g)].map((m) => m[1]!)
@@ -441,6 +600,11 @@ describe('the Production workflow', () => {
     )
     const worker = withSecrets.filter((s) => s.includes("if: inputs.action == 'worker'") && s.includes('production.sh'))
     expect(worker).toHaveLength(1)
-    for (const name of WORKER_ONLY) expect(envOf(worker[0]!)).toContain(name)
+    // Exactly the other step's credentials plus WORKER_ONLY, which
+    // production.sh strips from everything but flyctl ([6]): a secret added
+    // here and not there would reach the Vercel CLI.
+    expect(new Set(envOf(worker[0]!))).toEqual(
+      new Set([...WORKER_ONLY, 'PRODUCTION_DATABASE_URL', 'VERCEL_TOKEN', 'VERCEL_ORG_ID', 'VERCEL_PROJECT_ID', 'VERCEL_TEAM']),
+    )
   })
 })
