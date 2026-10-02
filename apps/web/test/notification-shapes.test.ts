@@ -118,6 +118,26 @@ describe('the reply hook (POST /api/inbound/email)', () => {
       expect(text).not.toContain('paused')
     })
 
+    /**
+     * Review round 7: a colleague answered our mail and asked to stop. The
+     * opt-out is theirs, so the alarm names their reply, never the contact
+     * it was filed under — whose address is the wrong one to record.
+     */
+    it('names the reply and not the contact for a stop sent by somebody else', () => {
+      const alarm = optOutNotRecordedNotification({ ...notRecorded, fromIsContact: false })
+      expect(alarm).toEqual({
+        kind: 'opt_out_not_recorded',
+        orgId: ORG,
+        touchId: recorded.touchId,
+        contactId: null,
+        path: 'reply',
+        fromIsContact: false,
+      })
+      const text = slackMessage(alarm!, ORIGIN).text
+      expect(text).toContain('sent by somebody other than the contact')
+      expect(text).not.toContain(recorded.contactId)
+    })
+
     it('is not ALSO announced as an ordinary reply', () => {
       expect(replyNotification(notRecorded)).toBeNull()
     })

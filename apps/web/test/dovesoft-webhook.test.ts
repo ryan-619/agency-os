@@ -486,7 +486,7 @@ describe('what an inbound text is answered with', () => {
     const wire = JSON.stringify(slackMessage(r.alarms[0]!, 'https://x.test'))
     expect(wire).toContain(`contact ${CONTACT_B}`)
     expect(wire).toContain('https://x.test/suppressions')
-    expect(wire).not.toContain('Nothing in the app holds')
+    expect(wire).not.toContain('Whose number it was is not known')
     expect(wire).not.toContain('9876543210')
   })
 
@@ -791,7 +791,7 @@ describe('a fault while recording', () => {
     expect(r.alarms).toEqual([{ kind: 'opt_out_not_recorded', orgId: THEIR_ORG, touchId: null, contactId: THEIR_CONTACT, path: 'reply' }])
     const wire = JSON.stringify(slackMessage(r.alarms[0]!, 'https://x.test'))
     expect(wire).toContain('https://x.test/suppressions')
-    expect(wire).not.toContain('Nothing in the app holds')
+    expect(wire).not.toContain('Whose number it was is not known')
     expect(r.w.logs.at(-1)).toEqual({
       level: 'error',
       message: 'OPT-OUT NOT RECORDED — a text that asked to stop could not be recorded; follow up by hand',
@@ -875,7 +875,7 @@ describe('a fault while recording', () => {
         fields: { error: 'DrizzleQueryError', heldIn: 1, orgs: 2, alarm: 'raised' },
       },
     ])
-    expect(JSON.stringify(r.alarms.map((a) => slackMessage(a, 'https://x.test')))).not.toContain('Nothing in the app holds')
+    expect(JSON.stringify(r.alarms.map((a) => slackMessage(a, 'https://x.test')))).not.toContain('Whose number it was is not known')
   })
 
   /** Review round 7, [8]: a redelivery whose finishing faulted is not a STOP nobody recorded. */

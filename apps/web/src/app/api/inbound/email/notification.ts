@@ -61,6 +61,19 @@ export function optOutNotRecordedNotification(
   outcome: InboundOutcome,
 ): Extract<NotificationEvent, { kind: 'opt_out_not_recorded' }> | null {
   if (outcome.matched === 'none' || outcome.duplicate || !outcome.optOutNotRecorded) return null
+  // A colleague's stop filed under the contact our mail went to (review
+  // round 7): the opt-out is the sender's, so the alarm names their reply
+  // and never the contact, whose address is the wrong one to record.
+  if (outcome.fromIsContact === false) {
+    return {
+      kind: 'opt_out_not_recorded',
+      orgId: outcome.orgId,
+      touchId: outcome.touchId,
+      contactId: null,
+      path: 'reply',
+      fromIsContact: false,
+    }
+  }
   return {
     kind: 'opt_out_not_recorded',
     orgId: outcome.orgId,

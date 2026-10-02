@@ -2324,6 +2324,13 @@ export async function recordInboundReply(
    * person to record the opt-out by hand.
    */
   optOutNotRecorded: boolean
+  /**
+   * Whether the reply came from the contact it was filed under (review
+   * round 7): false is a colleague's mail matched by our Message-ID, whose
+   * opt-out is the SENDER's, so a caller's alarm must not name the contact.
+   * Null when it could not be read.
+   */
+  fromIsContact: boolean | null
   deal: string | null
   /** The deterministic kind stored on the inbound touch (§5.5). */
   replyKind: ReplyKind
@@ -2629,7 +2636,7 @@ export async function recordInboundReply(
       await tx.execute(sql`SELECT 1`)
 
       return {
-        touchId, paused, cancelled: cancelled.length, suppressed, optOutNotRecorded, deal, replyKind, companyId, companyDomain,
+        touchId, paused, cancelled: cancelled.length, suppressed, optOutNotRecorded, fromIsContact, deal, replyKind, companyId, companyDomain,
       }
     })
   } catch (err) {
@@ -2693,6 +2700,13 @@ export type InboundOutcome =
        * False on a duplicate: the first delivery raised it.
        */
       readonly optOutNotRecorded: boolean
+      /**
+       * `recordInboundReply`'s `fromIsContact`: false when the reply came
+       * from somebody other than the contact (a colleague answering our
+       * mail), so the alarm names the sender's message and never the
+       * contact. Absent or null reads as the contact's own.
+       */
+      readonly fromIsContact?: boolean | null
     }
   | {
       readonly matched: 'none'
@@ -3133,6 +3147,7 @@ export async function handleInboundEmail(
         companyId: r.companyId,
         companyDomain: r.companyDomain,
         optOutNotRecorded: r.optOutNotRecorded,
+        fromIsContact: r.fromIsContact,
       }
     }
   }
@@ -3164,7 +3179,7 @@ export async function handleInboundEmail(
     matched: 'contact', contactId: only.id, orgId: only.orgId,
     touchId: r.touchId, paused: r.paused, suppressed: r.suppressed, replyKind: r.replyKind,
     duplicate: false, companyId: r.companyId, companyDomain: r.companyDomain,
-    optOutNotRecorded: r.optOutNotRecorded,
+    optOutNotRecorded: r.optOutNotRecorded, fromIsContact: r.fromIsContact,
   }
 }
 
