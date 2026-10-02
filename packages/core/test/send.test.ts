@@ -474,6 +474,9 @@ describe('a paused contact', () => {
       expect(say(cls), cls).not.toMatch(/resum/i)
     }
     expect(say('opt_out_not_recorded')).toMatch(/record the opt-out by hand/i)
+    // The class also holds a shared number's other holders, who may have
+    // sent nothing (review round 8): the words do not say they asked.
+    expect(say('opt_out_not_recorded')).toMatch(/or a text from a number they share did/)
     expect(say('erasure')).toMatch(/complete the erasure/i)
     expect(say('unsubscribed')).toMatch(/unsubscribed/)
     // No class at all reads as the careful generic sentence.
@@ -485,6 +488,12 @@ describe('a paused contact', () => {
     expect(pauseReasonClass('replied 2026-09-15T12:00:00.000Z')).toBe('replied')
     expect(pauseReasonClass('replied on the phone (by sam@agency.test)')).toBe('manual')
     expect(pauseReasonClass('opt-out not recorded: reply 2026-09-15T12:00:00.000Z')).toBe('opt_out_not_recorded')
+    // The hard hold a shared number's unrecorded STOP puts on its other
+    // holders (review round 8, sms.ts): the same class, so Resume refuses it
+    // until a delivery finds the number suppressed and eases it.
+    expect(pauseReasonClass('opt-out not recorded: a text from a number they share, 2026-09-15T12:00:00.000Z (record_failed)')).toBe(
+      'opt_out_not_recorded',
+    )
     expect(pauseReasonClass('erasure requested 2026-09-15; not completed (Error)')).toBe('erasure')
     expect(pauseReasonClass('unsubscribed 2026-09-15T11:00:00.000Z')).toBe('unsubscribed')
     expect(pauseReasonClass('')).toBe('other')

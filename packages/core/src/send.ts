@@ -648,7 +648,11 @@ export function deferUntil(decision: SendDecision, now: Date): Date | null {
  *
  *  - `replied`       `recordInboundReply`: exactly `replied <ISO instant>`
  *  - `opt_out_not_recorded`  an opt-out whose suppression could not be
- *                    written: a reply's, or a one-click unsubscribe's
+ *                    written: a reply's, or a one-click unsubscribe's — and
+ *                    since review round 8 a text's, for the contacts who
+ *                    share the number it came from (`opt-out not recorded:
+ *                    a text from a number they share, …`, sms.ts), which
+ *                    the same opening words make this class
  *  - `manual`        the contacts route: `<why> (by <who>)`
  *  - `erasure`       an erasure that could not finish
  *  - `unsubscribed`  a one-click unsubscribe that was recorded
@@ -700,9 +704,12 @@ export function pausedSentence(pausedFor: PauseReasonClass): string {
         'reads why on /contacts, and an unsubscribe is not something to undo.'
       )
     case 'opt_out_not_recorded':
+      // Or a text from a number they share did (review round 8): its other
+      // holders are paused in this class too, and may have sent nothing.
       return (
-        'This contact asked to stop and the opt-out could not be recorded, so there is no suppression row yet. ' +
-        'Nothing was sent, and approving does not lift a pause. Record the opt-out by hand on /suppressions.'
+        'This contact asked to stop — or a text from a number they share did — and the opt-out could not be recorded, ' +
+        'so there is no suppression row yet. Nothing was sent, and approving does not lift a pause. Record the opt-out ' +
+        'by hand on /suppressions.'
       )
     case 'erasure':
       return (

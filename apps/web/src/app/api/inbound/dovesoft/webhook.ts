@@ -540,7 +540,13 @@ export async function handleDoveSoftDlr(
  *    nobody, announces nothing, and writes only the suppressions still
  *    missing (`finishRedelivered`), raising the alarm again where one fails
  *    again. A 200 here meant no retry ever came, and the code that writes
- *    them on a retry was never reached;
+ *    them on a retry was never reached. Except for a push that carried no
+ *    message id (review round 8): the recorder tells a redelivery by its id
+ *    alone, so its retry would be recorded as a new text — a second inbound
+ *    row, a second reply notice, a second loud path, on every retry while
+ *    the write keeps failing. That is answered 200 after the same alarms,
+ *    with an error line saying the missing suppression is a person's to
+ *    record;
  *  - a number that could not be read: 400, so DoveSoft retries and the
  *    error log repeats until somebody looks — the recorder has already
  *    audited it, and taken the loud path if it was a STOP;
@@ -673,7 +679,22 @@ export async function handleDoveSoftMo(
     const body = { matched: 'contact', duplicate: outcome.duplicate, paused: outcome.paused, suppressed: outcome.suppressed }
     if (outcome.optOutNotRecorded || outcome.optOutNotRecordedIn.length > 0) {
       // A suppression the recorder could not write, somewhere. Refused, so
-      // DoveSoft's retry comes and writes it (review round 7).
+      // DoveSoft's retry comes and writes it (review round 7) — but only
+      // when the push carried a message id (review round 8). The recorder
+      // knows a redelivery by its id alone: without one, the retry is a
+      // new text, recorded again — a second inbound row under the contact,
+      // a second reply notice, a second loud path — every time the write
+      // fails again. So a push with no id is answered 200 once the alarms
+      // have gone, and a person records what is missing.
+      if (mo.providerMessageId === null) {
+        deps.log.error('OPT-OUT NOT RECORDED — a STOP filed under a contact could not be suppressed in every org holding the number, and the push carried no message id, so a redelivery could not be told from a new text: it was answered 200, and what is missing must be recorded by hand', {
+          duplicate: outcome.duplicate,
+          orgs: alarms.length,
+          alarm: 'raised',
+          messageId: false,
+        })
+        return { status: 200, body }
+      }
       deps.log.error('OPT-OUT NOT RECORDED — a STOP filed under a contact could not be suppressed in every org holding the number; it was refused so DoveSoft retries', {
         duplicate: outcome.duplicate,
         orgs: alarms.length,

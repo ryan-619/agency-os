@@ -440,9 +440,10 @@ export async function recordSmsDelivery(
 /**
  * An org where a text's opt-out could not be written as a phone suppression
  * — already audited `contact.opt_out_not_recorded` there, logged, and each
- * of its contacts holding the number paused saying so (`optOutLost`) — and
- * one of those contacts, for the alarm to name: null where no contact there
- * holds the number (the org a number nobody holds is filed under).
+ * of its contacts holding the number paused saying so (`optOutLost`, or
+ * `sharedNumberOptOutLost` for all but the contact it was filed under) —
+ * and one of those contacts, for the alarm to name: null where no contact
+ * there holds the number (the org a number nobody holds is filed under).
  */
 export interface SmsOptOutLost {
   readonly orgId: string
@@ -609,7 +610,13 @@ export type InboundSmsOutcome =
  *    own suppression could not be written, the others in their org take the
  *    loud path with them: the one suppression row would have covered them
  *    too — and so they do when recording the STOP threw, which rolled that
- *    row back with the reply (`SmsOptOutNotRecorded`).
+ *    row back with the reply (`SmsOptOutNotRecorded`). As HOLDERS of the
+ *    number, never as the one who asked (review round 8): paused with a
+ *    reason Resume refuses only while the number is unsuppressed
+ *    (`sharedNumberOptOutReason`), with a row the inbox does not read as
+ *    their own opt-out, and eased to the ordinary hold by the delivery that
+ *    finds the number suppressed in their org — DoveSoft's retry, which the
+ *    caller asks for (`releaseSharedNumberHolds`).
  *  - NONE, or SEVERAL that nothing narrows to one: nothing is filed under a
  *    guessed person — no inbound row is written, and `sms.inbound_unmatched`
  *    is audited (ids and counts, never the number or the words) in every
@@ -732,7 +739,13 @@ export async function recordInboundSms(
     // that threw on every delivery left another org's holder with nothing
     // but a hold a teammate could lift — no suppression, no row, no alarm.
     const elsewhere = orgsOf(others).filter((o) => o !== only.orgId)
-    const recorded = await suppressInEvery(db, log, optOut ? elsewhere : [], holders, e164, now)
+    const recorded = await suppressInEvery(db, log, optOut ? elsewhere : [], holders, e164, now, null)
+    // Where the number is suppressed now, a holder an earlier delivery of
+    // this STOP left held hard — it could not record it — is eased to the
+    // ordinary hold (review round 8): the retry is what records it.
+    const released = optOut
+      ? await releaseSharedNumberHolds(db, log, elsewhere.filter((o) => written(recorded, o)), others, now)
+      : new Map<string, number>()
     // A row in each org whose contacts were held: who, by counts, and that
     // the text was filed under somebody — another contact here, or a contact
     // in another org.
@@ -745,11 +758,12 @@ export async function recordInboundSms(
         paused: hold?.paused ?? 0,
         cancelledQueued: hold?.cancelled ?? 0,
         ...replacedOf(hold),
+        ...releasedOf(released.get(orgId)),
         filedUnder: orgId === only.orgId ? 'another_contact' : 'another_org',
         ...(optOut ? { suppressed } : {}),
       })
     }
-    if (optOut) for (const orgId of elsewhere) await auditHeld(orgId, recorded.get(orgId) === true)
+    if (optOut) for (const orgId of elsewhere) await auditHeld(orgId, written(recorded, orgId))
     let r: Awaited<ReturnType<typeof recordInboundReply>>
     try {
       r = await recordInboundReply(db, {
@@ -776,26 +790,39 @@ export async function recordInboundSms(
       // which would have covered the twins here too: they take the loud
       // path now, as they do when that row alone could not be written —
       // left with the hold, a teammate could lift it and text the number
-      // that said STOP (review round 7). The filed contact is the caller's,
-      // from the error, as from the line `recordInboundReply` just wrote.
-      for (const twin of others.filter((h) => h.orgId === only.orgId)) {
-        await optOutLost(db, log, { orgId: only.orgId, contactId: twin.id, why: 'record_failed', now })
-      }
+      // that said STOP (review round 7). As holders of a number, never as
+      // the one who asked (review round 8): DoveSoft's retry records it and
+      // eases them. The filed contact is the caller's, from the error, as
+      // from the line `recordInboundReply` just wrote.
+      await sharedNumberOptOutLost(db, log, {
+        orgId: only.orgId,
+        contactIds: others.filter((h) => h.orgId === only.orgId).map((h) => h.id),
+        why: 'record_failed',
+        now,
+        touchId: null,
+      })
       throw new SmsOptOutNotRecorded(faultName(err), filingUnder, lostIn(elsewhere, recorded, holders), [...held.keys()])
     }
     // The one suppression row in this org covers every contact here holding
     // the number, so when it could not be written they share the loud path:
-    // paused OVER the hold, audited, logged (review round 6). Only the
+    // paused OVER the hold, audited, logged (review round 6) — as holders
+    // of the number, about the text that asked (review round 8). Only the
     // filed contact's alarm is raised — it names the org's missing row.
     const twins = others.filter((h) => h.orgId === only.orgId)
     if (r.optOutNotRecorded) {
-      for (const twin of twins) {
-        await optOutLost(db, log, { orgId: only.orgId, contactId: twin.id, why: 'suppression_failed', now })
-      }
+      await sharedNumberOptOutLost(db, log, {
+        orgId: only.orgId,
+        contactIds: twins.map((h) => h.id),
+        why: 'suppression_failed',
+        now,
+        touchId: r.touchId,
+      })
+    } else if (optOut && r.suppressed && twins.length > 0) {
+      for (const [orgId, n] of await releaseSharedNumberHolds(db, log, [only.orgId], twins, now)) released.set(orgId, n)
     }
     for (const orgId of orgsOf(others)) {
       if (optOut && orgId !== only.orgId) continue
-      await auditHeld(orgId, orgId === only.orgId ? r.suppressed : recorded.get(orgId) === true)
+      await auditHeld(orgId, orgId === only.orgId ? r.suppressed : written(recorded, orgId))
     }
     return {
       matched: 'contact',
@@ -835,14 +862,21 @@ export async function recordInboundSms(
       // where it could not: never "nothing was written" (review round 7).
       throw new SmsRedeliveryIncomplete(faultName(err), null, null)
     }
-    const recorded = await suppressInEvery(db, log, missing, holders, e164, now)
-    for (const orgId of missing) {
+    const recorded = await suppressInEvery(db, log, missing, holders, e164, now, null)
+    // Every holder the first delivery left held hard, where the number is
+    // suppressed now — written by this retry or by anybody since — is eased
+    // to the ordinary hold (review round 8), and the org's row says so.
+    const present = orgs.filter((o) => !missing.includes(o) || written(recorded, o))
+    const released = await releaseSharedNumberHolds(db, log, present, holders, now)
+    for (const orgId of orgs) {
+      if (!missing.includes(orgId) && !released.has(orgId)) continue
       await auditUnmatched(db, orgId, {
         why,
         optOut,
         contacts: holders.filter((m) => m.orgId === orgId).length,
         redelivered: true,
-        suppressed: recorded.get(orgId) === true,
+        suppressed: present.includes(orgId),
+        ...releasedOf(released.get(orgId)),
         messageHash,
       })
     }
@@ -863,7 +897,13 @@ export async function recordInboundSms(
     await optOutLost(db, log, { orgId: null, contactId: null, why: 'no_org', now })
   }
   /** Per org: whether the opt-out's phone suppression was written there. */
-  const recorded = await suppressInEvery(db, log, optOut ? orgs : [], holders, e164, now)
+  const recorded = await suppressInEvery(db, log, optOut ? orgs : [], holders, e164, now, null)
+  // A holder an earlier, faulted delivery left held hard (no messageHash
+  // row was written then, so this is not a redelivery to the check above)
+  // is eased where the number is suppressed now (review round 8).
+  const released = optOut
+    ? await releaseSharedNumberHolds(db, log, orgs.filter((o) => written(recorded, o)), holders, now)
+    : new Map<string, number>()
   for (const orgId of orgs) {
     const hold = held.get(orgId)
     await auditUnmatched(db, orgId, {
@@ -873,12 +913,13 @@ export async function recordInboundSms(
       // Counts only: how many of this org's holders were paused by this
       // text, and how many of their messages it cancelled.
       ...(why === 'ambiguous' ? { paused: hold?.paused ?? 0, cancelledQueued: hold?.cancelled ?? 0, ...replacedOf(hold) } : {}),
-      ...(optOut ? { suppressed: recorded.get(orgId) === true } : {}),
+      ...releasedOf(released.get(orgId)),
+      ...(optOut ? { suppressed: written(recorded, orgId) } : {}),
       // The redelivery check above reads it: a hash, never the id itself.
       ...(messageHash ? { messageHash } : {}),
     })
   }
-  const everywhere = orgs.length > 0 && orgs.every((o) => recorded.get(o) === true)
+  const everywhere = orgs.length > 0 && orgs.every((o) => written(recorded, o))
   return none(why, {
     suppressed: optOut && everywhere,
     optOutNotRecorded: optOut && !everywhere,
@@ -961,6 +1002,110 @@ export function sharedNumberHoldReason(now: Date): string {
   return `held: a text came from a number another contact also holds, ${now.toISOString()}`
 }
 
+/**
+ * The pause a contact gets who HOLDS a number whose STOP could not be
+ * recorded in their org, and is not the contact the text was filed under
+ * (review round 8): a twin of the filed contact, another org's holder, or
+ * any holder of a text filed under nobody. `pauseReasonClass` reads it as
+ * `opt_out_not_recorded` — by its opening words — so Resume refuses it while
+ * it stands: lifted, a teammate could text the number that said STOP.
+ *
+ * It is a reason of its own because it does not stand for good, where the
+ * asker's (`opt-out not recorded: reply …`) does. They may have sent
+ * nothing, and the fault that left the number unsuppressed is one DoveSoft's
+ * retry recovers from: once the number's phone suppression exists in their
+ * org, the next delivery through `recordInboundSms` — that retry, or any
+ * later text from the number — replaces exactly this shape with the ordinary
+ * hold (`releaseSharedNumberHolds`), which Resume lifts. Round 8 found them
+ * paused with the asker's own reason and named as the subject of the audit
+ * row, which /inbox reads however old: locked out on every channel, for
+ * good, by a fault the retry had already recovered from.
+ */
+export function sharedNumberOptOutReason(now: Date, why: string): string {
+  return `opt-out not recorded: a text from a number they share, ${now.toISOString()} (${why})`
+}
+
+const SHARED_NUMBER_OPT_OUT = /^opt-out not recorded: a text from a number they share, \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z \([^()]*\)$/
+
+/** Is this pause `sharedNumberOptOutReason`'s, and nothing else's? Matched in full, as the reply's is. */
+export function isSharedNumberOptOutPause(reason: string | null | undefined): boolean {
+  return reason !== null && reason !== undefined && SHARED_NUMBER_OPT_OUT.test(reason)
+}
+
+/**
+ * Ease the holders a STOP left held hard (`sharedNumberOptOutReason`), in
+ * every one of these orgs — each one where the number's phone suppression
+ * exists now — to the ordinary hold, `sharedNumberHoldReason`, which Resume
+ * lifts (review round 8). Per org: how many were eased, where any were.
+ *
+ * Only that exact shape is replaced, read under the rows' locks and named in
+ * the UPDATE (`pauseContact`'s `replacing`): a teammate's pause, an
+ * unsubscribe's, an asker's own unrecorded opt-out, or a hold that is
+ * already the ordinary one stand. Never the contact the text was filed
+ * under: callers leave them out of `holders`, because their pause is their
+ * own reply's.
+ *
+ * Best-effort, one transaction per org: the STOP is recorded by now, and a
+ * caller that threw here would tell DoveSoft — and a person — that it was
+ * not. A fault leaves that org's holders held hard, the conservative
+ * direction, and an error line says so; the next delivery tries again.
+ */
+async function releaseSharedNumberHolds(
+  db: AgencyDb,
+  log: InboundLog,
+  orgs: readonly string[],
+  holders: readonly Holder[],
+  now: Date,
+): Promise<Map<string, number>> {
+  const released = new Map<string, number>()
+  for (const orgId of orgs) {
+    const contactIds = holders.filter((h) => h.orgId === orgId).map((h) => h.id)
+    if (contactIds.length === 0) continue
+    try {
+      const n = await releaseEach(db, orgId, contactIds, now)
+      if (n > 0) released.set(orgId, n)
+    } catch (err) {
+      log.error('contacts held while a shared number’s opt-out was not recorded could not be eased to an ordinary hold; they stay held', {
+        channel: 'sms',
+        orgId,
+        contactIds,
+        error: faultName(err),
+      })
+    }
+  }
+  return released
+}
+
+/**
+ * `releaseSharedNumberHolds` in one org: the holders locked `FOR NO KEY
+ * UPDATE`, by id — the lock every writer of `paused_reason` conflicts with,
+ * and not one an FK check's key-share waits on (see `holdEach`) — and each
+ * whose reason is exactly the hard hold's replaced. Contacts only: no
+ * message of theirs is touched, so the one lock order holds trivially.
+ */
+async function releaseEach(db: AgencyDb, orgId: string, contactIds: readonly string[], now: Date): Promise<number> {
+  return db.transaction(async (transaction) => {
+    const tx = transaction as unknown as AgencyDb
+    const current = await tx
+      .select({ id: schema.contacts.id, pausedAt: schema.contacts.pausedAt, pausedReason: schema.contacts.pausedReason })
+      .from(schema.contacts)
+      .where(and(eq(schema.contacts.orgId, orgId), inArray(schema.contacts.id, [...contactIds])))
+      .orderBy(schema.contacts.id)
+      .for('no key update')
+    let n = 0
+    for (const c of current) {
+      if (c.pausedAt === null || c.pausedReason === null || !isSharedNumberOptOutPause(c.pausedReason)) continue
+      if (await pauseContact(tx, orgId, c.id, sharedNumberHoldReason(now), now, { replacing: c.pausedReason })) n++
+    }
+    return n
+  })
+}
+
+/** The hold row's word on the hard holds it eased (review round 8): a count, never a reason. */
+function releasedOf(n: number | undefined): Record<string, unknown> {
+  return n !== undefined && n > 0 ? { released: n } : {}
+}
+
 /** What `holdEach` did in one org: counts. */
 interface Held {
   readonly paused: number
@@ -1000,10 +1145,11 @@ async function holdEachOrg(
  * anyone could lift while nothing anywhere recorded that their number had
  * said STOP. No suppression has been written yet (they come after the
  * holds), so EVERY holder takes the loud path — paused saying the opt-out
- * was not recorded, audited, logged — and the fault is thrown as
- * `SmsOptOutNotRecorded`: the contact it was being filed under, if any,
- * for the caller to take the same path for and alarm; every other org, for
- * an alarm each; and which orgs' holds had committed.
+ * was not recorded, audited, logged — as holders of the number, never as
+ * the one who asked (`sharedNumberOptOutLost`, review round 8), and the
+ * fault is thrown as `SmsOptOutNotRecorded`: the contact it was being filed
+ * under, if any, for the caller to take the asker's path for and alarm;
+ * every other org, for an alarm each; and which orgs' holds had committed.
  */
 async function holdOrSayWhy(
   db: AgencyDb,
@@ -1017,7 +1163,15 @@ async function holdOrSayWhy(
     return await holdEachOrg(db, holders, now, held)
   } catch (err) {
     if (!stop) throw err
-    for (const h of holders) await optOutLost(db, log, { orgId: h.orgId, contactId: h.id, why: 'record_failed', now })
+    for (const orgId of orgsOf(holders)) {
+      await sharedNumberOptOutLost(db, log, {
+        orgId,
+        contactIds: holders.filter((h) => h.orgId === orgId).map((h) => h.id),
+        why: 'record_failed',
+        now,
+        touchId: null,
+      })
+    }
     const filedIn = stop.filingUnder?.orgId ?? null
     throw new SmsOptOutNotRecorded(
       faultName(err),
@@ -1044,6 +1198,16 @@ async function holdOrSayWhy(
  * left with it was resumed by answering an old email while a person was
  * still working out whose this text was. The reasons are read under the
  * rows' locks, and the one replaced is named EXACTLY in the UPDATE.
+ *
+ * The lock is `FOR NO KEY UPDATE` (review round 8), never `FOR UPDATE`.
+ * Every writer of `paused_reason` is an UPDATE of non-key columns, which
+ * takes that same lock, so the reasons are still read under one nobody can
+ * write past. `FOR UPDATE` is the one row lock that also conflicts with the
+ * `FOR KEY SHARE` a foreign-key check takes: `approveDraft` re-pointing an
+ * email draft from one holder to another holds the draft and waits on the
+ * new holder's key-share while this hold, holding that holder, waits on
+ * the draft to cancel it — a deadlock on a real Postgres (40P01), and for a
+ * STOP the loud path for every holder.
  */
 async function holdEach(
   db: AgencyDb,
@@ -1060,7 +1224,7 @@ async function holdEach(
       .from(schema.contacts)
       .where(and(eq(schema.contacts.orgId, orgId), inArray(schema.contacts.id, [...contactIds])))
       .orderBy(schema.contacts.id)
-      .for('update')
+      .for('no key update')
     const replyPause = new Map(
       current
         .filter((c) => c.pausedAt !== null && pauseReasonClass(c.pausedReason) === 'replied')
@@ -1092,10 +1256,23 @@ async function holdEach(
   })
 }
 
+/** What became of a phone suppression in one org: there now — written, or found already there — or not, and the class of why. */
+type PhoneSuppressed = { readonly ok: true; readonly alreadyPresent: boolean } | { readonly ok: false; readonly why: string }
+
+/** Whether the number's phone suppression is in this org now: written by this call, or found there. */
+function written(recorded: ReadonlyMap<string, PhoneSuppressed>, orgId: string): boolean {
+  return recorded.get(orgId)?.ok === true
+}
+
 /**
  * The phone suppression in each of these orgs, and the loud path where it
  * cannot be written — for every holder of the number in that org, or for
- * the org alone when none is. Per org: whether it was written.
+ * the org alone when none is. Per org: what became of it.
+ *
+ * `filed` is the contact the text was filed under, when there is one: in
+ * their org they take the asker's loud path (`optOutLost`), and everybody
+ * else holding the number takes the holders' (`sharedNumberOptOutLost`,
+ * review round 8), about the filed text when it is stored.
  */
 async function suppressInEvery(
   db: AgencyDb,
@@ -1104,23 +1281,35 @@ async function suppressInEvery(
   holders: readonly Holder[],
   e164: string,
   now: Date,
-): Promise<Map<string, boolean>> {
-  const recorded = new Map<string, boolean>()
+  filed: { readonly orgId: string; readonly contactId: string; readonly touchId: string } | null,
+): Promise<Map<string, PhoneSuppressed>> {
+  const recorded = new Map<string, PhoneSuppressed>()
   for (const orgId of orgs) {
     const added = await suppressPhone(db, orgId, e164, now)
-    recorded.set(orgId, added.ok)
+    recorded.set(orgId, added)
     if (added.ok) continue
     const inOrg = holders.filter((m) => m.orgId === orgId)
-    if (inOrg.length === 0) await optOutLost(db, log, { orgId, contactId: null, why: added.why, now })
-    for (const m of inOrg) await optOutLost(db, log, { orgId, contactId: m.id, why: added.why, now })
+    if (inOrg.length === 0) {
+      await optOutLost(db, log, { orgId, contactId: null, why: added.why, now })
+      continue
+    }
+    const asker = filed && filed.orgId === orgId ? inOrg.find((m) => m.id === filed.contactId) : undefined
+    if (asker) await optOutLost(db, log, { orgId, contactId: asker.id, why: added.why, now })
+    await sharedNumberOptOutLost(db, log, {
+      orgId,
+      contactIds: inOrg.filter((m) => m !== asker).map((m) => m.id),
+      why: added.why,
+      now,
+      touchId: asker ? filed!.touchId : null,
+    })
   }
   return recorded
 }
 
 /** The orgs among these where the suppression was not written, each with one of its holders for the alarm. */
-function lostIn(orgs: readonly string[], recorded: ReadonlyMap<string, boolean>, holders: readonly Holder[]): SmsOptOutLost[] {
+function lostIn(orgs: readonly string[], recorded: ReadonlyMap<string, PhoneSuppressed>, holders: readonly Holder[]): SmsOptOutLost[] {
   return orgs
-    .filter((orgId) => recorded.get(orgId) !== true)
+    .filter((orgId) => !written(recorded, orgId))
     .map((orgId) => ({ orgId, contactId: holders.find((h) => h.orgId === orgId)?.id ?? null }))
 }
 
@@ -1149,9 +1338,14 @@ async function unsuppressedIn(db: AgencyDb, orgs: readonly string[], e164: strin
  * could not make — it took the loud path for it, and the caller answered
  * 500 so that this retry would come. Nobody is held or paused again, and
  * the stored row is not touched; a suppression already present is not
- * written twice, and neither is its audit row. Where one fails again, the
- * loud path runs again and the outcome says so, as the first delivery's
- * did.
+ * written twice, and neither is its audit row — nor is one somebody else
+ * wrote between the read and the insert (review round 8: it was logged as
+ * System's add, beside the person's). Where one fails again, the loud path
+ * runs again and the outcome says so, as the first delivery's did.
+ *
+ * Wherever the number is suppressed now, a holder the first delivery left
+ * held hard (`sharedNumberOptOutReason`) is eased to the ordinary hold
+ * (review round 8), and the org's `sms.inbound_unmatched` row says so.
  *
  * A fault while finishing is `SmsRedeliveryIncomplete`, never the fault
  * itself: the text was recorded the first time, so a caller must not say
@@ -1171,30 +1365,50 @@ async function finishRedelivered(
     // their record says now: their org is owed the suppression, and their
     // name is the one its loud path takes.
     const holders = found.some((h) => h.id === dup.contactId) ? found : [{ id: dup.contactId, orgId: dup.orgId }, ...found]
-    const missing = await unsuppressedIn(db, orgsOf(holders), e164)
-    if (missing.length === 0) return { ...dup, suppressed: true }
-    const recorded = await suppressInEvery(db, log, missing, holders, e164, now)
-    for (const orgId of missing) {
+    const orgs = orgsOf(holders)
+    const missing = await unsuppressedIn(db, orgs, e164)
+    const recorded = await suppressInEvery(db, log, missing, holders, e164, now, {
+      orgId: dup.orgId, contactId: dup.contactId, touchId: dup.touchId,
+    })
+    const present = orgs.filter((o) => !missing.includes(o) || written(recorded, o))
+    const others = holders.filter((h) => h.id !== dup.contactId)
+    const released = await releaseSharedNumberHolds(db, log, present, others, now)
+    for (const orgId of orgs) {
+      const wrote = missing.includes(orgId)
+      if (!wrote && !released.has(orgId)) continue
       if (orgId === dup.orgId) {
         // The filed org's own: the row a person reads it was written by,
-        // beside the `contact.opt_out_not_recorded` the first delivery left.
-        if (recorded.get(orgId) === true) {
+        // beside the `contact.opt_out_not_recorded` the first delivery left —
+        // only when THIS insert wrote it.
+        const own = recorded.get(orgId)
+        if (own?.ok && !own.alreadyPresent) {
           await appendAudit(db, auditSuppressionAdded({
             orgId, actor: 'system', alreadyPresent: false, kind: 'phone', value: e164, reason: stopReason(now),
           })).catch(() => {})
         }
+        if (!released.has(orgId)) continue
+        await auditUnmatched(db, orgId, {
+          why: 'ambiguous',
+          optOut: true,
+          contacts: others.filter((m) => m.orgId === orgId).length,
+          ...releasedOf(released.get(orgId)),
+          filedUnder: 'another_contact',
+          redelivered: true,
+          suppressed: true,
+        })
         continue
       }
       await auditUnmatched(db, orgId, {
         why: 'ambiguous',
         optOut: true,
         contacts: holders.filter((m) => m.orgId === orgId).length,
+        ...releasedOf(released.get(orgId)),
         filedUnder: 'another_org',
         redelivered: true,
-        suppressed: recorded.get(orgId) === true,
+        suppressed: present.includes(orgId),
       })
     }
-    const own = !missing.includes(dup.orgId) || recorded.get(dup.orgId) === true
+    const own = !missing.includes(dup.orgId) || written(recorded, dup.orgId)
     return {
       ...dup,
       suppressed: own,
@@ -1296,7 +1510,7 @@ async function suppressPhone(
   orgId: string,
   phone: string,
   now: Date,
-): Promise<{ ok: true } | { ok: false; why: string }> {
+): Promise<PhoneSuppressed> {
   try {
     const added = await addSuppression(db, {
       orgId,
@@ -1305,19 +1519,25 @@ async function suppressPhone(
       reason: stopReason(now),
       source: 'reply',
     })
-    return added.ok ? { ok: true } : { ok: false, why: 'unparseable_number' }
+    // Whether THIS insert wrote it, or found it there — a person recording
+    // it by hand, or a parallel delivery, between a caller's read and this
+    // insert (review round 8): only the first is this system's to log.
+    return added.ok ? { ok: true, alreadyPresent: added.alreadyPresent } : { ok: false, why: 'unparseable_number' }
   } catch (err) {
     return { ok: false, why: err instanceof Error ? err.name : 'UnknownError' }
   }
 }
 
 /**
- * §2.1's Phase 4 obligation for a text nobody could file under one person:
- * the same loud path `recordInboundReply` takes for a reply it could file —
- * the contact (when there is one) paused OVER any earlier reason with
- * `opt-out not recorded: reply <ISO> (<why>)`, a `contact.opt_out_not_recorded`
- * audit row the compliance page and the digest count, and an `OPT-OUT NOT
- * RECORDED` line at error. Ids and a reason class only (§2.3).
+ * §2.1's Phase 4 obligation for the one who ASKED — the contact a STOP was
+ * filed under, or nobody, for a number no contact holds or one that could
+ * not be read: the same loud path `recordInboundReply` takes for a reply it
+ * could file — the contact (when there is one) paused OVER any earlier
+ * reason with `opt-out not recorded: reply <ISO> (<why>)`, a
+ * `contact.opt_out_not_recorded` audit row the compliance page and the
+ * digest count, and an `OPT-OUT NOT RECORDED` line at error. Ids and a
+ * reason class only (§2.3). Anybody else holding the number takes
+ * `sharedNumberOptOutLost` instead.
  */
 async function optOutLost(
   db: AgencyDb,
@@ -1351,6 +1571,73 @@ async function optOutLost(
     channel: 'sms',
     orgId: args.orgId,
     contactId: args.contactId,
+    why: args.why,
+  })
+}
+
+/**
+ * The loud path for the contacts in one org who HOLD a number whose STOP
+ * could not be recorded there, other than the contact it was filed under
+ * (review round 8): each paused OVER any earlier reason — a hold anyone
+ * could lift would let a teammate text the number that said STOP — with
+ * `sharedNumberOptOutReason`, which Resume refuses until the number is
+ * suppressed and a delivery eases it (`releaseSharedNumberHolds`); ONE
+ * `contact.opt_out_not_recorded` row for the org, which the compliance page
+ * and the digest count; and an `OPT-OUT NOT RECORDED` line.
+ *
+ * The row never names them as its subject or as `detail.contactId`: the
+ * inbox reads a row that does as THAT contact's own opt-out nobody
+ * recorded, however old, and refused to answer their own email for good
+ * once it was. It is about the text that asked when one is stored in this
+ * org (`touchId`, the subject the compliance page resolves the company
+ * through), and otherwise about nothing; `sharedNumber` marks the shape
+ * /audit words, and `holders` lists them by id, for a person to find.
+ */
+async function sharedNumberOptOutLost(
+  db: AgencyDb,
+  log: InboundLog,
+  args: {
+    readonly orgId: string
+    readonly contactIds: readonly string[]
+    readonly why: string
+    readonly now: Date
+    /** The filed text, when it is stored in this org. */
+    readonly touchId: string | null
+  },
+): Promise<void> {
+  if (args.contactIds.length === 0) return
+  let paused = 0
+  for (const contactId of args.contactIds) {
+    try {
+      if (await pauseContactOverriding(db, args.orgId, contactId, sharedNumberOptOutReason(args.now, args.why), args.now)) paused++
+    } catch (err) {
+      log.error('an opt-out that was not recorded could not pause the contact', {
+        contactId,
+        orgId: args.orgId,
+        error: faultName(err),
+      })
+    }
+  }
+  await appendAudit(db, {
+    orgId: args.orgId,
+    actor: 'system',
+    action: 'contact.opt_out_not_recorded',
+    subjectType: args.touchId ? 'touch' : null,
+    subjectId: args.touchId,
+    detail: {
+      channel: 'sms',
+      why: args.why,
+      sharedNumber: true,
+      contacts: args.contactIds.length,
+      paused,
+      holders: [...args.contactIds],
+    },
+  }).catch(() => {})
+  log.error('OPT-OUT NOT RECORDED — follow up by hand', {
+    channel: 'sms',
+    orgId: args.orgId,
+    contactIds: [...args.contactIds],
+    sharedNumber: true,
     why: args.why,
   })
 }
