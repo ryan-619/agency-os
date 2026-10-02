@@ -20,7 +20,8 @@ import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
-  handleInboundEmail, pauseContactOverriding, pauseReasonClass, previewSend, schema, type AgencyDb,
+  contactResumeByHand, handleInboundEmail, pauseContact, pauseContactOverriding, pauseReasonClass,
+  previewSend, replyQueueDraft, schema, type AgencyDb,
 } from '@agency/db/queries'
 import { migratedDb, type TestDb } from '../../../packages/db/test/helpers.js'
 import { failOnce } from '../../../packages/db/test/fault-db.js'
@@ -50,10 +51,14 @@ describe('POST /api/inbound/email — a fault while recording', () => {
       order.push('audit')
       audits.push(entry)
     },
-    // The route's own wiring: the real writer, on the same database.
+    // The route's own wiring: the real writers, on the same database.
     pause: async (orgId, contactId, reason, now) => {
       order.push('pause')
       return pauseContactOverriding(db, orgId, contactId, reason, now)
+    },
+    hold: async (orgId, contactId, reason, now) => {
+      order.push('hold')
+      return pauseContact(db, orgId, contactId, reason, now)
     },
     alarm: async (event) => {
       order.push('alarm')
@@ -99,11 +104,11 @@ describe('POST /api/inbound/email — a fault while recording', () => {
   })
 
   /** The route's call, with its log, and the answer it gives when the call throws. */
-  const deliver = async (text: string, references: readonly string[] = [OUR_ID]) => {
+  const deliver = async (text: string, references: readonly string[] = [OUR_ID], from = ADDRESS) => {
     const recorder = recorderFor()
     try {
       await handleInboundEmail(db, {
-        from: ADDRESS, subject: 'Re: A gap on your security page', text, messageId: '<reply-1@rentman.io>',
+        from, subject: 'Re: A gap on your security page', text, messageId: '<reply-1@rentman.io>',
         references, now: NOON, log: recorder,
       })
     } catch (err) {
@@ -132,7 +137,7 @@ describe('POST /api/inbound/email — a fault while recording', () => {
     expect(alarms).toEqual([{ kind: 'opt_out_not_recorded', orgId, touchId: sentId, contactId, path: 'reply' }])
     expect(lines.at(-1)).toEqual({
       message: expect.stringContaining('OPT-OUT NOT RECORDED — an email that asked to stop could not be recorded'),
-      fields: { error: 'Error', orgId, contactId, paused: true, audited: true, alarm: 'raised' },
+      fields: { error: 'Error', orgId, contactId, fromIsContact: true, paused: true, audited: true, alarm: 'raised' },
     })
     expect(order).toEqual(['pause', 'audit', 'alarm'])
     for (const said of [JSON.stringify(lines), JSON.stringify(audits), JSON.stringify(slackMessage(alarms[0]!, 'https://x.test'))]) {
@@ -175,6 +180,120 @@ describe('POST /api/inbound/email — a fault while recording', () => {
     expect(outcome).toMatchObject({ matched: 'message', suppressed: true })
     const [after] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, contactId))
     expect(pauseReasonClass(after!.pausedReason)).toBe('opt_out_not_recorded')
+  })
+
+  /**
+   * Review round 7, [7] — the reviewer's probe. Priya's colleague replies
+   * all to our message asking to be taken off; the reply is filed under
+   * Priya (it References our message to her), and its recording throws
+   * once. The fault path held PRIYA as an opt-out nobody recorded: a pause
+   * no Resume lifts and a row /inbox reads however old. The retry then
+   * suppressed the colleague — and Priya, who never asked to stop, stayed
+   * locked out of every campaign and the inbox for good.
+   */
+  describe('a stop from somebody else in the thread', () => {
+    const COLLEAGUE = 'sam@rentman.io'
+    const later = new Date(NOON.getTime() + 20 * 86_400_000)
+    const owner = async () => {
+      const [u] = await db.insert(schema.users).values({ orgId, email: 'owner@agency.test', role: 'owner' }).returning({ id: schema.users.id })
+      return u!.id
+    }
+
+    it('holds the contact only as a reply, audits the message the sender answered, and alarms naming no contact', async () => {
+      await failOnce(test.pg, { table: 'touches', event: 'INSERT', when: "NEW.direction = 'in'" })
+      const { answer } = await deliver('Please remove me from your list.', [OUR_ID], COLLEAGUE)
+      expect(answer).toEqual({ status: 500, body: { error: 'opt-out not recorded', retry: true } })
+      expect(order).toEqual(['hold', 'audit', 'alarm'])
+
+      const [c] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, contactId))
+      expect(c!.pausedReason).toBe(`replied ${NOON.toISOString()}`)
+      expect(pauseReasonClass(c!.pausedReason)).toBe('replied')
+      expect(audits).toEqual([
+        {
+          orgId, actor: 'system', action: 'contact.opt_out_not_recorded', subjectType: 'touch', subjectId: sentId,
+          detail: { channel: 'email', why: 'record_failed', fromIsContact: false, filedUnder: contactId },
+        },
+      ])
+      expect(alarms).toEqual([
+        { kind: 'opt_out_not_recorded', orgId, touchId: sentId, contactId: null, path: 'reply', fromIsContact: false },
+      ])
+      expect(lines.at(-1)!.fields).toMatchObject({ orgId, contactId, fromIsContact: false, paused: true, audited: true })
+      // The Slack message says whose address to record, and quotes none.
+      const text = slackMessage(alarms[0]!, 'https://x.test').text
+      expect(text).toContain('sent by somebody other than the contact')
+      expect(text).not.toContain(contactId)
+      for (const said of [JSON.stringify(lines), JSON.stringify(audits), text]) expect(said).not.toContain(COLLEAGUE)
+    })
+
+    it('leaves the contact resumable and their own later reply answerable once the retry records it', async () => {
+      await failOnce(test.pg, { table: 'touches', event: 'INSERT', when: "NEW.direction = 'in'" })
+      await deliver('Please remove me from your list.', [OUR_ID], COLLEAGUE)
+      // The provider's retry records the reply and suppresses the colleague.
+      const retry = await handleInboundEmail(db, {
+        from: COLLEAGUE, subject: 'Re: A gap on your security page', text: 'Please remove me from your list.',
+        messageId: '<reply-1@rentman.io>', references: [OUR_ID], now: NOON, log: recorderFor(),
+      })
+      expect(retry).toMatchObject({ matched: 'message', contactId, suppressed: true, replyKind: 'opted_out' })
+      expect((await db.select().from(schema.suppressions)).map((r) => r.value)).toEqual([COLLEAGUE])
+
+      // Weeks later Priya herself writes back, and a teammate answers.
+      const own = await handleInboundEmail(db, {
+        from: ADDRESS, subject: 'Re: A gap on your security page', text: 'Sorry for the delay — yes, let us talk next week.',
+        messageId: '<reply-2@rentman.io>', references: [OUR_ID], now: later, log: recorderFor(),
+      })
+      if (own.matched === 'none') throw new Error(own.why)
+      // Our message here went out with no campaign; an answer names one.
+      const [campaign] = await db
+        .insert(schema.campaigns)
+        .values({ orgId, name: 'Replies', channel: 'email', status: 'active' })
+        .returning({ id: schema.campaigns.id })
+      const answered = await replyQueueDraft(db, {
+        orgId, inboundTouchId: own.touchId, campaignId: campaign!.id, subject: 'Re: A gap on your security page',
+        body: 'Great — Tuesday?', actor: await owner(), now: new Date(later.getTime() + 60_000),
+      })
+      expect(answered, JSON.stringify(answered)).toMatchObject({ ok: true })
+    })
+
+    it('leaves the contact resumable by hand on /contacts once the retry records it', async () => {
+      await failOnce(test.pg, { table: 'touches', event: 'INSERT', when: "NEW.direction = 'in'" })
+      await deliver('Please remove me from your list.', [OUR_ID], COLLEAGUE)
+      await handleInboundEmail(db, {
+        from: COLLEAGUE, subject: 'Re: A gap on your security page', text: 'Please remove me from your list.',
+        messageId: '<reply-1@rentman.io>', references: [OUR_ID], now: NOON, log: recorderFor(),
+      })
+      const [c] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, contactId))
+      expect(pauseReasonClass(c!.pausedReason)).toBe('replied')
+      const resumed = await contactResumeByHand(db, {
+        orgId, contact: { id: contactId }, expectedReason: c!.pausedReason, actor: await owner(),
+      })
+      expect(resumed).toEqual({ ok: true })
+    })
+
+    it('keeps a stronger pause the contact already had', async () => {
+      await db.update(schema.contacts).set({ pausedAt: NOON, pausedReason: 'unsubscribed: one-click 2026-09-01' })
+        .where(eq(schema.contacts.id, contactId))
+      await failOnce(test.pg, { table: 'touches', event: 'INSERT', when: "NEW.direction = 'in'" })
+      await deliver('Please remove me from your list.', [OUR_ID], COLLEAGUE)
+      const [c] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, contactId))
+      expect(c!.pausedReason).toBe('unsubscribed: one-click 2026-09-01')
+      expect(lines.at(-1)!.fields).toMatchObject({ fromIsContact: false, paused: false })
+    })
+
+    /** The control: the contact's OWN stop, recorded on the retry — the lockout stands, and that one is right. */
+    it('still holds the contact as an opt-out nobody recorded when the stop was their own', async () => {
+      await failOnce(test.pg, { table: 'touches', event: 'INSERT', when: "NEW.direction = 'in'" })
+      await deliver('Please remove me from your list.')
+      await handleInboundEmail(db, {
+        from: ADDRESS, subject: 'Re: A gap on your security page', text: 'Please remove me from your list.',
+        messageId: '<reply-1@rentman.io>', references: [OUR_ID], now: NOON, log: recorderFor(),
+      })
+      const [c] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, contactId))
+      expect(pauseReasonClass(c!.pausedReason)).toBe('opt_out_not_recorded')
+      const resumed = await contactResumeByHand(db, {
+        orgId, contact: { id: contactId }, expectedReason: c!.pausedReason, actor: await owner(),
+      })
+      expect(resumed).toMatchObject({ ok: false, reason: 'opt_out_not_recorded' })
+    })
   })
 
   it('still audits and alarms when the pause itself cannot be written, and says so', async () => {
@@ -252,7 +371,7 @@ describe('POST /api/inbound/email — a fault while recording', () => {
     recorder.error('something else', { orgId, contactId })
     expect(recorder.rolledBack()).toBeNull()
     recorder.error('OPT-OUT NOT RECORDED — the reply was rolled back', { orgId, contactId, inReplyTo: null, why: 'Error' })
-    expect(recorder.rolledBack()).toEqual({ orgId, contactId, inReplyTo: null })
+    expect(recorder.rolledBack()).toEqual({ orgId, contactId, inReplyTo: null, fromIsContact: true })
     expect(lines.map((l) => l.message)).toEqual(['something else', 'OPT-OUT NOT RECORDED — the reply was rolled back'])
   })
 })
@@ -274,6 +393,13 @@ describe('the route, as it wires it (read from the source)', () => {
   it('wires the pause to the real writer, on the same database', () => {
     expect(route).toMatch(
       /pause: \(orgId, contactId, reason, now\) => pauseContactOverriding\(getDb\(\) as unknown as AgencyDb, orgId, contactId, reason, now\)/,
+    )
+  })
+
+  /** A colleague's stop holds the contact as a reply would: the writer that keeps a pause already there. */
+  it('wires the hold to pauseContact, on the same database', () => {
+    expect(route).toMatch(
+      /hold: \(orgId, contactId, reason, now\) => pauseContact\(getDb\(\) as unknown as AgencyDb, orgId, contactId, reason, now\)/,
     )
   })
 

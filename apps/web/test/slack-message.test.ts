@@ -236,7 +236,9 @@ describe('slackMessage', () => {
   it('links an opt-out alarm with no touch to /compliance, and names no number', () => {
     const text = slackMessage(EVENTS[9]!, ORIGIN).text
     expect(text).toMatch(/^OPT-OUT NOT RECORDED\./)
-    expect(text).toContain('no message on file · contact unknown')
+    expect(text).toContain('no message or contact named')
+    // It says what is known (review round 7, [8]): check first, record if missing.
+    expect(text).toContain('it may not be on the suppression list')
     expect(text.split('\n').at(-1)).toBe(`${ORIGIN}/compliance`)
     expect(text).not.toContain('/suppressions')
     expect(text).not.toContain('touch ')

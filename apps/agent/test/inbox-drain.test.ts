@@ -25,7 +25,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { and, eq } from 'drizzle-orm'
 import { pauseReasonClass, type SlackOptOutNotRecordedEvent } from '@agency/core'
-import { schema, type AgencyDb } from '@agency/db'
+import { contactResumeByHand, schema, type AgencyDb } from '@agency/db'
 import { migratedDb, type TestDb } from '../../../packages/db/test/helpers.js'
 import { failOnce, throughTransactions } from '../../../packages/db/test/fault-db.js'
 import {
@@ -288,9 +288,9 @@ describe('startInbox', () => {
   let sentId: string
 
   const raw = (headers: string, body: string): string => `${headers.trim()}\r\n\r\n${body}`
-  const reply = (body: string, id: string): string =>
+  const reply = (body: string, id: string, from = 'Priya <priya@rentman.io>'): string =>
     raw(
-      `From: Priya <priya@rentman.io>
+      `From: ${from}
 To: outreach@agency.test
 Subject: Re: A gap on your security page
 Message-ID: ${id}
@@ -434,7 +434,7 @@ In-Reply-To: <sent-1@agency.test>`,
       {
         level: 'error',
         msg: expect.stringContaining('could not be recorded'),
-        uid: 9, error: 'DatabaseError', orgId, contactId, paused: true, audited: true, alarm: 'raised',
+        uid: 9, error: 'DatabaseError', orgId, contactId, fromIsContact: true, paused: true, audited: true, alarm: 'raised',
       },
     ])
     expect(out.indexOf(loud[0]!)).toBeLessThan(out.findIndex((l) => l.msg === 'could not record an inbound message; left unseen to retry'))
@@ -460,6 +460,61 @@ In-Reply-To: <sent-1@agency.test>`,
       [false, 'raised'],
       [true, 'already_raised'],
     ])
+  })
+
+  /**
+   * Review round 7, [7], on IMAP. Priya's colleague replies all to our
+   * message asking to be taken off; the reply is filed under Priya, and its
+   * first recording fails. `stopNotRecorded` held PRIYA as an opt-out nobody
+   * recorded — a pause no Resume lifts and a row /inbox reads however old —
+   * and the retry, which suppressed the colleague, left her locked out for
+   * good. She is held as any reply holds her now, and the row and the alarm
+   * are about the colleague.
+   */
+  it('holds the contact only as a reply when a colleague’s stop cannot be recorded, and frees them once it is', async () => {
+    await failOnce(test.pg, { table: 'touches', event: 'INSERT', when: "NEW.direction = 'in'" })
+    const box = new FakeMailbox()
+    box.put(8, reply('Please remove me from your list.', '<sam-8@rentman.io>', 'Sam <sam@rentman.io>'))
+    const alarms: SlackOptOutNotRecordedEvent[] = []
+    const lines = start(box, db, { retryMs: 20, refreshMs: 60_000 }, alarms)
+
+    await vi.waitFor(() => expect(box.seen(8)).toBe(true), { timeout: 10_000 })
+    // The retry recorded it: the colleague's address, never Priya's.
+    expect(await suppressions()).toEqual([{ kind: 'email', value: 'sam@rentman.io', source: 'reply' }])
+    expect(alarms).toEqual([
+      { kind: 'opt_out_not_recorded', orgId, touchId: sentId, contactId: null, path: 'reply', fromIsContact: false },
+    ])
+    const rows = await notRecordedRows()
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      actor: 'system', subjectType: 'touch', subjectId: sentId,
+      detail: { channel: 'email', why: 'record_failed', fromIsContact: false, filedUnder: contactId },
+    })
+    const loud = said(lines).filter((l) => String(l.msg).startsWith('OPT-OUT NOT RECORDED — a reply that asked to stop'))
+    expect(loud).toEqual([expect.objectContaining({ uid: 8, contactId, fromIsContact: false, paused: true, audited: true })])
+
+    // Priya: paused as any reply pauses her, and a person's to resume.
+    const contact = await contactRow()
+    expect(contact.pausedReason).toBe(`replied ${NOON.toISOString()}`)
+    const [owner] = await db.insert(schema.users).values({ orgId, email: 'owner@agency.test', role: 'owner' })
+      .returning({ id: schema.users.id })
+    expect(await contactResumeByHand(db, {
+      orgId, contact: { id: contactId }, expectedReason: contact.pausedReason, actor: owner!.id,
+    })).toEqual({ ok: true })
+    expect(JSON.stringify([lines, rows])).not.toContain('sam@')
+  })
+
+  /** The control: Priya's OWN stop is still held as hers — that lockout is right. */
+  it('still holds the contact as an opt-out nobody recorded when the stop was their own', async () => {
+    await failOnce(test.pg, { table: 'touches', event: 'INSERT', when: "NEW.direction = 'in'" })
+    const box = new FakeMailbox()
+    box.put(8, reply('Please remove me from your list.', '<priya-8@rentman.io>'))
+    const alarms: SlackOptOutNotRecordedEvent[] = []
+    start(box, db, { retryMs: 20, refreshMs: 60_000 }, alarms)
+
+    await vi.waitFor(() => expect(box.seen(8)).toBe(true), { timeout: 10_000 })
+    expect(alarms).toEqual([{ kind: 'opt_out_not_recorded', orgId, touchId: sentId, contactId, path: 'reply' }])
+    expect(pauseReasonClass((await contactRow()).pausedReason)).toBe('opt_out_not_recorded')
   })
 
   it('pauses nobody and raises nothing for an ordinary reply it cannot record', async () => {
