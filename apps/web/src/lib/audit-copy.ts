@@ -947,26 +947,41 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   // A suppression is claimed only where the row says one was written:
   // `suppressed: true`. A row with no key — an unreadable number's, before
   // r5 wrote `suppressed: false` there — had none written, and read as if it had.
+  //
+  // Four writers in sms.ts (review round 6): a text filed under nobody; one
+  // filed under a contact, whose OTHER holders were held — `filedUnder`
+  // says whether under another contact in this org or a contact in another
+  // org; and a redelivery of either that only wrote a missing suppression
+  // (`redelivered`).
   'sms.inbound_unmatched': (c) => {
-    const why = own(SMS_UNMATCHED, word(c.d, 'why')) ?? 'that could not be placed'
     const optOut = flag(c.d, 'optOut') === true
-    // An ambiguous text pauses every contact it could be from and cancels
-    // what was queued for them (review round 5): said, with its counts.
-    const paused = num(c.d, 'paused')
-    const cancelled = num(c.d, 'cancelledQueued')
-    const held =
-      paused !== null && paused > 0
-        ? `; ${paused === 1 ? 'the contact' : `${paused} contacts`} holding the number ${paused === 1 ? 'was' : 'were'} paused${
-            cancelled !== null && cancelled > 0 ? ` and ${cancelled} queued message${cancelled === 1 ? '' : 's'} cancelled` : ''
-          }`
-        : ''
-    return `received a text from a number ${why}, so it was filed under nobody${held}${
-      optOut
-        ? flag(c.d, 'suppressed') === true
-          ? '; it asked to stop, and the number was put on the suppression list'
-          : '; it asked to stop, and the number is NOT on the suppression list — follow up by hand'
-        : ''
-    }`
+    const stop = optOut
+      ? flag(c.d, 'suppressed') === true
+        ? '; it asked to stop, and the number was put on the suppression list'
+        : '; it asked to stop, and the number is NOT on the suppression list — follow up by hand'
+      : ''
+    const contacts = num(c.d, 'contacts')
+    const redelivered = flag(c.d, 'redelivered') === true
+    const filedUnder = word(c.d, 'filedUnder')
+    if (filedUnder === 'another_org') {
+      const here = contacts !== null && contacts > 1 ? `${contacts} contacts here hold` : 'a contact here holds'
+      return redelivered
+        ? `received again a text from a number ${here}, which it had filed under a contact in another organisation${stop}`
+        : `received a text from a number ${here}, and filed it under a contact in another organisation that this system had texted${held(
+            c.d, 'contact here holding it', 'contacts here holding it',
+          )}${stop}`
+    }
+    if (filedUnder === 'another_contact') {
+      return `received a text from a number more than one contact here holds, and filed it under the one this system had texted${held(
+        c.d, 'other contact holding it', 'other contacts holding it',
+      )}${stop}`
+    }
+    const why = own(SMS_UNMATCHED, word(c.d, 'why')) ?? 'that could not be placed'
+    return redelivered
+      ? `received again a text from a number ${why}, which it had filed under nobody; nobody was paused again${stop}`
+      : `received a text from a number ${why}, so it was filed under nobody${held(
+          c.d, 'contact holding the number', 'contacts holding the number',
+        )}${stop}`
   },
   // The two DoveSoft pushes this deployment could not read (/api/inbound/dovesoft/*).
   // Which field was missing, by name — never a value, a number or the words.
@@ -997,6 +1012,38 @@ const UNREADABLE_FIELD: Readonly<Record<string, string>> = {
 function aChannel(channel: string | null): string {
   const name = channelName(channel)
   return /^(SMS|[aeiou])/i.test(name) ? `an ${name}` : `a ${name}`
+}
+
+/**
+ * What a text from a shared number did to the contacts holding it, from
+ * `sms.inbound_unmatched`'s counts: how many were paused, of how many, and
+ * how many of their waiting messages were cancelled — or nothing when it
+ * did neither. Said whenever EITHER count is above zero (review round 6):
+ * a holder already paused is not paused again, and their drafts are still
+ * cancelled. `one` and `many` name who, as the row's writer counts them.
+ */
+function held(d: unknown, one: string, many: string): string {
+  const paused = num(d, 'paused') ?? 0
+  const cancelled = num(d, 'cancelledQueued') ?? 0
+  const of = num(d, 'contacts')
+  if (paused <= 0 && cancelled <= 0) return ''
+  const were = (n: number): string => (n === 1 ? 'was' : 'were')
+  const messages = (n: number): string => `${n} queued message${n === 1 ? '' : 's'}`
+  let who: string | null = null
+  if (paused > 0) {
+    if (of !== null && paused >= of) {
+      who = of === 1 ? `the ${one} was paused` : of === 2 ? `both ${many} were paused` : `all ${of} ${many} were paused`
+    } else if (of !== null) {
+      who = `${paused} of the ${of} ${many} ${were(paused)} paused`
+    } else {
+      who = `${paused === 1 ? `a ${one}` : `${paused} ${many}`} ${were(paused)} paused`
+    }
+  }
+  if (who === null) {
+    const to = of === 1 ? `the ${one}` : `the ${many}`
+    return `; ${messages(cancelled)} to ${to} ${were(cancelled)} cancelled (already paused, so not paused again)`
+  }
+  return `; ${who}${cancelled > 0 ? ` and ${messages(cancelled)} cancelled` : ''}`
 }
 
 /** Why `sms.inbound_unmatched` filed a text under nobody — `sms.ts`'s own reasons. */

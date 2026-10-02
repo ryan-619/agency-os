@@ -4,7 +4,7 @@ import {
 } from '@agency/db/queries'
 import { secretMatches } from '../../../../lib/secret-compare'
 import type { NotificationEvent } from '../../../../lib/slack-message'
-import { smsOptOutNotRecordedNotification, smsReplyNotification, smsUnplacedOptOutNotification } from './notification'
+import { smsOptOutAlarms, smsReplyNotification, smsUnplacedOptOutNotification } from './notification'
 
 /**
  * DoveSoft's two pushes, the pure half (0019): who may post, what a payload
@@ -418,8 +418,9 @@ export interface DoveSoftDeps {
     readonly orgId: string
     readonly actor: 'system'
     readonly action: string
-    readonly subjectType: null
-    readonly subjectId: null
+    /** A contact only for a STOP whose recording threw, when the recorder had said whose it was. */
+    readonly subjectType: 'contact' | null
+    readonly subjectId: string | null
     readonly detail: Record<string, unknown>
   }) => Promise<void>
   readonly log: WebhookLog
@@ -530,7 +531,11 @@ export async function handleDoveSoftDlr(
  *    and a retry is a duplicate that records nothing more. If it asked to
  *    stop and the suppression could not be written, the `opt_out_not_recorded`
  *    alarm is AWAITED first (never `after()`, which a host without
- *    `waitUntil` drops) in place of the ordinary reply notice;
+ *    `waitUntil` drops) — one per org where it failed (`smsOptOutAlarms`,
+ *    review round 6): the filed contact's own in place of the ordinary
+ *    reply notice, and one for each OTHER org holding the number whose
+ *    suppression failed, beside the notice, which stays when the filed
+ *    contact's own was written;
  *  - a number that could not be read: 400, so DoveSoft retries and the
  *    error log repeats until somebody looks — the recorder has already
  *    audited it, and taken the loud path if it was a STOP;
@@ -541,10 +546,12 @@ export async function handleDoveSoftDlr(
  *
  *  and for both of those, when the text was a STOP that nobody recorded,
  *  the `opt_out_not_recorded` alarm is AWAITED before the answer, with no
- *  touch and no contact (there is no message row), filed under
- *  `DOVESOFT_ORG_ID`. With no org named it cannot be filed, and the error
- *  line says `alarm: 'not_raised_no_org'`. Each delivery that fails again
- *  raises it again, as it writes the audit row again;
+ *  touch (there is no message row), one in each org where it failed —
+ *  naming a contact there who holds the number, or nobody in the org a
+ *  number no contact holds is filed under (`DOVESOFT_ORG_ID`). With no org
+ *  at all it cannot be filed, and the error line says `alarm:
+ *  'not_raised_no_org'`. Each delivery that fails again raises it again, as
+ *  it writes the audit row again;
  *  - anything else it filed under nobody: 200, the answer to a delivery.
  *
  * Unreadable (no sender or no words) → 400, `sms.inbound_unreadable` in the
@@ -556,9 +563,18 @@ export async function handleDoveSoftDlr(
  * parameter, the number and the words, and Next logs an escaping error
  * whole. The error line names the fault's class only. And when the words
  * asked to stop (`smsTextAsksToStop`, the recorder's own reader) the loud
- * path runs as it does for a STOP filed under nobody: a
- * `contact.opt_out_not_recorded` row and the AWAITED alarm, under
- * `DOVESOFT_ORG_ID`, with no contact — nothing says whose it was.
+ * path runs. Whose it was comes from the recorder itself (review round 6):
+ * its rolled-back line names the org and the contact it was filing under
+ * (`keepingRolledBackSmsOptOut`), so nothing is read again from a database
+ * that just failed — and then the `contact.opt_out_not_recorded` row is
+ * written under that contact in THEIR org (what /compliance, the digest
+ * and /inbox read), they are paused saying so, best-effort, and the AWAITED
+ * alarm names them. Only a fault before the recorder named anybody — the
+ * duplicate check, the match, the hold — takes the subject-less path: the
+ * row and the alarm under `DOVESOFT_ORG_ID`, with no contact, because
+ * nothing says whose it was. It used to take that path always, so a known
+ * contact's STOP was alarmed as "nothing in the app holds the number" and
+ * audited in an org that was not theirs, or nowhere.
  */
 export async function handleDoveSoftMo(
   read: FieldsRead,
@@ -578,6 +594,12 @@ export async function handleDoveSoftMo(
     readonly alarm: (event: NotificationEvent) => Promise<void>
     /** Scheduled after the answer: the ordinary reply notice. May throw where the host cannot schedule. */
     readonly later: (event: NotificationEvent) => void
+    /**
+     * Pause a contact OVER any earlier reason (`pauseContactOverriding`):
+     * for a STOP whose recording threw, once the recorder has said whose it
+     * was. Best-effort — the database just failed — and a throw is caught.
+     */
+    readonly pause: (args: { readonly orgId: string; readonly contactId: string; readonly reason: string; readonly now: Date }) => Promise<unknown>
   },
 ): Promise<WebhookAnswer> {
   const mo = read.ok ? readMo(read.fields, now) : null
@@ -594,6 +616,7 @@ export async function handleDoveSoftMo(
   }
 
   let outcome: InboundSmsOutcome
+  const recorder = keepingRolledBackSmsOptOut({ error: (message, fields) => deps.log.error(message, { ...fields }) })
   try {
     outcome = await deps.record({
       from: mo.from,
@@ -602,15 +625,16 @@ export async function handleDoveSoftMo(
       providerMessageId: mo.providerMessageId,
       ...(mo.receivedAt ? { receivedAt: mo.receivedAt } : {}),
       orgId: deps.orgId,
-      log: { error: (message, fields) => deps.log.error(message, { ...fields }) },
+      log: recorder,
     })
   } catch (err) {
-    return moNotRecorded(smsTextAsksToStop(mo.text), faultName(err), shape, deps)
+    return moNotRecorded(smsTextAsksToStop(mo.text), recorder.rolledBack(), faultName(err), shape, now, deps)
   }
 
+  // One alarm per org where the STOP could not be suppressed, each AWAITED.
+  const alarms = smsOptOutAlarms(outcome)
   if (outcome.matched === 'contact') {
-    const alarm = smsOptOutNotRecordedNotification(outcome, deps.orgId)
-    if (alarm) await deps.alarm(alarm)
+    for (const alarm of alarms) await deps.alarm(alarm)
     const event = smsReplyNotification(outcome)
     if (event) {
       try {
@@ -626,11 +650,11 @@ export async function handleDoveSoftMo(
   }
 
   // A STOP filed under nobody that could not be suppressed reaches a person
-  // as the filed one does: AWAITED, before the answer, under the org the
-  // deployment names. Without one there is no org to file the alarm under,
-  // and the error line says so.
-  const alarm = smsOptOutNotRecordedNotification(outcome, deps.orgId)
-  const alarmed = alarm ? 'raised' : outcome.optOutNotRecorded ? 'not_raised_no_org' : null
+  // as the filed one does: AWAITED, before the answer, in each org where it
+  // failed. With no org anywhere — no contact holds the number and the
+  // deployment names none — there is nowhere to file the alarm, and the
+  // error line says so.
+  const alarmed = alarms.length > 0 ? 'raised' : outcome.optOutNotRecorded ? 'not_raised_no_org' : null
   if (outcome.why === 'unreadable_number') {
     deps.log.error('DoveSoft inbound text came from a number that could not be read as E.164; nothing was filed', {
       optOut: outcome.optOut,
@@ -638,7 +662,7 @@ export async function handleDoveSoftMo(
       ...(alarmed ? { alarm: alarmed } : {}),
       ...shapeOf(shape),
     })
-    if (alarm) await deps.alarm(alarm)
+    for (const alarm of alarms) await deps.alarm(alarm)
     return { status: 400, body: { error: 'unreadable sender number', matched: 'none', why: outcome.why } }
   }
   if (outcome.optOutNotRecorded) {
@@ -646,27 +670,116 @@ export async function handleDoveSoftMo(
       why: outcome.why,
       orgConfigured: deps.orgId !== null,
       alarm: alarmed,
+      ...(alarms.length > 1 ? { orgs: alarms.length } : {}),
     })
-    if (alarm) await deps.alarm(alarm)
+    for (const alarm of alarms) await deps.alarm(alarm)
     return { status: 500, body: { error: 'opt-out not recorded', matched: 'none', why: outcome.why } }
   }
   return { status: 200, body: { matched: 'none', why: outcome.why, optOut: outcome.optOut, suppressed: outcome.suppressed } }
 }
 
+/** What the recorder said about a STOP whose recording it rolled back: ids only. */
+export interface RolledBackSmsOptOut {
+  readonly orgId: string
+  readonly contactId: string
+}
+
+/**
+ * The line `recordInboundReply` writes when it rolls back a reply that
+ * asked to stop. Matched by its own opening words, because the recorder
+ * says `OPT-OUT NOT RECORDED` for other reasons too — a suppression that
+ * failed in ANOTHER org names that org's contact, and is no evidence of
+ * whose text this was.
+ */
+export const ROLLED_BACK_OPT_OUT_LINE = 'OPT-OUT NOT RECORDED — the reply was rolled back'
+
+/**
+ * The recorder's log, forwarded line for line to `forward` — and the last
+ * rolled-back line that names an org and a contact, kept: the one line that
+ * says whose a STOP was when recording it threw (review round 6). The
+ * email route keeps the same line its own way (`../email/fault.ts`); this
+ * one is local so the two routes do not share a module two groups edit.
+ */
+export function keepingRolledBackSmsOptOut(
+  forward: InboundLog,
+): InboundLog & { readonly rolledBack: () => RolledBackSmsOptOut | null } {
+  let kept: RolledBackSmsOptOut | null = null
+  return {
+    error(message, fields) {
+      forward.error(message, fields)
+      const orgId = fields?.['orgId']
+      const contactId = fields?.['contactId']
+      if (message.startsWith(ROLLED_BACK_OPT_OUT_LINE) && typeof orgId === 'string' && typeof contactId === 'string') {
+        kept = { orgId, contactId }
+      }
+    },
+    rolledBack: () => kept,
+  }
+}
+
 /**
  * An inbound text whose recording threw. 500 either way, so DoveSoft
  * retries; a STOP also takes the loud path, because nothing was written for
- * it and a retry may fail the same way.
+ * it and a retry may fail the same way — under the contact the recorder
+ * was filing it under when it said so (`placed`), and otherwise under
+ * nobody, in `DOVESOFT_ORG_ID`.
  */
 async function moNotRecorded(
   optOut: boolean,
+  placed: RolledBackSmsOptOut | null,
   error: string,
   shape: RequestShape,
-  deps: DoveSoftDeps & { readonly alarm: (event: NotificationEvent) => Promise<void> },
+  now: Date,
+  deps: DoveSoftDeps & {
+    readonly alarm: (event: NotificationEvent) => Promise<void>
+    readonly pause: (args: { readonly orgId: string; readonly contactId: string; readonly reason: string; readonly now: Date }) => Promise<unknown>
+  },
 ): Promise<WebhookAnswer> {
   if (!optOut) {
     deps.log.error('DoveSoft inbound text could not be recorded; it was refused so DoveSoft retries', { error, ...shapeOf(shape) })
     return { status: 500, body: { error: 'inbound text not recorded' } }
+  }
+  if (placed) {
+    // Their org, their row: what /compliance, the digest and /inbox read.
+    let audited = true
+    try {
+      await deps.audit({
+        orgId: placed.orgId,
+        actor: 'system',
+        action: 'contact.opt_out_not_recorded',
+        subjectType: 'contact',
+        subjectId: placed.contactId,
+        detail: { channel: 'sms', why: 'record_failed' },
+      })
+    } catch {
+      audited = false
+    }
+    // Paused OVER any earlier reason, as the recorder's own loud path does:
+    // left live, their approved text would go on the next tick to the
+    // number that just said STOP. Best-effort — the database just failed.
+    let paused = true
+    try {
+      await deps.pause({
+        orgId: placed.orgId,
+        contactId: placed.contactId,
+        reason: `opt-out not recorded: reply ${now.toISOString()} (record_failed)`,
+        now,
+      })
+    } catch {
+      paused = false
+    }
+    deps.log.error('OPT-OUT NOT RECORDED — a text that asked to stop could not be recorded; follow up by hand', {
+      error,
+      orgId: placed.orgId,
+      contactId: placed.contactId,
+      audited,
+      paused,
+      alarm: 'raised',
+    })
+    // No message row: the reply was rolled back. The contact's record holds
+    // the number, so the alarm links /suppressions.
+    await deps.alarm({ kind: 'opt_out_not_recorded', orgId: placed.orgId, touchId: null, contactId: placed.contactId, path: 'reply' })
+    return { status: 500, body: { error: 'opt-out not recorded' } }
   }
   const audited = await auditQuietly(deps, {
     action: 'contact.opt_out_not_recorded',

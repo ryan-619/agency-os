@@ -673,9 +673,13 @@ export function matchesTemplate(text: string, template: string | ParsedTemplate)
 /**
  * The keywords that are an opt-out on their own, as the whole message: the
  * industry's standard set. CANCEL, END and QUIT are opt-outs ONLY alone —
- * "cancel tomorrow's call" is somebody rearranging a meeting.
+ * "cancel tomorrow's call" is somebody rearranging a meeting — and never as
+ * one clause of a longer text ("Not interested, cancel" is not read as one):
+ * `SMS_STOP_CLAUSE_WORDS` is the set without them.
  */
 const SMS_STOP_WORDS = ['stop', 'stopall', 'stop all', 'unsubscribe', 'unsub', 'cancel', 'end', 'quit', 'optout', 'opt out', 'opt-out']
+const SMS_STOP_ALONE_ONLY = new Set(['cancel', 'end', 'quit'])
+const SMS_STOP_CLAUSE_WORDS = SMS_STOP_WORDS.filter((w) => !SMS_STOP_ALONE_ONLY.has(w))
 
 /**
  * The keywords that may carry ONE trailing token — the "reply STOP <code>"
@@ -687,6 +691,15 @@ const SMS_STOP_WORDS = ['stop', 'stopall', 'stop all', 'unsubscribe', 'unsub', '
  */
 const SMS_STOP_WITH_TOKEN = ['stop', 'stopall', 'unsubscribe', 'unsub', 'optout', 'opt out', 'opt-out']
 const SMS_STOP_TOKEN_TAIL = /^[\s,:;-]+(?:all[\s,:;-]+)?[\p{L}\p{N}]{1,20}$/u
+
+/**
+ * The token a keyword may carry when it stands as one CLAUSE of a longer
+ * text, read in the case it was typed: a short code (`56161`), a brand
+ * keyword in capitals (`ACMEIN`), or `all`. As the whole message any one
+ * token is read, as before; beside another sentence a lower-case word is
+ * prose — "All good, stop worrying", "Sure, stop by" — and is not.
+ */
+const SMS_CLAUSE_TOKEN = /^[\p{Lu}\p{N}]{2,20}$/u
 
 /**
  * SMS-shaped prose that says stop in so many words, whole-message only —
@@ -709,23 +722,29 @@ const SMS_STOP_TOKEN_TAIL = /^[\s,:;-]+(?:all[\s,:;-]+)?[\p{L}\p{N}]{1,20}$/u
  * follows a whole stop sentence and ends the message — so "stop by tomorrow
  * please" and "don't stop texting me please" are still not opt-outs, and
  * CANCEL, END and QUIT are still opt-outs only alone.
+ *
+ * Review round 6 added what a person types when they mean it: politeness
+ * CHAINED after the words ("Stop please thank you"), "stop spamming me",
+ * "remove my number" (with "from your list" after it, like "remove me"),
+ * and a stop said more than once ("stop stop stop").
  */
 const SMS_MESSAGES = '(?:messages?|msgs?|texts?|txts?|sms)'
 const SMS_TO_MESSAGE = '(?:text|txt|message|msg|sms|contact|email)'
+const SMS_FROM_THE_LIST = '(?:\\s+from\\s+(?:your|the|this)\\s+(?:(?:mailing|sms|text(?:ing)?|contact)\\s+)?list)?'
 const SMS_STOP_PROSE = new RegExp(
   '^(?:(?:please|pls|plz|kindly)\\s+)?(?:' +
     [
-      `stop\\s+(?:texting|txting|messaging|msging|msg|sms(?:ing)?|sending\\s+(?:me\\s+)?${SMS_MESSAGES})(?:\\s+me)?`,
+      `stop\\s+(?:texting|txting|messaging|msging|msg|sms(?:ing)?|spamming|sending\\s+(?:me\\s+)?${SMS_MESSAGES})(?:\\s+me)?`,
       `(?:do\\s+not|don['’]?t)\\s+${SMS_TO_MESSAGE}\\s+me(?:\\s+again)?`,
       `no\\s+more\\s+(?:${SMS_MESSAGES}|emails?)`,
-      'stop',
+      'stop(?:\\s+stop)*',
       'unsubscribe(?:\\s+me)?',
-      'remove\\s+me(?:\\s+from\\s+(?:your|the|this)\\s+(?:(?:mailing|sms|text(?:ing)?|contact)\\s+)?list)?',
+      `remove\\s+(?:me|my\\s+(?:number|mobile(?:\\s+number)?|phone(?:\\s+number)?))${SMS_FROM_THE_LIST}`,
       'opt(?:\\s+me)?[\\s-]?out',
       'take\\s+me\\s+off\\s+(?:your|the)\\s+list',
       'leave\\s+me\\s+alone',
     ].join('|') +
-    ')(?:[\\s,.!]+(?:please|pls|plz|thanks|thank\\s+you|thx))?$',
+    ')(?:[\\s,.!]+(?:please|pls|plz|thanks|thank\\s+you|thx))*$',
   'u',
 )
 
@@ -741,6 +760,13 @@ const SMS_DECORATION =
 const SMS_DECORATION_ENDS = new RegExp(`^${SMS_DECORATION}|${SMS_DECORATION}$`, 'gu')
 
 /**
+ * Where one clause of a text ends and the next begins: sentence punctuation,
+ * a comma, a semicolon, a line break, an ellipsis, or a dash set off as a
+ * dash (never the hyphen inside "opt-out").
+ */
+const SMS_CLAUSE_BREAK = /[\r\n.!?;,…]+|\s+-+\s+|[–—]+/u
+
+/**
  * Is this SMS an opt-out?
  *
  * Whole-message and case-insensitive: STOP, STOPALL, UNSUBSCRIBE, CANCEL,
@@ -748,10 +774,23 @@ const SMS_DECORATION_ENDS = new RegExp(`^${SMS_DECORATION}|${SMS_DECORATION}$`, 
  * short code or a brand keyword), with an optional `all` before it; any of
  * them after "reply", "sms", "text" or "send" (somebody repeating the footer
  * back); and a few SMS-shaped sentences ("stop texting me", "don't text me
- * again", "please stop", "no more msgs pls"), with one "please" or "thanks"
- * before or after them. Whitespace, punctuation, symbols and emoji at
- * either end are ignored — `STOP)`, `¡STOP!`, `STOP 👍`, `"STOP"` — and the
- * text is NFKC-folded so full-width letters read as letters.
+ * again", "please stop", "no more msgs pls"), with one "please" before them
+ * and any run of "please" and "thanks" after. Whitespace, punctuation,
+ * symbols and emoji at either end are ignored — `STOP)`, `¡STOP!`, `STOP 👍`,
+ * `"STOP"` — and the text is NFKC-folded so full-width letters read as
+ * letters.
+ *
+ * And clause by clause (review round 6): a text that is several clauses —
+ * set apart by sentence punctuation, a comma or a line break — is an
+ * opt-out when ONE of them, its own ends stripped, is one of those strong
+ * forms: "Not interested. Stop", "Wrong number, stop", "Who is this? Stop
+ * texting me". Read whole-message only, each of those was an ordinary reply
+ * to both readers — paused, never suppressed, and resumable. A clause is
+ * read more strictly than a whole message in two ways: CANCEL, END and QUIT
+ * never count as a clause ("Not interested, cancel" is somebody cancelling
+ * something), and a keyword's trailing token must look like a footer's — a
+ * short code or a brand keyword in capitals — never a lower-case word, so
+ * "All good, stop worrying" and "Sure, stop by" stay prose.
  *
  * Deliberately narrow in the middle, like the email reader beside the send
  * path (`looksLikeOptOut` in packages/db), which the SMS recorder runs TOO —
@@ -761,20 +800,36 @@ const SMS_DECORATION_ENDS = new RegExp(`^${SMS_DECORATION}|${SMS_DECORATION}$`, 
  * somewhere is not one ("stop by tomorrow", "don't stop"); every SMS reply
  * pauses the person anyway. But a missed STOP is the worse error — it is
  * stored as an ordinary reply, which answering it can resume — so the ends
- * are read generously. CANCEL, END and QUIT stay opt-outs only alone.
+ * are read generously, and so is a clause that says nothing else: a bare
+ * "Stop" beside another sentence is read as one, whatever the sentence.
+ * CANCEL, END and QUIT stay opt-outs only alone.
  */
 export function smsOptOut(text: string | null | undefined): boolean {
   if (!text) return false
-  const t = text
-    .normalize('NFKC')
-    .toLowerCase()
-    .replace(SMS_DECORATION_ENDS, '')
-    .replace(/\s+/gu, ' ')
+  const folded = text.normalize('NFKC')
+  if (saysStop(folded, false)) return true
+  const clauses = folded.split(SMS_CLAUSE_BREAK)
+  return clauses.length > 1 && clauses.some((clause) => saysStop(clause, true))
+}
+
+/**
+ * One reading: the whole message (`clause` false), or one clause of it
+ * (`clause` true, the strong forms only — see `smsOptOut`). `text` is
+ * NFKC-folded and still in the case it was typed.
+ */
+function saysStop(text: string, clause: boolean): boolean {
+  const typed = text.replace(SMS_DECORATION_ENDS, '').replace(/\s+/gu, ' ')
+  const t = typed.toLowerCase()
   if (!t) return false
   const bare = t.replace(/^(?:reply|sms|text|send)\s+/, '')
-  if (SMS_STOP_WORDS.includes(bare)) return true
+  if ((clause ? SMS_STOP_CLAUSE_WORDS : SMS_STOP_WORDS).includes(bare)) return true
   for (const word of SMS_STOP_WITH_TOKEN) {
-    if (bare.startsWith(word) && SMS_STOP_TOKEN_TAIL.test(bare.slice(word.length))) return true
+    if (!bare.startsWith(word) || !SMS_STOP_TOKEN_TAIL.test(bare.slice(word.length))) continue
+    if (!clause) return true
+    // The token as it was TYPED: lower-casing keeps every separator, so the
+    // last run is the same run.
+    const token = typed.split(/[\s,:;-]+/u).pop() ?? ''
+    if (token.toLowerCase() === 'all' || SMS_CLAUSE_TOKEN.test(token)) return true
   }
   return SMS_STOP_PROSE.test(bare)
 }

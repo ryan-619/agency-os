@@ -16,8 +16,10 @@ type Filed = Extract<InboundSmsOutcome, { matched: 'contact' }>
 /**
  * The ordinary reply notice, or null: nothing filed under a contact, a
  * retried push (`duplicate`), and a STOP whose suppression could not be
- * written — that one raises the alarm below instead, because "asked to
- * stop … paused" would read as handled.
+ * written in the filed contact's own org — that one raises the alarm below
+ * instead, because "asked to stop … paused" would read as handled. A
+ * suppression that failed only in ANOTHER org keeps this notice: the filed
+ * org's reply was recorded whole, and the other org has its own alarm.
  */
 export function smsReplyNotification(outcome: InboundSmsOutcome): Extract<NotificationEvent, { kind: 'reply' }> | null {
   if (outcome.matched !== 'contact' || outcome.duplicate || outcome.optOutNotRecorded) return null
@@ -34,48 +36,50 @@ export function smsReplyNotification(outcome: InboundSmsOutcome): Extract<Notifi
   }
 }
 
+type OptOutAlarm = Extract<NotificationEvent, { kind: 'opt_out_not_recorded' }>
+
 /**
- * The alarm a STOP raises when its phone suppression could not be written —
- * §2.1's Phase 4 obligation said to a person, the event the email, unsubscribe
- * and erasure paths send, with `path: 'reply'` (a text that said stop is a
- * reply). AWAITED by the route. Null for every other outcome, including a
- * retry, which answers `optOutNotRecorded: false`.
+ * The alarms a STOP raises when its phone suppression could not be written
+ * — §2.1's Phase 4 obligation said to a person, the event the email,
+ * unsubscribe and erasure paths send, with `path: 'reply'` (a text that said
+ * stop is a reply). Each AWAITED by the route. None for every other outcome,
+ * including a retry that wrote nothing it lacked.
  *
- * A STOP filed under a contact names the message it arrived on. One from a
- * number no single contact holds — nobody, several people, or a number that
- * is not E.164 — has no message row and no contact, so it goes with
- * `touchId: null` and `contactId: null`, and the message links to
- * /compliance rather than to anything built from the number. It is filed
- * under `unplacedOrgId`, the deployment's `DOVESOFT_ORG_ID` — the org the
- * recorder audits such a push under — and is null without one: the
- * notification's audit row needs an org, and the route then says in its
- * error line that no alarm was raised.
+ * ONE PER ORG WHERE IT FAILED, filed under that org (review round 6). A
+ * STOP filed under a contact whose own suppression failed names the message
+ * it arrived on and that contact. Every other org the recorder reports
+ * (`optOutNotRecordedIn`) gets its own: naming one of its contacts holding
+ * the number, whose record holds it, with no message on file there — or,
+ * where no contact there holds it (the `DOVESOFT_ORG_ID` a number nobody
+ * holds is filed under, or an unreadable number), no contact either, and
+ * the message links to /compliance rather than to anything built from the
+ * number. Before, another org's failure was folded into the filed contact's
+ * flag, so the one alarm named the org whose suppression had WORKED and the
+ * org that needed it heard nothing.
  */
-export function smsOptOutNotRecordedNotification(
-  outcome: InboundSmsOutcome,
-  unplacedOrgId: string | null,
-): Extract<NotificationEvent, { kind: 'opt_out_not_recorded' }> | null {
-  if (!outcome.optOutNotRecorded) return null
-  if (outcome.matched === 'none') return smsUnplacedOptOutNotification(unplacedOrgId)
-  if (outcome.duplicate) return null
-  return {
-    kind: 'opt_out_not_recorded',
-    orgId: outcome.orgId,
-    touchId: outcome.touchId,
-    contactId: outcome.contactId,
-    path: 'reply',
+export function smsOptOutAlarms(outcome: InboundSmsOutcome): readonly OptOutAlarm[] {
+  const alarms: OptOutAlarm[] = []
+  if (outcome.matched === 'contact' && outcome.optOutNotRecorded && !outcome.duplicate) {
+    alarms.push({
+      kind: 'opt_out_not_recorded',
+      orgId: outcome.orgId,
+      touchId: outcome.touchId,
+      contactId: outcome.contactId,
+      path: 'reply',
+    })
   }
+  for (const lost of outcome.optOutNotRecordedIn) {
+    alarms.push({ kind: 'opt_out_not_recorded', orgId: lost.orgId, touchId: null, contactId: lost.contactId, path: 'reply' })
+  }
+  return alarms
 }
 
 /**
  * The alarm for a STOP no message row and no contact can be named for — one
- * from a number no single contact holds, and one whose recording failed
- * outright, before anything said whose it was. Filed under `unplacedOrgId`
- * (`DOVESOFT_ORG_ID`); null without one.
+ * whose recording failed outright, before anything said whose it was. Filed
+ * under `unplacedOrgId` (`DOVESOFT_ORG_ID`); null without one.
  */
-export function smsUnplacedOptOutNotification(
-  unplacedOrgId: string | null,
-): Extract<NotificationEvent, { kind: 'opt_out_not_recorded' }> | null {
+export function smsUnplacedOptOutNotification(unplacedOrgId: string | null): OptOutAlarm | null {
   if (unplacedOrgId === null) return null
   return { kind: 'opt_out_not_recorded', orgId: unplacedOrgId, touchId: null, contactId: null, path: 'reply' }
 }

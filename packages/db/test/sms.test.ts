@@ -15,8 +15,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import {
-  approveDraft, dispatchTouch, pauseReasonClass, previewSend, recordInboundReply, recordInboundSms, recordSmsDelivery, schema, smsDraft,
-  smsTextAsksToStop, templatesSetActive,
+  approveDraft, dispatchTouch, pauseReasonClass, previewSend, recordInboundReply, recordInboundSms, recordSmsDelivery, schema,
+  sharedNumberHoldReason, smsDraft, smsTextAsksToStop, templatesSetActive,
   type AgencyDb, type InboundLog, type MessageProvider, type MessageTemplateRegistration,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
@@ -579,45 +579,58 @@ describe('SMS (0019)', () => {
        * whole — nobody paused, nothing cancelled — so an approved SMS to
        * that person still went on the next tick. Pausing needs no
        * attribution: each of them is held, and the reply is still filed
-       * under nobody.
+       * under nobody. Review round 6: held as a HOLD — a reason that is not
+       * a reply's, and a cancel that is not their refusal.
        */
       it('files a reply two orgs could own under nobody, but pauses each holder and audits it in each', async () => {
         const d = await draft()
         if (!d.ok) throw new Error(d.message)
         const r = await inbound()
-        expect(r).toEqual({ matched: 'none', why: 'ambiguous', optOut: false, suppressed: false, optOutNotRecorded: false })
+        expect(r).toEqual({ matched: 'none', why: 'ambiguous', optOut: false, suppressed: false, optOutNotRecorded: false, optOutNotRecordedIn: [] })
         expect(await inboundRows()).toHaveLength(0)
         const rows = await audits('sms.inbound_unmatched')
         expect(rows.map((a) => a.orgId).sort()).toEqual([orgId, otherOrgId].sort())
         for (const a of rows) {
           expect(a.detail).toEqual({
             why: 'ambiguous', optOut: false, contacts: 1, paused: 1, cancelledQueued: a.orgId === orgId ? 1 : 0,
+            messageHash: expect.stringMatching(/^[0-9a-f]{64}$/),
           })
           expect(JSON.stringify(a)).not.toContain(PHONE)
+          expect(JSON.stringify(a)).not.toContain('mo-1')
         }
         for (const id of [contactId, otherContactId]) {
           const c = await contactRow(id)
-          expect(c.pausedReason).toBe(`replied ${NOON_IST.toISOString()}`)
-          expect(pauseReasonClass(c.pausedReason)).toBe('replied')
+          expect(c.pausedReason).toBe(sharedNumberHoldReason(NOON_IST))
+          expect(pauseReasonClass(c.pausedReason)).toBe('other')
         }
         // The approved text does not go on the next tick.
-        expect(await touch(d.touchId)).toMatchObject({ status: 'refused', refusalCode: 'consent_revoked' })
+        expect(await touch(d.touchId)).toMatchObject({ status: 'refused', refusalCode: 'paused' })
         // A pause already in place keeps its own reason, as a reply's does.
         await db.update(schema.contacts).set({ pausedReason: 'held by a teammate' }).where(eq(schema.contacts.id, contactId))
         await inbound({ providerMessageId: 'mo-2' })
         expect((await contactRow(contactId)).pausedReason).toBe('held by a teammate')
       })
 
-      it('files a reply under the one holder this system texted, and leaves the other alone', async () => {
+      /**
+       * Review round 6: the reply is filed under the one holder this system
+       * texted — and the other holder, in another org, is HELD, not left
+       * live: their approved text would otherwise go to the number that just
+       * replied. The other org is told, by counts, that it was filed under a
+       * contact elsewhere.
+       */
+      it('files a reply under the one holder this system texted, and holds the other', async () => {
         await texted(otherOrgId, otherContactId)
+        const d = await draft()
+        if (!d.ok) throw new Error(d.message)
         const r = await inbound()
         expect(r).toMatchObject({ matched: 'contact', orgId: otherOrgId, contactId: otherContactId, paused: true, duplicate: false })
         expect(await inboundRows()).toEqual([expect.objectContaining({ orgId: otherOrgId, contactId: otherContactId, channel: 'sms' })])
-        expect((await contactRow(otherContactId)).pausedAt).not.toBeNull()
-        expect((await contactRow(contactId)).pausedAt).toBeNull()
-        // Filed, so nothing was unmatched — and an ordinary reply is nothing
-        // to the org that did not text them.
-        expect(await audits('sms.inbound_unmatched')).toEqual([])
+        expect(pauseReasonClass((await contactRow(otherContactId)).pausedReason)).toBe('replied')
+        expect((await contactRow(contactId)).pausedReason).toBe(sharedNumberHoldReason(NOON_IST))
+        expect(await touch(d.touchId)).toMatchObject({ status: 'refused', refusalCode: 'paused' })
+        expect((await audits('sms.inbound_unmatched')).map((a) => [a.orgId, a.detail])).toEqual([
+          [orgId, { why: 'ambiguous', optOut: false, contacts: 1, paused: 1, cancelledQueued: 1, filedUnder: 'another_org' }],
+        ])
       })
 
       it('still suppresses a STOP filed under the one it texted in every org that holds the number', async () => {
@@ -632,11 +645,20 @@ describe('SMS (0019)', () => {
         expect(a).toMatchObject({ orgId: otherOrgId, detail: { why: 'ambiguous', optOut: true, contacts: 1, suppressed: true } })
       })
 
-      it('prefers the holder in the deployment’s org when both were texted', async () => {
+      /**
+       * Review round 6, findings [1] and [5]: every org's texts go out
+       * through the one DoveSoft account, so the deployment's org is no
+       * evidence of whose text was answered. It used to be preferred, and
+       * the other org's texted contact was left live.
+       */
+      it('files nothing under either when both were texted, whatever org the deployment names, and holds both', async () => {
         await texted(orgId, contactId)
         await texted(otherOrgId, otherContactId)
-        expect(await inbound({ orgId: otherOrgId })).toMatchObject({ matched: 'contact', orgId: otherOrgId, contactId: otherContactId })
-        expect((await contactRow(contactId)).pausedAt).toBeNull()
+        expect(await inbound({ orgId: otherOrgId })).toMatchObject({ matched: 'none', why: 'ambiguous' })
+        expect(await inboundRows()).toHaveLength(0)
+        for (const id of [contactId, otherContactId]) {
+          expect((await contactRow(id)).pausedReason).toBe(sharedNumberHoldReason(NOON_IST))
+        }
       })
 
       it('holds both, and files nothing, when both were texted and the deployment names neither org', async () => {
@@ -664,9 +686,9 @@ describe('SMS (0019)', () => {
         expect(await approveDraft(db, { orgId, touchId: d.touchId, contactId, campaignId, approvedBy: userId, now: NOON_IST }))
           .toMatchObject({ ok: true })
         const r = await inbound({ text: 'Who is this? Not interested, please do not message again' })
-        expect(r).toEqual({ matched: 'none', why: 'ambiguous', optOut: false, suppressed: false, optOutNotRecorded: false })
-        for (const id of [contactId, twin!.id]) expect(pauseReasonClass((await contactRow(id)).pausedReason)).toBe('replied')
-        expect(await touch(d.touchId)).toMatchObject({ status: 'refused', refusalCode: 'consent_revoked' })
+        expect(r).toEqual({ matched: 'none', why: 'ambiguous', optOut: false, suppressed: false, optOutNotRecorded: false, optOutNotRecordedIn: [] })
+        for (const id of [contactId, twin!.id]) expect(pauseReasonClass((await contactRow(id)).pausedReason)).toBe('other')
+        expect(await touch(d.touchId)).toMatchObject({ status: 'refused', refusalCode: 'paused' })
         const [a] = await audits('sms.inbound_unmatched')
         expect(a).toMatchObject({ orgId, detail: { why: 'ambiguous', contacts: 2, paused: 2, cancelledQueued: 1 } })
         // What the sender would now say about Priya: held, never send-now.
@@ -682,11 +704,15 @@ describe('SMS (0019)', () => {
           .returning({ id: schema.contacts.id })
         await texted(orgId, twin!.id)
         expect(await inbound()).toMatchObject({ matched: 'contact', orgId, contactId: twin!.id })
+        // Review round 6: the twin it did not text is held, not left live.
+        expect((await contactRow(contactId)).pausedReason).toBe(sharedNumberHoldReason(NOON_IST))
+        const [a] = await audits('sms.inbound_unmatched')
+        expect(a).toMatchObject({ orgId, detail: { contacts: 1, paused: 1, filedUnder: 'another_contact' } })
       })
 
       it('still records an opt-out from it, as a phone suppression in every org that holds the number', async () => {
         const r = await inbound({ text: 'STOP' })
-        expect(r).toEqual({ matched: 'none', why: 'ambiguous', optOut: true, suppressed: true, optOutNotRecorded: false })
+        expect(r).toEqual({ matched: 'none', why: 'ambiguous', optOut: true, suppressed: true, optOutNotRecorded: false, optOutNotRecordedIn: [] })
         const rows = await db.select().from(schema.suppressions)
         expect(rows.map((s) => [s.orgId, s.kind, s.value, s.source]).sort()).toEqual(
           [[orgId, 'phone', PHONE, 'reply'], [otherOrgId, 'phone', PHONE, 'reply']].sort(),
@@ -700,7 +726,7 @@ describe('SMS (0019)', () => {
        */
       it('does not narrow the match to the org the deployment names — two orgs holding it is still ambiguous', async () => {
         const r = await inbound({ orgId: otherOrgId, text: 'STOP' })
-        expect(r).toEqual({ matched: 'none', why: 'ambiguous', optOut: true, suppressed: true, optOutNotRecorded: false })
+        expect(r).toEqual({ matched: 'none', why: 'ambiguous', optOut: true, suppressed: true, optOutNotRecorded: false, optOutNotRecordedIn: [] })
         const rows = await db.select().from(schema.suppressions)
         expect(rows.map((s) => s.orgId).sort()).toEqual([orgId, otherOrgId].sort())
         expect(otherContactId).toBeTruthy()
@@ -732,7 +758,7 @@ describe('SMS (0019)', () => {
 
       it('files a number no contact anywhere holds under the fallback org', async () => {
         const r = await inbound({ from: '+919811111111', text: 'STOP', orgId: fallbackOrgId })
-        expect(r).toEqual({ matched: 'none', why: 'no_contact', optOut: true, suppressed: true, optOutNotRecorded: false })
+        expect(r).toEqual({ matched: 'none', why: 'no_contact', optOut: true, suppressed: true, optOutNotRecorded: false, optOutNotRecordedIn: [] })
         expect(await db.select().from(schema.suppressions)).toEqual([
           expect.objectContaining({ orgId: fallbackOrgId, value: '+919811111111', source: 'reply' }),
         ])
@@ -768,9 +794,11 @@ describe('SMS (0019)', () => {
 
     it('audits a number no contact has in the org the deployment names, and records an opt-out from it there', async () => {
       const r = await inbound({ from: '+919811111111', text: 'STOP', orgId })
-      expect(r).toEqual({ matched: 'none', why: 'no_contact', optOut: true, suppressed: true, optOutNotRecorded: false })
+      expect(r).toEqual({ matched: 'none', why: 'no_contact', optOut: true, suppressed: true, optOutNotRecorded: false, optOutNotRecordedIn: [] })
       expect(await db.select().from(schema.suppressions)).toEqual([expect.objectContaining({ orgId, value: '+919811111111', source: 'reply' })])
-      expect((await audits('sms.inbound_unmatched'))[0]?.detail).toEqual({ why: 'no_contact', optOut: true, contacts: 0, suppressed: true })
+      expect((await audits('sms.inbound_unmatched'))[0]?.detail).toEqual({
+        why: 'no_contact', optOut: true, contacts: 0, suppressed: true, messageHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+      })
     })
 
     it('is loud about an opt-out from a number no contact has when no org is named', async () => {
@@ -783,7 +811,10 @@ describe('SMS (0019)', () => {
     it('is loud about an opt-out from a number it cannot read, and never guesses its country', async () => {
       const l = log()
       const r = await inbound({ from: '9876543210', text: 'STOP', orgId, log: l })
-      expect(r).toEqual({ matched: 'none', why: 'unreadable_number', optOut: true, suppressed: false, optOutNotRecorded: true })
+      expect(r).toEqual({
+        matched: 'none', why: 'unreadable_number', optOut: true, suppressed: false, optOutNotRecorded: true,
+        optOutNotRecordedIn: [{ orgId, contactId: null }],
+      })
       expect(l.lines.some((m) => m.includes('OPT-OUT NOT RECORDED'))).toBe(true)
       expect(await audits('contact.opt_out_not_recorded')).toEqual([expect.objectContaining({ orgId, subjectId: null })])
       expect(await db.select().from(schema.suppressions)).toHaveLength(0)
