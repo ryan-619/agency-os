@@ -1085,6 +1085,21 @@ export function sharedNumberHolderRowExists(orgId: string, contactId: string): S
 }
 
 /**
+ * Whether Resume asks `heldForUnrecordedSharedNumber` at all for a contact
+ * paused for this reason — the order `contactResumeByHand` asks in. Their
+ * own unrecorded opt-out (not the shared-number hard hold's shape) and an
+ * unfinished erasure are refused before it, so a reader that words a
+ * shared-number hold over them says something Resume never answers
+ * (review round 11). `previewSend`'s and the ledger's `sharedNumberHold`
+ * read the gate only where this holds.
+ */
+export function resumeAsksSharedNumber(reason: string | null | undefined): boolean {
+  const pausedFor = pauseReasonClass(reason ?? 'paused')
+  if (pausedFor === 'erasure') return false
+  return pausedFor !== 'opt_out_not_recorded' || isSharedNumberOptOutPause(reason)
+}
+
+/**
  * Whether this contact holds a number a STOP came from that could not be
  * recorded in their org — the hard hold's shape on their pause, or a row
  * that lists them and that no later resume of theirs has spent

@@ -55,7 +55,7 @@ import { advanceDeal } from './deals.js'
 // Review round 10, [2]: whether a pause is one Resume refuses until a shared
 // number's unrecorded STOP is recorded — the gate's own answer, asked here
 // so the sender and every dry run word the refusal alike.
-import { heldForUnrecordedSharedNumber } from './sms.js'
+import { heldForUnrecordedSharedNumber, resumeAsksSharedNumber } from './sms.js'
 
 export type TouchRow = typeof schema.touches.$inferSelect
 
@@ -1272,8 +1272,10 @@ export async function sendFactsFor(
    */
   const paused = row.contact.pausedAt !== null
   const pausedReason = paused ? row.contact.pausedReason ?? 'paused' : null
-  // Review round 10, [2]: one read, for a paused contact only.
-  const sharedNumberHold = paused && (await heldForUnrecordedSharedNumber(db, orgId, row.contact))
+  // Review round 10, [2]: one read, for a paused contact only — and only
+  // for a pause Resume asks the question about (review round 11).
+  const sharedNumberHold =
+    paused && resumeAsksSharedNumber(row.contact.pausedReason) && (await heldForUnrecordedSharedNumber(db, orgId, row.contact))
 
   // 0019: the registered template behind THESE words, on SMS and WhatsApp.
   // The caller's words, else the stored message the evidence question names.

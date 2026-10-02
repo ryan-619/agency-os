@@ -178,17 +178,39 @@ describe('changing the phone of a shared number’s holder (review round 9)', ()
   })
 
   /**
-   * A holder the row lists whose pause could not be written — the
-   * shortfall `paused` counts — is not paused: there is no hold the edit
-   * could strand, so it is not refused (review round 10).
+   * Review round 11 (three lenses): round 10 refused only while paused, so a
+   * contact a governing row lists but who is NOT paused — the `paused`
+   * shortfall, or a Resume landing before the row commits — could be moved
+   * off the number. The row then governed every later pause of theirs,
+   * judged against the NEW phone: Resume asked for a number that never said
+   * STOP to be recorded, and recording the shared number changed nothing.
+   * Refused again, paused or not, in words that give the way out.
    */
-  it('does not refuse an unpaused contact a row lists', async () => {
+  it('refuses an unpaused contact a row lists, and names the way out: record the number, then pause and resume them', async () => {
     await auditRowsInTheirOwnSeconds()
     await db.insert(schema.auditLog).values({
       orgId, actor: 'system', action: 'contact.opt_out_not_recorded', subjectType: null, subjectId: null,
       detail: { channel: 'sms', why: 'suppression_failed', sharedNumber: true, contacts: 1, paused: 0, holders: [bina] },
     })
     expect((await row(bina)).pausedAt).toBeNull()
+    for (const phone of ['+91 99887 76655', '']) {
+      const r = await contactsUpdate(db, orgId, bina, { phone })
+      expect(r).toMatchObject({ ok: false, reason: 'shared_number_hold' })
+      if (!r.ok) {
+        expect(r.message).toMatch(/they are not paused now/)
+        expect(r.message).toMatch(/pause and resume them/)
+        expect(r.message).not.toContain('9812345678')
+      }
+      expect((await row(bina)).phone).toBe(PHONE)
+    }
+    // The way out: the number recorded, a pause and a Resume that spends the
+    // row; then moving her off the number is the owner's decision as ever.
+    expect(await addSuppression(db, { orgId, kind: 'phone', value: PHONE, reason: 'by hand', source: 'manual' })).toMatchObject({ ok: true })
+    expect(await contactPauseByHand(db, { orgId, contactId: bina, reason: 'closing the record (by owner@agency.test)' })).toMatchObject({ ok: true })
+    const paused = await row(bina)
+    expect(await contactResumeByHand(db, { orgId, contact: { id: bina }, expectedReason: paused.pausedReason, actor: userId })).toEqual({ ok: true })
+    const [sup] = await db.select({ id: schema.suppressions.id }).from(schema.suppressions).where(eq(schema.suppressions.kind, 'phone'))
+    expect(await removeSuppression(db, orgId, sup!.id)).not.toBeNull()
     expect(await contactsUpdate(db, orgId, bina, { phone: '+91 99887 76655' })).toMatchObject({ ok: true, changed: ['phone'] })
   })
 
@@ -224,6 +246,28 @@ describe('changing the phone of a shared number’s holder (review round 9)', ()
         return Reflect.get(t, p, r)
       },
     }) as AgencyDb
+    expect(await contactsUpdate(racing, orgId, bina, { phone: '+91 99887 76655' })).toMatchObject({ ok: false, reason: 'changed_meanwhile' })
+    expect((await row(bina)).phone).toBe(PHONE)
+  })
+
+  it('fails the edit of an UNPAUSED contact when a row listing them lands between its read and its write (review round 11)', async () => {
+    let fired = false
+    const racing = new Proxy(db as object, {
+      get(t, p, r) {
+        if (p === 'update' && !fired) {
+          fired = true
+          return (...args: unknown[]) => {
+            void db.insert(schema.auditLog).values({
+              orgId, actor: 'system', action: 'contact.opt_out_not_recorded', subjectType: null, subjectId: null,
+              detail: { channel: 'sms', why: 'suppression_failed', sharedNumber: true, contacts: 1, paused: 0, holders: [bina] },
+            }).then(() => {})
+            return (Reflect.get(t, p, r) as (...a: unknown[]) => unknown).apply(t, args)
+          }
+        }
+        return Reflect.get(t, p, r)
+      },
+    }) as AgencyDb
+    expect((await row(bina)).pausedAt).toBeNull()
     expect(await contactsUpdate(racing, orgId, bina, { phone: '+91 99887 76655' })).toMatchObject({ ok: false, reason: 'changed_meanwhile' })
     expect((await row(bina)).phone).toBe(PHONE)
   })

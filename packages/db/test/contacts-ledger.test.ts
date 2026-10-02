@@ -18,8 +18,8 @@ import { migratedDb, type TestDb } from './helpers.js'
 // Review round 10, [2]: a shared number's holder, through every reader of the gate.
 import { pausedSentence } from '@agency/core'
 import {
-  SHARED_NUMBER_HOLD_SENTENCE, contactPauseByHand, contactResumeByHand, dispatchTouch, inboxTouches, pausedContacts,
-  recordInboundSms, type MessageProvider,
+  SHARED_NUMBER_HOLD_SENTENCE, contactPauseByHand, contactResumeByHand, dispatchTouch, inboxTouches, pauseContactOverriding,
+  pausedContacts, recordInboundSms, resumeAsksSharedNumber, type MessageProvider,
 } from '../src/index.js'
 import { failOnce } from './fault-db.js'
 
@@ -362,6 +362,26 @@ describe('a shared number’s holder whose own pause stood', () => {
     const replies = await inboxTouches(db, orgId)
     expect(replies).toHaveLength(1)
     expect(replies[0]!.contact).toMatchObject({ id: jo, phone: PHONE })
+  })
+
+  /**
+   * Review round 11, [3]: the fact was computed for any paused contact a row
+   * lists — their own unrecorded opt-out and an unfinished erasure included,
+   * which Resume refuses BEFORE it asks the shared-number question — so
+   * /approvals, get_consent and check_send told a person the number would
+   * unlock a Resume that never would. It is read only where Resume asks.
+   */
+  it('is false for a listed holder whose own unrecorded opt-out or unfinished erasure Resume refuses first', async () => {
+    for (const reason of [`opt-out not recorded: reply ${AT.toISOString()} (record_failed)`, `erasure could not complete ${AT.toISOString()} (Error)`]) {
+      await pauseContactOverriding(db, orgId, bina, reason, AT)
+      expect(await pausedReason(bina)).toBe(reason)
+      expect((await preview(bina)).facts.sharedNumberHold).toBe(false)
+      expect((await consentLedgerFor(db, orgId, bina))?.sharedNumberHold).toBe(false)
+    }
+    expect(resumeAsksSharedNumber(`erasure could not complete ${AT.toISOString()} (Error)`)).toBe(false)
+    expect(resumeAsksSharedNumber(`opt-out not recorded: reply ${AT.toISOString()} (record_failed)`)).toBe(false)
+    expect(resumeAsksSharedNumber(await pausedReason(cai))).toBe(true)
+    expect(resumeAsksSharedNumber('on leave (by sam@agency.test)')).toBe(true)
   })
 
   it('is false for anybody else: the contact it was filed under, and a person who is not paused', async () => {

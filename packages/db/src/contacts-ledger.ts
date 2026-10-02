@@ -400,6 +400,13 @@ const SHARED_NUMBER_HOLD_EDIT =
   'nothing could lift. Record the number on /suppressions and resume them first; changing a number on the ' +
   'suppression list is then an owner’s decision, as for any suppressed address. Nothing was changed.'
 
+const SHARED_NUMBER_HOLD_EDIT_UNPAUSED =
+  'A text from a number this contact holds asked to stop, and it could not be recorded — they are not paused now, ' +
+  'but the record of it still lists them, and any later pause of theirs is lifted only once the number is on the ' +
+  'suppression list. Moving them off the number now would leave that pause judged against a number that never asked. ' +
+  'Record the number on /suppressions, then pause and resume them on /contacts, which closes the record; changing a ' +
+  'number on the suppression list is then an owner’s decision, as for any suppressed address. Nothing was changed.'
+
 /** Every suppression key a stored value produces; none for an empty or unreadable one. */
 function keysOf(field: AddressField, value: string | null): { kind: SuppressionKind; value: string }[] {
   if (!value) return []
@@ -565,15 +572,20 @@ export async function contactsUpdate(
 
   // A shared number's holder, while its STOP is unrecorded. Reached only
   // when the number's key is being dropped and no suppression matches it —
-  // one that did was refused just above, as the owner's decision. And only
-  // while they are PAUSED (review round 10): what the refusal protects is a
-  // pause the number's suppression would lift, and a contact who is not
-  // paused has none to strand — read as held, a contact a person had resumed
-  // once the number was recorded could never have the phone changed after
-  // an owner removed its suppression.
+  // one that did was refused just above, as the owner's decision. Paused or
+  // not (review round 11, undoing round 10's "only while paused"): a row
+  // that lists them governs every LATER pause of theirs too, judged against
+  // whatever phone they have then, so a contact moved off the number while
+  // unpaused had a later pause Resume could never lift — the number that
+  // asked to stop was no longer theirs to record. A person resumed after the
+  // number was recorded is not held: that resume spent the row.
   const phoneDropped = dropping.some((k) => k.kind === 'phone')
-  if (phoneDropped && old.pausedAt !== null && (await heldForUnrecordedSharedNumber(db, orgId, old))) {
-    return { ok: false, reason: 'shared_number_hold', message: SHARED_NUMBER_HOLD_EDIT }
+  if (phoneDropped && (await heldForUnrecordedSharedNumber(db, orgId, old))) {
+    return {
+      ok: false,
+      reason: 'shared_number_hold',
+      message: old.pausedAt !== null ? SHARED_NUMBER_HOLD_EDIT : SHARED_NUMBER_HOLD_EDIT_UNPAUSED,
+    }
   }
 
   if (next.email) {
@@ -616,11 +628,11 @@ export async function contactsUpdate(
             ? [sql`NOT EXISTS (SELECT 1 FROM ${schema.suppressions} WHERE ${suppressedAmong(dropping)})`]
             : []),
           // The pause and the rows the shared-number check read, when it ran:
-          // a row listing a paused contact that landed since fails the edit.
+          // a row listing them that landed since fails the edit.
           ...(phoneDropped
             ? [
                 sql`${schema.contacts.pausedReason} IS NOT DISTINCT FROM ${old.pausedReason}`,
-                sql`(${schema.contacts.pausedAt} IS NULL OR NOT ${sharedNumberHolderRowExists(orgId, id)})`,
+                sql`NOT ${sharedNumberHolderRowExists(orgId, id)}`,
               ]
             : []),
         ),

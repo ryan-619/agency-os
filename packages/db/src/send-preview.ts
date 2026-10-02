@@ -25,7 +25,7 @@ import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 import { channelMismatch, decideGathered, sendFactsFor, type EvidenceAsOf, type MessageWords } from './outreach.js'
 // Review round 10, [2]: the ledger asks Resume's own shared-number question.
-import { heldForUnrecordedSharedNumber } from './sms.js'
+import { heldForUnrecordedSharedNumber, resumeAsksSharedNumber } from './sms.js'
 
 export interface SendPreviewInput {
   readonly orgId: string
@@ -344,7 +344,8 @@ export async function consentLedgerFor(
   const contact = contactRows[0]
   if (!contact) return null
   // One more read, for a paused person only — the page already reads per row.
-  const sharedNumberHold = contact.pausedAt !== null && (await heldForUnrecordedSharedNumber(db, orgId, contact))
+  const sharedNumberHold =
+    contact.pausedAt !== null && resumeAsksSharedNumber(contact.pausedReason) && (await heldForUnrecordedSharedNumber(db, orgId, contact))
 
   const consentRows = await db
     .select()
