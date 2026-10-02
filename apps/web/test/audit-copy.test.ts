@@ -698,10 +698,18 @@ describe('sentenceFor', () => {
   it('words the holders of a number whose STOP was not recorded as holders, never as the one who asked', () => {
     const say = (d: Record<string, unknown>, over: Partial<AuditLine> = {}) =>
       sentenceFor(line('contact.opt_out_not_recorded', d, { actor: 'system', ...over }), lookups)
+    // A recording that failed is refused whatever the push carried, so its
+    // retry comes; a suppression that failed is refused only when the push
+    // carried a message id (review round 10, [6]) — without one it is
+    // answered 200, and no retry comes to ease anybody.
     const HELD =
       'They are not treated as the one who asked, but are held until it is recorded: Resume is refused until then, and the ' +
       'next text DoveSoft delivers from the number after that — its retry of this one included — makes it an ordinary hold ' +
       'that Resume lifts'
+    const HELD_WHERE_ID =
+      'They are not treated as the one who asked, but are held until it is recorded: Resume is refused until then, and the ' +
+      'next text DoveSoft delivers from the number after that — its retry of this one included, where the push carried a ' +
+      'message id — makes it an ordinary hold that Resume lifts'
     expect(say({ channel: 'sms', why: 'record_failed', sharedNumber: true, contacts: 1, paused: 1, holders: [SUBJECT] })).toBe(
       'could not record an opt-out texted from a number a contact here holds — recording the text failed, so the number may ' +
         'not be on the suppression list; a retry may record it, but check /suppressions for the number on their record and ' +
@@ -713,7 +721,7 @@ describe('sentenceFor', () => {
       }),
     ).toBe(
       'could not record an opt-out texted from a number 2 contacts here hold — the number is NOT on the suppression list; ' +
-        `record it by hand on /suppressions, from their record. ${HELD}`,
+        `record it by hand on /suppressions, from their record. ${HELD_WHERE_ID}`,
     )
     // A pause that could not be written is said, with what to do.
     expect(say({ channel: 'sms', why: 'Error', sharedNumber: true, contacts: 3, paused: 1 })).toMatch(

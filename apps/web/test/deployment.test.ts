@@ -220,6 +220,21 @@ describe('dovesoftFacts', () => {
     expect(off).not.toContain('can be recorded only in an org where a contact holds the number')
   })
 
+  /**
+   * Review round 10, [6]: since round 9 such a STOP is answered 200 when the
+   * push carried no message id — its retry could not be told from a new text
+   * (`handleDoveSoftMo`) — and the sentence still said it "is answered 500",
+   * which reads as "DoveSoft retries it". DEPLOYING.md's own wording.
+   */
+  it('says a STOP from a number nobody holds is answered 200 when the push carried no message id', () => {
+    const off = dovesoftFacts(base).sentences[1] ?? ''
+    expect(off).toContain(
+      'it is answered 500 so DoveSoft retries — 200 when the push carried no message id, since its retry could not be ' +
+        'told from a new text — and logged OPT-OUT NOT RECORDED, for a person to record by hand',
+    )
+    expect(off).not.toContain('it is answered 500 and logged')
+  })
+
   /** Half of all base64 secrets carry a `+`, which a query string reads as a space. */
   it('says to generate the secret as hex, and to percent-encode any other in the URL', () => {
     const all = dovesoftFacts(base).sentences.join(' ')

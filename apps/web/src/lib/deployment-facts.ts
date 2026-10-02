@@ -182,9 +182,11 @@ export function dovesoftFacts(
         : 'DOVESOFT_WEBHOOK_SECRET is not set, so both DoveSoft routes answer 503: no delivery report is recorded, and no text a contact sends back — a STOP included — reaches this deployment.',
       // 0019 r5: matching is across every org first; the org is a fallback, never a filter.
       // r6: and never a preference among the contacts holding a number.
+      // Review round 10, [6]: a push with no message id is answered 200 since
+      // round 9 (`handleDoveSoftMo`), so "answered 500" alone promised a retry.
       org
         ? 'A text is filed under the contact whose number it came from, in whichever org holds them; DOVESOFT_ORG_ID decides nothing about a number a contact holds. Only a text from a number no contact anywhere holds — and a report naming a message this system did not send — is audited in the org DOVESOFT_ORG_ID names, and a STOP from such a number is put on that org’s suppression list.'
-        : 'DOVESOFT_ORG_ID is not set. A text is still filed under the contact whose number it came from, in whichever org holds them; but one from a number no contact holds is filed under no org, and a STOP from such a number is recorded nowhere — it is answered 500 and logged OPT-OUT NOT RECORDED, for a person to record by hand.',
+        : 'DOVESOFT_ORG_ID is not set. A text is still filed under the contact whose number it came from, in whichever org holds them; but one from a number no contact holds is filed under no org, and a STOP from such a number is recorded nowhere — it is answered 500 so DoveSoft retries — 200 when the push carried no message id, since its retry could not be told from a new text — and logged OPT-OUT NOT RECORDED, for a person to record by hand.',
       // r6: a number several contacts share, in one org or several.
       'A number several contacts share is filed under the one this system texted at it, and every other contact holding it is paused and their waiting messages cancelled. When this system texted none of them, or more than one, it is filed under nobody, and every contact holding the number is paused and their waiting messages cancelled, until a person resumes them on /contacts. A STOP from a shared number is put on the suppression list of every org whose contacts hold it.',
       'DoveSoft’s report and inbound formats are not public. The routes read the common field names, and a payload they cannot read is refused with a 4xx, audited and logged — never answered 200 and dropped.',
