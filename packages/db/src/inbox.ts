@@ -1258,11 +1258,21 @@ const RESUME_NOT_PAUSED = 'This contact is not paused, so there is nothing to re
  *    `check_send` already say they are never resumed. The fix is to record
  *    the opt-out or finish the erasure, so this refuses even once the
  *    opt-out has been recorded by hand: an opt-out is not something to undo.
+ *    Except a shared number's holder (`isSharedNumberOptOutPause`), who may
+ *    have sent nothing: lifted once the number is recorded (review round 8).
+ *  - any pause of a contact held for a shared number's unrecorded STOP —
+ *    that hard hold, or a pause of their own that stood and a row listing
+ *    them (`heldForUnrecordedSharedNumber`, review round 9) — while the
+ *    number they hold has no phone suppression in the org.
  *  - any other pause while `unrecordedOptOut` — the inbox's own reading,
  *    the audit row or an opted_out reply no suppression row matches — holds
- *    an opt-out of THEIRS AND no suppression row matches any of their
- *    addresses today. Recorded by hand since, the suppression row enforces
- *    it, and the pause is a person's to lift again.
+ *    an opt-out of THEIRS AND a key it was about has no suppression row
+ *    today (`ownOptOutStillToRecord`, review round 9: the channel the row
+ *    names, the address the reply came from, every address for an
+ *    erasure). A suppression on another of their addresses records nothing
+ *    — a number's ended an email opt-out, and the email went. Recorded by
+ *    hand since, the suppression row enforces it, and the pause is a
+ *    person's to lift again.
  *  - any other pause while an opted-out reply from ANOTHER address on the
  *    thread, filed under them, matches no suppression row (review round 8).
  *    Only a suppression on that reply's From ends it: one on the contact's
