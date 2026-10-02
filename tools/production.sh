@@ -4,10 +4,17 @@
 #   tools/production.sh status    which migrations production has applied
 #   tools/production.sh migrate   apply what is pending, then status
 #   tools/production.sh deploy    build and deploy this checkout to Vercel prod
-#   tools/production.sh worker    deploy apps/agent to Fly.io (fly.toml) and
-#                                 point the web app at it — refused until
-#                                 production has this checkout's migration
-#                                 (run `release` first)
+#   tools/production.sh worker    deploy apps/agent to Fly.io (fly.toml) and,
+#                                 when the wiring changes, set AGENT_URL and
+#                                 AGENT_INTERNAL_TOKEN on Vercel — refused
+#                                 until production has this checkout's
+#                                 migration (run `release` first). Never runs
+#                                 the Vercel CLI: the web redeploy is
+#   tools/production.sh worker-web
+#                                 the second job's — redeploy the web app
+#                                 when `worker` left a wiring of this run
+#                                 waiting, then record it, then check the
+#                                 worker is live
 #   tools/production.sh release   migrate, THEN deploy, then check /api/health
 #                                 reports this checkout's migration — the order
 #                                 DEPLOYING.md requires ("migrate FIRST"). With
@@ -17,17 +24,19 @@
 #
 # Credentials come from the workflow's secrets and are never echoed (§2.3):
 #   VERCEL_TOKEN               deploy and release
-#   PRODUCTION_DATABASE_URL    optional: Neon's DIRECT string. Without it,
-#                              `release` lets the Vercel build migrate, with
-#                              the project's own (Sensitive) database URL, and
-#                              `migrate` reads it from `vercel pull`, which
-#                              only works where that variable is NOT Sensitive
+#   PRODUCTION_DATABASE_URL    Neon's DIRECT string; optional but for
+#                              `worker`. Without it, `release` lets the Vercel
+#                              build migrate, with the project's own
+#                              (Sensitive) database URL, and `migrate` reads
+#                              it from `vercel pull`, which only works where
+#                              that variable is NOT Sensitive
 #   VERCEL_ORG_ID + VERCEL_PROJECT_ID, or VERCEL_TEAM    optional; without
 #                              them the project `agency-os` is found under
 #                              every scope the token reaches
 #                              (tools/vercel-project.mjs)
 #   WORKER_ONLY, below         `worker` alone: staged on Fly over stdin, and
-#                              handed to no program but flyctl
+#                              handed to no program but flyctl. `worker-web`
+#                              runs in a job that is never given one
 #
 # No `set -x`, ever: it would print every expanded credential.
 set -euo pipefail
@@ -36,15 +45,23 @@ ACTION=${1:-status}
 SITE=${PRODUCTION_URL:-https://myagencyos.in}
 PROJECT_NAME=agency-os
 
-# The worker step's own secrets (.github/workflows/production.yml hands them
-# to that step alone). `worker` stages them on Fly over stdin and hands
-# flyctl FLY_API_TOKEN; no other program this script runs is handed any of
-# them — not the Vercel CLI, which npx installs at run time with no lockfile
-# and floating transitive ranges, and whose `build` runs the whole web build,
-# and not our own helpers, which need none (review round 7, [6]). FLY_API_TOKEN
-# and FLY_ORG are Fly's, so they are not staged. A name added to the step
-# goes here too: packages/db/test/production-tooling.test.ts holds the two
-# lists equal.
+# The worker job's own secrets (.github/workflows/production.yml hands them
+# to the `worker` job's script step alone). `worker` stages them on Fly over
+# stdin and hands flyctl FLY_API_TOKEN; no other program this script runs
+# inherits any of them — not our own helpers, which need none (review round
+# 7, [6]). FLY_API_TOKEN and FLY_ORG are Fly's, so they are not staged. A
+# name added to the step goes here too:
+# packages/db/test/production-tooling.test.ts holds the two lists equal.
+#
+# What un-exporting does NOT do (review round 8, [5]): it changes what a
+# child INHERITS, never what is in /proc/<pid>/environ of this shell and the
+# step's shell above it — the environment each was started with — which any
+# process running as the same user can read. So no un-export can keep a
+# secret from the Vercel CLI, which npx installs at run time with no lockfile
+# and floating transitive ranges, and whose `build` runs the whole web build.
+# Only a JOB boundary can: `worker` never runs that CLI (below), and the web
+# redeploy is `worker-web`'s, in a job of its own on a fresh VM that is
+# handed VERCEL_* alone.
 WORKER_ONLY=(FLY_API_TOKEN FLY_ORG ANTHROPIC_API_KEY ANTHROPIC_WORKSPACE_ID AGENT_MODEL SECRETS_KEY
   SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASSWORD SMTP_SECURE MAIL_FROM
   IMAP_HOST IMAP_PORT IMAP_USER IMAP_PASSWORD IMAP_SECURE IMAP_MAILBOX
@@ -52,16 +69,25 @@ WORKER_ONLY=(FLY_API_TOKEN FLY_ORG ANTHROPIC_API_KEY ANTHROPIC_WORKSPACE_ID AGEN
 # Each stays a shell variable, read where it is used, and no program this
 # script starts inherits one.
 export -n "${WORKER_ONLY[@]}"
-# A second guard on the code fetched at run time, which holds even if a later
-# edit exports one again: the Vercel CLI's own command line strips them all.
+# A second guard, which holds even if a later edit exports one again: the
+# Vercel CLI's own command line strips them all — and in the one action whose
+# job holds them, there is no Vercel CLI at all (no_vercel_cli).
 STRIP=()
 for n in "${WORKER_ONLY[@]}"; do STRIP+=(-u "$n"); done
 VERCEL=(env "${STRIP[@]}" npx --yes vercel@62.1.0)
+[ "$ACTION" != worker ] || VERCEL=(no_vercel_cli)
 PULLED=.vercel/.env.production.local
 export VERCEL_TELEMETRY_DISABLED=1
 
 die() {
   echo "::error::$*"
+  exit 1
+}
+
+# What every Vercel CLI call in the `worker` action reaches instead of the
+# CLI: a stop, on stderr because some callers send stdout to /dev/null.
+no_vercel_cli() {
+  echo "::error::The worker action's job holds the worker's secrets and never runs the Vercel CLI; the web redeploy belongs to the worker-web job. This is a bug in tools/production.sh." >&2
   exit 1
 }
 
@@ -102,8 +128,11 @@ database_url() {
 built=false
 db() {
   database_url
-  # CI's own postgres16 job runs the compiled CLI the same way.
-  $built || { npx tsc --build; built=true; }
+  # CI's own postgres16 job runs the compiled CLI the same way. The
+  # lockfile's tsc, by path, never through npx: npx installs a package from
+  # the registry when it finds no local one by that name, assuming --yes in
+  # CI, and the `worker` job runs no code fetched at run time.
+  $built || { node_modules/.bin/tsc --build; built=true; }
   DATABASE_URL=$(cat "$DB_FILE") NODE_ENV=production node packages/db/dist/cli.js "$@"
 }
 
@@ -173,6 +202,12 @@ verify() {
 # secrets imported from this run's environment over stdin and never echoed,
 # then the web app pointed at it.
 #
+# Two jobs of the Production workflow, on two VMs (review round 8, [5]):
+# `worker` holds the worker's secrets, deploys to Fly and sets the web app's
+# variables through our own REST helper; `worker-web` holds VERCEL_* alone
+# and runs the Vercel CLI to redeploy the web app. A step boundary would not
+# do: a process reads the environment of the shells above it from /proc.
+#
 # The internal token is generated here, and a run that stages a new one on
 # Fly sets it on Vercel and redeploys the web app in the same run. A run cut
 # off part-way — Fly re-tokened and Vercel not set, or Vercel set and the web
@@ -183,6 +218,15 @@ verify() {
 # token it holds, neither of them secret. A run that does not find exactly
 # that marker, beside both names, rotates the token and wires both sides
 # again; one that does keeps the token.
+#
+# The marker is written by the second job, after the web redeploy is
+# verified, from what the first left for it on Vercel ($PENDING) — not from
+# a job output. GitHub drops a job output whose value contains any secret
+# value of the job that set it, as a substring and at any length, and the
+# worker job's secrets include FLY_ORG (which a Fly app name can contain),
+# ports, and SMTP_SECURE/IMAP_SECURE, which are `true` or `false`. For the
+# same reason the one output, `redeploy`, is read fail-open: the second job
+# is skipped only on a `false` that arrived (production.yml).
 
 # flyctl, handed Fly's token for that one call and nothing else of WORKER_ONLY.
 fly() { FLY_API_TOKEN=$FLY_API_TOKEN flyctl "$@"; }
@@ -263,9 +307,33 @@ schema_ready() {
 }
 
 MARKER=AGENT_INTERNAL_TOKEN_WIRED
+# What a wiring run leaves for `worker-web` to record once the web app is
+# redeployed: "<run id>/<the marker's value>", or "<run id>/" when Fly gave
+# no digest to record. An encrypted Vercel production variable, holding no
+# secret, that nothing in the app reads. The run id is the workflow run's,
+# which both jobs share, so `worker-web` never records another run's wiring.
+PENDING=AGENT_INTERNAL_TOKEN_PENDING
 
+# The workflow run both jobs belong to; a re-run of a failed job keeps it.
+run_id() {
+  [ -n "${GITHUB_RUN_ID:-}" ] || die "GITHUB_RUN_ID is not set: the worker actions run from the Production workflow only."
+  export RUN_ID=$GITHUB_RUN_ID
+}
+
+# A job output, for production.yml's `outputs:`. Never a secret: GitHub
+# would drop it, and it would be in the run's record.
+output() {
+  [ -z "${GITHUB_OUTPUT:-}" ] || printf '%s=%s\n' "$1" "$2" >>"$GITHUB_OUTPUT"
+}
+
+# Job 1 of 2 (production.yml, job `worker`): Fly, and the web app's
+# variables — never the Vercel CLI, so never `vercel pull` for the database
+# URL either.
 worker() {
   [ -n "${FLY_API_TOKEN:-}" ] || die "The FLY_API_TOKEN secret is not set (an ORG token: fly.io → Tokens)."
+  [ -n "${PRODUCTION_DATABASE_URL:-}" ] \
+    || die "The worker action needs the PRODUCTION_DATABASE_URL secret (Neon's DIRECT string). Its job holds the worker's secrets, so it never runs the Vercel CLI, the only other way this script finds the database URL. Nothing was created or deployed."
+  run_id
   database_url
   schema_ready
   fly_app
@@ -309,16 +377,40 @@ worker() {
   if $wire; then
     VALUE="https://$APP.fly.dev" node tools/vercel-env.mjs set AGENT_URL encrypted
     VALUE="$token" node tools/vercel-env.mjs set AGENT_INTERNAL_TOKEN sensitive
-    # A new deployment is what picks the variables up.
+    # After the token, never before it: what is left to record must never
+    # name a token Vercel does not hold yet.
+    digest=$(fly_token_digest) || digest=
+    [ -n "$digest" ] \
+      || echo "::warning::Fly reported no digest for AGENT_INTERNAL_TOKEN, so the wiring cannot be recorded; the web app is still redeployed, and the next run will rotate the token and wire both sides again."
+    VALUE="$RUN_ID/${digest:+$APP:$digest}" node tools/vercel-env.mjs set "$PENDING" encrypted
+    # A new deployment is what picks the variables up, and it is the next
+    # job's, which records the wiring last.
+    echo "wiring: set on Vercel; the worker-web job redeploys the web app, then records it"
+  else
+    worker_seen
+  fi
+  output redeploy "$wire"
+}
+
+# Job 2 of 2 (production.yml, job `worker-web`, after `worker`): VERCEL_*
+# alone, on a VM that never held a worker secret, so the Vercel CLI it runs
+# can read none — not even from /proc/<pid>/environ of a process above it.
+worker_web() {
+  run_id
+  vercel_ids
+  if vercel_env pending "$PENDING"; then
     deploy
     verify
     # Last: only a run that got this far may say both sides agree.
-    digest=$(fly_token_digest) || digest=
-    if [ -n "$digest" ]; then
-      VALUE="$APP:$digest" node tools/vercel-env.mjs set "$MARKER" encrypted
-    else
-      echo "::warning::Fly reported no digest for AGENT_INTERNAL_TOKEN, so the wiring could not be recorded; the next run will rotate the token and wire both sides again."
-    fi
+    local rc=0
+    node tools/vercel-env.mjs promote "$PENDING" "$MARKER" || rc=$?
+    case $rc in
+      0) echo "wiring: recorded — Fly and the live web app hold this run's token" ;;
+      1) echo "::warning::This run's wiring could not be recorded (Fly reported no digest for AGENT_INTERNAL_TOKEN; the worker job's log says so). The next run will rotate the token and wire both sides again." ;;
+      *) die "Could not record the wiring on Vercel (the line above says why); the web app is deployed, and the next run will rotate the token and wire both sides again." ;;
+    esac
+  else
+    echo "wiring: nothing of this run is waiting to be recorded (the worker job kept the existing wiring); the web app is not redeployed"
   fi
   worker_seen
 }
@@ -386,5 +478,6 @@ case "$ACTION" in
     ;;
   verify) verify ;;
   worker) worker ;;
+  worker-web) worker_web ;;
   *) die "unknown action: $ACTION" ;;
 esac
