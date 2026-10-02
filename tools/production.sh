@@ -22,6 +22,9 @@
 #                                 checkout and the BUILD migrates first
 #                                 (tools/vercel-build-migrate.mjs)
 #
+# `worker-web` also reads REDEPLOY, the `worker` job's one output as it
+# arrived — never a secret (production.yml, and worker_web below).
+#
 # Credentials come from the workflow's secrets and are never echoed (§2.3):
 #   VERCEL_TOKEN               deploy, release, worker and worker-web
 #   PRODUCTION_DATABASE_URL    Neon's DIRECT string; optional but for
@@ -395,6 +398,17 @@ worker() {
 # Job 2 of 2 (production.yml, job `worker-web`, after `worker`): VERCEL_*
 # alone, on a VM that never held a worker secret, so the Vercel CLI it runs
 # can read none — not even from /proc/<pid>/environ of a process above it.
+#
+# REDEPLOY is the worker job's one output, as it arrived ('' when GitHub
+# dropped it). An arrived `true` says job 1 set a new token on Fly AND on
+# Vercel in this run, so finding no record of this run is never "the
+# existing wiring was kept" (review round 9, [8]): the live web app holds
+# the old token, and every call it makes to the worker is refused. That
+# stops the run, red, and the next one rotates and wires both sides again —
+# unless a LATER run has written its own record since, which is what a
+# re-run of an old run's second job finds: that run wired, and this one has
+# nothing left to do. A dropped output still reads the record alone,
+# fail-open, as above.
 worker_web() {
   run_id
   vercel_ids
@@ -409,8 +423,12 @@ worker_web() {
       1) echo "::warning::This run's wiring could not be recorded (Fly reported no digest for AGENT_INTERNAL_TOKEN; the worker job's log says so). The next run will rotate the token and wire both sides again." ;;
       *) die "Could not record the wiring on Vercel (the line above says why); the web app is deployed, and the next run will rotate the token and wire both sides again." ;;
     esac
-  else
+  elif [ "${REDEPLOY:-}" != true ]; then
     echo "wiring: nothing of this run is waiting to be recorded (the worker job kept the existing wiring); the web app is not redeployed"
+  elif vercel_env superseded "$PENDING"; then
+    echo "wiring: nothing of this run is waiting to be recorded — a later run has wired since and left its own record; the web app is not redeployed"
+  else
+    die "The worker job set a new AGENT_INTERNAL_TOKEN on Fly and Vercel in this run, but no record of this run can be read from $PENDING, so the web app was not redeployed: its live deployment still runs on the old token, and every call it makes to the worker is refused. Run the worker action again — it finds no record of a finished wiring, and wires both sides again."
   fi
   worker_seen
 }

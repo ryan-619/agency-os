@@ -95,6 +95,20 @@ if [ ! -d node_modules ]; then
   echo "Run 'npm ci' in this folder first, then run this again." >&2
   exit 1
 fi
+# The lockfile's TypeScript and tsx, by path — never through npx, which
+# installs and runs whatever the registry holds under that name when no
+# local one exists (assuming --yes with no terminal), and the worker below
+# runs with every production credential in its environment (review round 9,
+# [9]; tools/production.sh does the same). Both are development
+# dependencies, so an install with --omit=dev, or under NODE_ENV=production,
+# leaves them out.
+for tool in tsc tsx; do
+  if [ ! -x "node_modules/.bin/$tool" ]; then
+    echo "This checkout has no node_modules/.bin/$tool, which the worker is built and run with." >&2
+    echo "Run 'npm ci' in this folder (it installs the development tools too), then run this again." >&2
+    exit 1
+  fi
+done
 
 # Keep the Mac awake while the worker runs. Mail queued while the lid was
 # shut is not lost — it goes, re-checked against every rule, when the worker
@@ -105,6 +119,14 @@ if [ "$(uname -s)" = Darwin ] && command -v caffeinate >/dev/null 2>&1 && [ -z "
   # ${1+"$@"}, not "$@": macOS's bash 3.2 calls an empty "$@" unbound under set -u.
   AGENCY_CAFFEINATED=1 exec caffeinate -is "$SELF" ${1+"$@"}
 fi
+
+# ── Build, before any answer is read or asked ────────────────────────────────
+# The packages run as compiled JavaScript (packages/*/dist): build them, or a
+# fresh checkout or a `git pull` runs stale code — or fails to start at all.
+# Here, before a single credential is in this process's environment, so the
+# build and everything it runs see none of them (review round 9, [9]).
+echo "Building the packages…"
+node_modules/.bin/tsc --build
 
 # ── Read what was saved, or ask ──────────────────────────────────────────────
 LOADED="no"
@@ -187,28 +209,99 @@ if [ "$LOADED" = no ]; then
   # ── Links in mail, and the alarm ─────────────────────────────────────────
   # The worker adds List-Unsubscribe headers only with BOTH WEB_PUBLIC_URL and
   # UNSUBSCRIBE_SECRET, and the web app verifies the link with ITS copy of the
-  # secret — so the two must hold the same value.
+  # secret — so the two must hold the same value. A link minted under any
+  # other value is refused with a 404: a one-click unsubscribe from a mail
+  # client shows the person nothing, and nothing is recorded (review round 9,
+  # [2] and [7]). So this script never makes one up on a key press. Enter
+  # keeps the secret saved here before, or sends no unsubscribe header at all
+  # — the worker then mails without one, and a "stop" reply is still read. A
+  # new secret is made only when asked for by name, and only where it can be
+  # both put on the clipboard (for Vercel) and saved (for the next run),
+  # because Vercel keeps it Sensitive and can never show it back, and the
+  # Keychain holds it base64-encoded.
   printf 'Public address of the web app [https://myagencyos.in]: ' >&3
   read -r V <&3; export WEB_PUBLIC_URL="${V:-https://myagencyos.in}"; unset V
 
-  if [ -n "${SMTP_HOST:-}" ]; then
-    printf 'One-click unsubscribe: paste the UNSUBSCRIBE_SECRET that Vercel has (hidden),\n' >&3
-    printf '  or press Enter to make a new one: ' >&3
-    read -r -s V <&3; printf '\n' >&3
-    if [ -n "${V:-}" ]; then
-      export UNSUBSCRIBE_SECRET="$V"
+  SAVED_UNSUBSCRIBE=""
+  if have_keychain; then SAVED_UNSUBSCRIBE=$(kc_get UNSUBSCRIBE_SECRET) || SAVED_UNSUBSCRIBE=""; fi
+  CAN_MAKE=no
+  if have_keychain && command -v pbcopy >/dev/null 2>&1; then CAN_MAKE=yes; fi
+
+  # What Enter means: the saved secret where there is one, else no header.
+  keep_or_none() {
+    if [ -n "$SAVED_UNSUBSCRIBE" ]; then
+      export UNSUBSCRIBE_SECRET="$SAVED_UNSUBSCRIBE"
+      printf '  Kept the UNSUBSCRIBE_SECRET saved in your Keychain.\n' >&3
     else
-      export UNSUBSCRIBE_SECRET="$(openssl rand -hex 32)"
-      if command -v pbcopy >/dev/null 2>&1; then
-        printf '%s' "$UNSUBSCRIBE_SECRET" | pbcopy
-        printf '  A new secret is on your clipboard (it is not shown). Paste it into Vercel →\n' >&3
-      else
-        printf '  A new secret was made. Copy it from the Keychain item below into Vercel →\n' >&3
-      fi
-      printf '  Settings → Environment Variables → UNSUBSCRIBE_SECRET (Production), then\n' >&3
-      printf '  redeploy. Until the site has the same value, unsubscribe links are refused.\n' >&3
+      unset UNSUBSCRIBE_SECRET
+      printf '  No UNSUBSCRIBE_SECRET: mail goes WITHOUT a one-click unsubscribe header,\n' >&3
+      printf '  and a "stop" reply is still read. Run with --reconfigure to add one.\n' >&3
     fi
+  }
+
+  # A new secret: on the clipboard first, then saved at once — not only if
+  # the answers are remembered below, or the next run would load the old one
+  # while Vercel holds this — and used only if both worked.
+  make_new() {
+    printf '  A NEW secret means every unsubscribe link already mailed under the old one\n' >&3
+    printf '  stops working, and no link mailed by this worker works until Vercel holds\n' >&3
+    printf '  the same new value. Make one only if Vercel has none, or you are replacing it.\n' >&3
+    printf '  Make a new UNSUBSCRIBE_SECRET? [y/N]: ' >&3
+    read -r ANSWER <&3
+    case "$ANSWER" in
+      [yY]*) ;;
+      *) keep_or_none; return 0 ;;
+    esac
+    local fresh
+    fresh=$(openssl rand -hex 32)
+    if ! printf '%s' "$fresh" | pbcopy; then
+      printf '  Could not put a new secret on the clipboard, so none was made.\n' >&3
+      keep_or_none; return 0
+    fi
+    # Read back, not trusted: `security -i` can answer 0 for a command it refused.
+    if ! kc_put UNSUBSCRIBE_SECRET "$fresh" || [ "$(kc_get UNSUBSCRIBE_SECRET || true)" != "$fresh" ]; then
+      printf '' | pbcopy || true
+      printf '  Could not save a new secret in your Keychain, so none was made.\n' >&3
+      keep_or_none; return 0
+    fi
+    export UNSUBSCRIBE_SECRET="$fresh"
+    SAVED_UNSUBSCRIBE="$fresh"
+    printf '  A new secret is on your clipboard (it is not shown) and saved in your Keychain.\n' >&3
+    printf '  Paste it into Vercel → Settings → Environment Variables → UNSUBSCRIBE_SECRET\n' >&3
+    printf '  (Production), then redeploy. Until the site has the same value, every link\n' >&3
+    printf '  this worker mails is refused, and the site logs OPT-OUT NOT RECORDED.\n' >&3
+  }
+
+  if [ -n "${SMTP_HOST:-}" ]; then
+    printf 'One-click unsubscribe needs the UNSUBSCRIBE_SECRET Vercel holds — the same value on both.\n' >&3
+    if [ -n "$SAVED_UNSUBSCRIBE" ]; then
+      printf '  Enter keeps the one saved in your Keychain; or paste Vercel'"'"'s (hidden)' >&3
+    else
+      printf '  Paste Vercel'"'"'s (hidden), or press Enter to send WITHOUT an unsubscribe header' >&3
+    fi
+    if [ "$CAN_MAKE" = yes ]; then printf ';\n  or type new to make one: ' >&3; else printf ': ' >&3; fi
+    read -r -s V <&3; printf '\n' >&3
+    case "${V:-}" in
+      '') keep_or_none ;;
+      new | NEW | New)
+        if [ "$CAN_MAKE" = yes ]; then
+          make_new
+        else
+          # Off a Mac nothing could keep it: shown nowhere, saved nowhere, and
+          # Vercel would never get the value the worker mails under.
+          printf '  A new secret is made only on a Mac, where it goes on the clipboard and into\n' >&3
+          printf '  the Keychain. Paste the value Vercel holds instead, or leave it unset.\n' >&3
+          keep_or_none
+        fi
+        ;;
+      *) export UNSUBSCRIBE_SECRET="$V" ;;
+    esac
     unset V
+  elif [ -n "$SAVED_UNSUBSCRIBE" ]; then
+    # Sending is off this time; carry the saved secret over all the same, so
+    # remembering these answers does not delete the one value Vercel can
+    # never show back. The worker adds no header without a mailbox.
+    export UNSUBSCRIBE_SECRET="$SAVED_UNSUBSCRIBE"
   fi
 
   printf 'Slack webhook URL for the opt-out alarm (hidden; Enter to skip): ' >&3
@@ -220,7 +313,19 @@ if [ "$LOADED" = no ]; then
     printf 'Remember these answers in your Keychain, so the next run asks nothing? [Y/n]: ' >&3
     read -r ANSWER <&3
     case "$ANSWER" in
-      [nN]*) ;;
+      [nN]*)
+        # Not remembering these leaves whatever was saved before in place,
+        # and a run without --reconfigure reads THAT — say so, loudest where
+        # it is an unsubscribe secret other than the one this run mails under.
+        if kc_get DATABASE_URL >/dev/null; then
+          printf '  The answers saved before stay in your Keychain, and the next run without\n' >&3
+          printf '  --reconfigure uses them, not these ('"'"'%s --forget'"'"' deletes them).\n' "$0" >&3
+          if [ "${UNSUBSCRIBE_SECRET:-}" != "$(kc_get UNSUBSCRIBE_SECRET || true)" ]; then
+            printf '  WARNING: that includes a different UNSUBSCRIBE_SECRET from this run'"'"'s, so\n' >&3
+            printf '  the unsubscribe links of one run or the other will not verify on the site.\n' >&3
+          fi
+        fi
+        ;;
       *)
         for n in "${SAVED_NAMES[@]}"; do
           kc_del "$n"
@@ -303,11 +408,6 @@ echo "  'sms: dovesoft on|off' at boot. If that disagrees with this, trust it."
 echo "  Closing this window stops it; queued mail waits for the next run."
 echo
 
-# The packages run as compiled JavaScript (packages/*/dist): build them, or a
-# fresh checkout or a `git pull` runs stale code — or fails to start at all.
-echo "Building the packages…"
-npx tsc --build
-
 # Required by the worker's schema, and with no tunnel nothing ever presents it:
 # the web app only sends this header when it calls /internal/*, which it cannot
 # reach. A fresh random value per run is therefore correct — it is a shared
@@ -316,4 +416,4 @@ npx tsc --build
 AGENT_INTERNAL_TOKEN="$(openssl rand -base64 32)" \
   NODE_ENV=production \
   AGENT_BIND=127.0.0.1 \
-  exec npx tsx apps/agent/src/index.ts
+  exec node_modules/.bin/tsx apps/agent/src/index.ts

@@ -3,6 +3,7 @@ import { unsubscribeOrgName, verifyUnsubscribeToken, type AgencyDb } from '@agen
 import { getDb } from '@/lib/db'
 import { env } from '@/lib/env'
 import { log } from '@/lib/logger'
+import { logMismatchOnce } from '../../api/unsubscribe/[token]/mismatch'
 
 /**
  * The page behind an unsubscribe link (RFC 8058, §2.1).
@@ -49,7 +50,12 @@ export default async function UnsubscribePage({ params }: { params: Promise<{ to
   }
 
   const check = verifyUnsubscribeToken(secret, token)
-  if (!check.ok) return <Invalid />
+  if (!check.ok) {
+    // The same answer to whoever opened it; a link a worker minted under
+    // another secret is said once, at error, by this page's path alone.
+    logMismatchOnce('/unsubscribe', token, log)
+    return <Invalid />
+  }
 
   let orgName: string | null
   try {
