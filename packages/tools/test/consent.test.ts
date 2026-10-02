@@ -446,6 +446,24 @@ describe('the consent tools on a shared number’s holder whose own pause stood'
     )
   })
 
+  // Review round 13: a holder paused by their own reply. /inbox refuses the
+  // answer until the number is recorded, so check_send must not offer it.
+  it('check_send offers neither /inbox nor Resume for a holder their own reply paused', async () => {
+    await db
+      .update(schema.contacts)
+      .set({ pausedReason: `replied ${new Date(AT.getTime() + 60_000).toISOString()}` })
+      .where(eq(schema.contacts.email, 'bina@acme.example'))
+    const out = await run(checkSend, { domain: 'acme.example', contactEmail: 'bina@acme.example', campaignName: 'Mail' })
+    if (!out.ok) throw new Error(out.message)
+    expect(out.data).toMatchObject({ code: 'paused', facts: { pausedFor: 'replied', sharedNumberHold: true } })
+    expect(out.summary).not.toContain('which resumes them')
+    expect(out.summary).toContain(
+      'so neither answering their reply from /inbox nor Resume on /contacts lifts the pause until a person records ' +
+        'the number on /suppressions; do not suggest either before that.',
+    )
+    expect(out.summary).not.toMatch(/they asked to stop/)
+  })
+
   it('says nothing of the kind once the number is recorded', async () => {
     await addSuppression(db, { orgId, kind: 'phone', value: PHONE, reason: 'texted STOP', source: 'manual' })
     const sent = await run(checkSend, { domain: 'acme.example', contactEmail: 'bina@acme.example', campaignName: 'Mail' })

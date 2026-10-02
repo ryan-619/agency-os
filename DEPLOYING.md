@@ -925,7 +925,10 @@ unsubscribe's pause is replaced by the hold after all, because the row is
 what held them; Resume then
 refuses whatever paused them until the number is recorded, and until a
 person resumes them after that, paused or not, their phone cannot be moved
-off the number or cleared on `/contacts`. A person's Resume after that ends what the row says about
+off the number or cleared on `/contacts` — except while their own unrecorded
+opt-out or an unfinished erasure holds them, which Resume never lifts, so
+moving the phone strands nothing. Answering their reply from `/inbox` is
+refused too while the number is unrecorded, because it would resume them. A person's Resume after that ends what the row says about
 them, so a later pause of theirs is an ordinary one. The
 next delivery from the number that finds it suppressed — the retry, or any
 later text, whatever it says — eases the hard hold to an ordinary one, and

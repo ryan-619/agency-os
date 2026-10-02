@@ -1429,7 +1429,10 @@ async function evidenceState(
  * — while Resume refuses it until the number is recorded. The sentence says
  * so after the class's own. Not for the classes whose sentence already says
  * to record something rather than resume (an unrecorded opt-out, the
- * shared-number hold's own shape among them) or to finish an erasure.
+ * shared-number hold's own shape among them) or to finish an erasure. A
+ * reply's pause gets a sentence of its own (review round 13): its class's
+ * words send a person to answer from /inbox, which `replyQueueDraft`
+ * refuses (`SHARED_NUMBER_HELD`) while the number is unrecorded.
  */
 export function decideGathered(gathered: {
   readonly facts: SendFacts
@@ -1441,6 +1444,9 @@ export function decideGathered(gathered: {
   if (!decision.allowed && decision.code === 'paused') {
     const pausedFor = gathered.facts.pausedFor ?? 'other'
     if (!gathered.sharedNumberHold || pausedFor === 'opt_out_not_recorded' || pausedFor === 'erasure') return decision
+    // A reply's pause names /inbox as a way out, and /inbox refuses the
+    // answer while the number is unrecorded (review round 13): its own words.
+    if (pausedFor === 'replied') return { ...decision, reason: SHARED_NUMBER_HOLD_REPLIED_SENTENCE }
     return { ...decision, reason: `${decision.reason} ${SHARED_NUMBER_HOLD_SENTENCE}` }
   }
   if (decision.allowed || decision.code !== 'stale_evidence') return decision
@@ -1463,6 +1469,18 @@ export function decideGathered(gathered: {
 export const SHARED_NUMBER_HOLD_SENTENCE =
   'A text from a number they share also asked to stop, and it could not be recorded — they may not have sent it — ' +
   'so Resume is refused until the number is recorded on /suppressions.'
+
+/**
+ * The whole `paused` sentence for such a holder whose own pause is a reply's
+ * (review round 13): `pausedSentence('replied')` says answering the reply
+ * from /inbox resumes them, and while the number is unrecorded /inbox
+ * refuses that answer as Resume refuses the pause.
+ */
+export const SHARED_NUMBER_HOLD_REPLIED_SENTENCE =
+  'This contact replied, and every campaign stops for them. A text from a number they share also asked to stop, ' +
+  'and it could not be recorded — they may not have sent it — so neither answering their reply from /inbox nor ' +
+  'Resume on /contacts lifts the pause until the number is recorded on /suppressions. Nothing was sent, and ' +
+  'approving does not lift a pause.'
 
 async function staleAfterDays(db: AgencyDb, orgId: string): Promise<number> {
   return staleAfterDaysOf((await activeIcpProfile(db, orgId))?.definition)

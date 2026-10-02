@@ -68,10 +68,18 @@ function pauseWords(pausedFor: PauseReasonClass, reason: string | null, channel:
   const held = sharedNumberHold ? ` ${SHARED_NUMBER_HOLD_WORDS}` : ''
   switch (pausedFor) {
     case 'replied':
+      // Held for a shared number too (review round 13): /inbox refuses the
+      // answer as Resume refuses the pause, so neither is offered.
+      if (sharedNumberHold) {
+        return (
+          `paused: they replied (${why}); every campaign stops for them. This is not a refusal of ${channel}. ` +
+          `get_replies shows what they said. ${SHARED_NUMBER_HOLD_REPLIED_WORDS}`
+        )
+      }
       return (
         `paused: they replied (${why}); every campaign stops for them until a person answers from /inbox ` +
         `(which resumes them) or resumes them on /contacts. This is not a refusal of ${channel}. ` +
-        `get_replies shows what they said.${held}`
+        `get_replies shows what they said.`
       )
     case 'manual':
       return (
@@ -120,6 +128,16 @@ const SHARED_NUMBER_HOLD_WORDS =
   'They also hold a phone number a text came from that asked to stop, and it could not be recorded — it may not ' +
   'have been them — so Resume is refused until a person records the number on /suppressions; do not suggest ' +
   'resuming them before that.'
+
+/**
+ * The same for a holder paused by their own reply (review round 13):
+ * answering it from /inbox would resume them, and /inbox refuses that
+ * answer until the number is recorded, as Resume refuses the pause.
+ */
+const SHARED_NUMBER_HOLD_REPLIED_WORDS =
+  'They also hold a phone number a text came from that asked to stop, and it could not be recorded — it may not ' +
+  'have been them — so neither answering their reply from /inbox nor Resume on /contacts lifts the pause until a ' +
+  'person records the number on /suppressions; do not suggest either before that.'
 
 /** The campaign by name, in this org. Names are unique per org (`campaigns_org_name_key`). */
 async function campaignNamed(ctx: ToolContext, name: string) {
@@ -214,7 +232,9 @@ export const checkSend: AgencyToolSpec<typeof checkSendShape> = {
         : `${decision.code}: ${decision.reason.replace(/[.\s]+$/, '')}. ` +
           (decision.humanCanResolve ? 'A person could resolve this. ' : 'Nobody may approve past this. ') +
           (facts.paused ? `They are also paused (${(facts.pausedReason ?? 'no reason recorded').slice(0, 200)}). ` : '') +
-          (facts.sharedNumberHold ? `${SHARED_NUMBER_HOLD_WORDS} ` : '') +
+          (facts.sharedNumberHold
+            ? `${facts.pausedFor === 'replied' ? SHARED_NUMBER_HOLD_REPLIED_WORDS : SHARED_NUMBER_HOLD_WORDS} `
+            : '') +
           'Nothing was queued.'
 
     return ok(

@@ -287,6 +287,18 @@ describe('a paused holder of a shared number whose STOP could not be recorded', 
     expect(approveBlock(d, 'sms')).not.toContain('choose someone else')
   })
 
+  // Review round 13: a reply's own pause names /inbox as a way out, and
+  // /inbox refuses that answer while the number is unrecorded.
+  it('names neither /inbox nor Resume as a way out of a reply’s pause while the number is unrecorded', () => {
+    const d = decideGathered({ facts: { ...FACTS, pausedFor: 'replied' }, evidenceAged: false, evidenceSuperseded: false, sharedNumberHold: true })
+    if (d.allowed) throw new Error('a paused contact must be refused')
+    expect(d.reason).not.toContain('which resumes them')
+    expect(d.reason).toContain('neither answering their reply from /inbox nor Resume on /contacts lifts the pause until the number is recorded on /suppressions')
+    const plain = decideGathered({ facts: { ...FACTS, pausedFor: 'replied' }, evidenceAged: false, evidenceSuperseded: false, sharedNumberHold: false })
+    if (plain.allowed) throw new Error('a paused contact must be refused')
+    expect(plain.reason).toContain('answers the reply from /inbox (which resumes them)')
+  })
+
   it('says nothing of the kind for any other pause, or a fact the page did not pass', () => {
     const d = view(false)
     expect(d).not.toHaveProperty('sharedNumberHold')

@@ -18,9 +18,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
+import { pausedSentence } from '@agency/core'
 import {
-  addSuppression, contactResumeByHand, contactsUpdate, heldForUnrecordedSharedNumber, pauseContactOverriding,
-  recordInboundReply, replyQueueDraft, schema, type AgencyDb,
+  SHARED_NUMBER_HOLD_REPLIED_SENTENCE, addSuppression, contactResumeByHand, contactsUpdate, heldForUnrecordedSharedNumber,
+  pauseContactOverriding, previewSend, recordInboundReply, replyQueueDraft, schema, type AgencyDb,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
 
@@ -36,6 +37,7 @@ describe('a shared number’s holder, through every writer of a resume (review r
   let userId: string
   let x: string
   let mailOut: string
+  let mailId: string
 
   beforeEach(async () => {
     test = await migratedDb()
@@ -57,6 +59,7 @@ describe('a shared number’s holder, through every writer of a resume (review r
       .insert(schema.campaigns)
       .values({ orgId, name: 'Mail', channel: 'email', status: 'active', autoSend: false })
       .returning({ id: schema.campaigns.id })
+    mailId = mail!.id
     const [out] = await db
       .insert(schema.touches)
       .values({
@@ -99,6 +102,18 @@ describe('a shared number’s holder, through every writer of a resume (review r
       expect(refused.message).toMatch(/Record the number on \/suppressions/)
       expect(refused.message).not.toContain('9812345678')
     }
+    // And the send path's sentence does not send a person to /inbox for it
+    // (review round 13): the reply's own words named the answer as a way out.
+    const words = async () => {
+      const p = await previewSend(db, { orgId, contactId: x, campaignId: mailId, now: LATER })
+      if (!p.ok || p.decision.allowed) throw new Error('expected a refusal')
+      return p.decision.reason
+    }
+    expect(await words()).toBe(SHARED_NUMBER_HOLD_REPLIED_SENTENCE)
+    expect(SHARED_NUMBER_HOLD_REPLIED_SENTENCE).toContain('neither answering their reply from /inbox nor Resume on /contacts')
+    expect(SHARED_NUMBER_HOLD_REPLIED_SENTENCE).not.toContain('which resumes them')
+    expect(SHARED_NUMBER_HOLD_REPLIED_SENTENCE).not.toMatch(/they asked to stop/)
+
     // Nothing drafted, nobody resumed, and the row still holds them.
     expect((await row()).pausedReason).toBe(paused.pausedReason)
     expect(await db.select().from(schema.auditLog).where(eq(schema.auditLog.action, 'contact.resumed'))).toHaveLength(0)
@@ -106,6 +121,7 @@ describe('a shared number’s holder, through every writer of a resume (review r
 
     // Recorded, the answer goes ahead and resumes them, as Resume now would.
     expect(await addSuppression(db, { orgId, kind: 'phone', value: PHONE, reason: 'texted STOP', source: 'manual' })).toMatchObject({ ok: true })
+    expect(await words()).toBe(pausedSentence('replied'))
     expect(await replyQueueDraft(db, { orgId, inboundTouchId: replyId, subject: 'Re: Hi', body: 'Happy to.', actor: userId, now: LATER })).toMatchObject({
       ok: true, resumed: true,
     })

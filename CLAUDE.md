@@ -27,7 +27,7 @@ tested against a fetch that records and never sends, and against PGlite —
 never against DoveSoft itself, whose push formats and `mobiles` format are
 assumptions to confirm before a real send. Calls
 and WhatsApp over DoveSoft are not built: DoveSoft publishes no API for
-either. Twelve review rounds, and the follow-ups they left open, have been fixed
+either. Thirteen review rounds, and the follow-ups they left open, have been fixed
 on top of both releases; each fix is stated below where the rule it changed
 lives.
 
@@ -1497,7 +1497,12 @@ class is `replied`, `manual`, `unsubscribed` or `other`, it appends
 to stop, and it could not be recorded — they may not have sent it — so
 Resume is refused until the number is recorded on /suppressions."), because
 `pausedSentence` alone said "until a person resumes them there" of a pause
-Resume refuses. The sender's own decision (`dispatchTouch`'s return value,
+Resume refuses. A reply's pause (`replied`) gets a sentence of its own,
+`SHARED_NUMBER_HOLD_REPLIED_SENTENCE` (review round 13): its class's words
+send a person to answer from `/inbox`, which `replyQueueDraft` refuses
+(`SHARED_NUMBER_HELD`) while the number is unrecorded, so it says neither
+answering the reply nor Resume lifts the pause until the number is recorded;
+`check_send` says the same (`SHARED_NUMBER_HOLD_REPLIED_WORDS`). The sender's own decision (`dispatchTouch`'s return value,
 what LinkedIn's Start shows) and every dry run — the ledger's "Why can't I
 reach them?", `/approvals`' rule line, enrolment, the inbox's answer,
 `smsDraft` — word it alike; the hard hold's own shape, an own unrecorded
@@ -2915,7 +2920,9 @@ one rather than replace it (review round 9, `/settings/templates` below).
   STOP was eased by no delivery and refused by Resume for good — so
   `contactsUpdate` refuses that edit while they are held, paused or not
   (`shared_number_hold`, §2, "The send path"; round 10 narrowed it to
-  paused contacts and review round 11 put it back).
+  paused contacts and review round 11 put it back) — but not over their own
+  unrecorded opt-out or an unfinished erasure, which Resume never lifts
+  (review round 12).
 
 **`/settings/templates`** records registrations and registers nothing: add
 one by hand, switch one off or on (idempotent, audited
@@ -3895,7 +3902,7 @@ absent.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 6411 tests in 216 files: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice + the 0018 release + DoveSoft SMS (0019) + twelve review rounds
+npm test                 # 6411 tests in 216 files: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice + the 0018 release + DoveSoft SMS (0019) + thirteen review rounds
 npx vitest run --maxWorkers=1 --minWorkers=1   # the same suite on a machine short of memory
 npm run build            # packages, then the Next app
 
