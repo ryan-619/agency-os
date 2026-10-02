@@ -727,24 +727,40 @@ const SMS_CLAUSE_TOKEN = /^[\p{Lu}\p{N}]{2,20}$/u
  * CHAINED after the words ("Stop please thank you"), "stop spamming me",
  * "remove my number" (with "from your list" after it, like "remove me"),
  * and a stop said more than once ("stop stop stop").
+ *
+ * Review round 7 added the "send" and "this number" sentences: "don't send
+ * me (any more) messages", "stop sending (me) these messages (to this
+ * number)", "stop messaging this number"; and "stop it" and "unsub me",
+ * which were read as the whole message (a keyword and one token) but not as
+ * a CLAUSE, where a lower-case token is prose — so "Not interested, stop it"
+ * was an ordinary reply. Every form is still anchored at both ends: "don't
+ * send me messages after 9pm" and "don't stop sending me messages" are not
+ * opt-outs.
  */
-const SMS_MESSAGES = '(?:messages?|msgs?|texts?|txts?|sms)'
+const SMS_MESSAGES = '(?:messages?|msgs?|texts?|txts?|sms(?:es)?)'
 const SMS_TO_MESSAGE = '(?:text|txt|message|msg|sms|contact|email)'
 const SMS_FROM_THE_LIST = '(?:\\s+from\\s+(?:your|the|this)\\s+(?:(?:mailing|sms|text(?:ing)?|contact)\\s+)?list)?'
+const SMS_MY_NUMBER = '(?:this|my)\\s+(?:number|mobile(?:\\s+number)?|phone(?:\\s+number)?)'
+const SMS_THESE = '(?:(?:these|this|your|any|such)\\s+)?'
+/** Politeness after the words: "please", "pls", "plz", "thanks", "thank you", "thx". */
+const SMS_POLITE_TAIL = '(?:[\\s,.!]+(?:please|pls|plz|thanks|thank\\s+you|thx))'
 const SMS_STOP_PROSE = new RegExp(
   '^(?:(?:please|pls|plz|kindly)\\s+)?(?:' +
     [
-      `stop\\s+(?:texting|txting|messaging|msging|msg|sms(?:ing)?|spamming|sending\\s+(?:me\\s+)?${SMS_MESSAGES})(?:\\s+me)?`,
+      `stop\\s+(?:texting|txting|messaging|msging|msg|sms(?:ing)?|spamming)(?:\\s+(?:me|${SMS_MY_NUMBER}))?`,
+      `stop\\s+sending\\s+(?:me\\s+)?${SMS_THESE}${SMS_MESSAGES}(?:\\s+me|\\s+to\\s+(?:me|${SMS_MY_NUMBER}))?`,
       `(?:do\\s+not|don['’]?t)\\s+${SMS_TO_MESSAGE}\\s+me(?:\\s+again)?`,
+      `(?:do\\s+not|don['’]?t)\\s+send\\s+me\\s+(?:any\\s*more\\s+)?${SMS_THESE}${SMS_MESSAGES}(?:\\s+(?:again|any\\s*more))?`,
       `no\\s+more\\s+(?:${SMS_MESSAGES}|emails?)`,
       'stop(?:\\s+stop)*',
-      'unsubscribe(?:\\s+me)?',
+      'stop\\s+it',
+      'unsub(?:scribe)?(?:\\s+me)?',
       `remove\\s+(?:me|my\\s+(?:number|mobile(?:\\s+number)?|phone(?:\\s+number)?))${SMS_FROM_THE_LIST}`,
       'opt(?:\\s+me)?[\\s-]?out',
       'take\\s+me\\s+off\\s+(?:your|the)\\s+list',
       'leave\\s+me\\s+alone',
     ].join('|') +
-    ')(?:[\\s,.!]+(?:please|pls|plz|thanks|thank\\s+you|thx))*$',
+    `)${SMS_POLITE_TAIL}*$`,
   'u',
 )
 
@@ -755,16 +771,47 @@ const SMS_STOP_PROSE = new RegExp(
  * "Don't stop! 👍" is still prose about not stopping; digits and letters are
  * never stripped, so a short code survives.
  */
-const SMS_DECORATION =
-  '[\\s\\p{P}\\p{S}\\p{Extended_Pictographic}\\p{Emoji_Modifier}\\p{Regional_Indicator}\\u200d\\ufe0e\\ufe0f\\u20e3]+'
+const SMS_DECORATION_CHAR =
+  '[\\s\\p{P}\\p{S}\\p{Extended_Pictographic}\\p{Emoji_Modifier}\\p{Regional_Indicator}\\u200d\\ufe0e\\ufe0f\\u20e3]'
+const SMS_DECORATION = `${SMS_DECORATION_CHAR}+`
 const SMS_DECORATION_ENDS = new RegExp(`^${SMS_DECORATION}|${SMS_DECORATION}$`, 'gu')
+const SMS_DECORATION_ONE = new RegExp(`^${SMS_DECORATION_CHAR}$`, 'u')
 
 /**
  * Where one clause of a text ends and the next begins: sentence punctuation,
- * a comma, a semicolon, a line break, an ellipsis, or a dash set off as a
- * dash (never the hyphen inside "opt-out").
+ * a comma, a colon, a semicolon, a line break, an ellipsis, or a dash set off
+ * as a dash (never the hyphen inside "opt-out"). The colon is review round
+ * 7's — "Not interested: STOP" — and is not a break before `//`, so a link's
+ * scheme does not make its host a clause ("https://stop.example").
  */
-const SMS_CLAUSE_BREAK = /[\r\n.!?;,…]+|\s+-+\s+|[–—]+/u
+const SMS_CLAUSE_BREAK = /[\r\n.!?;,…]+|:(?!\/\/)|\s+-+\s+|[–—]+/u
+
+/**
+ * A STOP-family keyword typed in CAPITALS that ends a text, after a space:
+ * STOP, STOPALL, UNSUBSCRIBE, UNSUB, OPTOUT or OPT OUT, with an optional
+ * `ALL` and one optional footer token after it — the case-SENSITIVE half of
+ * `endsInCapitalStop`. CANCEL, END and QUIT are not here: they are opt-outs
+ * only alone. Matched from a whitespace character, so it does no
+ * backtracking over the words before it.
+ */
+const SMS_CAPITAL_STOP_AT_END =
+  /\s(?:STOPALL|STOP|UNSUBSCRIBE|UNSUB|OPTOUT|OPT[\s-]OUT)(?:\s+ALL)?(?:\s+(?<token>[\p{Lu}\p{N}]{2,20}))?$/u
+
+/**
+ * One polite word ending a text whose whitespace is collapsed, and what sets
+ * it off — `SMS_POLITE_TAIL` read from the end (`withoutPolitenessAtEnd`).
+ */
+const SMS_POLITE_WORD_AT_END = /(?:please|pls|plz|thanks|thank you|thx)$/iu
+const SMS_POLITE_SEPARATOR = /^[\s,.!]$/u
+
+/**
+ * The words that make a capital STOP right after them part of a sentence
+ * rather than a command: a negation ("Please don't STOP", "never STOP",
+ * "don't ever STOP"), an article ("the STOP", "a STOP"), or a word that makes
+ * it a place ("the bus STOP", "a pit STOP", "the next STOP").
+ */
+const SMS_NOT_A_COMMAND =
+  /^(?:not|never|ever|cannot|(?:do|does|did|wo|ca|could|should|would|must|is|are|was|were)n['’]?t|a|an|the|bus|pit|truck|next|last)$/iu
 
 /**
  * Is this SMS an opt-out?
@@ -792,6 +839,14 @@ const SMS_CLAUSE_BREAK = /[\r\n.!?;,…]+|\s+-+\s+|[–—]+/u
  * short code or a brand keyword in capitals — never a lower-case word, so
  * "All good, stop worrying" and "Sure, stop by" stay prose.
  *
+ * And a capital STOP ending the text (review round 7, `endsInCapitalStop`):
+ * "Not interested STOP", with no punctuation before the keyword — the
+ * commonest shape of all, since the footer said "Reply STOP" — is read as
+ * its own clause when the keyword is typed in CAPITALS. A lower-case "stop"
+ * there is a sentence about stopping ("I will stop", "Please don't stop"),
+ * and so is a capital one after a negation, an article or a place word
+ * ("the bus STOP"), or with a question mark after it.
+ *
  * Deliberately narrow in the middle, like the email reader beside the send
  * path (`looksLikeOptOut` in packages/db), which the SMS recorder runs TOO —
  * this adds the keyword forms an SMS footer teaches people, and the
@@ -808,8 +863,68 @@ export function smsOptOut(text: string | null | undefined): boolean {
   if (!text) return false
   const folded = text.normalize('NFKC')
   if (saysStop(folded, false)) return true
+  if (endsInCapitalStop(folded)) return true
   const clauses = folded.split(SMS_CLAUSE_BREAK)
   return clauses.length > 1 && clauses.some((clause) => saysStop(clause, true))
+}
+
+/**
+ * Does the text END in a STOP-family keyword typed in capitals, after at
+ * least one word and with no punctuation needed before it? `text` is
+ * NFKC-folded and in the case it was typed.
+ *
+ * The end may carry what a whole message's may — a full stop, an emoji, a
+ * run of "thanks" — but not a question mark: "Not interested STOP?" is a
+ * question. The word right before the keyword may not be a negation, an
+ * article or a place word (`SMS_NOT_A_COMMAND`). A footer token after the keyword is read in
+ * the case it was typed, as a clause's is; and in a text typed in capitals
+ * throughout, where every word looks like a footer token ("OK I WILL STOP
+ * BY"), only a token carrying a digit — a short code — is read.
+ */
+function endsInCapitalStop(text: string): boolean {
+  const decoration = trailingDecoration(text)
+  if (/[?¿]/u.test(decoration)) return false
+  const words = withoutPolitenessAtEnd(text.slice(0, text.length - decoration.length).replace(/\s+/gu, ' '))
+  const end = SMS_CAPITAL_STOP_AT_END.exec(words)
+  if (!end) return false
+  const before = words.slice(0, end.index).trim()
+  if (!/[\p{L}\p{N}]/u.test(before)) return false
+  const last = (before.split(/\s+/u).pop() ?? '').replace(/[^\p{L}\p{N}'’]+/gu, '')
+  if (SMS_NOT_A_COMMAND.test(last)) return false
+  const token = end.groups?.['token']
+  const inCapitalsThroughout = /\p{Lu}/u.test(before) && !/\p{Ll}/u.test(before)
+  return !token || !inCapitalsThroughout || /\p{N}/u.test(token)
+}
+
+/**
+ * The decoration (`SMS_DECORATION_CHAR`) ending a text, walked back one code
+ * point at a time so that a long run of it costs one pass — a regex anchored
+ * only at the end is tried again from every position of such a run.
+ */
+function trailingDecoration(text: string): string {
+  const chars = Array.from(text)
+  let from = chars.length
+  while (from > 0 && SMS_DECORATION_ONE.test(chars[from - 1] ?? '')) from -= 1
+  return chars.slice(from).join('')
+}
+
+/**
+ * `words` (whitespace collapsed) without the run of politeness that ends it —
+ * "please", "pls", "plz", "thanks", "thank you" or "thx", each set off by a
+ * space, a comma, a full stop or a "!" — read back from the end one word at a
+ * time, so that each character is looked at once.
+ */
+function withoutPolitenessAtEnd(words: string): string {
+  let end = words.length
+  for (;;) {
+    const polite = SMS_POLITE_WORD_AT_END.exec(words.slice(Math.max(0, end - 'thank you'.length), end))
+    if (!polite) return words.slice(0, end)
+    const word = end - polite[0].length
+    let from = word
+    while (from > 0 && SMS_POLITE_SEPARATOR.test(words[from - 1] ?? '')) from -= 1
+    if (from === word) return words.slice(0, end)
+    end = from
+  }
 }
 
 /**

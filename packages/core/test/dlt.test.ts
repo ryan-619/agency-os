@@ -636,4 +636,165 @@ describe('the SMS opt-out reader', () => {
   ])('does not read %j as an opt-out — a clause is read by the strong forms only', (text) => {
     expect(smsOptOut(text)).toBe(false)
   })
+
+  /**
+   * Review round 7, finding [5]: a STOP with no punctuation before it — "Not interested STOP", the
+   * commonest shape of all — was missed, as were a colon, a lower-case "stop it" or "unsub me" as a
+   * clause, and the "send" and "this number" phrasings. Each was an ordinary reply: paused, never
+   * suppressed, and resumable.
+   */
+  it.each([
+    'Not interested STOP',
+    'No thanks STOP',
+    'Wrong number STOP',
+    'Not interested: STOP',
+    'Not interested, stop it',
+    'Wrong number, unsub me',
+    "Don't send me messages",
+    'Do not send me sms',
+    'Stop sending me these messages',
+    'Stop messaging this number',
+    'Stop sending sms to this number',
+  ])('reads %j as an opt-out — the round 7 probe', (text) => {
+    expect(smsOptOut(text)).toBe(true)
+  })
+
+  /**
+   * A STOP-family keyword typed in CAPITALS that ENDS the text is its own clause, punctuation or
+   * not — the footer said "Reply STOP", and that is what came back after the sentence. The end may
+   * carry what a whole message may (a footer token, "ALL", a full stop, an emoji, a "thanks").
+   */
+  it.each([
+    'Not interested STOP.',
+    'Not interested STOP!!!',
+    'Not interested STOP 🙏',
+    'Not interested STOP :)',
+    'Not interested STOP thanks',
+    'Not interested STOP, thank you',
+    'Not interested STOP. Thanks!',
+    'Thank you STOP',
+    'I said STOP',
+    'Ok STOP',
+    'Can you STOP',
+    'Not interested STOP NOW',
+    'Not interested STOP 56161',
+    'Not interested STOP ACMEIN',
+    'Wrong person STOP ALL',
+    'who is this STOPALL',
+    'Who is this? Wrong number STOP',
+    'Wrong number UNSUBSCRIBE',
+    'not my number UNSUB',
+    'No thanks OPT OUT',
+    'No thanks OPT-OUT',
+    'No thanks OPTOUT',
+    'Please STOP',
+    'Please do STOP',
+    'make it STOP',
+    'नहीं चाहिए STOP',
+    'नहीं चाहिए STOP ACMEIN',
+    // A text in capitals throughout: the keyword alone, or with a short code, still ends it.
+    'NOT INTERESTED STOP',
+    'WRONG NUMBER STOP 56161',
+  ])('reads %j as an opt-out — a capital STOP ending the text', (text) => {
+    expect(smsOptOut(text)).toBe(true)
+  })
+
+  it.each([
+    'Wrong number, stop it please',
+    'Not interested. Unsub me',
+    'No thanks, unsub',
+    "Don't send me any more messages",
+    'dont send me anymore texts',
+    'Don’t send me msgs again',
+    'do not send me these sms please',
+    'Pls don’t send me smses',
+    'Who is this? Do not send me texts',
+    'stop sending me sms',
+    'Stop sending your messages to this number',
+    'stop sending messages to me',
+    'Stop sending texts to my number',
+    'Stop texting this number',
+    'stop txting my number pls',
+    'Not interested, stop messaging this number',
+    'Not interested :( stop',
+    'Re: Stop',
+  ])('reads %j as an opt-out — a lower-case "stop it" or "unsub me" as a clause, and the "send" and "this number" sentences', (text) => {
+    expect(smsOptOut(text)).toBe(true)
+  })
+
+  /**
+   * Only CAPITALS at the end are read: a lower-case "stop" there is a sentence about stopping. A
+   * negation or an article right before a capital STOP makes it one too, and a question mark after
+   * it makes it a question. CANCEL, END and QUIT never end a text this way. In a text typed in
+   * capitals throughout, a word after STOP is a word ("STOP BY"), so only a short code is read
+   * there.
+   */
+  it.each([
+    'I will stop',
+    "Please don't stop",
+    'Please don’t stop.',
+    'I will stop by at 5',
+    'Please do not stop the service',
+    'Bus stop at 5 STOP? no',
+    'Not interested stop',
+    'can we stop',
+    'This has to stop',
+    "Please don't STOP",
+    'Please do not STOP',
+    'Never STOP',
+    'Don’t ever STOP',
+    'It will never STOP!',
+    'PLEASE DON’T STOP',
+    'Where is the STOP',
+    'meet at the bus STOP',
+    'I AM AT THE BUS STOP',
+    'Is this the last STOP',
+    'I am at Andheri Bus Stop',
+    'Is this your STOP?',
+    'When does it STOP?',
+    'Not interested STOP?',
+    'Not interested CANCEL',
+    'Thanks, see you then END',
+    'I give up QUIT',
+    'OK I WILL STOP BY',
+    'SURE WE CAN STOP IN',
+    'Is this a non-STOP flight',
+    'BUSSTOP',
+    'Not interested in STOPS',
+    'Not interested, STOPPED already',
+  ])('does not read %j as an opt-out — a lower-case stop, a negation, a question or a word after it', (text) => {
+    expect(smsOptOut(text)).toBe(false)
+  })
+
+  it.each([
+    "Don't send me the invoice",
+    "Don't send me messages after 9pm",
+    'Don’t stop sending me messages',
+    'Do not stop sending me texts please',
+    'please send me more messages',
+    'Stop sending me invoices',
+    'stop messaging this number and call my office instead',
+    'Meet at 5:30, stop by the desk',
+    'Re: stop by tomorrow',
+    'https://stop.example',
+    'see http://stop.example/menu',
+    'Time: 5:30',
+    'Note: we will stop at 5',
+    'Sure: stop by on Friday',
+    'Ok, stop worrying',
+    "Fine, don't stop it",
+    'Unsubscribed already, thanks for checking',
+    'Can you stop it from crashing?',
+  ])('does not read %j as an opt-out — the new sentences are anchored, and a colon is only a break', (text) => {
+    expect(smsOptOut(text)).toBe(false)
+  })
+
+  it('reads a long text in linear time — the capital-STOP reading adds no backtracking', () => {
+    const long = `${'word '.repeat(3000)}STOP`
+    const started = performance.now()
+    expect(smsOptOut(long)).toBe(true)
+    expect(smsOptOut(`${'a'.repeat(16_000)} STOP`)).toBe(true)
+    expect(smsOptOut(`${'A'.repeat(16_000)}STOP`)).toBe(false)
+    expect(performance.now() - started).toBeLessThan(500)
+  })
 })
