@@ -5,10 +5,12 @@ import { useRouter } from 'next/navigation'
 import { When } from '@/components/when'
 import { answerElsewhere, answersByTemplate, channelLabel, contactsLinkFor, matchedByWords } from '@/components/inbox/channel'
 import { optedOutNote, optedOutWarning, type OptedOutRow } from '@/components/inbox/opted-out'
+import { SharedNumberHolderNote } from '@/components/shared-number-note'
 import {
   ANSWER_BODY_MAX, ANSWER_SUBJECT_MAX, HUMAN_REPLY_KINDS, INBOX_GROUP_LABELS, RECLASSIFY_HINT, answerIsLive,
   answerStateWords, answerSubject, type InboxGroup,
 } from '@/lib/inbox-view'
+import { isSharedNumberOptOutPause } from '@/lib/shared-number-pause'
 
 /**
  * The inbox's rows and what a person can do with each (PROMPT.md §8.4).
@@ -27,6 +29,9 @@ import {
  *    the row points at Draft SMS on /contacts instead of offering free text
  *    — and, since Draft SMS refuses a paused person and resumes nobody, says
  *    to resume them there first when their reply paused them.
+ *
+ * A shared number's holder reads beside Resume what lifts their pause
+ * (`SharedNumberHolderNote`; review round 9), as on /contacts.
  *
  * The reply's body is shown whole. Somebody deciding what to do about a
  * message has to be able to read all of it.
@@ -378,9 +383,16 @@ export function InboxQueue({
 
                     {canWrite && row.contact && !optedOut ? (
                       row.contact.paused ? (
-                        <button type="button" disabled={busy === row.id} onClick={() => void resume(row)}>
-                          Resume
-                        </button>
+                        <>
+                          <button type="button" disabled={busy === row.id} onClick={() => void resume(row)}>
+                            Resume
+                          </button>
+                          {isSharedNumberOptOutPause(row.contact.pausedReason) ? (
+                            <span className="hint" style={{ maxWidth: 190, textAlign: 'right' }}>
+                              <SharedNumberHolderNote />
+                            </span>
+                          ) : null}
+                        </>
                       ) : (
                         <button type="button" disabled={busy === row.id} onClick={() => void pause(row)}>
                           Pause

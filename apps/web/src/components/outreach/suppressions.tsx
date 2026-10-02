@@ -2,6 +2,8 @@
 
 import { useState } from 'react'
 import { When } from '@/components/when'
+import { SharedNumberHolderNote } from '@/components/shared-number-note'
+import { isSharedNumberOptOutPause } from '@/lib/shared-number-pause'
 
 /**
  * The suppression list, and who is paused (PROMPT.md §2.1, §8.4).
@@ -17,6 +19,11 @@ import { When } from '@/components/when'
  * Each row carries its source as a tag — how it came to be on the list — in
  * words the page mapped on the server. "unrecorded" is a row from before the
  * source was tracked, and says so rather than borrowing another tag.
+ *
+ * The paused list offers Resume for every pause; the route refuses, with
+ * its sentence, the ones a person may not lift. A shared number's holder
+ * reads what lifts theirs beside it (review round 9): this page is where
+ * the number they share is recorded, and Resume works once it is.
  */
 
 export interface SourceView {
@@ -228,7 +235,8 @@ export function SuppressionsPanel({
 
       <h2 style={{ fontSize: 15, margin: '22px 0 8px' }}>Paused</h2>
       <p className="muted" style={{ fontSize: 12.5, marginTop: 0 }}>
-        A contact who replied. Nothing further goes to them in any campaign until a person resumes them.
+        Held from every campaign — most often because they replied; each row says why. Nothing further goes to them
+        until the pause is lifted.
       </p>
       {paused.length === 0 ? (
         <p className="muted" style={{ fontSize: 13 }}>Nobody is paused.</p>
@@ -248,6 +256,11 @@ export function SuppressionsPanel({
               </div>
               <div className="muted" style={{ fontSize: 12.5 }}>
                 {p.pausedReason} · {p.pausedAt ? <When iso={p.pausedAt} /> : null}
+                {isSharedNumberOptOutPause(p.pausedReason) ? (
+                  <div style={{ marginTop: 2 }}>
+                    <SharedNumberHolderNote />
+                  </div>
+                ) : null}
               </div>
             </div>
           ))}
