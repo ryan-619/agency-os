@@ -1106,7 +1106,7 @@ function sharedNumberOptOut(d: unknown): string {
   const holds = n === 1 ? 'a contact here holds' : `${n} contacts here hold`
   const why =
     word(d, 'why') === 'record_failed'
-      ? 'recording the text failed, so it may not be on the suppression list; a retry may record it, but check ' +
+      ? 'recording the text failed, so the number may not be on the suppression list; a retry may record it, but check ' +
         '/suppressions for the number on their record and record it there if it is missing'
       : 'the number is NOT on the suppression list; record it by hand on /suppressions, from their record'
   const unpaused =
