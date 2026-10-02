@@ -668,6 +668,9 @@ async function recordRecoveredSend(
  *    that row's stored `created_at`, never a `Date` read back. A reply that
  *    arrived meanwhile kept the recovery's reason (`pauseContact` keeps the
  *    first), and is unanswered;
+ *  - no reply of theirs is stored since the answer was drafted — read from
+ *    `touches`, not the log, whose row for a reply may be missing or stamped
+ *    before the recovery's (review round 6, [15]);
  *  - the stored reason is still exactly the reply's `replied <instant>`
  *    (`resumeContact`'s `expectedReason`, in the UPDATE's own predicate).
  *
@@ -730,6 +733,32 @@ async function liftRecoveryPause(
     .limit(1)
   if (since.length > 0) return false
 
+  // The log alone is not enough for a reply (review round 6, [15]): its
+  // `contact.replied` row is written best-effort, and stamped with `now()`
+  // — the reply transaction's START, which can fall before the recovery's
+  // row though the reply committed after it. So the touches decide too: an
+  // inbound row of theirs stored at or after the ANSWER was drafted, other
+  // than the reply it answers, is a reply nobody has answered. Compared in
+  // SQL against the answer's stored `created_at`. A reply in flight is not
+  // missed: one inserted before the caller locked this contact held a
+  // key-share lock on it, so that lock waited for the reply to commit and
+  // this read sees it; one inserted after waits for this transaction, and
+  // its own pause then lands on a person this has resumed.
+  const newerReply = await db
+    .select({ id: schema.touches.id })
+    .from(schema.touches)
+    .where(
+      and(
+        eq(schema.touches.orgId, orgId),
+        eq(schema.touches.contactId, contactId),
+        eq(schema.touches.direction, 'in'),
+        sql`${schema.touches.id} <> ${answer.answersTouchId}`,
+        sql`${schema.touches.createdAt} >= (SELECT a.created_at FROM touches a WHERE a.id = ${answer.id})`,
+      ),
+    )
+    .limit(1)
+  if (newerReply.length > 0) return false
+
   const reason = replyPauseReason(reply)
   if (!(await resumeContact(db, orgId, contactId, { expectedReason: reason }))) return false
   await appendAudit(db, {
@@ -777,12 +806,21 @@ async function settle(
       })
       .where(eq(schema.touches.id, touch.id))
   const ended = touch.answersTouchId ? answerEndedBy(state.status, state.refusalCode) : null
-  if (!ended) {
+  if (!ended || !touch.answersTouchId) {
     await write(db)
     return
   }
+  const replyTouchId = touch.answersTouchId
   await db.transaction(async (transaction) => {
     const tx = transaction as unknown as AgencyDb
+    // Contact before touch (review round 6, [13]): the reply's person first,
+    // the lock `repauseForUnansweredReply` then re-takes, and only then the
+    // answer's own row. Writing the answer first held its row while waiting
+    // for the person — and an erasure holds the person while it scrubs that
+    // very row, so the two deadlocked on a real Postgres and the erasure
+    // took the loud "could not keep its suppression" path for a fault that
+    // was never about a suppression.
+    await lockReplyContact(tx, touch.orgId, replyTouchId)
     await write(tx)
     await repauseForUnansweredReply(tx, { orgId: touch.orgId, answer: touch, actor: 'system', because: ended, now })
   })
@@ -1753,6 +1791,47 @@ async function lockReplyContact(db: AgencyDb, orgId: string, replyTouchId: strin
     .limit(1)
     .for('update')
   return contact?.id ?? null
+}
+
+/**
+ * `lockReplyContact` for several answers at once — the stuck-send recovery's
+ * (apps/agent/src/boot/reconcile.ts), which settles every claim the last
+ * worker left and re-pauses the people whose answers were among them
+ * (review round 6, [13]). Each reply is read, never locked; their contacts
+ * are then locked `FOR UPDATE` in ONE statement, in id order — Postgres
+ * applies ORDER BY before the locking clause, so the rows are locked in
+ * that order and two writers holding several people cannot each wait on
+ * the other. Call it BEFORE writing any of the answers: contact before
+ * touch. A reply or a contact that is gone is skipped, as the single
+ * helper returns null for it.
+ */
+export async function lockReplyContacts(
+  db: AgencyDb,
+  answers: readonly { readonly orgId: string; readonly answersTouchId: string }[],
+): Promise<void> {
+  if (answers.length === 0) return
+  const replies = await db
+    .select({ id: schema.touches.id, orgId: schema.touches.orgId, contactId: schema.touches.contactId })
+    .from(schema.touches)
+    .where(
+      and(
+        inArray(schema.touches.id, [...new Set(answers.map((a) => a.answersTouchId))]),
+        eq(schema.touches.direction, 'in'),
+        isNotNull(schema.touches.contactId),
+      ),
+    )
+  // Only a reply in the answer's own org names a person to lock.
+  const wanted = new Set(answers.map((a) => `${a.orgId}:${a.answersTouchId}`))
+  const contactIds = [
+    ...new Set(replies.filter((r) => wanted.has(`${r.orgId}:${r.id}`) && r.contactId).map((r) => r.contactId as string)),
+  ]
+  if (contactIds.length === 0) return
+  await db
+    .select({ id: schema.contacts.id })
+    .from(schema.contacts)
+    .where(inArray(schema.contacts.id, contactIds))
+    .orderBy(asc(schema.contacts.id))
+    .for('update')
 }
 
 /**
