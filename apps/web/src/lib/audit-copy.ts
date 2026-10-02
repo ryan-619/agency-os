@@ -963,25 +963,35 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     const contacts = num(c.d, 'contacts')
     const redelivered = flag(c.d, 'redelivered') === true
     const filedUnder = word(c.d, 'filedUnder')
+    // The hold REPLACES the pause a holder's own unanswered reply had caused
+    // (review round 7), so answering that reply no longer lifts it — named
+    // by class and count, never the reason.
+    const replacedN = word(c.d, 'replacedPauseFor') === 'replied' ? (num(c.d, 'replacedPauses') ?? 1) : 0
+    const replaced =
+      replacedN <= 0
+        ? ''
+        : contacts === 1 && replacedN === 1
+          ? '; the hold replaced the pause their reply had caused'
+          : `; the hold replaced the pause a reply had caused for ${replacedN} of them`
     if (filedUnder === 'another_org') {
       const here = contacts !== null && contacts > 1 ? `${contacts} contacts here hold` : 'a contact here holds'
       return redelivered
         ? `received again a text from a number ${here}, which it had filed under a contact in another organisation${stop}`
         : `received a text from a number ${here}, and filed it under a contact in another organisation that this system had texted${held(
             c.d, 'contact here holding it', 'contacts here holding it',
-          )}${stop}`
+          )}${replaced}${stop}`
     }
     if (filedUnder === 'another_contact') {
       return `received a text from a number more than one contact here holds, and filed it under the one this system had texted${held(
         c.d, 'other contact holding it', 'other contacts holding it',
-      )}${stop}`
+      )}${replaced}${stop}`
     }
     const why = own(SMS_UNMATCHED, word(c.d, 'why')) ?? 'that could not be placed'
     return redelivered
       ? `received again a text from a number ${why}, which it had filed under nobody; nobody was paused again${stop}`
       : `received a text from a number ${why}, so it was filed under nobody${held(
           c.d, 'contact holding the number', 'contacts holding the number',
-        )}${stop}`
+        )}${replaced}${stop}`
   },
   // The two DoveSoft pushes this deployment could not read (/api/inbound/dovesoft/*).
   // Which field was missing, by name — never a value, a number or the words.
