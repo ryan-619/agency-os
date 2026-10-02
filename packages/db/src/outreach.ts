@@ -2241,6 +2241,37 @@ export function looksLikeOptOut(body: string | null | undefined): boolean {
 }
 
 /**
+ * Did a reply come FROM the contact it is filed under (review round 7)?
+ *
+ * Not always: `handleInboundEmail` files a reply matched by References under
+ * the contact OUR message went to, whoever answered — and a colleague in
+ * the thread replying all "please remove me from your list" is the opt-out
+ * of the colleague, not of the contact. When it cannot be recorded, holding
+ * the CONTACT as an opt-out nobody recorded locked out somebody who never
+ * asked to stop, for good: no Resume lifts that pause, and the inbox reads
+ * the audit row however old.
+ *
+ * Compared by the channel's own address key (`suppressionKeysFor`), never
+ * the domain — a colleague shares it. False only when BOTH addresses read
+ * and differ: a sender that is shown to be somebody else. Either side
+ * unreadable — a contact whose address was cleared since — is true, the
+ * reading that holds the contact as before, because "we could not tell"
+ * is not "it was somebody else".
+ */
+function replyIsFromTheContact(
+  from: string,
+  channel: Channel,
+  contact: { readonly email: string | null; readonly phone: string | null; readonly linkedinUrl: string | null },
+): boolean {
+  const own = channel === 'email' ? contact.email : channel === 'linkedin' ? contact.linkedinUrl : contact.phone
+  const keyOf = (address: string | null): string | null =>
+    address ? (suppressionKeysFor(address, channel)?.find((k) => k.kind !== 'domain')?.value ?? null) : null
+  const sender = keyOf(from)
+  const contactKey = keyOf(own)
+  return sender === null || contactKey === null || sender === contactKey
+}
+
+/**
  * Record an inbound reply, and stop everything queued for that contact.
  *
  * Both halves in one call, because doing one without the other is the bug:
@@ -2383,19 +2414,32 @@ export async function recordInboundReply(
   // Lines said once the outcome is COMMITTED: a line about a write that then
   // rolled back would be a claim about nothing.
   const said: { readonly message: string; readonly fields: Readonly<Record<string, unknown>> }[] = []
+  // Whether the reply came from the contact it is filed under
+  // (`replyIsFromTheContact`), from the contact row this transaction reads
+  // first — kept out here so the rolled-back line can say it without
+  // reading again from a database that just failed. Null when the fault
+  // came before that read: unknown, which every reader holds as before.
+  let fromIsContact: boolean | null = null
   let recorded: Awaited<ReturnType<typeof recordInboundReply>>
   try {
     recorded = await db.transaction(async (transaction) => {
       const tx = transaction as unknown as AgencyDb
 
       const contactRows = await tx
-        .select({ companyId: schema.contacts.companyId, companyDomain: schema.companies.domain })
+        .select({
+          companyId: schema.contacts.companyId,
+          companyDomain: schema.companies.domain,
+          email: schema.contacts.email,
+          phone: schema.contacts.phone,
+          linkedinUrl: schema.contacts.linkedinUrl,
+        })
         .from(schema.contacts)
         .leftJoin(schema.companies, eq(schema.companies.id, schema.contacts.companyId))
         .where(and(eq(schema.contacts.orgId, args.orgId), eq(schema.contacts.id, args.contactId)))
         .limit(1)
       const companyId = contactRows[0]?.companyId ?? null
       const companyDomain = contactRows[0]?.companyDomain ?? null
+      if (contactRows[0]) fromIsContact = replyIsFromTheContact(from, args.channel, contactRows[0])
 
       const inserted = await tx
         .insert(schema.touches)
@@ -2485,40 +2529,66 @@ export async function recordInboundReply(
           // person whose opt-out was never recorded — and a fault that failed
           // the suppression can fail the audit row below too, leaving the inbox
           // nothing else to find. Found by review.
-          try {
-            const overridden = await tx.transaction((sp) =>
-              pauseContactOverriding(
-                sp as unknown as AgencyDb, args.orgId, args.contactId,
-                `opt-out not recorded: reply ${now.toISOString()} (${why})`, now,
-              ),
-            )
-            paused = paused || overridden
-          } catch (err) {
-            said.push({
-              message: 'an opt-out that was not recorded could not pause the contact',
-              fields: {
-                touchId,
-                contactId: args.contactId,
-                orgId: args.orgId,
-                error: err instanceof Error ? err.name : 'UnknownError',
-              },
-            })
+          //
+          // Except when the reply came from somebody else (review round 7):
+          // the opt-out is THEIRS, and the contact it is filed under never
+          // asked to stop. They keep the reply's own pause, which a person
+          // lifts — once the sender's address is on the suppression list, the
+          // inbox's reading of this opted-out reply (its From matched by no
+          // suppression row) lets them go too.
+          if (fromIsContact !== false) {
+            try {
+              const overridden = await tx.transaction((sp) =>
+                pauseContactOverriding(
+                  sp as unknown as AgencyDb, args.orgId, args.contactId,
+                  `opt-out not recorded: reply ${now.toISOString()} (${why})`, now,
+                ),
+              )
+              paused = paused || overridden
+            } catch (err) {
+              said.push({
+                message: 'an opt-out that was not recorded could not pause the contact',
+                fields: {
+                  touchId,
+                  contactId: args.contactId,
+                  orgId: args.orgId,
+                  error: err instanceof Error ? err.name : 'UnknownError',
+                },
+              })
+            }
           }
+          // The row /compliance and the digest count. About the contact when
+          // the reply was theirs — what keeps /inbox from drafting to them —
+          // and otherwise about the reply itself, which holds the sender's
+          // address, with the contact as `filedUnder`: never as a subject or a
+          // `contactId`, the two things the inbox reads as THEIR opt-out.
           await tx
             .transaction((sp) =>
-              appendAudit(sp as unknown as AgencyDb, {
-                orgId: args.orgId,
-                actor: 'system',
-                action: 'contact.opt_out_not_recorded',
-                subjectType: 'contact',
-                subjectId: args.contactId,
-                detail: { touchId, channel: args.channel, why },
-              }),
+              appendAudit(
+                sp as unknown as AgencyDb,
+                fromIsContact === false
+                  ? {
+                      orgId: args.orgId,
+                      actor: 'system',
+                      action: 'contact.opt_out_not_recorded',
+                      subjectType: 'touch',
+                      subjectId: touchId,
+                      detail: { touchId, channel: args.channel, why, fromIsContact: false, filedUnder: args.contactId },
+                    }
+                  : {
+                      orgId: args.orgId,
+                      actor: 'system',
+                      action: 'contact.opt_out_not_recorded',
+                      subjectType: 'contact',
+                      subjectId: args.contactId,
+                      detail: { touchId, channel: args.channel, why },
+                    },
+              ),
             )
             .catch(() => {})
           said.push({
             message: 'OPT-OUT NOT RECORDED — follow up by hand',
-            fields: { touchId, contactId: args.contactId, orgId: args.orgId, why },
+            fields: { touchId, contactId: args.contactId, orgId: args.orgId, why, fromIsContact },
           })
         }
       }
@@ -2584,6 +2654,10 @@ export async function recordInboundReply(
         // The message it answered, when it was matched by one: an id a
         // caller can name in the alarm it raises (the email webhook does).
         inReplyTo: args.inReplyTo ?? null,
+        // Whether the reply came from that contact (review round 7): false
+        // is a colleague's stop filed under them, and the caller must not
+        // hold THEM as an opt-out nobody recorded. Null: not known.
+        fromIsContact,
         why: err instanceof Error ? err.name : 'UnknownError',
       })
     }
