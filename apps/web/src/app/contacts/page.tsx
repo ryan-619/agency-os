@@ -89,6 +89,7 @@ export default async function ContactsPage({
       zoneMissing: !r.timeZone && !r.companyTimeZone,
       pausedAt: r.pausedAt ? r.pausedAt.toISOString() : null,
       pausedReason: r.pausedReason,
+      sharedNumberHold: ledger.sharedNumberHold,
       // The column exists from 0018 and nothing writes it yet; shown only when set.
       emailBouncedAt: r.emailBouncedAt ? r.emailBouncedAt.toISOString() : null,
       emailBounceCode: r.emailBounceCode,

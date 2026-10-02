@@ -27,7 +27,10 @@ import { offersResume, resumeOfferFor } from '@/lib/shared-number-pause'
  * a number they share asked to stop, they may not have sent it, and the
  * route lifts their pause once the number is on the suppression list — so
  * the row says exactly that and offers Resume, which answers the route's
- * sentence until the number is recorded. A reply's pause gets Pause beside
+ * sentence until the number is recorded. So does a holder whose own pause
+ * stood instead of the hold (review round 10, [2]): the shape is a
+ * teammate's or an unsubscribe's, so the row reads the database's answer,
+ * `sharedNumberHold`, beside it. A reply's pause gets Pause beside
  * Resume, so a teammate can hold somebody whose reply someone may answer.
  * The route also refuses a resume while an opt-out the audit log says was
  * never recorded matches no suppression row; that needs the database, so
@@ -80,6 +83,12 @@ export interface LedgerView {
   readonly zoneMissing: boolean
   readonly pausedAt: string | null
   readonly pausedReason: string | null
+  /**
+   * Resume refuses their pause until a shared number is recorded
+   * (`consentLedgerFor`'s `sharedNumberHold`, review round 10, [2]) — a
+   * holder whose own pause stood instead of the hold. False when not paused.
+   */
+  readonly sharedNumberHold: boolean
   readonly emailBouncedAt: string | null
   readonly emailBounceCode: string | null
   readonly channels: readonly LedgerChannelView[]
@@ -168,7 +177,7 @@ export function ContactsLedger({
           const panel = open?.id === r.id ? open.panel : null
           // Null when they are not paused. Which buttons the row gets — see the header.
           const pausedFor = r.pausedAt ? pauseReasonClass(r.pausedReason) : null
-          const offer = resumeOfferFor(pausedFor, r.pausedReason)
+          const offer = resumeOfferFor(pausedFor, r.pausedReason, r.sharedNumberHold)
           return (
             <Fragment key={r.id}>
               <tr>

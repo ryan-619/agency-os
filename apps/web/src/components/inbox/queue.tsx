@@ -11,7 +11,7 @@ import {
   ANSWER_BODY_MAX, ANSWER_SUBJECT_MAX, HUMAN_REPLY_KINDS, INBOX_GROUP_LABELS, RECLASSIFY_HINT, answerIsLive,
   answerStateWords, answerSubject, type InboxGroup,
 } from '@/lib/inbox-view'
-import { isSharedNumberOptOutPause } from '@/lib/shared-number-pause'
+import { SHARED_NUMBER_LABEL, isSharedNumberOptOutPause } from '@/lib/shared-number-pause'
 
 /**
  * The inbox's rows and what a person can do with each (PROMPT.md §8.4).
@@ -36,7 +36,8 @@ import { isSharedNumberOptOutPause } from '@/lib/shared-number-pause'
  * sender, "filed under" the contact, and its composer says the answer goes
  * to the contact's address on file, not to the sender (`sender.ts`; review
  * round 9). A shared number's holder reads beside Resume what lifts their
- * pause (`SharedNumberHolderNote`), as on /contacts.
+ * pause (`SharedNumberHolderNote`), as on /contacts, and the number it asks
+ * to be recorded — the one on their record (review round 10, [7]).
  *
  * The reply's body is shown whole. Somebody deciding what to do about a
  * message has to be able to read all of it.
@@ -58,6 +59,8 @@ export interface InboxRowView {
     readonly id: string
     readonly name: string
     readonly email: string | null
+    /** Shown beside a shared number's holder's note — the number it asks to be recorded. */
+    readonly phone: string | null
     readonly pausedReason: string | null
     readonly paused: boolean
   } | null
@@ -410,6 +413,12 @@ export function InboxQueue({
                           {isSharedNumberOptOutPause(row.contact.pausedReason) ? (
                             <span className="hint" style={{ maxWidth: 190, textAlign: 'right' }}>
                               <SharedNumberHolderNote />
+                              {row.contact.phone ? (
+                                <>
+                                  {' '}
+                                  {SHARED_NUMBER_LABEL} <code>{row.contact.phone}</code>
+                                </>
+                              ) : null}
                             </span>
                           ) : null}
                         </>

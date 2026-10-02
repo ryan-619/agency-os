@@ -24,6 +24,8 @@ import { TEMPLATE_CHANNELS, type TemplateCategory, type TemplateFacts } from '@a
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 import { channelMismatch, decideGathered, sendFactsFor, type EvidenceAsOf, type MessageWords } from './outreach.js'
+// Review round 10, [2]: the ledger asks Resume's own shared-number question.
+import { heldForUnrecordedSharedNumber } from './sms.js'
 
 export interface SendPreviewInput {
   readonly orgId: string
@@ -86,6 +88,16 @@ export interface SendPreviewFacts {
    * answering it. Null when not paused.
    */
   readonly pausedFor: PauseReasonClass | null
+  /**
+   * Whether Resume refuses this pause until a shared number's STOP is
+   * recorded (`heldForUnrecordedSharedNumber`, the gate `contactResumeByHand`
+   * asks; review round 10, [2]). A holder whose own pause — a teammate's,
+   * an unsubscribe's — stood instead of the hold reads as any pause of its
+   * class, which a person lifts with Resume; this says they cannot, yet.
+   * False when they are not paused. The decision's sentence says it too
+   * (`decideGathered`).
+   */
+  readonly sharedNumberHold: boolean
   /**
    * Whether the words may not quote the scan behind them (§2.2): it is past
    * its re-verification deadline now — judged at `writtenAt`, from the
@@ -244,6 +256,7 @@ export async function previewSend(db: AgencyDb, input: SendPreviewInput): Promis
       paused,
       pausedReason,
       pausedFor: paused ? pauseReasonClass(pausedReason) : null,
+      sharedNumberHold: gathered.sharedNumberHold,
       evidenceStale: facts.evidenceStale,
       evidenceSuperseded: gathered.evidenceSuperseded,
       quietStart: facts.quietStart,
@@ -289,6 +302,14 @@ export type SuppressionStanding = 'clear' | 'suppressed' | 'unparseable' | 'none
 export interface ConsentLedger {
   readonly contactId: string
   readonly channels: readonly ConsentState[]
+  /**
+   * Whether they are paused and Resume refuses that pause until a shared
+   * number's STOP is recorded — `previewSend`'s `sharedNumberHold`, the gate
+   * `contactResumeByHand` asks (review round 10, [2]). /contacts words the
+   * row's Resume by it, as it does for the hold's own shape, and
+   * `get_consent` says it. False when they are not paused.
+   */
+  readonly sharedNumberHold: boolean
   readonly suppression: {
     readonly email: SuppressionStanding
     readonly phone: SuppressionStanding
@@ -314,12 +335,16 @@ export async function consentLedgerFor(
       email: schema.contacts.email,
       phone: schema.contacts.phone,
       linkedinUrl: schema.contacts.linkedinUrl,
+      pausedAt: schema.contacts.pausedAt,
+      pausedReason: schema.contacts.pausedReason,
     })
     .from(schema.contacts)
     .where(and(eq(schema.contacts.orgId, orgId), eq(schema.contacts.id, contactId)))
     .limit(1)
   const contact = contactRows[0]
   if (!contact) return null
+  // One more read, for a paused person only — the page already reads per row.
+  const sharedNumberHold = contact.pausedAt !== null && (await heldForUnrecordedSharedNumber(db, orgId, contact))
 
   const consentRows = await db
     .select()
@@ -381,6 +406,7 @@ export async function consentLedgerFor(
   return {
     contactId: contact.id,
     channels,
+    sharedNumberHold,
     suppression: {
       email: standingOf(email),
       phone: standingOf(phone),

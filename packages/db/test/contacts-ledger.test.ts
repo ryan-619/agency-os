@@ -15,6 +15,13 @@ import {
   contactsUpdate, contactPatchInput, previewSend, schema, type AgencyDb,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
+// Review round 10, [2]: a shared number's holder, through every reader of the gate.
+import { pausedSentence } from '@agency/core'
+import {
+  SHARED_NUMBER_HOLD_SENTENCE, contactPauseByHand, contactResumeByHand, dispatchTouch, inboxTouches, pausedContacts,
+  recordInboundSms, type MessageProvider,
+} from '../src/index.js'
+import { failOnce } from './fault-db.js'
 
 describe('the consent ledger writers', () => {
   let test: TestDb
@@ -211,6 +218,163 @@ describe('the consent ledger writers', () => {
     // before the consent check — by a rule no approver can click past.
     expect(decision.code).toBe('cold_channel_forbidden')
     expect(decision.humanCanResolve).toBe(false)
+  })
+})
+
+/**
+ * Review round 10, [2]: a holder of a shared number whose STOP could not be
+ * recorded, whose own pause — a teammate's — stood instead of the hold
+ * (`holdHard`'s `kept`). Resume refuses it until the number is recorded
+ * (RESUME_SHARED_NUMBER_KEPT), and every other reader said a person lifts
+ * it with Resume: the send path's sentence — on the ledger's dry run, on
+ * /approvals and in `touches.error` — the ledger's row, `check_send`. The
+ * gate's answer is a fact now, `sharedNumberHold`, on `previewSend` and
+ * `consentLedgerFor`, and the sentence says it; once the number is
+ * recorded every reader says what Resume then does.
+ */
+describe('a shared number’s holder whose own pause stood', () => {
+  const PHONE = '+919812345678'
+  const AT = new Date('2026-09-15T06:30:00.000Z')
+  let test: TestDb
+  let db: AgencyDb
+  let orgId: string
+  let userId: string
+  let mailId: string
+  let jo: string
+  let bina: string
+  let cai: string
+
+  beforeEach(async () => {
+    test = await migratedDb()
+    db = drizzle(test.pg, { schema }) as unknown as AgencyDb
+    const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
+    orgId = org!.id
+    const [user] = await db.insert(schema.users).values({ orgId, email: 'owner@agency.test', role: 'owner' }).returning({ id: schema.users.id })
+    userId = user!.id
+    const [company] = await db
+      .insert(schema.companies)
+      .values({ orgId, domain: 'acme.example', timeZone: 'Asia/Kolkata' })
+      .returning({ id: schema.companies.id })
+    const [mail] = await db
+      .insert(schema.campaigns)
+      .values({ orgId, name: 'Mail', channel: 'email', status: 'active', autoSend: false })
+      .returning({ id: schema.campaigns.id })
+    mailId = mail!.id
+    const person = async (email: string) =>
+      (await db
+        .insert(schema.contacts)
+        .values({ orgId, companyId: company!.id, email, phone: PHONE, timeZone: 'Asia/Kolkata' })
+        .returning({ id: schema.contacts.id }))[0]!.id
+    jo = await person('jo@acme.example')
+    bina = await person('bina@acme.example')
+    cai = await person('cai@acme.example')
+    // Jo is the one this system texted, so a text from the number is filed under Jo.
+    await db.insert(schema.touches).values({
+      orgId, contactId: jo, companyId: company!.id, channel: 'sms', direction: 'out', status: 'sent',
+      body: 'Hi Jo', recipient: PHONE, sentAt: new Date(AT.getTime() - 86_400_000), providerId: 'ds-1',
+    })
+    expect((await contactPauseByHand(db, { orgId, contactId: bina, reason: 'on leave (by sam@agency.test)', now: new Date(AT.getTime() - 60_000) })).ok).toBe(true)
+    // The STOP's phone suppression cannot be written: Cai is held hard, and Bina keeps her teammate's pause.
+    await failOnce(test.pg, { table: 'suppressions', event: 'INSERT', when: `NEW.kind = 'phone'` })
+    const r = await recordInboundSms(db, { from: PHONE, text: 'Wrong number. STOP', providerMessageId: null, orgId, receivedAt: AT, log: { error: () => {} } })
+    expect(r).toMatchObject({ matched: 'contact', optOutNotRecorded: true })
+  }, 30_000)
+
+  afterEach(async () => {
+    await test?.close()
+  })
+
+  const preview = async (contactId: string) => {
+    const p = await previewSend(db, { orgId, contactId, campaignId: mailId, now: AT })
+    if (!p.ok) throw new Error(p.message)
+    return p
+  }
+  const pausedReason = async (id: string) =>
+    (await db.select({ r: schema.contacts.pausedReason }).from(schema.contacts).where(eq(schema.contacts.id, id)))[0]!.r
+
+  it('says on the dry run that Resume waits for the number — and the gate agrees', async () => {
+    expect(await pausedReason(bina)).toBe('on leave (by sam@agency.test)')
+    const p = await preview(bina)
+    expect(p.facts.pausedFor).toBe('manual')
+    expect(p.facts.sharedNumberHold).toBe(true)
+    expect(p.decision).toMatchObject({ allowed: false, code: 'paused', humanCanResolve: false })
+    if (p.decision.allowed) return
+    expect(p.decision.reason).toBe(`${pausedSentence('manual')} ${SHARED_NUMBER_HOLD_SENTENCE}`)
+    expect(SHARED_NUMBER_HOLD_SENTENCE).toContain('Resume is refused until the number is recorded on /suppressions')
+    expect(SHARED_NUMBER_HOLD_SENTENCE).not.toMatch(/they asked to stop/)
+    // The ledger's row reads the same answer.
+    expect((await consentLedgerFor(db, orgId, bina))?.sharedNumberHold).toBe(true)
+    // And Resume refuses, as they say.
+    const resumed = await contactResumeByHand(db, { orgId, contact: { id: bina }, expectedReason: 'on leave (by sam@agency.test)', actor: userId })
+    expect(resumed).toMatchObject({ ok: false, reason: 'opt_out_not_recorded' })
+  })
+
+  it('words the sender’s own refusal the same — the one LinkedIn’s Start shows — so the dry run cannot disagree', async () => {
+    const [touch] = await db
+      .insert(schema.touches)
+      .values({
+        orgId, contactId: bina, campaignId: mailId, channel: 'email', direction: 'out', status: 'approved',
+        subject: 'Hello', body: 'Hello Bina', approvedBy: userId, approvedAt: AT,
+      })
+      .returning()
+    let sent = 0
+    const provider: MessageProvider = { name: 'test', channels: ['email'], async send() { sent++; return { providerId: 'x' } } }
+    const out = await dispatchTouch(db, provider, touch!, { now: AT })
+    expect(sent).toBe(0)
+    expect(out.decision).toEqual({
+      allowed: false,
+      code: 'paused',
+      humanCanResolve: false,
+      reason: `${pausedSentence('manual')} ${SHARED_NUMBER_HOLD_SENTENCE}`,
+    })
+    const [row] = await db.select().from(schema.touches).where(eq(schema.touches.id, touch!.id))
+    expect(row).toMatchObject({ status: 'refused', refusalCode: 'paused' })
+  })
+
+  it('leaves the hold’s own shape worded as it was: its sentence already says to record it', async () => {
+    const p = await preview(cai)
+    expect(p.facts.pausedFor).toBe('opt_out_not_recorded')
+    expect(p.facts.sharedNumberHold).toBe(true)
+    if (p.decision.allowed) throw new Error('allowed')
+    expect(p.decision.reason).toBe(pausedSentence('opt_out_not_recorded'))
+    expect((await consentLedgerFor(db, orgId, cai))?.sharedNumberHold).toBe(true)
+  })
+
+  it('says nothing of the kind once the number is recorded, and Resume then lifts the pause', async () => {
+    expect((await addSuppression(db, { orgId, kind: 'phone', value: PHONE, reason: 'texted STOP', source: 'manual' })).ok).toBe(true)
+    const p = await preview(bina)
+    expect(p.facts.sharedNumberHold).toBe(false)
+    if (p.decision.allowed) throw new Error('allowed')
+    expect(p.decision.reason).toBe(pausedSentence('manual'))
+    expect((await consentLedgerFor(db, orgId, bina))?.sharedNumberHold).toBe(false)
+    const resumed = await contactResumeByHand(db, { orgId, contact: { id: bina }, expectedReason: 'on leave (by sam@agency.test)', actor: userId })
+    expect(resumed.ok).toBe(true)
+  })
+
+  /**
+   * Review round 10, [7]: the screens that list paused people without their
+   * record — /suppressions and /inbox — told a holder's reader to record
+   * "the number" and showed none. The rows carry it now, as stored.
+   */
+  it('hands /suppressions and /inbox the number a holder’s note asks to be recorded', async () => {
+    const paused = await pausedContacts(db, orgId)
+    expect(paused.find((p) => p.id === cai)).toMatchObject({ email: 'cai@acme.example', phone: PHONE, firstName: null, lastName: null })
+    const replies = await inboxTouches(db, orgId)
+    expect(replies).toHaveLength(1)
+    expect(replies[0]!.contact).toMatchObject({ id: jo, phone: PHONE })
+  })
+
+  it('is false for anybody else: the contact it was filed under, and a person who is not paused', async () => {
+    // Jo is paused by their own reply — not a holder the row lists.
+    expect((await preview(jo)).facts.sharedNumberHold).toBe(false)
+    expect((await consentLedgerFor(db, orgId, jo))?.sharedNumberHold).toBe(false)
+    const [company] = await db.select({ id: schema.companies.id }).from(schema.companies).limit(1)
+    const [dee] = await db
+      .insert(schema.contacts)
+      .values({ orgId, companyId: company!.id, email: 'dee@acme.example', timeZone: 'Asia/Kolkata' })
+      .returning({ id: schema.contacts.id })
+    expect((await preview(dee!.id)).facts.sharedNumberHold).toBe(false)
+    expect((await consentLedgerFor(db, orgId, dee!.id))?.sharedNumberHold).toBe(false)
   })
 })
 

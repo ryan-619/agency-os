@@ -71,6 +71,7 @@ export default async function InboxPage({
             id: r.contact.id,
             name: personName(r.contact),
             email: r.contact.email,
+            phone: r.contact.phone,
             paused: r.contact.pausedAt !== null,
             pausedReason: r.contact.pausedReason,
           }

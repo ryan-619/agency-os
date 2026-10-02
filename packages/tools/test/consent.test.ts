@@ -13,9 +13,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import { z } from 'zod'
-import { addSuppression, contactsRecordConsent, type AgencyDb } from '@agency/db'
+import { addSuppression, contactPauseByHand, contactsRecordConsent, recordInboundSms, type AgencyDb } from '@agency/db'
 import * as schema from '@agency/db/schema'
 import { migratedDb, type TestDb } from '../../db/test/helpers.js'
+import { failOnce } from '../../db/test/fault-db.js'
 import { AGENCY_TOOLS, checkSend, getConsent, type AgencyToolSpec, type ToolContext } from '../src/index.js'
 
 const NOON_UTC = new Date('2026-09-15T12:00:00.000Z')
@@ -360,5 +361,99 @@ describe('the consent tools', () => {
       expect(out.code).toBe('not_found')
       expect(audited).toEqual([])
     })
+  })
+})
+
+/**
+ * Review round 10, [2]: a holder of a shared number whose STOP could not be
+ * recorded, whose own pause — a teammate's — stood instead of the hold. The
+ * class is `manual`, and `check_send` told the model a person resumes them
+ * on /contacts, while Resume refuses until the number is recorded
+ * (RESUME_SHARED_NUMBER_KEPT). Both tools read the gate's answer now,
+ * `sharedNumberHold`, and say what Resume waits for — never that they asked.
+ */
+describe('the consent tools on a shared number’s holder whose own pause stood', () => {
+  const PHONE = '+919812345678'
+  const AT = new Date('2026-09-15T06:30:00.000Z')
+  let test: TestDb
+  let db: AgencyDb
+  let orgId: string
+
+  beforeEach(async () => {
+    test = await migratedDb()
+    db = drizzle(test.pg, { schema }) as unknown as AgencyDb
+    const [org] = await db.insert(schema.orgs).values({ name: 'Agency' }).returning({ id: schema.orgs.id })
+    orgId = org!.id
+    const [company] = await db
+      .insert(schema.companies)
+      .values({ orgId, domain: 'acme.example', timeZone: 'Asia/Kolkata' })
+      .returning({ id: schema.companies.id })
+    await db.insert(schema.campaigns).values({ orgId, name: 'Mail', channel: 'email', status: 'active', autoSend: false })
+    const person = async (email: string) =>
+      (await db
+        .insert(schema.contacts)
+        .values({ orgId, companyId: company!.id, email, phone: PHONE, timeZone: 'Asia/Kolkata' })
+        .returning({ id: schema.contacts.id }))[0]!.id
+    const jo = await person('jo@acme.example')
+    const bina = await person('bina@acme.example')
+    await db.insert(schema.touches).values({
+      orgId, contactId: jo, companyId: company!.id, channel: 'sms', direction: 'out', status: 'sent',
+      body: 'Hi Jo', recipient: PHONE, sentAt: new Date(AT.getTime() - 86_400_000), providerId: 'ds-1',
+    })
+    expect((await contactPauseByHand(db, { orgId, contactId: bina, reason: 'on leave (by sam@agency.test)', now: new Date(AT.getTime() - 60_000) })).ok).toBe(true)
+    await failOnce(test.pg, { table: 'suppressions', event: 'INSERT', when: `NEW.kind = 'phone'` })
+    const r = await recordInboundSms(db, { from: PHONE, text: 'Wrong number. STOP', providerMessageId: null, orgId, receivedAt: AT, log: { error: () => {} } })
+    expect(r).toMatchObject({ matched: 'contact', optOutNotRecorded: true })
+  }, 30_000)
+
+  afterEach(async () => {
+    await test?.close()
+  })
+
+  const ctx = (): ToolContext => ({
+    db,
+    orgId,
+    principal: { id: 'user-1', orgId, role: 'owner' },
+    turnId: '44444444-4444-4444-8444-444444444444',
+    now: () => AT,
+    audit: async () => {},
+  })
+  const run = async <S extends z.ZodRawShape>(spec: AgencyToolSpec<S>, input: unknown) =>
+    spec.handler(z.object(spec.shape).parse(input) as never, ctx())
+
+  it('check_send says Resume waits for the number, after the teammate’s pause, and never that they asked', async () => {
+    const out = await run(checkSend, { domain: 'acme.example', contactEmail: 'bina@acme.example', campaignName: 'Mail' })
+    if (!out.ok) throw new Error(out.message)
+    expect(out.data).toMatchObject({ code: 'paused', facts: { pausedFor: 'manual', sharedNumberHold: true } })
+    expect(out.summary).toMatch(/^paused by a teammate \(on leave \(by sam@agency\.test\)\)/)
+    expect(out.summary).toContain(
+      'They also hold a phone number a text came from that asked to stop, and it could not be recorded — it may not ' +
+        'have been them — so Resume is refused until a person records the number on /suppressions; do not suggest ' +
+        'resuming them before that.',
+    )
+    expect(out.summary).not.toMatch(/they asked to stop/)
+    expect(out.summary).toMatch(/Nothing was queued\.$/)
+  })
+
+  it('get_consent says they cannot be resumed until the number is recorded', async () => {
+    const out = await run(getConsent, { contactEmail: 'bina@acme.example' })
+    if (!out.ok) throw new Error(out.message)
+    expect(out.data).toMatchObject({ paused: true, sharedNumberHold: true })
+    expect(out.summary.split('\n')[0]).toBe(
+      'bina@acme.example at acme.example — paused: nothing is sent to them, and they cannot be resumed until a person ' +
+        'records a phone number they share on /suppressions — a text from it asked to stop and could not be recorded, ' +
+        'and it may not have been them',
+    )
+  })
+
+  it('says nothing of the kind once the number is recorded', async () => {
+    await addSuppression(db, { orgId, kind: 'phone', value: PHONE, reason: 'texted STOP', source: 'manual' })
+    const sent = await run(checkSend, { domain: 'acme.example', contactEmail: 'bina@acme.example', campaignName: 'Mail' })
+    if (!sent.ok) throw new Error(sent.message)
+    expect(sent.data).toMatchObject({ code: 'paused', facts: { sharedNumberHold: false } })
+    expect(sent.summary).not.toContain('They also hold a phone number')
+    const consent = await run(getConsent, { contactEmail: 'bina@acme.example' })
+    if (!consent.ok) throw new Error(consent.message)
+    expect(consent.summary.split('\n')[0]).toBe('bina@acme.example at acme.example — paused: nothing is sent to them until a person resumes them')
   })
 })

@@ -41,14 +41,26 @@ export function isSharedNumberOptOutPause(reason: string | null | undefined): bo
  * file imports nothing. `record_number` still renders Resume: the route
  * refuses it with RESUME_SHARED_NUMBER's sentence until the number is
  * recorded, and lifts it after, so the button and the server agree.
+ *
+ * `sharedNumberHold` is the database's answer for this row
+ * (`consentLedgerFor`, review round 10, [2]): a holder whose OWN pause — a
+ * teammate's, an unsubscribe's — stood instead of the hold has that pause's
+ * shape, and read by the shape alone got a plain Resume the route then
+ * refused (RESUME_SHARED_NUMBER_KEPT). With it, their row says what lifts
+ * it, as the hold's own shape does. Omitted: the shape alone decides, as
+ * before, on the screens that do not read it.
  */
 export type ResumeOffer = 'resume' | 'record_number' | 'opt_out_not_recorded' | 'erasure'
 
-export function resumeOfferFor(pausedFor: string | null, reason: string | null | undefined): ResumeOffer | null {
+export function resumeOfferFor(
+  pausedFor: string | null,
+  reason: string | null | undefined,
+  sharedNumberHold?: boolean,
+): ResumeOffer | null {
   if (pausedFor === null) return null
   if (pausedFor === 'opt_out_not_recorded') return isSharedNumberOptOutPause(reason) ? 'record_number' : 'opt_out_not_recorded'
   if (pausedFor === 'erasure') return 'erasure'
-  return 'resume'
+  return sharedNumberHold === true ? 'record_number' : 'resume'
 }
 
 /** Does this offer render a Resume button? */
@@ -72,3 +84,13 @@ export const SHARED_NUMBER_HOLDER_WORDS = {
 /** The same words as one line. */
 export const SHARED_NUMBER_HOLDER_NOTE =
   SHARED_NUMBER_HOLDER_WORDS.lead + SHARED_NUMBER_HOLDER_WORDS.link + SHARED_NUMBER_HOLDER_WORDS.tail
+
+/**
+ * Said before the number itself, beside the note, on the screens that list
+ * paused people without their record — /suppressions and /inbox (review
+ * round 10, [7]). The note says to record "the number"; those screens
+ * showed none, so a holder imported with a phone and no email was a bare id
+ * beside an instruction nobody could follow from there. The number is the
+ * one on their record, which /contacts and the company page already show.
+ */
+export const SHARED_NUMBER_LABEL = 'The number they share:'

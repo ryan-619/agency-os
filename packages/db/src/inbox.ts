@@ -108,6 +108,12 @@ export interface InboxRow {
     readonly firstName: string | null
     readonly lastName: string | null
     readonly email: string | null
+    /**
+     * Shown beside a shared number's holder (review round 10, [7]): the
+     * note there says to record "the number", and this is the number they
+     * hold. As stored on their record, which /contacts already shows.
+     */
+    readonly phone: string | null
     readonly pausedAt: Date | null
     readonly pausedReason: string | null
     readonly timeZone: string | null
@@ -199,12 +205,12 @@ export async function inboxTouches(
         firstName: schema.contacts.firstName,
         lastName: schema.contacts.lastName,
         email: schema.contacts.email,
+        phone: schema.contacts.phone,
         pausedAt: schema.contacts.pausedAt,
         pausedReason: schema.contacts.pausedReason,
         timeZone: schema.contacts.timeZone,
       },
-      // Read for the suppression lookup only; the row does not carry them.
-      contactPhone: schema.contacts.phone,
+      // Read for the suppression lookup only; the row does not carry it.
       contactLinkedin: schema.contacts.linkedinUrl,
       company: {
         id: schema.companies.id,
@@ -283,7 +289,7 @@ export async function inboxTouches(
   const fromIsContact = new Map<string, boolean>()
   for (const r of rows) {
     const channel = r.touch.channel as Channel
-    const contact = r.contact ? { email: r.contact.email, phone: r.contactPhone, linkedinUrl: r.contactLinkedin } : null
+    const contact = r.contact ? { email: r.contact.email, phone: r.contact.phone, linkedinUrl: r.contactLinkedin } : null
     fromIsContact.set(r.touch.id, contact === null || replyIsFromTheContact(r.touch.recipient, channel, contact))
     const keys =
       r.touch.replyKind === 'opted_out'
