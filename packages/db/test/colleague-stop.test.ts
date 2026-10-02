@@ -19,6 +19,7 @@
  *    Priya's address as well as Sam's, so recording Priya cleared the
  *    warning; and it could not tell the screen whose the words were.
  */
+import { readFileSync } from 'node:fs'
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { and, eq } from 'drizzle-orm'
@@ -407,5 +408,37 @@ describe('replyIsFromTheContact', () => {
     expect(replyIsFromTheContact(null, 'email', priya)).toBe(true)
     expect(replyIsFromTheContact('not an address', 'email', priya)).toBe(true)
     expect(replyIsFromTheContact('sam@rentman.io', 'email', { email: null })).toBe(true)
+  })
+})
+
+/**
+ * The lock order every writer that holds a person and their messages keeps
+ * (`lock-order.test.ts`): the person first. A source pin, because PGlite has
+ * one session and cannot show a deadlock.
+ */
+describe('holding the sender', () => {
+  const src = readFileSync(new URL('../src/outreach.ts', import.meta.url), 'utf8')
+  const body = (signature: string): string => {
+    const start = src.indexOf(signature)
+    expect(start, signature).toBeGreaterThan(-1)
+    const rest = src.slice(start)
+    return rest.slice(0, rest.indexOf('\n}\n')).replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+  }
+
+  it('pauses each sender before it refuses their messages, each write in its own savepoint', () => {
+    const fn = body('async function holdTheSender(')
+    const pause = fn.indexOf('pauseContactOverriding(')
+    const cancel = fn.indexOf('.update(schema.touches)')
+    expect(pause).toBeGreaterThan(-1)
+    expect(cancel).toBeGreaterThan(pause)
+    expect(fn.match(/tx\.transaction\(/g)).toHaveLength(3)
+  })
+
+  it('finds them in one order, by id, and before the reply writes anything that may fail', () => {
+    expect(body('async function contactsAtTheAddress(')).toContain('.orderBy(asc(schema.contacts.id))')
+    const record = body('export async function recordInboundReply(')
+    const found = record.indexOf('contactsAtTheAddress(')
+    expect(found).toBeGreaterThan(-1)
+    expect(found).toBeLessThan(record.indexOf('.insert(schema.touches)'))
   })
 })
