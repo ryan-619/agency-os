@@ -111,7 +111,10 @@ jobs:
       # Two steps, so a credential reaches only the action that uses it:
       # status, migrate, deploy and release see the database and Vercel
       # only; the worker's own secrets — Fly, the model, the mailboxes,
-      # Slack, DoveSoft — reach the worker step alone.
+      # Slack, DoveSoft — reach the worker step alone. Inside it,
+      # tools/production.sh hands them to flyctl alone (its WORKER_ONLY,
+      # which must list every one of them below): never to the Vercel CLI,
+      # which npx installs at run time, nor to the web build it runs.
       - name: ${{ inputs.action }}
         if: inputs.action != 'worker'
         env:

@@ -26,6 +26,8 @@
 #                              them the project `agency-os` is found under
 #                              every scope the token reaches
 #                              (tools/vercel-project.mjs)
+#   WORKER_ONLY, below         `worker` alone: staged on Fly over stdin, and
+#                              handed to no program but flyctl
 #
 # No `set -x`, ever: it would print every expanded credential.
 set -euo pipefail
@@ -33,7 +35,28 @@ set -euo pipefail
 ACTION=${1:-status}
 SITE=${PRODUCTION_URL:-https://myagencyos.in}
 PROJECT_NAME=agency-os
-VERCEL=(npx --yes vercel@62.1.0)
+
+# The worker step's own secrets (.github/workflows/production.yml hands them
+# to that step alone). `worker` stages them on Fly over stdin and hands
+# flyctl FLY_API_TOKEN; no other program this script runs is handed any of
+# them — not the Vercel CLI, which npx installs at run time with no lockfile
+# and floating transitive ranges, and whose `build` runs the whole web build,
+# and not our own helpers, which need none (review round 7, [6]). FLY_API_TOKEN
+# and FLY_ORG are Fly's, so they are not staged. A name added to the step
+# goes here too: packages/db/test/production-tooling.test.ts holds the two
+# lists equal.
+WORKER_ONLY=(FLY_API_TOKEN FLY_ORG ANTHROPIC_API_KEY ANTHROPIC_WORKSPACE_ID AGENT_MODEL SECRETS_KEY
+  SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASSWORD SMTP_SECURE MAIL_FROM
+  IMAP_HOST IMAP_PORT IMAP_USER IMAP_PASSWORD IMAP_SECURE IMAP_MAILBOX
+  SLACK_WEBHOOK_URL UNSUBSCRIBE_SECRET DOVESOFT_API_KEY DOVESOFT_ENTITY_ID)
+# Each stays a shell variable, read where it is used, and no program this
+# script starts inherits one.
+export -n "${WORKER_ONLY[@]}"
+# A second guard on the code fetched at run time, which holds even if a later
+# edit exports one again: the Vercel CLI's own command line strips them all.
+STRIP=()
+for n in "${WORKER_ONLY[@]}"; do STRIP+=(-u "$n"); done
+VERCEL=(env "${STRIP[@]}" npx --yes vercel@62.1.0)
 PULLED=.vercel/.env.production.local
 export VERCEL_TELEMETRY_DISABLED=1
 
@@ -161,13 +184,15 @@ verify() {
 # that marker, beside both names, rotates the token and wires both sides
 # again; one that does keeps the token.
 
+# flyctl, handed Fly's token for that one call and nothing else of WORKER_ONLY.
+fly() { FLY_API_TOKEN=$FLY_API_TOKEN flyctl "$@"; }
+
 APP=
 fly_app() {
   [ -n "${FLY_API_TOKEN:-}" ] || die "The FLY_API_TOKEN secret is not set (an ORG token: fly.io → Tokens)."
-  export FLY_API_TOKEN
   local want existing first_error
   want=$(sed -n 's/^app = "\(.*\)"/\1/p' fly.toml)
-  existing=$(flyctl apps list --json | node -e '
+  existing=$(fly apps list --json | node -e '
     let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
       const want = process.argv[1]
       const names = (JSON.parse(s || "[]") || []).map((a) => a.Name ?? a.name ?? a.ID ?? a.id).filter(Boolean)
@@ -179,12 +204,12 @@ fly_app() {
     echo "fly: app $APP"
     return 0
   fi
-  if first_error=$(flyctl apps create "$want" --org "${FLY_ORG:-personal}" 2>&1); then
+  if first_error=$(fly apps create "$want" --org "${FLY_ORG:-personal}" 2>&1); then
     APP=$want
   else
     # Fly app names are global: somebody else may hold this one.
     APP="$want-$(openssl rand -hex 3)"
-    flyctl apps create "$APP" --org "${FLY_ORG:-personal}" >/dev/null 2>&1 || {
+    fly apps create "$APP" --org "${FLY_ORG:-personal}" >/dev/null 2>&1 || {
       echo "first attempt: $first_error"
       die "Could not create a Fly app. FLY_API_TOKEN must be an ORG token, and the org needs a payment method."
     }
@@ -195,7 +220,7 @@ fly_app() {
 # "<name> <digest>" per secret on the app. The digest is Fly's own hash of
 # the value — never the value, which Fly does not return to anybody.
 fly_secrets() {
-  flyctl secrets list --app "$APP" --json | node -e '
+  fly secrets list --app "$APP" --json | node -e '
     let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
       for (const x of JSON.parse(s || "[]") || []) console.log(`${x.Name ?? x.name} ${x.Digest ?? x.digest ?? ""}`)
     })'
@@ -261,19 +286,24 @@ worker() {
     add AGENT_INTERNAL_TOKEN "$token"
     echo "wiring: no record that both sides hold the same token; a new one goes to Fly AND Vercel in this run"
   fi
-  # Everything optional, only when this run was handed it.
+  # Everything optional, only when this run was handed it; Fly's own two are
+  # flyctl's, not the worker's.
   local n
-  for n in ANTHROPIC_API_KEY ANTHROPIC_WORKSPACE_ID AGENT_MODEL SECRETS_KEY \
-    SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASSWORD SMTP_SECURE MAIL_FROM \
-    IMAP_HOST IMAP_PORT IMAP_USER IMAP_PASSWORD IMAP_SECURE IMAP_MAILBOX \
-    SLACK_WEBHOOK_URL UNSUBSCRIBE_SECRET DOVESOFT_API_KEY DOVESOFT_ENTITY_ID; do
+  for n in "${WORKER_ONLY[@]}"; do
+    case $n in FLY_API_TOKEN | FLY_ORG) continue ;; esac
     if [ -n "${!n:-}" ]; then add "$n" "${!n}"; fi
   done
-  printf '%s' "$lines" | flyctl secrets import --app "$APP" --stage >/dev/null
+  printf '%s' "$lines" | fly secrets import --app "$APP" --stage >/dev/null
   echo "fly: secrets staged: $(printf '%s' "$lines" | cut -d= -f1 | tr '\n' ' ')"
+  # Fly holds them now, and nothing later in this run needs one: only
+  # FLY_API_TOKEN stays, for the flyctl calls below.
+  lines=
+  for n in "${WORKER_ONLY[@]}"; do
+    [ "$n" = FLY_API_TOKEN ] || unset "$n"
+  done
 
-  flyctl deploy --app "$APP" --config fly.toml --remote-only --ha=false
-  flyctl scale count 1 --app "$APP" --yes >/dev/null
+  fly deploy --app "$APP" --config fly.toml --remote-only --ha=false
+  fly scale count 1 --app "$APP" --yes >/dev/null
   worker_ready
 
   if $wire; then
