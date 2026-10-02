@@ -1,5 +1,5 @@
 import { NextResponse, after } from 'next/server'
-import { appendAudit, recordInboundSms, type AgencyDb } from '@agency/db/queries'
+import { appendAudit, pauseContactOverriding, recordInboundSms, type AgencyDb } from '@agency/db/queries'
 import { getDb } from '@/lib/db'
 import { env } from '@/lib/env'
 import { log } from '@/lib/logger'
@@ -29,9 +29,10 @@ import { authoriseDoveSoft, handleDoveSoftMo, logRefusalOnce, readDoveSoftReques
  * pauses the person and cancels what was queued, as an email reply does, and
  * a STOP that is written as a phone suppression with source `reply` — or the
  * loud `opt_out_not_recorded` path when it cannot be, whose Slack alarm is
- * awaited here. A text this route cannot read is never answered 200: it may
- * have been a STOP, so it is a 400 DoveSoft retries, an audit row and an
- * error line, with no body and no number in either.
+ * awaited here — one per org where the suppression could not be written. A
+ * text this route cannot read is never answered 200: it may have been a
+ * STOP, so it is a 400 DoveSoft retries, an audit row and an error line,
+ * with no body and no number in either.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -56,6 +57,8 @@ async function handle(request: Request): Promise<NextResponse> {
     // host without `waitUntil`. `notify` is bounded (3 s) and never throws.
     alarm: (event) => notify(event),
     later: (event) => after(() => notify(event)),
+    // A STOP whose recording threw, once the recorder said whose it was.
+    pause: (p) => pauseContactOverriding(db, p.orgId, p.contactId, p.reason, p.now),
   })
   return NextResponse.json(answer.body, { status: answer.status })
 }

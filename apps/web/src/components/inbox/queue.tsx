@@ -4,11 +4,14 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { When } from '@/components/when'
 import { answerElsewhere, answersByTemplate, channelLabel, contactsLinkFor, matchedByWords } from '@/components/inbox/channel'
+import { optedOutNote, optedOutWarning, type OptedOutRow } from '@/components/inbox/opted-out'
+import { answerComposerNote, colleagueHeadline, resumedLine, type ReplySender } from '@/components/inbox/sender'
+import { SharedNumberHolderNote } from '@/components/shared-number-note'
 import {
-  ANSWER_BODY_MAX, ANSWER_SUBJECT_MAX, HUMAN_REPLY_KINDS, INBOX_GROUP_LABELS, OPTED_OUT_NOTE,
-  OPTED_OUT_NOT_SUPPRESSED_NOTE, RECLASSIFY_HINT, answerIsLive, answerStateWords, answerSubject,
-  type InboxGroup,
+  ANSWER_BODY_MAX, ANSWER_SUBJECT_MAX, HUMAN_REPLY_KINDS, INBOX_GROUP_LABELS, RECLASSIFY_HINT, answerIsLive,
+  answerStateWords, answerSubject, type InboxGroup,
 } from '@/lib/inbox-view'
+import { SHARED_NUMBER_LABEL, isSharedNumberOptOutPause } from '@/lib/shared-number-pause'
 
 /**
  * The inbox's rows and what a person can do with each (PROMPT.md §8.4).
@@ -27,6 +30,14 @@ import {
  *    the row points at Draft SMS on /contacts instead of offering free text
  *    — and, since Draft SMS refuses a paused person and resumes nobody, says
  *    to resume them there first when their reply paused them.
+ *
+ * A reply from somebody else on the thread — a colleague replying all to
+ * our message, filed under the contact it went to — is headlined under its
+ * sender, "filed under" the contact, and its composer says the answer goes
+ * to the contact's address on file, not to the sender (`sender.ts`; review
+ * round 9). A shared number's holder reads beside Resume what lifts their
+ * pause (`SharedNumberHolderNote`), as on /contacts, and the number it asks
+ * to be recorded — the one on their record (review round 10, [7]).
  *
  * The reply's body is shown whole. Somebody deciding what to do about a
  * message has to be able to read all of it.
@@ -48,6 +59,8 @@ export interface InboxRowView {
     readonly id: string
     readonly name: string
     readonly email: string | null
+    /** Shown beside a shared number's holder's note — the number it asks to be recorded. */
+    readonly phone: string | null
     readonly pausedReason: string | null
     readonly paused: boolean
   } | null
@@ -60,7 +73,14 @@ export interface InboxRowView {
     readonly sentAt: string | null
   } | null
   readonly dealStage: string | null
+  /** For a reply that asked to stop, by the address it came from alone (`inboxTouches`). */
   readonly suppressed: boolean
+  /**
+   * False when the reply came from another address than the contact it is
+   * filed under — a colleague replying all to our message (review round 8):
+   * a stop in it is theirs, never the contact's.
+   */
+  readonly fromIsContact: boolean
   readonly handled: { readonly by: string; readonly at: string } | null
   readonly answered: { readonly touchId: string; readonly status: string } | null
 }
@@ -73,6 +93,21 @@ export interface InboxCampaignChoice {
 }
 
 type Drafted = { readonly lines: readonly string[] }
+
+/** What `opted-out.ts` reads off a row to say whose stop it was. */
+function stopOf(row: InboxRowView): OptedOutRow {
+  return { fromIsContact: row.fromIsContact, from: row.from, contactName: row.contact?.name ?? null, suppressed: row.suppressed }
+}
+
+/** What `sender.ts` reads off a row to say whose reply it was, and where an answer goes. */
+function senderOf(row: InboxRowView): ReplySender {
+  return {
+    fromIsContact: row.fromIsContact,
+    from: row.from,
+    contactName: row.contact?.name ?? null,
+    contactEmail: row.contact?.email ?? null,
+  }
+}
 
 export function InboxQueue({
   groups,
@@ -156,9 +191,7 @@ export function InboxQueue({
     })
     if (!b) return
     const lines: string[] = [typeof b.note === 'string' ? b.note : 'Drafted. A person approves it on /approvals.']
-    if (b.resumed === true && row.contact) {
-      lines.push(`${row.contact.name} is resumed — their reply had paused them in every campaign.`)
-    }
+    if (b.resumed === true && row.contact) lines.push(resumedLine(senderOf(row)))
     const hold = b.wouldHold as { reason?: unknown } | null | undefined
     if (hold && typeof hold.reason === 'string') lines.push(`If it were approved right now: ${hold.reason}`)
     if (typeof b.deployment === 'string') lines.push(b.deployment)
@@ -181,14 +214,24 @@ export function InboxQueue({
               const forChannel = campaigns.filter((c) => c.channel === row.channel)
               const f = formFor(row)
               const done = drafted[row.id]
+              const colleague = colleagueHeadline(senderOf(row))
               return (
                 <div key={row.id} className="inbox-row">
                   <div style={{ minWidth: 0 }}>
                     <div className="touch-head">
                       <span className="inbox-kind">{INBOX_GROUP_LABELS[row.group]}</span>
                       {channelLabel(row.channel) ? <span className="pill">{channelLabel(row.channel)}</span> : null}
-                      <strong>{row.contact?.name ?? 'a contact no longer in the CRM'}</strong>
-                      {row.from ? <span className="muted">&lt;{row.from}&gt;</span> : null}
+                      {colleague ? (
+                        <>
+                          <strong>{colleague.sender}</strong>
+                          <span className="muted">— {colleague.note}</span>
+                        </>
+                      ) : (
+                        <>
+                          <strong>{row.contact?.name ?? 'a contact no longer in the CRM'}</strong>
+                          {row.from ? <span className="muted">&lt;{row.from}&gt;</span> : null}
+                        </>
+                      )}
                       {row.company ? (
                         <a href={`/companies/${encodeURIComponent(row.company.domain)}`}>
                           {row.company.name ?? row.company.domain}
@@ -238,12 +281,11 @@ export function InboxQueue({
 
                     {optedOut ? (
                       <p className="muted" style={{ fontSize: 12.5, margin: '6px 0 0' }}>
-                        {row.contact?.name ?? 'This person'} {OPTED_OUT_NOTE}{' '}
-                        <a href="/suppressions">The suppression list</a>.
+                        {optedOutNote(stopOf(row))} <a href="/suppressions">The suppression list</a>.
                       </p>
                     ) : null}
-                    {optedOut && !row.suppressed ? (
-                      <div className="note note-warn" style={{ marginTop: 8 }}>{OPTED_OUT_NOT_SUPPRESSED_NOTE}</div>
+                    {optedOut && optedOutWarning(stopOf(row)) ? (
+                      <div className="note note-warn" style={{ marginTop: 8 }}>{optedOutWarning(stopOf(row))}</div>
                     ) : null}
 
                     {row.answered ? (
@@ -308,10 +350,7 @@ export function InboxQueue({
                           </span>
                         </label>
                         <p className="hint" style={{ marginTop: 10 }}>
-                          Drafting resumes {row.contact?.name ?? 'them'}: their reply paused them in every campaign, and an
-                          approved answer to a paused person is refused. If the draft is denied, or the answer fails or
-                          is refused when it would be sent, the pause their reply caused goes back on — unless somebody
-                          resumes them before then, or another answer to them is still waiting.
+                          {answerComposerNote(senderOf(row))}
                         </p>
                         <div className="inbox-actions" style={{ marginTop: 10 }}>
                           <button
@@ -367,9 +406,22 @@ export function InboxQueue({
 
                     {canWrite && row.contact && !optedOut ? (
                       row.contact.paused ? (
-                        <button type="button" disabled={busy === row.id} onClick={() => void resume(row)}>
-                          Resume
-                        </button>
+                        <>
+                          <button type="button" disabled={busy === row.id} onClick={() => void resume(row)}>
+                            Resume
+                          </button>
+                          {isSharedNumberOptOutPause(row.contact.pausedReason) ? (
+                            <span className="hint" style={{ maxWidth: 190, textAlign: 'right' }}>
+                              <SharedNumberHolderNote />
+                              {row.contact.phone ? (
+                                <>
+                                  {' '}
+                                  {SHARED_NUMBER_LABEL} <code>{row.contact.phone}</code>
+                                </>
+                              ) : null}
+                            </span>
+                          ) : null}
+                        </>
                       ) : (
                         <button type="button" disabled={busy === row.id} onClick={() => void pause(row)}>
                           Pause

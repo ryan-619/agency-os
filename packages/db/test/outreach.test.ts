@@ -684,6 +684,19 @@ describe('the single send path', () => {
       'No more emails!',
       'take me off your list',
       'Unsubscribe\n\n> On Tue, you wrote:\n> A gap on your security page',
+      // Review round 6: the commonest ways to say it in a mail.
+      'Please stop emailing me.',
+      'Stop contacting me',
+      'stop sending me emails',
+      'Please stop e-mailing me, thanks.',
+      'Don’t email me again',
+      "don't contact me anymore",
+      'Remove me from your mailing list.',
+      'Kindly remove me from your list',
+      'Unsubscribe me from this list please',
+      'Opt me out of your email list',
+      'Take me off the mailing list, thank you',
+      'Stop spamming me!',
     ])('reads %j as an opt-out', (body) => {
       expect(looksLikeOptOut(body)).toBe(true)
     })
@@ -696,6 +709,12 @@ describe('the single send path', () => {
       null,
       // Their quoted footer, not their words.
       'Sounds good.\n\n> Reply STOP to unsubscribe',
+      // A sentence that only mentions emailing or a list is not an opt-out.
+      'Stop emailing me the PDF, I have it — call me Thursday instead.',
+      'Please remove me from the CC and add Priya instead.',
+      "Don't email me at this address, use priya@rentman.io — happy to talk.",
+      'Can you stop by Thursday?',
+      'Please send me the list of findings.',
     ])('does not read %j as an opt-out', (body) => {
       expect(looksLikeOptOut(body)).toBe(false)
     })
@@ -1239,7 +1258,7 @@ describe('the send-path contract', () => {
           // What recoverStuckSends writes.
           await db
             .update(schema.touches)
-            .set({ status: 'failed', error: 'The worker restarted while this was being sent. It may or may not have gone; check the mailbox, then re-approve to send it again.' })
+            .set({ status: 'failed', error: 'The worker restarted while this was being sent. It may or may not have gone; check the mailbox before drafting it again.' })
             .where(eq(schema.touches.id, row.id))
           return provider.send(m)
         },
@@ -1253,7 +1272,7 @@ describe('the send-path contract', () => {
       const after = await touch(row.id)
       expect(after).toMatchObject({ status: 'sent', providerId: 'test-1', recipient: 'priya@rentman.io', refusalCode: null })
       expect(after.sentAt?.toISOString()).toBe(NOON.toISOString())
-      // "re-approve to send it again" on a row that went is an instruction to send a duplicate.
+      // "check … before drafting it again" on a row that went invites a duplicate.
       expect(after.error).toBeNull()
       expect(lines.some((l) => l.includes('already settled'))).toBe(false)
     })
@@ -1548,14 +1567,17 @@ describe('the send-path contract', () => {
      * deal advanced. It never writes a suppression.
      */
     it.each([
-      ['the send path’s own example', 'I have left — remove me from your list'],
-      ['a bare removal request', 'remove me from your list'],
+      ['the send path’s own example', 'I have left — remove me from your list', false],
+      // Review round 6: the narrow reader now reads this whole sentence, so
+      // it is the opt-out itself — suppressed as well as paused.
+      ['a bare removal request', 'remove me from your list', true],
       [
         'an out-of-office that ends asking to be removed',
         'Thank you for your email. I am out of the office until 21 September with no access to email.\n\n' +
           'Please remove me from your mailing list.',
+        false,
       ],
-    ])('an automatic mail that mentions removal pauses like any reply: %s', async (_label, body) => {
+    ])('an automatic mail that mentions removal pauses like any reply: %s', async (_label, body, optOut) => {
       const [queuedRow] = await db
         .insert(schema.touches)
         .values({ orgId, companyId, contactId, campaignId, channel: 'email', direction: 'out', status: 'queued', subject: 's', body: 'b' })
@@ -1567,9 +1589,10 @@ describe('the send-path contract', () => {
       expect(r.cancelled).toBe(1)
       expect((await touch(queuedRow!.id)).status).toBe('refused')
       expect(r.deal).toMatch(/replied$/)
-      // The broad reader decides the pause, never the suppression.
-      expect(r.suppressed).toBe(false)
-      expect(await db.select().from(schema.suppressions)).toEqual([])
+      // The broad reader decides the pause, never the suppression; only the
+      // narrow opt-out reader writes one.
+      expect(r.suppressed).toBe(optOut)
+      expect(await db.select().from(schema.suppressions)).toHaveLength(optOut ? 1 : 0)
       const [contact] = await db.select().from(schema.contacts).where(eq(schema.contacts.id, contactId))
       expect(contact!.pausedAt).not.toBeNull()
     })

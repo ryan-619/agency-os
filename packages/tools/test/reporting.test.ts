@@ -15,6 +15,7 @@ import { z } from 'zod'
 import type { Principal } from '@agency/core'
 import { SEED_DIR, advanceDeal, notesAdd, tasksCreate, type AgencyDb } from '@agency/db'
 import * as schema from '@agency/db/schema'
+import { eq } from 'drizzle-orm'
 import { migratedDb, type TestDb } from '../../db/test/helpers.js'
 import {
   getCompanyTimeline, getComplianceSummary, getPipelineMetrics, searchCrm, type AgencyToolSpec, type ToolContext,
@@ -223,6 +224,81 @@ describe('the reporting tools', () => {
       for (const hidden of ['SECOND LINE OF THE OUTBOUND BODY', 'third line', 'PLEASE KEEP THIS QUOTED PART OUT', 'SECOND LINE OF THE NOTE', 'TRANSCRIPT WORDS', '+14155550101']) {
         expect(everything, hidden).not.toContain(hidden)
       }
+    })
+
+    /**
+     * Review round 5, [10]. /tasks shows a LinkedIn message's words only once
+     * Start has handed them over, and withholds them again while the step is
+     * open and its re-check refuses — and the company page follows the same
+     * rule (`linkedinThreadWithheld`). This low-risk read printed the first
+     * line of every touch, so an approved opener to somebody since
+     * suppressed on LinkedIn reached the model whole, for a teammate to copy
+     * into LinkedIn past every rule Start would run.
+     */
+    describe('a LinkedIn message /tasks would not show', () => {
+      const linkedin = async () => {
+        const [campaign] = await db
+          .insert(schema.campaigns)
+          .values({ orgId, name: 'LinkedIn openers', channel: 'linkedin', status: 'active', autoSend: false, dailyCap: 20 })
+          .returning({ id: schema.campaigns.id })
+        const [jo] = await db
+          .insert(schema.contacts)
+          .values({ orgId, companyId, firstName: 'Jo', linkedinUrl: 'https://www.linkedin.com/in/jo-bloggs', timeZone: 'Europe/London' })
+          .returning({ id: schema.contacts.id })
+        return { campaignId: campaign!.id, contactId: jo!.id }
+      }
+
+      it('prints its status and never its words before Start has handed them over', async () => {
+        const { campaignId, contactId } = await linkedin()
+        await db.insert(schema.touches).values({
+          orgId, companyId, campaignId, contactId, channel: 'linkedin', direction: 'out', status: 'approved',
+          body: 'Hi Jo — LINKEDIN WORDS NOBODY HAS CHECKED\nsecond line', approvedBy: userId, approvedAt: new Date(),
+        })
+        // Suppressed on LinkedIn since it was approved: Start would refuse it.
+        await db.insert(schema.suppressions).values({ orgId, kind: 'linkedin', value: 'in/jo-bloggs', reason: 'asked', source: 'manual' })
+        const out = await run(getCompanyTimeline, { domain: 'rentman.io' })
+        if (!out.ok) throw new Error(out.message)
+        expect(JSON.stringify(out)).not.toContain('LINKEDIN WORDS')
+        const line = events(out.data).find((e) => e.kind === 'message')!.text
+        expect(line).toMatch(/^linkedin message out, approved — words withheld/)
+        expect(line).not.toContain('first line')
+      })
+
+      it('withholds a handed message whose open step the re-check withholds, and shows one whose step is closed', async () => {
+        const { campaignId, contactId } = await linkedin()
+        const handedAt = new Date(Date.now() - 60_000)
+        const [held] = await db.insert(schema.touches).values({
+          orgId, companyId, campaignId, contactId, channel: 'linkedin', direction: 'out', status: 'sent', sentAt: handedAt,
+          providerId: `human:${userId}`, body: 'HELD WORDS of an open step', approvedBy: userId, approvedAt: handedAt,
+        }).returning({ id: schema.touches.id })
+        await db.insert(schema.tasks).values({ orgId, companyId, touchId: held!.id, kind: 'linkedin_send', title: 'Send a LinkedIn message' })
+        const [done] = await db.insert(schema.touches).values({
+          orgId, companyId, campaignId, contactId, channel: 'linkedin', direction: 'out', status: 'sent', sentAt: handedAt,
+          providerId: `human:${userId}`, body: 'HISTORY WORDS of a closed step', approvedBy: userId, approvedAt: handedAt,
+        }).returning({ id: schema.touches.id })
+        await db.insert(schema.tasks).values({
+          orgId, companyId, touchId: done!.id, kind: 'linkedin_send', title: 'Send a LinkedIn message', doneAt: handedAt, doneBy: userId,
+        })
+        // Paused since: /tasks withholds the open step's words.
+        await db.update(schema.contacts).set({ pausedAt: new Date(), pausedReason: 'held by a teammate' }).where(eq(schema.contacts.id, contactId))
+
+        const out = await run(getCompanyTimeline, { domain: 'rentman.io' })
+        if (!out.ok) throw new Error(out.message)
+        const everything = JSON.stringify(out)
+        expect(everything).not.toContain('HELD WORDS')
+        expect(everything).toContain('HISTORY WORDS of a closed step')
+        const texts = events(out.data).filter((e) => e.kind === 'message').map((e) => e.text)
+        expect(texts.filter((t) => t.includes('words withheld'))).toHaveLength(1)
+        expect(out.summary).toContain('A LinkedIn message’s words are shown only where /tasks would show them')
+      })
+
+      it('still prints an email’s first line', async () => {
+        await plant()
+        const out = await run(getCompanyTimeline, { domain: 'rentman.io' })
+        if (!out.ok) throw new Error(out.message)
+        expect(JSON.stringify(out)).toContain('Hi Priya,')
+        expect(JSON.stringify(out)).not.toContain('words withheld')
+      })
     })
 
     it('labels a note as somebody’s words, and never as observed', async () => {

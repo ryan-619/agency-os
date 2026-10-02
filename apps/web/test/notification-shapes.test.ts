@@ -89,6 +89,19 @@ describe('the reply hook (POST /api/inbound/email)', () => {
     expect(replyNotification({ matched: 'none', why: 'no contact has this address' })).toBeNull()
   })
 
+  /**
+   * Review round 8, [8]: a colleague's reply filed under the contact our
+   * mail went to says so, as a boolean — never the address.
+   */
+  it('says when the reply came from somebody other than the contact, and only then', () => {
+    const event = replyNotification({ ...recorded, replyKind: 'opted_out', suppressed: true, fromIsContact: false })
+    expect(event).toMatchObject({ kind: 'reply', fromIsContact: false, contactId: recorded.contactId })
+    expect(slackMessage(event!, ORIGIN).text).toContain('somebody else on the thread asked to stop')
+    expectNoLeadData(event!)
+    expect(replyNotification({ ...recorded, fromIsContact: true })).not.toHaveProperty('fromIsContact')
+    expect(replyNotification({ ...recorded, fromIsContact: null })).not.toHaveProperty('fromIsContact')
+  })
+
   it('carries the suppression through, so the channel is told not to answer', () => {
     const event = replyNotification({ ...recorded, replyKind: 'opted_out', suppressed: true })
     expect(event?.suppressed).toBe(true)
@@ -116,6 +129,26 @@ describe('the reply hook (POST /api/inbound/email)', () => {
       const text = slackMessage(alarm!, ORIGIN).text
       expect(text).toMatch(/^OPT-OUT NOT RECORDED\. Somebody asked to be left alone through a reply/)
       expect(text).not.toContain('paused')
+    })
+
+    /**
+     * Review round 7: a colleague answered our mail and asked to stop. The
+     * opt-out is theirs, so the alarm names their reply, never the contact
+     * it was filed under — whose address is the wrong one to record.
+     */
+    it('names the reply and not the contact for a stop sent by somebody else', () => {
+      const alarm = optOutNotRecordedNotification({ ...notRecorded, fromIsContact: false })
+      expect(alarm).toEqual({
+        kind: 'opt_out_not_recorded',
+        orgId: ORG,
+        touchId: recorded.touchId,
+        contactId: null,
+        path: 'reply',
+        fromIsContact: false,
+      })
+      const text = slackMessage(alarm!, ORIGIN).text
+      expect(text).toContain('sent by somebody other than the contact')
+      expect(text).not.toContain(recorded.contactId)
     })
 
     it('is not ALSO announced as an ordinary reply', () => {

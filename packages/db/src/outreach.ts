@@ -49,7 +49,13 @@ import * as schema from './schema.js'
 import { activeIcpProfile, type AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
 import { addSuppression } from './campaigns.js'
+// Review round 5: a raced duplicate delivery is not an opt-out lost.
+import { isUniqueViolation } from './pg-errors.js'
 import { advanceDeal } from './deals.js'
+// Review round 10, [2]: whether a pause is one Resume refuses until a shared
+// number's unrecorded STOP is recorded — the gate's own answer, asked here
+// so the sender and every dry run word the refusal alike.
+import { heldForUnrecordedSharedNumber, resumeAsksSharedNumber } from './sms.js'
 
 export type TouchRow = typeof schema.touches.$inferSelect
 
@@ -549,30 +555,19 @@ export async function dispatchTouch(
   // not be tied to this message by its Message-ID, an unsubscribe click on
   // it took the loud no-recipient path, and a supervised re-enrolment
   // drafted the same opener again. Found by review. The recovery's
-  // sentence ("re-approve to send it again") is cleared with it: on a row
-  // that went, it is an instruction to send a duplicate.
-  const recovered = and(
-    eq(schema.touches.status, 'failed'),
-    isNull(schema.touches.sentAt),
-    isNull(schema.touches.refusalCode),
-  )
-  const recorded = await db
+  // sentence ("may or may not have gone; check … before drafting it again")
+  // is cleared with it: on a row
+  // that went, it is an instruction to send a duplicate — and for an answer
+  // to a reply, the pause the recovery put back is lifted with it
+  // (`recordRecoveredSend`, review round 5).
+  const inFlight = await db
     .update(schema.touches)
-    .set({
-      status: 'sent',
-      sentAt: now,
-      providerId,
-      recipient: recipientUnlessErased(facts.recipient),
-      error: sql`CASE WHEN ${schema.touches.status} = 'failed' THEN NULL ELSE ${schema.touches.error} END`,
-    })
-    .where(
-      and(
-        eq(schema.touches.id, touch.id),
-        or(inArray(schema.touches.status, ['sending', touch.status]), recovered),
-      ),
-    )
+    .set({ status: 'sent', sentAt: now, providerId, recipient: recipientUnlessErased(facts.recipient) })
+    .where(and(eq(schema.touches.id, touch.id), inArray(schema.touches.status, ['sending', touch.status])))
     .returning({ id: schema.touches.id })
-  if (recorded.length === 0) {
+  const recorded =
+    inFlight.length === 1 || (await recordRecoveredSend(db, touch, { now, providerId, recipient: facts.recipient }))
+  if (!recorded) {
     // The provider took it; the row had already been settled by someone
     // else, in a state the provider's acceptance does not correct. The
     // audit row below still says it went, which is the truth.
@@ -612,6 +607,187 @@ export async function dispatchTouch(
 }
 
 /**
+ * Record as sent a row a stuck-send recovery gave up on while the provider
+ * had it — `failed`, never sent, no refusal — and, for an ANSWER to a reply,
+ * lift the pause that recovery put back (review round 5, [12]).
+ *
+ * `recoverStuckSends` re-pauses the person when the answer it gives up on
+ * resumed them (`repauseForUnansweredReply`): it cannot know whether the
+ * answer went, and a reply possibly unanswered must not leave them live. The
+ * provider's acceptance answers that. Left on, the pause held a person whose
+ * reply WAS answered, under an audit row saying the answer failed to send —
+ * and answering the same reply again from /inbox resumed them, so a second
+ * answer could follow the first. Lifted only while it is still that pause:
+ * `liftRecoveryPause` says exactly when.
+ *
+ * Contact before touch, the order every writer that holds both takes
+ * (review round 5, [13]: the reply, the bounce and the reclassify cancels
+ * lock the contact and then that person's touches). Deadlock-free against
+ * the recovery itself, which locks the touch first: this runs only after
+ * the in-flight UPDATE matched nothing, and that UPDATE waited for whoever
+ * held the row — the recovery — to commit.
+ */
+async function recordRecoveredSend(
+  db: AgencyDb,
+  touch: Pick<TouchRow, 'id' | 'orgId' | 'answersTouchId'>,
+  sent: { readonly now: Date; readonly providerId: string; readonly recipient: string },
+): Promise<boolean> {
+  return db.transaction(async (transaction) => {
+    const tx = transaction as unknown as AgencyDb
+    const contactId = touch.answersTouchId ? await lockReplyContact(tx, touch.orgId, touch.answersTouchId) : null
+    const rows = await tx
+      .update(schema.touches)
+      .set({
+        status: 'sent',
+        sentAt: sent.now,
+        providerId: sent.providerId,
+        recipient: recipientUnlessErased(sent.recipient),
+        error: null,
+      })
+      .where(
+        and(
+          eq(schema.touches.id, touch.id),
+          eq(schema.touches.status, 'failed'),
+          isNull(schema.touches.sentAt),
+          isNull(schema.touches.refusalCode),
+        ),
+      )
+      .returning({ id: schema.touches.id })
+    if (rows.length === 0) return false
+    if (contactId && touch.answersTouchId) {
+      await liftRecoveryPause(tx, { orgId: touch.orgId, answer: { id: touch.id, answersTouchId: touch.answersTouchId }, contactId })
+    }
+    return true
+  })
+}
+
+/**
+ * Lift the pause a stuck-send recovery put back over an answer that went
+ * after all — only while it is still that pause:
+ *
+ *  - the recovery wrote it: a `contact.paused` row naming this answer, ended
+ *    `failed` (`repauseForUnansweredReply`'s shape);
+ *  - nothing has been recorded about the person since — a later reply, a
+ *    teammate's hold, an unsubscribe, a resume — compared in SQL against
+ *    that row's stored `created_at`, never a `Date` read back. A reply that
+ *    arrived meanwhile kept the recovery's reason (`pauseContact` keeps the
+ *    first), and is unanswered;
+ *  - no reply of theirs is stored since the answer was drafted — read from
+ *    `touches`, not the log, whose row for a reply may be missing or stamped
+ *    before the recovery's (review round 6, [15]);
+ *  - the stored reason is still exactly the reply's `replied <instant>`
+ *    (`resumeContact`'s `expectedReason`, in the UPDATE's own predicate).
+ *
+ * Then they are resumed, and `contact.resumed` names the answer — actor
+ * `system`, the CLASS of the pause, never its text. Uncaught, inside the
+ * caller's transaction, as the re-pause is. The contact must already be
+ * locked by the caller.
+ */
+async function liftRecoveryPause(
+  db: AgencyDb,
+  args: {
+    readonly orgId: string
+    readonly answer: { readonly id: string; readonly answersTouchId: string }
+    readonly contactId: string
+  },
+): Promise<boolean> {
+  const { orgId, answer, contactId } = args
+  const [reply] = await db
+    .select({ sentAt: schema.touches.sentAt, createdAt: schema.touches.createdAt })
+    .from(schema.touches)
+    .where(
+      and(
+        eq(schema.touches.id, answer.answersTouchId),
+        eq(schema.touches.orgId, orgId),
+        eq(schema.touches.direction, 'in'),
+      ),
+    )
+    .limit(1)
+  if (!reply) return false
+
+  const [repaused] = await db
+    .select({ id: schema.auditLog.id })
+    .from(schema.auditLog)
+    .where(
+      and(
+        eq(schema.auditLog.orgId, orgId),
+        eq(schema.auditLog.action, 'contact.paused'),
+        eq(schema.auditLog.subjectType, 'contact'),
+        eq(schema.auditLog.subjectId, contactId),
+        sql`${schema.auditLog.detail}->>'answerTouchId' = ${answer.id}`,
+        sql`${schema.auditLog.detail}->>'answerEnded' = 'failed'`,
+      ),
+    )
+    .orderBy(desc(schema.auditLog.createdAt))
+    .limit(1)
+  if (!repaused) return false
+
+  const since = await db
+    .select({ id: schema.auditLog.id })
+    .from(schema.auditLog)
+    .where(
+      and(
+        eq(schema.auditLog.orgId, orgId),
+        eq(schema.auditLog.subjectType, 'contact'),
+        eq(schema.auditLog.subjectId, contactId),
+        sql`${schema.auditLog.id} <> ${repaused.id}`,
+        sql`${schema.auditLog.createdAt} >= (SELECT a.created_at FROM audit_log a WHERE a.id = ${repaused.id})`,
+      ),
+    )
+    .limit(1)
+  if (since.length > 0) return false
+
+  // The log alone is not enough for a reply (review round 6, [15]): its
+  // `contact.replied` row is written best-effort, and stamped with `now()`
+  // — the reply transaction's START, which can fall before the recovery's
+  // row though the reply committed after it. So the touches decide too: an
+  // inbound row of theirs stored at or after the ANSWER was drafted, other
+  // than the reply it answers, is a reply nobody has answered. Compared in
+  // SQL against the answer's stored `created_at`. A reply in flight is not
+  // missed: one inserted before the caller locked this contact held a
+  // key-share lock on it, so that lock waited for the reply to commit and
+  // this read sees it; one inserted after waits for this transaction, and
+  // its own pause then lands on a person this has resumed.
+  const newerReply = await db
+    .select({ id: schema.touches.id })
+    .from(schema.touches)
+    .where(
+      and(
+        eq(schema.touches.orgId, orgId),
+        eq(schema.touches.contactId, contactId),
+        eq(schema.touches.direction, 'in'),
+        sql`${schema.touches.id} <> ${answer.answersTouchId}`,
+        sql`${schema.touches.createdAt} >= (SELECT a.created_at FROM touches a WHERE a.id = ${answer.id})`,
+      ),
+    )
+    .limit(1)
+  if (newerReply.length > 0) return false
+
+  // A shared number's holder (review round 12): Resume refuses any pause of
+  // theirs until the number's STOP is recorded, and this lift — writing
+  // `contact.resumed` — would also spend the row that holds them. The
+  // re-pause stays, the conservative direction; the caller holds the lock.
+  const [held] = await db
+    .select({ id: schema.contacts.id, phone: schema.contacts.phone, pausedReason: schema.contacts.pausedReason })
+    .from(schema.contacts)
+    .where(and(eq(schema.contacts.orgId, orgId), eq(schema.contacts.id, contactId)))
+    .limit(1)
+  if (!held || (await heldForUnrecordedSharedNumber(db, orgId, held))) return false
+
+  const reason = replyPauseReason(reply)
+  if (!(await resumeContact(db, orgId, contactId, { expectedReason: reason }))) return false
+  await appendAudit(db, {
+    orgId,
+    actor: 'system',
+    action: 'contact.resumed',
+    subjectType: 'contact',
+    subjectId: contactId,
+    detail: { reason: 'the answer to their reply went after all', pausedFor: pauseReasonClass(reason), answerTouchId: answer.id },
+  })
+  return true
+}
+
+/**
  * Write where a message got to. Every terminal state `dispatchTouch` records
  * goes through here.
  *
@@ -627,6 +803,13 @@ async function settle(
   state: { status: string; refusalCode: string | null; recipient?: string; error?: string },
   now: Date,
 ): Promise<void> {
+  // A row a stuck-send recovery marked `failed` meanwhile (never sent, no
+  // refusal) carries its "may or may not have gone; check … before drafting
+  // it again". Settled here, this dispatch never reached the provider, so that
+  // sentence is false of it and an instruction nobody can follow on a
+  // refused row: it goes, unless this state brings an error of its own
+  // (review round 5, [12]). Judged on the row as it stands, in the UPDATE.
+  const recoveryError = sql`CASE WHEN ${schema.touches.status} = 'failed' AND ${schema.touches.sentAt} IS NULL AND ${schema.touches.refusalCode} IS NULL THEN NULL ELSE ${schema.touches.error} END`
   const write = (d: AgencyDb) =>
     d
       .update(schema.touches)
@@ -634,16 +817,25 @@ async function settle(
         status: state.status,
         refusalCode: state.refusalCode,
         ...(state.recipient !== undefined ? { recipient: recipientUnlessErased(state.recipient) } : {}),
-        ...(state.error !== undefined ? { error: state.error } : {}),
+        error: state.error !== undefined ? state.error : recoveryError,
       })
       .where(eq(schema.touches.id, touch.id))
   const ended = touch.answersTouchId ? answerEndedBy(state.status, state.refusalCode) : null
-  if (!ended) {
+  if (!ended || !touch.answersTouchId) {
     await write(db)
     return
   }
+  const replyTouchId = touch.answersTouchId
   await db.transaction(async (transaction) => {
     const tx = transaction as unknown as AgencyDb
+    // Contact before touch (review round 6, [13]): the reply's person first,
+    // the lock `repauseForUnansweredReply` then re-takes, and only then the
+    // answer's own row. Writing the answer first held its row while waiting
+    // for the person — and an erasure holds the person while it scrubs that
+    // very row, so the two deadlocked on a real Postgres and the erasure
+    // took the loud "could not keep its suppression" path for a fault that
+    // was never about a suppression.
+    await lockReplyContact(tx, touch.orgId, replyTouchId)
     await write(tx)
     await repauseForUnansweredReply(tx, { orgId: touch.orgId, answer: touch, actor: 'system', because: ended, now })
   })
@@ -712,8 +904,9 @@ async function gatherFacts(
   touch: TouchRow,
   now: Date,
 ): Promise<
-  // r4: the evidence halves ride along, for `decideGathered`'s wording.
-  | { facts: SendFacts; recipient: string; evidenceAged: boolean; evidenceSuperseded: boolean }
+  // r4: the evidence halves ride along, for `decideGathered`'s wording —
+  // and, review round 10, the shared-number hold.
+  | { facts: SendFacts; recipient: string; evidenceAged: boolean; evidenceSuperseded: boolean; sharedNumberHold: boolean }
   | { missing: string }
 > {
   if (!touch.campaignId) {
@@ -982,6 +1175,17 @@ export async function sendFactsFor(
        */
       evidenceAged: boolean
       evidenceSuperseded: boolean
+      /**
+       * Whether they are paused AND Resume refuses to lift that pause until
+       * a shared number's STOP is recorded (`heldForUnrecordedSharedNumber`,
+       * the gate's own question, review round 10, [2]): a holder of a number
+       * whose STOP could not be recorded in their org, whose own pause — a
+       * teammate's, an unsubscribe's — stood instead of the hold, and so
+       * reads as any pause of its class, which a person lifts with Resume.
+       * Asked only of a paused contact: it is about what lifts a pause.
+       * `decideGathered` words the `paused` refusal by it.
+       */
+      sharedNumberHold: boolean
     }
   | { missing: string }
 > {
@@ -1079,6 +1283,10 @@ export async function sendFactsFor(
    */
   const paused = row.contact.pausedAt !== null
   const pausedReason = paused ? row.contact.pausedReason ?? 'paused' : null
+  // Review round 10, [2]: one read, for a paused contact only — and only
+  // for a pause Resume asks the question about (review round 11).
+  const sharedNumberHold =
+    paused && resumeAsksSharedNumber(row.contact.pausedReason) && (await heldForUnrecordedSharedNumber(db, orgId, row.contact))
 
   // 0019: the registered template behind THESE words, on SMS and WhatsApp.
   // The caller's words, else the stored message the evidence question names.
@@ -1103,6 +1311,7 @@ export async function sendFactsFor(
     campaignChannel,
     evidenceAged: evidence.aged,
     evidenceSuperseded: evidence.superseded,
+    sharedNumberHold,
     facts: {
       channel,
       recipient,
@@ -1213,13 +1422,33 @@ async function evidenceState(
  * the deadline sentence, the plainer of two true reasons. The sender and
  * every dry run (`previewSend`) decide through this, so they cannot word
  * one refusal two ways.
+ *
+ * And a `paused` refusal of a shared number's holder whose own pause stood
+ * (`sharedNumberHold`, review round 10, [2]): `pausedSentence` words the
+ * pause by its class — "until a person resumes them there" for a teammate's
+ * — while Resume refuses it until the number is recorded. The sentence says
+ * so after the class's own. Not for the classes whose sentence already says
+ * to record something rather than resume (an unrecorded opt-out, the
+ * shared-number hold's own shape among them) or to finish an erasure. A
+ * reply's pause gets a sentence of its own (review round 13): its class's
+ * words send a person to answer from /inbox, which `replyQueueDraft`
+ * refuses (`SHARED_NUMBER_HELD`) while the number is unrecorded.
  */
 export function decideGathered(gathered: {
   readonly facts: SendFacts
   readonly evidenceAged: boolean
   readonly evidenceSuperseded: boolean
+  readonly sharedNumberHold?: boolean
 }): SendDecision {
   const decision = decideSend(gathered.facts)
+  if (!decision.allowed && decision.code === 'paused') {
+    const pausedFor = gathered.facts.pausedFor ?? 'other'
+    if (!gathered.sharedNumberHold || pausedFor === 'opt_out_not_recorded' || pausedFor === 'erasure') return decision
+    // A reply's pause names /inbox as a way out, and /inbox refuses the
+    // answer while the number is unrecorded (review round 13): its own words.
+    if (pausedFor === 'replied') return { ...decision, reason: SHARED_NUMBER_HOLD_REPLIED_SENTENCE }
+    return { ...decision, reason: `${decision.reason} ${SHARED_NUMBER_HOLD_SENTENCE}` }
+  }
   if (decision.allowed || decision.code !== 'stale_evidence') return decision
   if (gathered.evidenceAged || !gathered.evidenceSuperseded) return decision
   return {
@@ -1231,6 +1460,27 @@ export function decideGathered(gathered: {
       'the latest scan.',
   }
 }
+
+/**
+ * What `decideGathered` adds to a `paused` refusal of a shared number's
+ * holder whose own pause stood (review round 10, [2]). It never says they
+ * asked — they may have sent nothing — and names what Resume waits for.
+ */
+export const SHARED_NUMBER_HOLD_SENTENCE =
+  'A text from a number they share also asked to stop, and it could not be recorded — they may not have sent it — ' +
+  'so Resume is refused until the number is recorded on /suppressions.'
+
+/**
+ * The whole `paused` sentence for such a holder whose own pause is a reply's
+ * (review round 13): `pausedSentence('replied')` says answering the reply
+ * from /inbox resumes them, and while the number is unrecorded /inbox
+ * refuses that answer as Resume refuses the pause.
+ */
+export const SHARED_NUMBER_HOLD_REPLIED_SENTENCE =
+  'This contact replied, and every campaign stops for them. A text from a number they share also asked to stop, ' +
+  'and it could not be recorded — they may not have sent it — so neither answering their reply from /inbox nor ' +
+  'Resume on /contacts lifts the pause until the number is recorded on /suppressions. Nothing was sent, and ' +
+  'approving does not lift a pause.'
 
 async function staleAfterDays(db: AgencyDb, orgId: string): Promise<number> {
   return staleAfterDaysOf((await activeIcpProfile(db, orgId))?.definition)
@@ -1482,6 +1732,19 @@ export async function denyDraft(
   // COMMIT would roll back the deny without a word.
   const row = await db.transaction(async (transaction) => {
     const tx = transaction as unknown as AgencyDb
+    // Contact before touch (review round 5, [13]). A reply, a bounce and a
+    // reclassify lock the person and then cancel their waiting messages —
+    // this answer among them; the deny locked the answer and then, to put
+    // the pause back, the person, and the two could deadlock on a real
+    // Postgres. So an answer's deny takes the reply's contact first, the
+    // lock `repauseForUnansweredReply` then re-takes. A read, not a lock, of
+    // the answer row: it is locked by the UPDATE below, after the person.
+    const [draft] = await tx
+      .select({ answersTouchId: schema.touches.answersTouchId })
+      .from(schema.touches)
+      .where(and(eq(schema.touches.id, args.touchId), eq(schema.touches.orgId, args.orgId)))
+      .limit(1)
+    if (draft?.answersTouchId) await lockReplyContact(tx, args.orgId, draft.answersTouchId)
     const updated = await tx
       .update(schema.touches)
       .set({
@@ -1565,6 +1828,86 @@ const UNANSWERED_AGAIN: Record<Exclude<AnswerEnded, 'denied'>, string> = {
 }
 
 /**
+ * The reason a reply's own pause carries, `replied <instant>` — the shape
+ * `pauseReasonClass` reads as `replied`. One spelling, for the re-pause that
+ * puts it back and the lift that takes the re-pause off again.
+ */
+function replyPauseReason(reply: { readonly sentAt: Date | null; readonly createdAt: Date }): string {
+  return `replied ${(reply.sentAt ?? reply.createdAt).toISOString()}`
+}
+
+/**
+ * Lock the contact a reply came from, `FOR UPDATE`, and return its id — or
+ * null when the reply or the contact is gone. Taken FIRST by every writer
+ * here that settles an answer and then pauses or resumes its person (review
+ * round 5, [13]): contact before touch, the order a reply, a bounce, a
+ * reclassify and an erasure take, so no two of them can each hold the
+ * lock the other waits for.
+ */
+async function lockReplyContact(db: AgencyDb, orgId: string, replyTouchId: string): Promise<string | null> {
+  const [reply] = await db
+    .select({ contactId: schema.touches.contactId })
+    .from(schema.touches)
+    .where(
+      and(
+        eq(schema.touches.id, replyTouchId),
+        eq(schema.touches.orgId, orgId),
+        eq(schema.touches.direction, 'in'),
+      ),
+    )
+    .limit(1)
+  if (!reply?.contactId) return null
+  const [contact] = await db
+    .select({ id: schema.contacts.id })
+    .from(schema.contacts)
+    .where(and(eq(schema.contacts.id, reply.contactId), eq(schema.contacts.orgId, orgId)))
+    .limit(1)
+    .for('update')
+  return contact?.id ?? null
+}
+
+/**
+ * `lockReplyContact` for several answers at once — the stuck-send recovery's
+ * (apps/agent/src/boot/reconcile.ts), which settles every claim the last
+ * worker left and re-pauses the people whose answers were among them
+ * (review round 6, [13]). Each reply is read, never locked; their contacts
+ * are then locked `FOR UPDATE` in ONE statement, in id order — Postgres
+ * applies ORDER BY before the locking clause, so the rows are locked in
+ * that order and two writers holding several people cannot each wait on
+ * the other. Call it BEFORE writing any of the answers: contact before
+ * touch. A reply or a contact that is gone is skipped, as the single
+ * helper returns null for it.
+ */
+export async function lockReplyContacts(
+  db: AgencyDb,
+  answers: readonly { readonly orgId: string; readonly answersTouchId: string }[],
+): Promise<void> {
+  if (answers.length === 0) return
+  const replies = await db
+    .select({ id: schema.touches.id, orgId: schema.touches.orgId, contactId: schema.touches.contactId })
+    .from(schema.touches)
+    .where(
+      and(
+        inArray(schema.touches.id, [...new Set(answers.map((a) => a.answersTouchId))]),
+        eq(schema.touches.direction, 'in'),
+        isNotNull(schema.touches.contactId),
+      ),
+    )
+  // Only a reply in the answer's own org names a person to lock.
+  const wanted = new Set(answers.map((a) => `${a.orgId}:${a.answersTouchId}`))
+  const contactIds = [
+    ...new Set(replies.filter((r) => wanted.has(`${r.orgId}:${r.id}`) && r.contactId).map((r) => r.contactId as string)),
+  ]
+  if (contactIds.length === 0) return
+  await db
+    .select({ id: schema.contacts.id })
+    .from(schema.contacts)
+    .where(inArray(schema.contacts.id, contactIds))
+    .orderBy(asc(schema.contacts.id))
+    .for('update')
+}
+
+/**
  * Put back the pause a reply caused when the answer that lifted it never
  * goes (review rounds 3 and 4).
  *
@@ -1578,9 +1921,13 @@ const UNANSWERED_AGAIN: Record<Exclude<AnswerEnded, 'denied'>, string> = {
  * writer that settles an answer `failed` or `refused` now calls this, in
  * its own transaction, so the settle and the pause land together or not at
  * all — `settle` for each of `dispatchTouch`'s, `denyDraft`, and the
- * bounce's cancel (`outreachRecordBounce`). Exported for the writers
- * outside this file that settle a row `failed`: the stuck-send recovery and
- * the LinkedIn step's "I did not send it".
+ * bounce's cancel (`outreachRecordBounce`). Exported for the one writer
+ * outside this file that settles an answer `failed`: the stuck-send
+ * recovery (`recoverStuckSends`). The LinkedIn step's "I did not send it"
+ * never calls it, and needs not: an answer is only ever email — no inbound
+ * LinkedIn path exists, and the inbox refuses SMS and WhatsApp. When the
+ * recovery guessed wrong and the provider had taken the answer after all,
+ * `dispatchTouch` lifts the pause put back here (`liftRecoveryPause`).
  *
  * The pause goes back on, with the reply's own `replied <instant>` reason —
  * the shape `recordInboundReply` writes and `pauseReasonClass` reads — when:
@@ -1689,7 +2036,7 @@ export async function repauseForUnansweredReply(
     .limit(1)
   if (otherAnswer.length > 0) return false
 
-  const paused = await pauseContact(db, orgId, contactId, `replied ${(reply.sentAt ?? reply.createdAt).toISOString()}`, args.now)
+  const paused = await pauseContact(db, orgId, contactId, replyPauseReason(reply), args.now)
   if (!paused) return false
   // Uncaught, inside the settle's transaction. A deny keeps the shape /audit
   // words as "the answer to their reply was denied"; every other ending is
@@ -1850,8 +2197,11 @@ export async function pauseContact(
  * could not finish. That is the reason that matters now, and left behind an
  * older `replied …` it let answering that reply in /inbox resume a person who
  * had asked to stop (the inbox ends only a reply's own pause). The one
- * writer, shared by the three paths that need it: a reply's opt-out whose
- * suppression failed (`recordInboundReply`), a one-click unsubscribe that
+ * writer, shared by every path that knows an opt-out failed to store: a
+ * reply's opt-out whose suppression failed (`recordInboundReply`, and
+ * sms.ts for a number's other holders), a stop whose whole recording threw
+ * (the two email webhooks, the DoveSoft text route and the worker's IMAP
+ * inbox, through inbound-fault.ts's reason), a one-click unsubscribe that
  * could not be recorded (unsubscribe.ts), and an erasure rolled back whole
  * (erasure.ts). Each gives a reason `pauseReasonClass` reads as
  * `opt_out_not_recorded` or `erasure`.
@@ -1925,8 +2275,33 @@ export async function resumeContact(
  * that does not pause is a genuine auto-reply, and "genuine" is decided by
  * the BROAD reader, `mentionsRemovalOrDeparture` — see `recordInboundReply`.)
  */
-const OPT_OUT =
-  /^\s*(?:please\s+)?(?:stop|unsubscribe(?:\s+me)?|remove\s+me|opt(?:\s+me)?[\s-]?out|do\s+not\s+(?:contact|email)\s+me(?:\s+again)?|no\s+more\s+emails?|take\s+me\s+off\s+(?:your|the)\s+list|leave\s+me\s+alone)\b[\s.!,]*$/i
+const LIST = String.raw`(?:your|the|this)\s+(?:(?:mailing|e-?mail(?:ing)?|contact)\s+)?list`
+/**
+ * The sentences above, whole. Review round 6 found "Please stop emailing me."
+ * read as an ordinary reply — paused, never suppressed — so the commonest
+ * ways to say it in a mail are listed: stop emailing / contacting / messaging
+ * me, don't email me, remove or unsubscribe me from your list. Still a whole
+ * first line (or a whole short message), with an optional please / kindly in
+ * front and one please / thanks after, so "stop by", "stop the migration" and
+ * a sentence that only mentions a list are not read.
+ */
+const OPT_OUT = new RegExp(
+  String.raw`^\s*(?:(?:please|pls|kindly)[\s,]+)?(?:` +
+    [
+      String.raw`stop`,
+      String.raw`stop\s+(?:e-?mailing|mailing|contacting|messaging|writing\s+to|spamming)(?:\s+me)?(?:\s+(?:again|any\s*more))?`,
+      String.raw`stop\s+sending\s+(?:me\s+)?(?:e-?mails?|mails?|messages?)(?:\s+to\s+me)?`,
+      String.raw`unsubscribe(?:\s+me)?(?:\s+from\s+${LIST})?`,
+      String.raw`remove\s+me(?:\s+from\s+${LIST})?`,
+      String.raw`opt(?:\s+me)?[\s-]?out(?:\s+of\s+${LIST})?`,
+      String.raw`(?:do\s+not|don['’]?t)\s+(?:contact|e-?mail|message|mail)\s+me(?:\s+(?:again|any\s*more))?`,
+      String.raw`no\s+more\s+e-?mails?`,
+      String.raw`take\s+me\s+off\s+${LIST}`,
+      String.raw`leave\s+me\s+alone`,
+    ].join('|') +
+    String.raw`)(?:[\s,.]+(?:please|pls|thanks|thank\s+you|thx))?[\s.!,]*$`,
+  'i',
+)
 
 export function looksLikeOptOut(body: string | null | undefined): boolean {
   if (!body) return false
@@ -1936,6 +2311,200 @@ export function looksLikeOptOut(body: string | null | undefined): boolean {
   const own = ownWords(body)
   const first = own.split(/\r?\n/).find((l) => l.trim().length > 0) ?? ''
   return OPT_OUT.test(first) || (own.trim().length <= 60 && OPT_OUT.test(own.trim()))
+}
+
+/**
+ * Did a reply come FROM the contact it is filed under (review round 7)?
+ *
+ * Not always: `handleInboundEmail` files a reply matched by References under
+ * the contact OUR message went to, whoever answered — and a colleague in
+ * the thread replying all "please remove me from your list" is the opt-out
+ * of the colleague, not of the contact. When it cannot be recorded, holding
+ * the CONTACT as an opt-out nobody recorded locked out somebody who never
+ * asked to stop, for good: no Resume lifts that pause, and the inbox reads
+ * the audit row however old.
+ *
+ * Compared by the channel's own address key (`suppressionKeysFor`), never
+ * the domain — a colleague shares it. False only when BOTH addresses read
+ * and differ: a sender that is shown to be somebody else. Either side
+ * unreadable — a contact whose address was cleared since — is true, the
+ * reading that holds the contact as before, because "we could not tell"
+ * is not "it was somebody else".
+ */
+export function replyIsFromTheContact(
+  from: string | null,
+  channel: Channel,
+  contact: {
+    readonly email: string | null
+    readonly phone?: string | null
+    readonly linkedinUrl?: string | null
+  },
+): boolean {
+  const own = channel === 'email' ? contact.email : channel === 'linkedin' ? contact.linkedinUrl : contact.phone
+  const sender = addressKeyOf(from, channel)
+  const contactKey = addressKeyOf(own ?? null, channel)
+  return sender === null || contactKey === null || sender === contactKey
+}
+
+/**
+ * The one key an address is suppressed by on its channel — the address
+ * itself, normalised (`suppressionKeysFor`), never the domain, which a
+ * colleague shares. Null when it cannot be read. The comparison
+ * `replyIsFromTheContact` makes, and the key `contactsAtTheAddress` finds
+ * the sender by (review round 8).
+ */
+export function addressKeyOf(address: string | null | undefined, channel: Channel): string | null {
+  return address ? (suppressionKeysFor(address, channel)?.find((k) => k.kind !== 'domain')?.value ?? null) : null
+}
+
+/**
+ * The contacts of this org who ARE the sender of a reply filed under
+ * somebody else (review round 8, [2]): those whose address key on the
+ * channel is the From's (`addressKeyOf` — never the domain, which a
+ * colleague shares), the filed contact excepted. Ordered by id, so two
+ * writers holding several people take them in one order.
+ *
+ * Read by `recordInboundReply` beside the contact row, BEFORE anything that
+ * may fail, so a reply rolled back by a fault still names them on its
+ * rolled-back line — and the caller's loud path holds them by id, with
+ * nothing read again from a database that just failed. In a savepoint: a
+ * lookup that fails holds nobody and says so (`said`), and the reply still
+ * records. LinkedIn has no inbound path, and no address here to compare.
+ */
+async function contactsAtTheAddress(
+  tx: AgencyDb,
+  args: { readonly orgId: string; readonly filedUnder: string; readonly channel: Channel; readonly from: string },
+  said: (message: string, fields: Readonly<Record<string, unknown>>) => void,
+): Promise<string[]> {
+  const key = addressKeyOf(args.from, args.channel)
+  if (key === null || args.channel === 'linkedin') return []
+  try {
+    const near = await tx.transaction((sp) =>
+      (sp as unknown as AgencyDb)
+        .select({ id: schema.contacts.id, email: schema.contacts.email, phone: schema.contacts.phone })
+        .from(schema.contacts)
+        .where(
+          and(
+            eq(schema.contacts.orgId, args.orgId),
+            sql`${schema.contacts.id} <> ${args.filedUnder}`,
+            args.channel === 'email'
+              ? sql`lower(btrim(${schema.contacts.email})) = ${key}`
+              : sql`btrim(${schema.contacts.phone}) = ${key}`,
+          ),
+        )
+        .orderBy(asc(schema.contacts.id)),
+    )
+    // The key the reply's own reading compares (`replyIsFromTheContact`),
+    // in the same code: the SQL above only narrows.
+    return near
+      .filter((c) => addressKeyOf(args.channel === 'email' ? c.email : c.phone, args.channel) === key)
+      .map((c) => c.id)
+  } catch (err) {
+    said('a stop from another address could not be matched to the contacts who hold it', {
+      contactId: args.filedUnder,
+      orgId: args.orgId,
+      error: err instanceof Error ? err.name : 'UnknownError',
+    })
+    return []
+  }
+}
+
+/**
+ * Hold everybody in this org who IS the sender of a stop that could not be
+ * recorded, when the reply was filed under somebody else (review round 8,
+ * [2]).
+ *
+ * `recordInboundReply` holds the contact a colleague's stop was filed under
+ * only as any reply holds them (`replied <ISO>`), because the opt-out is the
+ * SENDER's. And then nothing held the sender: a second contact here at the
+ * address that asked to stop, with an approved message, was sent it on the
+ * next tick — §2.1's "must never fall through to sending", broken for the
+ * one person who asked. So each of them (`contactsAtTheAddress`) is held as
+ * an opt-out nobody recorded, which is what it is:
+ *
+ *  - paused over any earlier reason (`pauseContactOverriding`, the reason
+ *    every such path writes, class `opt_out_not_recorded`), which no Resume
+ *    lifts and the inbox never ends;
+ *  - their queued, awaiting-approval and approved messages refused
+ *    `consent_revoked` — their own no, as a reply's cancel records it;
+ *  - a `contact.opt_out_not_recorded` row with THEM as its subject — their
+ *    own unrecorded opt-out, the shape the contact's own reply writes, which
+ *    the inbox, Resume and /compliance read.
+ *
+ * Each write in its own savepoint, as every write in the reply's
+ * transaction that may fail on its own is: a refused statement aborts a
+ * transaction, and the reply must still commit. The contact before their
+ * messages — the lock order every writer keeps. A write that fails is said
+ * (`said`), once the reply is committed, and the others are still tried.
+ * Returns how many were paused.
+ */
+async function holdTheSender(
+  tx: AgencyDb,
+  args: {
+    readonly orgId: string
+    readonly senders: readonly string[]
+    readonly channel: Channel
+    readonly touchId: string
+    readonly why: string
+    readonly now: Date
+  },
+  said: (message: string, fields: Readonly<Record<string, unknown>>) => void,
+): Promise<number> {
+  const failed = (step: string, contactId: string, err: unknown): void =>
+    said('an opt-out that was not recorded could not hold the contact at the address that asked to stop', {
+      touchId: args.touchId,
+      contactId,
+      orgId: args.orgId,
+      step,
+      error: err instanceof Error ? err.name : 'UnknownError',
+    })
+
+  let held = 0
+  for (const contactId of args.senders) {
+    try {
+      const paused = await tx.transaction((sp) =>
+        pauseContactOverriding(
+          sp as unknown as AgencyDb, args.orgId, contactId,
+          `opt-out not recorded: reply ${args.now.toISOString()} (${args.why})`, args.now,
+        ),
+      )
+      if (paused) held++
+    } catch (err) {
+      failed('pause', contactId, err)
+    }
+    try {
+      await tx.transaction((sp) =>
+        (sp as unknown as AgencyDb)
+          .update(schema.touches)
+          .set({ status: 'refused', refusalCode: 'consent_revoked' })
+          .where(
+            and(
+              eq(schema.touches.orgId, args.orgId),
+              eq(schema.touches.contactId, contactId),
+              eq(schema.touches.direction, 'out'),
+              inArray(schema.touches.status, ['queued', 'awaiting_approval', 'approved']),
+            ),
+          ),
+      )
+    } catch (err) {
+      failed('cancel', contactId, err)
+    }
+    try {
+      await tx.transaction((sp) =>
+        appendAudit(sp as unknown as AgencyDb, {
+          orgId: args.orgId,
+          actor: 'system',
+          action: 'contact.opt_out_not_recorded',
+          subjectType: 'contact',
+          subjectId: contactId,
+          detail: { touchId: args.touchId, channel: args.channel, why: args.why },
+        }),
+      )
+    } catch (err) {
+      failed('audit', contactId, err)
+    }
+  }
+  return held
 }
 
 /**
@@ -1991,6 +2560,13 @@ export async function recordInboundReply(
    * person to record the opt-out by hand.
    */
   optOutNotRecorded: boolean
+  /**
+   * Whether the reply came from the contact it was filed under (review
+   * round 7): false is a colleague's mail matched by our Message-ID, whose
+   * opt-out is the SENDER's, so a caller's alarm must not name the contact.
+   * Null when it could not be read.
+   */
+  fromIsContact: boolean | null
   deal: string | null
   /** The deterministic kind stored on the inbound touch (§5.5). */
   replyKind: ReplyKind
@@ -2000,6 +2576,21 @@ export async function recordInboundReply(
 }> {
   const now = args.now ?? new Date()
   const log = args.log ?? stderrLog
+
+  // Postgres refuses U+0000 in text, so a reply carrying one failed its
+  // INSERT on every retry — on every channel, not only SMS (review round 5:
+  // mailparser keeps a NUL decoded from quoted-printable `=00`, and IMAP,
+  // Resend and the generic webhook all land here), and a "stop" sent that
+  // way was recorded nowhere. Kept visible as U+FFFD rather than dropped, so
+  // the stored words say a character was there; and the words READ are the
+  // words stored. Here, once, for every caller — sms.ts' own strip before
+  // it changes nothing.
+  const withoutNul = <T extends string | null | undefined>(v: T): T =>
+    (typeof v === 'string' ? v.replace(/\u0000/g, '\uFFFD') : v) as T
+  const subject = withoutNul(args.subject)
+  const body = withoutNul(args.body)
+  const from = withoutNul(args.from)
+  const providerId = withoutNul(args.providerId ?? null)
 
   /**
    * Classified from the SAME opt-out reading that decides the suppression
@@ -2032,9 +2623,9 @@ export async function recordInboundReply(
   // footer taught (`smsOptOut`: STOP, STOP 56161, CANCEL alone, …); the
   // prose reader runs on every channel, as before.
   const optedOut =
-    looksLikeOptOut(args.body) || ((args.channel === 'sms' || args.channel === 'whatsapp') && smsOptOut(args.body))
-  const automatic = !optedOut && args.autoReply === true && !mentionsRemovalOrDeparture(args.body)
-  const replyKind: ReplyKind = automatic ? 'auto_reply' : classifyReply(args.body, optedOut)
+    looksLikeOptOut(body) || ((args.channel === 'sms' || args.channel === 'whatsapp') && smsOptOut(body))
+  const automatic = !optedOut && args.autoReply === true && !mentionsRemovalOrDeparture(body)
+  const replyKind: ReplyKind = automatic ? 'auto_reply' : classifyReply(body, optedOut)
 
   /**
    * The reply and every consequence of it are ONE transaction: the row, the
@@ -2066,19 +2657,44 @@ export async function recordInboundReply(
   // Lines said once the outcome is COMMITTED: a line about a write that then
   // rolled back would be a claim about nothing.
   const said: { readonly message: string; readonly fields: Readonly<Record<string, unknown>> }[] = []
+  // Whether the reply came from the contact it is filed under
+  // (`replyIsFromTheContact`), from the contact row this transaction reads
+  // first — kept out here so the rolled-back line can say it without
+  // reading again from a database that just failed. Null when the fault
+  // came before that read: unknown, which every reader holds as before.
+  let fromIsContact: boolean | null = null
+  // Whoever IS the sender of a stop filed under somebody else, when they are
+  // contacts here (`contactsAtTheAddress`, review round 8): read beside the
+  // contact, before anything that may fail, so the rolled-back line can
+  // name them too and the caller holds them by id.
+  let senders: string[] = []
   let recorded: Awaited<ReturnType<typeof recordInboundReply>>
   try {
     recorded = await db.transaction(async (transaction) => {
       const tx = transaction as unknown as AgencyDb
 
       const contactRows = await tx
-        .select({ companyId: schema.contacts.companyId, companyDomain: schema.companies.domain })
+        .select({
+          companyId: schema.contacts.companyId,
+          companyDomain: schema.companies.domain,
+          email: schema.contacts.email,
+          phone: schema.contacts.phone,
+          linkedinUrl: schema.contacts.linkedinUrl,
+        })
         .from(schema.contacts)
         .leftJoin(schema.companies, eq(schema.companies.id, schema.contacts.companyId))
         .where(and(eq(schema.contacts.orgId, args.orgId), eq(schema.contacts.id, args.contactId)))
         .limit(1)
       const companyId = contactRows[0]?.companyId ?? null
       const companyDomain = contactRows[0]?.companyDomain ?? null
+      if (contactRows[0]) fromIsContact = replyIsFromTheContact(from, args.channel, contactRows[0])
+      if (optedOut && fromIsContact === false) {
+        senders = await contactsAtTheAddress(
+          tx,
+          { orgId: args.orgId, filedUnder: args.contactId, channel: args.channel, from },
+          (message, fields) => said.push({ message, fields }),
+        )
+      }
 
       const inserted = await tx
         .insert(schema.touches)
@@ -2089,10 +2705,10 @@ export async function recordInboundReply(
           channel: args.channel,
           direction: 'in',
           status: 'replied',
-          subject: args.subject,
-          body: args.body,
-          recipient: args.from,
-          providerId: args.providerId ?? null,
+          subject,
+          body,
+          recipient: from,
+          providerId,
           inReplyTo: args.inReplyTo ?? null,
           replyKind,
           sentAt: now,
@@ -2142,7 +2758,7 @@ export async function recordInboundReply(
             addSuppression(sp as unknown as AgencyDb, {
               orgId: args.orgId,
               kind: suppressionKind,
-              value: args.from,
+              value: from,
               reason: `replied asking to stop, ${now.toISOString().slice(0, 10)}`,
               source: 'reply',
             }),
@@ -2168,40 +2784,81 @@ export async function recordInboundReply(
           // person whose opt-out was never recorded — and a fault that failed
           // the suppression can fail the audit row below too, leaving the inbox
           // nothing else to find. Found by review.
-          try {
-            const overridden = await tx.transaction((sp) =>
-              pauseContactOverriding(
-                sp as unknown as AgencyDb, args.orgId, args.contactId,
-                `opt-out not recorded: reply ${now.toISOString()} (${why})`, now,
-              ),
-            )
-            paused = paused || overridden
-          } catch (err) {
-            said.push({
-              message: 'an opt-out that was not recorded could not pause the contact',
-              fields: {
-                touchId,
-                contactId: args.contactId,
-                orgId: args.orgId,
-                error: err instanceof Error ? err.name : 'UnknownError',
-              },
-            })
+          //
+          // Except when the reply came from somebody else (review round 7):
+          // the opt-out is THEIRS, and the contact it is filed under never
+          // asked to stop. They keep the reply's own pause, which a person
+          // lifts — once the sender's address is on the suppression list, the
+          // inbox's reading of this opted-out reply (its From matched by no
+          // suppression row) lets them go too. The SENDER is held instead,
+          // when they are a contact here (`holdTheSender`, below).
+          if (fromIsContact !== false) {
+            try {
+              const overridden = await tx.transaction((sp) =>
+                pauseContactOverriding(
+                  sp as unknown as AgencyDb, args.orgId, args.contactId,
+                  `opt-out not recorded: reply ${now.toISOString()} (${why})`, now,
+                ),
+              )
+              paused = paused || overridden
+            } catch (err) {
+              said.push({
+                message: 'an opt-out that was not recorded could not pause the contact',
+                fields: {
+                  touchId,
+                  contactId: args.contactId,
+                  orgId: args.orgId,
+                  error: err instanceof Error ? err.name : 'UnknownError',
+                },
+              })
+            }
           }
+          // The row /compliance and the digest count. About the contact when
+          // the reply was theirs — what keeps /inbox from drafting to them —
+          // and otherwise about the reply itself, which holds the sender's
+          // address, with the contact as `filedUnder`: never as a subject or a
+          // `contactId`, the two things the inbox reads as THEIR opt-out.
           await tx
             .transaction((sp) =>
-              appendAudit(sp as unknown as AgencyDb, {
-                orgId: args.orgId,
-                actor: 'system',
-                action: 'contact.opt_out_not_recorded',
-                subjectType: 'contact',
-                subjectId: args.contactId,
-                detail: { touchId, channel: args.channel, why },
-              }),
+              appendAudit(
+                sp as unknown as AgencyDb,
+                fromIsContact === false
+                  ? {
+                      orgId: args.orgId,
+                      actor: 'system',
+                      action: 'contact.opt_out_not_recorded',
+                      subjectType: 'touch',
+                      subjectId: touchId,
+                      detail: { touchId, channel: args.channel, why, fromIsContact: false, filedUnder: args.contactId },
+                    }
+                  : {
+                      orgId: args.orgId,
+                      actor: 'system',
+                      action: 'contact.opt_out_not_recorded',
+                      subjectType: 'contact',
+                      subjectId: args.contactId,
+                      detail: { touchId, channel: args.channel, why },
+                    },
+              ),
             )
             .catch(() => {})
+          // And whoever IS the sender, when they are a contact here too
+          // (review round 8, [2]): their opt-out is the one nobody recorded,
+          // and the contact's reply pause above holds nobody but the contact.
+          const sendersHeld =
+            fromIsContact === false
+              ? await holdTheSender(
+                  tx,
+                  { orgId: args.orgId, senders, channel: args.channel, touchId, why, now },
+                  (message, fields) => said.push({ message, fields }),
+                )
+              : 0
           said.push({
             message: 'OPT-OUT NOT RECORDED — follow up by hand',
-            fields: { touchId, contactId: args.contactId, orgId: args.orgId, why },
+            fields: {
+              touchId, contactId: args.contactId, orgId: args.orgId, why, fromIsContact,
+              ...(fromIsContact === false ? { sendersHeld } : {}),
+            },
           })
         }
       }
@@ -2242,7 +2899,7 @@ export async function recordInboundReply(
       await tx.execute(sql`SELECT 1`)
 
       return {
-        touchId, paused, cancelled: cancelled.length, suppressed, optOutNotRecorded, deal, replyKind, companyId, companyDomain,
+        touchId, paused, cancelled: cancelled.length, suppressed, optOutNotRecorded, fromIsContact, deal, replyKind, companyId, companyDomain,
       }
     })
   } catch (err) {
@@ -2251,10 +2908,30 @@ export async function recordInboundReply(
     // retries it, a bounded number of times (`drainUnseen`). Until a retry
     // records it, a "stop" is §2.1's obligation unmet, so it is said out
     // loud — ids and a reason class, never the address or the words.
-    if (optedOut) {
+    //
+    // Except a raced duplicate (review round 5). The one unique index the
+    // inbound INSERT can meet is 0019's on an inbound SMS's message id: two
+    // deliveries of one STOP both read "not seen", the winner recorded it
+    // with its suppression, and this loser's INSERT was refused. Its caller
+    // (`recordInboundSms`) answers it as the duplicate it is, so a line
+    // telling a person to record by hand an opt-out that IS recorded would
+    // be false — and a false alarm teaches people to skip the true one.
+    const duplicate = providerId !== null && isUniqueViolation(err)
+    if (optedOut && !duplicate) {
       log.error('OPT-OUT NOT RECORDED — the reply was rolled back; a provider retry records it, otherwise follow up by hand', {
         contactId: args.contactId,
         orgId: args.orgId,
+        // The message it answered, when it was matched by one: an id a
+        // caller can name in the alarm it raises (the email webhook does).
+        inReplyTo: args.inReplyTo ?? null,
+        // Whether the reply came from that contact (review round 7): false
+        // is a colleague's stop filed under them, and the caller must not
+        // hold THEM as an opt-out nobody recorded. Null: not known.
+        fromIsContact,
+        // And, for a colleague's stop, the contacts here who ARE the sender
+        // (review round 8): the ones the caller holds as the opt-out nobody
+        // recorded, by id. Ids only, never the address.
+        ...(fromIsContact === false ? { senderContactIds: senders } : {}),
         why: err instanceof Error ? err.name : 'UnknownError',
       })
     }
@@ -2290,6 +2967,13 @@ export type InboundOutcome =
        * False on a duplicate: the first delivery raised it.
        */
       readonly optOutNotRecorded: boolean
+      /**
+       * `recordInboundReply`'s `fromIsContact`: false when the reply came
+       * from somebody other than the contact (a colleague answering our
+       * mail), so the alarm names the sender's message and never the
+       * contact. Absent or null reads as the contact's own.
+       */
+      readonly fromIsContact?: boolean | null
     }
   | {
       readonly matched: 'none'
@@ -2730,6 +3414,7 @@ export async function handleInboundEmail(
         companyId: r.companyId,
         companyDomain: r.companyDomain,
         optOutNotRecorded: r.optOutNotRecorded,
+        fromIsContact: r.fromIsContact,
       }
     }
   }
@@ -2761,7 +3446,7 @@ export async function handleInboundEmail(
     matched: 'contact', contactId: only.id, orgId: only.orgId,
     touchId: r.touchId, paused: r.paused, suppressed: r.suppressed, replyKind: r.replyKind,
     duplicate: false, companyId: r.companyId, companyDomain: r.companyDomain,
-    optOutNotRecorded: r.optOutNotRecorded,
+    optOutNotRecorded: r.optOutNotRecorded, fromIsContact: r.fromIsContact,
   }
 }
 

@@ -5,7 +5,9 @@ import { pauseReasonClass } from '@agency/core'
 import { When } from '@/components/when'
 import { ContactEdit } from '@/components/contacts/edit'
 import { SmsComposer } from '@/components/contacts/sms-composer'
+import { SharedNumberHolderNote } from '@/components/shared-number-note'
 import { sendCheckSentence, type SendCheckView } from '@/lib/consent-view'
+import { offersResume, resumeOfferFor } from '@/lib/shared-number-pause'
 
 /**
  * The consent ledger (§2.1): one row per person, and per row the facts the
@@ -17,9 +19,18 @@ import { sendCheckSentence, type SendCheckView } from '@/lib/consent-view'
  * this component renders and does not decide — with one reading of its own:
  * which pause buttons a row gets, from the pause's CLASS, through
  * `pauseReasonClass`, the one pure reader the route, the inbox and the send
- * path share (review round 3). A pause an unrecorded opt-out or an
- * unfinished erasure left gets no Resume and says what to do instead — the
- * route refuses it anyway (409) — and a reply's pause gets Pause beside
+ * path share (review round 3), and through `resumeOfferFor`
+ * (`lib/shared-number-pause.ts`). A pause the contact's own unrecorded
+ * opt-out or an unfinished erasure left gets no Resume and says what to do
+ * instead — the route refuses it anyway (409). A shared number's holder,
+ * whose pause has the same class, is neither (review round 9): a text from
+ * a number they share asked to stop, they may not have sent it, and the
+ * route lifts their pause once the number is on the suppression list — so
+ * the row says exactly that and offers Resume, which answers the route's
+ * sentence until the number is recorded. So does a holder whose own pause
+ * stood instead of the hold (review round 10, [2]): the shape is a
+ * teammate's or an unsubscribe's, so the row reads the database's answer,
+ * `sharedNumberHold`, beside it. A reply's pause gets Pause beside
  * Resume, so a teammate can hold somebody whose reply someone may answer.
  * The route also refuses a resume while an opt-out the audit log says was
  * never recorded matches no suppression row; that needs the database, so
@@ -72,6 +83,12 @@ export interface LedgerView {
   readonly zoneMissing: boolean
   readonly pausedAt: string | null
   readonly pausedReason: string | null
+  /**
+   * Resume refuses their pause until a shared number is recorded
+   * (`consentLedgerFor`'s `sharedNumberHold`, review round 10, [2]) — a
+   * holder whose own pause stood instead of the hold. False when not paused.
+   */
+  readonly sharedNumberHold: boolean
   readonly emailBouncedAt: string | null
   readonly emailBounceCode: string | null
   readonly channels: readonly LedgerChannelView[]
@@ -160,6 +177,7 @@ export function ContactsLedger({
           const panel = open?.id === r.id ? open.panel : null
           // Null when they are not paused. Which buttons the row gets — see the header.
           const pausedFor = r.pausedAt ? pauseReasonClass(r.pausedReason) : null
+          const offer = resumeOfferFor(pausedFor, r.pausedReason, r.sharedNumberHold)
           return (
             <Fragment key={r.id}>
               <tr>
@@ -244,16 +262,21 @@ export function ContactsLedger({
                             Draft SMS
                           </button>
                         ) : null}
-                        {pausedFor === 'opt_out_not_recorded' ? (
+                        {offer === 'opt_out_not_recorded' ? (
                           <span className="muted" style={{ fontSize: 12 }}>
                             No Resume: they asked to stop and it could not be recorded. Record the opt-out on{' '}
                             <a href="/suppressions">/suppressions</a>; the pause stays.
                           </span>
-                        ) : pausedFor === 'erasure' ? (
+                        ) : offer === 'erasure' ? (
                           <span className="muted" style={{ fontSize: 12 }}>
                             No Resume: they asked to be erased and it did not complete. An owner finishes it with Erase….
                           </span>
-                        ) : pausedFor ? (
+                        ) : offer === 'record_number' ? (
+                          <span className="muted" style={{ fontSize: 12 }}>
+                            <SharedNumberHolderNote />
+                          </span>
+                        ) : null}
+                        {offersResume(offer) ? (
                           <button type="button" className="linkish" disabled={busy === r.id} onClick={() => void patch(r.id, { action: 'resume', pausedReason: r.pausedReason })}>
                             Resume
                           </button>

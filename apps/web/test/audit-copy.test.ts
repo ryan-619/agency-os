@@ -113,6 +113,9 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'draft.approved': { contactId: SUBJECT, campaignId: SUBJECT, channel: 'email' },
   'draft.denied': { note: 'too pushy', refusalCode: 'needs_approval' },
   'contact.replied': { channel: 'email', paused: true, cancelledQueued: 2, suppressed: false, deal: 'advanced:replied' },
+  // A colleague's stop filed under the contact (review round 7) adds
+  // `fromIsContact: false` and `filedUnder` — the contact never as the
+  // subject or a `contactId` (FROM_SOMEBODY_ELSE below).
   'contact.opt_out_not_recorded': { touchId: SUBJECT, channel: 'email', why: 'unparseable' },
   'contact.created': { companyId: SUBJECT, source: 'manual', hasTimeZone: true },
   // The contacts route's shape, over a reply's own pause. `denyDraft` writes
@@ -233,13 +236,18 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   // DoveSoft (0019).
   'send.no_template': { campaignId: SUBJECT, channel: 'sms', code: 'no_template' },
   'send.template_mismatch': { campaignId: SUBJECT, channel: 'sms', code: 'template_mismatch' },
+  // Review round 5: a promotional SMS whose band never opens, stored as unknown_timezone before.
+  'send.band_never_opens': { campaignId: SUBJECT, channel: 'sms', code: 'band_never_opens' },
   'template.created': { channel: 'sms', category: 'service_explicit', externalId: '1107160000000012345' },
   'template.activated': { channel: 'sms', externalId: '1107160000000012345' },
   'template.deactivated': { channel: 'sms', externalId: '1107160000000012345' },
   'template.imported': { channel: 'sms', imported: 2, alreadyPresent: 0, skipped: 2, refused: 5 },
   'sms.drafted': { contactId: SUBJECT, campaignId: SUBJECT, templateId: SUBJECT },
   'sms.delivery_unmatched': { why: 'unknown_id', status: 'delivered' },
-  'sms.inbound_unmatched': { why: 'ambiguous', optOut: true, contacts: 2, suppressed: true },
+  'sms.inbound_unmatched': {
+    why: 'ambiguous', optOut: true, contacts: 2, suppressed: true, paused: 2, cancelledQueued: 1, messageHash: 'a'.repeat(64),
+    replacedPauseFor: 'replied', replacedPauses: 1,
+  },
   'sms.dlr_unreadable': { why: 'missing_fields', missing: ['messageid'] },
   'sms.inbound_unreadable': { why: 'missing_fields', missing: ['from', 'text'] },
   'contact.bounced': { code: '5.1.1', cancelledQueued: 1, touchId: SUBJECT },
@@ -335,6 +343,22 @@ describe('sentenceFor', () => {
   })
 
   /**
+   * Review round 5, [12]. A stuck-send recovery puts a reply's pause back
+   * over an answer it could not tell went — "the answer to it failed to
+   * send" — and `dispatchTouch` lifts that pause when the provider had taken
+   * the answer after all. The lift says why, beside the recovery's row it
+   * corrects, and never quotes the reason's text.
+   */
+  it('says a reply’s pause was lifted because the answer to it went after all', () => {
+    const detail = { reason: 'the answer to their reply went after all', pausedFor: 'replied', answerTouchId: SUBJECT }
+    expect(sentenceFor(line('contact.resumed', detail, { actor: 'system' }), lookups)).toBe(
+      'resumed a contact at rentman.io who had been paused by their reply, because the answer to it went after all',
+    )
+    const outreach = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../packages/db/src/outreach.ts'), 'utf8')
+    expect(outreach).toContain("detail: { reason: 'the answer to their reply went after all', pausedFor: pauseReasonClass(reason), answerTouchId: answer.id }")
+  })
+
+  /**
    * `denyDraft` records `stale_evidence` for words that quoted an AGED scan
    * and for words a newer scan SUPERSEDED, and its detail does not say
    * which. "A re-scan lets it be drafted again" is false of the second —
@@ -423,7 +447,10 @@ describe('sentenceFor', () => {
       'refused an SMS to a contact at rentman.io: not its registered template; nothing was sent',
     )
     expect(say('sms.inbound_unmatched')).toBe(
-      'received a text from a number more than one contact has, so it was filed under nobody; it asked to stop, and the number was put on the suppression list',
+      'received a text from a number more than one contact has, so it was filed under nobody; both contacts holding the number were paused and 1 queued message cancelled; the hold replaced the pause a reply had caused for 1 of them; it asked to stop, and the number was put on the suppression list',
+    )
+    expect(say('sms.inbound_unmatched', { why: 'ambiguous', paused: 1, cancelledQueued: 0 })).toBe(
+      'received a text from a number more than one contact has, so it was filed under nobody; a contact holding the number was paused',
     )
     expect(say('sms.inbound_unmatched', { why: 'no_contact', optOut: true, suppressed: false })).toContain('NOT on the suppression list')
     expect(say('sms.delivery_unmatched')).toBe('received a delivery report for an SMS this system did not send; nothing was changed')
@@ -453,6 +480,109 @@ describe('sentenceFor', () => {
   })
 
   /**
+   * Review round 6, finding [21]. The held clause said nothing when every
+   * holder was already paused although their messages were cancelled; it
+   * called one of several "the contact holding the number"; and the row a
+   * text filed under a contact leaves in ANOTHER org read "filed under
+   * nobody". Each writer's row is worded for what it did.
+   */
+  describe('a text from a shared number (sms.inbound_unmatched)', () => {
+    const say = (d: Record<string, unknown>) => sentenceFor(line('sms.inbound_unmatched', d, { actor: 'system' }), lookups)
+    const NOBODY = 'received a text from a number more than one contact has, so it was filed under nobody'
+
+    it('says what was cancelled when every holder was already paused', () => {
+      expect(say({ why: 'ambiguous', optOut: false, contacts: 2, paused: 0, cancelledQueued: 3 })).toBe(
+        `${NOBODY}; 3 queued messages to the contacts holding the number were cancelled (already paused, so not paused again)`,
+      )
+      expect(say({ why: 'ambiguous', optOut: false, contacts: 2, paused: 0, cancelledQueued: 0 })).toBe(NOBODY)
+    })
+
+    it('words one of several as one OF them', () => {
+      expect(say({ why: 'ambiguous', optOut: false, contacts: 2, paused: 1, cancelledQueued: 0 })).toBe(
+        `${NOBODY}; 1 of the 2 contacts holding the number was paused`,
+      )
+      expect(say({ why: 'ambiguous', optOut: false, contacts: 3, paused: 3, cancelledQueued: 2 })).toBe(
+        `${NOBODY}; all 3 contacts holding the number were paused and 2 queued messages cancelled`,
+      )
+      expect(say({ why: 'ambiguous', optOut: false, contacts: 1, paused: 1, cancelledQueued: 0 })).toBe(
+        'received a text from a number more than one contact has, so it was filed under nobody; the contact holding the number was paused',
+      )
+    })
+
+    it('says a text filed under a contact in another organisation was filed there, never under nobody', () => {
+      const elsewhere = say({
+        why: 'ambiguous', optOut: true, contacts: 1, paused: 1, cancelledQueued: 1, filedUnder: 'another_org', suppressed: true,
+      })
+      expect(elsewhere).toBe(
+        'received a text from a number a contact here holds, and filed it under a contact in another organisation that this system had texted; the contact here holding it was paused and 1 queued message cancelled; it asked to stop, and the number was put on the suppression list',
+      )
+      expect(elsewhere).not.toContain('filed under nobody')
+      expect(say({ why: 'ambiguous', optOut: true, contacts: 2, filedUnder: 'another_org', suppressed: false, paused: 0, cancelledQueued: 0 })).toBe(
+        'received a text from a number 2 contacts here hold, and filed it under a contact in another organisation that this system had texted; it asked to stop, and the number is NOT on the suppression list — follow up by hand',
+      )
+      expect(isAlarm(line('sms.inbound_unmatched', { optOut: true, filedUnder: 'another_org', suppressed: false }, { actor: 'system' }))).toBe(true)
+    })
+
+    /** Review round 7, [2]: a reply's pause the hold replaced, so answering that reply no longer lifts the hold. */
+    it('says the hold replaced the pause a holder’s reply had caused, and nothing when it replaced none', () => {
+      expect(say({ why: 'ambiguous', optOut: false, contacts: 1, paused: 1, cancelledQueued: 0, filedUnder: 'another_contact', replacedPauseFor: 'replied', replacedPauses: 1 })).toBe(
+        'received a text from a number more than one contact here holds, and filed it under the one this system had texted; the other contact holding it was paused; the hold replaced the pause their reply had caused',
+      )
+      expect(say({ why: 'ambiguous', optOut: false, contacts: 3, paused: 3, cancelledQueued: 0, replacedPauseFor: 'replied', replacedPauses: 2 })).toBe(
+        `${NOBODY}; all 3 contacts holding the number were paused; the hold replaced the pause a reply had caused for 2 of them`,
+      )
+      expect(say({ why: 'ambiguous', optOut: false, contacts: 2, paused: 1, cancelledQueued: 0 })).not.toContain('replaced')
+      expect(say({ why: 'ambiguous', optOut: false, contacts: 2, paused: 1, cancelledQueued: 0, replacedPauseFor: 'manual', replacedPauses: 1 })).not.toContain('replaced')
+    })
+
+    it('says a twin in the same org was held beside the contact it was filed under', () => {
+      expect(say({ why: 'ambiguous', optOut: false, contacts: 1, paused: 1, cancelledQueued: 1, filedUnder: 'another_contact' })).toBe(
+        'received a text from a number more than one contact here holds, and filed it under the one this system had texted; the other contact holding it was paused and 1 queued message cancelled',
+      )
+    })
+
+    it('says a redelivery paused nobody again, and what it wrote', () => {
+      expect(say({ why: 'ambiguous', optOut: true, contacts: 1, redelivered: true, suppressed: true, messageHash: 'b'.repeat(64) })).toBe(
+        'received again a text from a number more than one contact has, which it had filed under nobody; nobody was paused again; it asked to stop, and the number was put on the suppression list',
+      )
+      expect(say({ why: 'ambiguous', optOut: true, contacts: 1, filedUnder: 'another_org', redelivered: true, suppressed: true })).toBe(
+        'received again a text from a number a contact here holds, which it had filed under a contact in another organisation; it asked to stop, and the number was put on the suppression list',
+      )
+    })
+
+    it('never shows the message hash', () => {
+      expect(say(WRITTEN['sms.inbound_unmatched']!)).not.toContain('aaaa')
+    })
+
+    /**
+     * Review round 8, [0]: a delivery that finds the number suppressed eases
+     * the holders an earlier, faulted delivery of the STOP left held hard —
+     * on every writer's row, the filed org's redelivery included, which had
+     * no row of its own before.
+     */
+    it('says how many holders held hard while the opt-out was not recorded were eased, on every writer’s row', () => {
+      const EASED_ONE = '; a contact here held while the opt-out was not recorded is now held as anyone sharing the number is, which Resume lifts'
+      const STOPPED = '; it asked to stop, and the number was put on the suppression list'
+      expect(say({ why: 'ambiguous', optOut: true, contacts: 1, released: 1, filedUnder: 'another_contact', redelivered: true, suppressed: true })).toBe(
+        `received again a text from a number more than one contact here holds, which it had filed under one of them${STOPPED}${EASED_ONE}`,
+      )
+      expect(say({ why: 'ambiguous', optOut: true, contacts: 1, paused: 0, cancelledQueued: 0, released: 1, filedUnder: 'another_contact', suppressed: true })).toBe(
+        `received a text from a number more than one contact here holds, and filed it under the one this system had texted${STOPPED}${EASED_ONE}`,
+      )
+      expect(say({ why: 'ambiguous', optOut: true, contacts: 2, released: 2, filedUnder: 'another_org', redelivered: true, suppressed: true })).toBe(
+        'received again a text from a number 2 contacts here hold, which it had filed under a contact in another organisation' +
+          `${STOPPED}; 2 contacts here held while the opt-out was not recorded are now held as anyone sharing the number is, which Resume lifts`,
+      )
+      expect(say({ why: 'ambiguous', optOut: true, contacts: 2, released: 2, redelivered: true, suppressed: true, messageHash: 'b'.repeat(64) })).toContain(
+        'nobody was paused again; it asked to stop, and the number was put on the suppression list; 2 contacts here held',
+      )
+      // Nothing eased, nothing said; and a row that eased somebody is not an alarm.
+      expect(say({ why: 'ambiguous', optOut: true, contacts: 1, filedUnder: 'another_contact', suppressed: true, released: 0 })).not.toContain('held while')
+      expect(isAlarm(line('sms.inbound_unmatched', { optOut: true, released: 1, suppressed: true }, { actor: 'system' }))).toBe(false)
+    })
+  })
+
+  /**
    * An SMS STOP nobody could place has no contact: no subject, no
    * `contactId`. "A contact at an unknown company" sent the person following
    * up to look for somebody who does not exist.
@@ -464,7 +594,6 @@ describe('sentenceFor', () => {
       'could not record an opt-out texted from a number no single contact holds (the number could not be read) — ' +
         "it is NOT on the suppression list; read the number from the provider's inbound log and record it by hand",
     )
-    expect(unplaced({ channel: 'sms', why: 'record_failed' })).toContain('(recording the text failed)')
     // An error's class name says nothing a person can act on.
     expect(unplaced({ channel: 'sms', why: 'DrizzleQueryError' })).toBe(
       'could not record an opt-out texted from a number no single contact holds — ' +
@@ -481,6 +610,141 @@ describe('sentenceFor', () => {
     expect(sentenceFor(line('contact.opt_out_not_recorded', WRITTEN['contact.opt_out_not_recorded']), lookups)).toContain(
       'from a contact at rentman.io',
     )
+  })
+
+  /**
+   * Review round 5, [14]. The DoveSoft route writes `{ channel: 'sms', why:
+   * 'record_failed' }` whenever recording a STOP THREW — most often inside
+   * the one matched contact's `recordInboundReply`, which rolled back. The
+   * writer never learned whose number it was, and /audit said it came "from
+   * a number no single contact holds", so the person following up recorded
+   * a bare suppression and never looked for the contact, who stayed neither
+   * paused nor suppressed. It says whose number it was is not known, and
+   * that the contact who holds it is to be paused as well.
+   *
+   * Review round 7, [8]: nor can the writer know that NOTHING was written.
+   * A redelivery of a STOP already recorded, or a shared number held in one
+   * org before another threw, reached this row, and "it is NOT on the
+   * suppression list and nobody was paused" sent the person to record and
+   * pause what was done already. It says to check first now.
+   */
+  it('words a STOP whose recording failed as not known to be anybody’s, and says to check before recording', () => {
+    const failed = sentenceFor(line('contact.opt_out_not_recorded', { channel: 'sms', why: 'record_failed' }, { actor: 'system' }), {})
+    expect(failed).toBe(
+      'could not record an opt-out texted in: recording the text failed, so whose number it was is not known, and part of ' +
+        'it may already be recorded — by an earlier delivery, or by this one before it failed; it may not be on the ' +
+        'suppression list. It was refused so DoveSoft retries, but until a retry is recorded, check /suppressions for the ' +
+        "number in the provider's inbound log and record it there if it is missing — anybody holding the number may already " +
+        'be paused; pause whoever holds it and is not',
+    )
+    // Nothing the writer cannot know.
+    expect(failed).not.toContain('before anything was written')
+    expect(failed).not.toContain('nobody was paused')
+    expect(failed).not.toContain('it is NOT on the suppression list')
+    expect(failed).not.toContain('no single contact holds')
+    expect(failed).not.toContain('a contact at')
+    expect(isAlarm(line('contact.opt_out_not_recorded', { channel: 'sms', why: 'record_failed' }, { actor: 'system' }))).toBe(true)
+    // The other subject-less reasons keep their words: those writers did
+    // look, and found no single contact holding a readable number.
+    for (const why of ['unparseable_number', 'DrizzleQueryError']) {
+      expect(sentenceFor(line('contact.opt_out_not_recorded', { channel: 'sms', why }, { actor: 'system' }), {})).toContain(
+        'from a number no single contact holds',
+      )
+    }
+  })
+
+  /**
+   * Review round 7, [7]: a colleague replying all to our message asked to
+   * stop, and the reply was filed under the contact the message went to.
+   * The row names the contact only as `filedUnder` — a row about THEM is
+   * what /inbox reads as their own opt-out nobody recorded — and the
+   * sentence says whose address to record: the sender's, never the
+   * contact's. Two writers: the fault path (`record_failed`, the reply may
+   * yet be recorded by a retry) and the recorder's committed loud path (the
+   * reply is stored, its sender's suppression refused).
+   */
+  it('words a stop from somebody other than the contact it was filed under, and says whose address to record', () => {
+    const FROM_SOMEBODY_ELSE = { channel: 'email', fromIsContact: false, filedUnder: SUBJECT }
+    const say = (d: Record<string, unknown>) =>
+      sentenceFor(line('contact.opt_out_not_recorded', d, { actor: 'system', subjectType: 'touch', subjectId: SUBJECT }), lookups)
+    expect(say({ ...FROM_SOMEBODY_ELSE, why: 'record_failed' })).toBe(
+      'could not record an opt-out from a reply sent by somebody other than the contact at rentman.io it was filed under — ' +
+        'recording the reply failed, so the sender may not be on the suppression list: a retry may record it, but check ' +
+        '/suppressions for the address the reply came from and record it there if it is missing; the contact is not ' +
+        'treated as the one who asked',
+    )
+    expect(say({ ...FROM_SOMEBODY_ELSE, touchId: SUBJECT, why: 'Error' })).toBe(
+      'could not record an opt-out from a reply sent by somebody other than the contact at rentman.io it was filed under — ' +
+        'the sender is NOT on the suppression list; read their address from the reply and record it by hand; the ' +
+        'contact is not treated as the one who asked',
+    )
+    // Never the texted-in sentence, even with no subject to name.
+    const bare = sentenceFor(line('contact.opt_out_not_recorded', { ...FROM_SOMEBODY_ELSE, why: 'record_failed' }, { actor: 'system' }), {})
+    expect(bare).toContain('somebody other than the contact at an unknown company')
+    expect(bare).not.toContain('texted')
+    // Still an alarm: somebody's opt-out is recorded nowhere.
+    expect(isAlarm(line('contact.opt_out_not_recorded', { ...FROM_SOMEBODY_ELSE, why: 'record_failed' }, { actor: 'system' }))).toBe(true)
+  })
+
+  /**
+   * Review round 8, [0]: the contacts holding a number whose STOP could not
+   * be recorded, other than the one it was filed under. Their row was about
+   * each of them, as if THEY had asked — the inbox reads that as their own
+   * opt-out nobody recorded, however old, and they could never be answered
+   * or resumed. One row per org now, about the text, naming them only among
+   * its `holders`; the sentence says they are not the one who asked, what
+   * holds them, and what ends it.
+   */
+  it('words the holders of a number whose STOP was not recorded as holders, never as the one who asked', () => {
+    const say = (d: Record<string, unknown>, over: Partial<AuditLine> = {}) =>
+      sentenceFor(line('contact.opt_out_not_recorded', d, { actor: 'system', ...over }), lookups)
+    // A recording that failed is refused whatever the push carried, so its
+    // retry comes; a suppression that failed is refused only when the push
+    // carried a message id (review round 10, [6]) — without one it is
+    // answered 200, and no retry comes to ease anybody.
+    const HELD =
+      'They are not treated as the one who asked, but are held until it is recorded: Resume is refused until then, and the ' +
+      'next text DoveSoft delivers from the number after that — its retry of this one included — makes it an ordinary hold ' +
+      'that Resume lifts'
+    const HELD_WHERE_ID =
+      'They are not treated as the one who asked, but are held until it is recorded: Resume is refused until then, and the ' +
+      'next text DoveSoft delivers from the number after that — its retry of this one included, where the push carried a ' +
+      'message id — makes it an ordinary hold that Resume lifts'
+    expect(say({ channel: 'sms', why: 'record_failed', sharedNumber: true, contacts: 1, paused: 1, holders: [SUBJECT] })).toBe(
+      'could not record an opt-out texted from a number a contact here holds — recording the text failed, so the number may ' +
+        'not be on the suppression list; a retry may record it, but check /suppressions for the number on their record and ' +
+        `record it there if it is missing. ${HELD}`,
+    )
+    expect(
+      say({ channel: 'sms', why: 'suppression_failed', sharedNumber: true, contacts: 2, paused: 2, holders: [SUBJECT, OTHER_USER] }, {
+        subjectType: 'touch', subjectId: SUBJECT,
+      }),
+    ).toBe(
+      'could not record an opt-out texted from a number 2 contacts here hold — the number is NOT on the suppression list; ' +
+        `record it by hand on /suppressions, from their record. ${HELD_WHERE_ID}`,
+    )
+    // A pause that could not be written is said, with what to do.
+    expect(say({ channel: 'sms', why: 'Error', sharedNumber: true, contacts: 3, paused: 1 })).toMatch(
+      /; only 1 of the 3 could be paused — pause the rest by hand$/,
+    )
+    expect(say({ channel: 'sms', why: 'Error', sharedNumber: true, contacts: 2, paused: 0 })).toMatch(/; none of them could be paused — pause them by hand$/)
+    // A holder whose own pause stood (review round 9) is not eased by a text.
+    expect(say({ channel: 'sms', why: 'record_failed', sharedNumber: true, contacts: 2, paused: 2, kept: 1 })).toMatch(
+      /lifts; 1 of them was already held by a pause of their own, which stands — no text changes it, and Resume lifts it, where Resume may, only once the number is recorded$/,
+    )
+    expect(say({ channel: 'sms', why: 'record_failed', sharedNumber: true, contacts: 1, paused: 1, kept: 1 })).toMatch(/lifts; they were already held by a pause of their own/)
+    expect(say({ channel: 'sms', why: 'Error', sharedNumber: true, contacts: 2, paused: 2, kept: 2 })).toMatch(/lifts; all of them were already held by a pause of their own/)
+    expect(say({ channel: 'sms', why: 'Error', sharedNumber: true, contacts: 3, paused: 2, kept: 2 })).toMatch(
+      /lifts; 2 of them were already held by a pause of their own, which stands — .*; only 2 of the 3 could be paused — pause the rest by hand$/,
+    )
+    // Never the asker's sentence, the subject-less one, or a holder's id.
+    const words = say({ channel: 'sms', why: 'record_failed', sharedNumber: true, contacts: 1, paused: 1, holders: [SUBJECT] })
+    expect(words).not.toContain('from a contact at')
+    expect(words).not.toContain('no single contact holds')
+    expect(words).not.toContain('whose number it was is not known')
+    expect(words).not.toContain(SUBJECT)
+    // Still an alarm: the number's opt-out is recorded nowhere.
+    expect(isAlarm(line('contact.opt_out_not_recorded', { channel: 'sms', why: 'record_failed', sharedNumber: true, contacts: 1 }, { actor: 'system' }))).toBe(true)
   })
 
   /**
@@ -552,6 +816,10 @@ describe('sentenceFor', () => {
     )
     // A pause is not the person's no, and the log does not call it one.
     expect(say('send.paused')).toBe('refused an email to a contact at rentman.io: contact paused; nothing was sent')
+    // Review round 5: refused, never "held … retried later", and never a missing timezone.
+    expect(say('send.band_never_opens')).toBe(
+      'refused an SMS to a contact at rentman.io: promotional band never opens for them; nothing was sent',
+    )
     expect(say('campaign.auto_paused')).toBe(
       'paused a campaign automatically: 12% of the addresses it wrote to bounced (3 of 25; the limit is 5%); a person re-activates it',
     )

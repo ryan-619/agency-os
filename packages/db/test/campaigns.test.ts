@@ -368,6 +368,34 @@ describe('against a real engine', () => {
       await db.insert(schema.contacts).values({ orgId, companyId, email: 'c@rentman.io' })
       expect(await pausedContacts(db, orgId)).toEqual([])
     })
+
+    /**
+     * Review round 10, [7]: a shared number's holder imported with a phone
+     * and no email was a bare id on /suppressions, beside a note telling the
+     * reader to record "the number" — which the row did not show. Each row
+     * carries the person's name and phone now; the page shows the name on
+     * every row, and the number beside the note.
+     */
+    it('says who each paused person is — their name and their phone, beside the address', async () => {
+      const [held] = await db
+        .insert(schema.contacts)
+        .values({
+          orgId, companyId, firstName: 'Bina', lastName: 'Rao', phone: '+919812345678',
+          pausedAt: new Date('2026-09-01T10:00:00Z'),
+          pausedReason: 'opt-out not recorded: a text from a number they share, 2026-09-01T10:00:00.000Z (suppression_failed)',
+        })
+        .returning({ id: schema.contacts.id })
+      const [paused] = await pausedContacts(db, orgId)
+      expect(paused).toEqual({
+        id: held!.id,
+        firstName: 'Bina',
+        lastName: 'Rao',
+        email: null,
+        phone: '+919812345678',
+        pausedAt: new Date('2026-09-01T10:00:00Z'),
+        pausedReason: 'opt-out not recorded: a text from a number they share, 2026-09-01T10:00:00.000Z (suppression_failed)',
+      })
+    })
   })
   /**
    * A campaign whose addresses bounce past a threshold pauses itself. The

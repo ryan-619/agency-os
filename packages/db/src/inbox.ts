@@ -66,8 +66,9 @@ import {
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
-import { looksLikeOptOut, pauseContact, resumeContact, type TouchRow } from './outreach.js'
+import { looksLikeOptOut, pauseContact, replyIsFromTheContact, resumeContact, type TouchRow } from './outreach.js'
 import { previewSend } from './send-preview.js'
+import { heldForUnrecordedSharedNumber, isSharedNumberOptOutPause } from './sms.js'
 
 /** A group on the inbox: a stored kind, or the rows nobody has classified. */
 export type InboxKindFilter = ReplyKind | 'unclassified'
@@ -107,6 +108,12 @@ export interface InboxRow {
     readonly firstName: string | null
     readonly lastName: string | null
     readonly email: string | null
+    /**
+     * Shown beside a shared number's holder (review round 10, [7]): the
+     * note there says to record "the number", and this is the number they
+     * hold. As stored on their record, which /contacts already shows.
+     */
+    readonly phone: string | null
     readonly pausedAt: Date | null
     readonly pausedReason: string | null
     readonly timeZone: string | null
@@ -137,8 +144,25 @@ export interface InboxRow {
    * any key it matches (address and domain for email). False also covers an
    * address that could not be normalised — unknown, not clear — which is
    * why `replyQueueDraft` re-derives this rather than trusting the screen.
+   *
+   * An `opted_out` reply is judged by the address it came FROM alone (review
+   * round 8): that is the key `recordInboundReply` suppresses and the key
+   * /compliance reads, and a colleague's stop filed under this contact is
+   * not recorded by suppressing the contact's own address — which used to
+   * light this flag and clear the screen's warning while the sender stayed
+   * unsuppressed.
    */
   readonly suppressed: boolean
+  /**
+   * Whether the reply came from the contact it is filed under
+   * (`replyIsFromTheContact`, review round 8): false when both addresses
+   * read and differ — a colleague replying all to our message, filed under
+   * the contact it went to. Their words are not the contact's, and their
+   * stop is not the contact's opt-out. True when either side cannot be read
+   * or there is no contact, because "we could not tell" is not "it was
+   * somebody else".
+   */
+  readonly fromIsContact: boolean
   readonly handledBy: { readonly id: string; readonly email: string; readonly name: string | null } | null
   /** The most recent outbound draft answering this reply, and where it got to. */
   readonly answered: { readonly touchId: string; readonly status: string } | null
@@ -181,12 +205,12 @@ export async function inboxTouches(
         firstName: schema.contacts.firstName,
         lastName: schema.contacts.lastName,
         email: schema.contacts.email,
+        phone: schema.contacts.phone,
         pausedAt: schema.contacts.pausedAt,
         pausedReason: schema.contacts.pausedReason,
         timeZone: schema.contacts.timeZone,
       },
-      // Read for the suppression lookup only; the row does not carry them.
-      contactPhone: schema.contacts.phone,
+      // Read for the suppression lookup only; the row does not carry it.
       contactLinkedin: schema.contacts.linkedinUrl,
       company: {
         id: schema.companies.id,
@@ -258,14 +282,19 @@ export async function inboxTouches(
   // (`suppressionKeysFor`: an email is suppressed by address and by domain),
   // for the address on file AND the address the reply came from — the second
   // is the one `recordInboundReply` suppresses, and the sender never sees it.
-  // One query for the page rather than one per row.
+  // An opted-out reply by the address it came from ALONE (review round 8):
+  // its stop is recorded by that key and no other, whoever it is filed
+  // under. One query for the page rather than one per row.
   const keysByTouch = new Map<string, readonly { kind: string; value: string }[]>()
+  const fromIsContact = new Map<string, boolean>()
   for (const r of rows) {
-    const keys = replyKeys(
-      r.touch.channel as Channel,
-      r.contact ? { email: r.contact.email, phone: r.contactPhone, linkedinUrl: r.contactLinkedin } : null,
-      r.touch.recipient,
-    )
+    const channel = r.touch.channel as Channel
+    const contact = r.contact ? { email: r.contact.email, phone: r.contact.phone, linkedinUrl: r.contactLinkedin } : null
+    fromIsContact.set(r.touch.id, contact === null || replyIsFromTheContact(r.touch.recipient, channel, contact))
+    const keys =
+      r.touch.replyKind === 'opted_out'
+        ? replyKeys(channel, null, r.touch.recipient)
+        : replyKeys(channel, contact, r.touch.recipient)
     if (keys.length > 0) keysByTouch.set(r.touch.id, keys)
   }
   const values = [...new Set([...keysByTouch.values()].flat().map((k) => k.value))]
@@ -294,6 +323,7 @@ export async function inboxTouches(
       : null,
     dealStage: r.dealStage,
     suppressed: (keysByTouch.get(r.touch.id) ?? []).some((k) => suppressed.has(`${k.kind}:${k.value}`)),
+    fromIsContact: fromIsContact.get(r.touch.id) ?? true,
     handledBy: r.handler,
     answered: answered.get(r.touch.id) ?? null,
   }))
@@ -510,8 +540,58 @@ async function reclassify(
     return { ok: false, reason: 'opt_out_is_not_a_choice' }
   }
   const now = args.now ?? new Date()
+  // A reply's contact changes only when that contact is deleted or erased
+  // (ON DELETE SET NULL), so a second pass reads it NULL and locks nobody; the
+  // bound is for a writer nobody has written yet.
+  for (let attempt = 1; ; attempt++) {
+    const outcome = await reclassifyOnce(db, args, now, expected)
+    if (outcome !== CONTACT_CHANGED) return outcome
+    if (attempt >= 3) throw new Error('the reply’s contact changed under every attempt to reclassify it')
+  }
+}
+
+/** `reclassifyOnce`'s answer when the reply's contact changed between its read and its lock: start again. */
+const CONTACT_CHANGED = Symbol('contact changed')
+
+/**
+ * One attempt at `reclassify`, in one transaction.
+ *
+ * Contact before touch (review round 6, [14]), the order every writer that
+ * holds a person and their messages takes. The reply row is READ to learn
+ * whose it is, that person is locked, and only then is the reply locked —
+ * and checked to be theirs still. Locking the reply first held it while the
+ * pause below waited for the person, and an erasure holds the person while
+ * it scrubs that very reply: the two deadlocked on a real Postgres, and the
+ * erasure took the loud "could not keep its suppression" path. When the
+ * reply's contact changed in between — deleted or erased — the attempt is
+ * given up whole and the caller starts again, so the lock it would need is
+ * never taken after the reply's.
+ */
+async function reclassifyOnce(
+  db: AgencyDb,
+  args: ReclassifyArgs,
+  now: Date,
+  expected: ReplyKind | null | undefined,
+): Promise<ReplyReclassifyOutcome | ReplyReclassifyChangedMeanwhile | typeof CONTACT_CHANGED> {
   return db.transaction(async (transaction) => {
     const tx = transaction as unknown as AgencyDb
+    const replyIs = and(
+      eq(schema.touches.id, args.touchId),
+      eq(schema.touches.orgId, args.orgId),
+      eq(schema.touches.direction, 'in'),
+    )
+    const [seen] = await tx.select({ contactId: schema.touches.contactId }).from(schema.touches).where(replyIs).limit(1)
+    if (!seen) return { ok: false, reason: 'not_found' } as const
+    const contact = seen.contactId
+      ? (
+          await tx
+            .select({ email: schema.contacts.email, phone: schema.contacts.phone, linkedinUrl: schema.contacts.linkedinUrl })
+            .from(schema.contacts)
+            .where(and(eq(schema.contacts.id, seen.contactId), eq(schema.contacts.orgId, args.orgId)))
+            .limit(1)
+            .for('update')
+        )[0] ?? null
+      : null
     const current = await tx
       .select({
         id: schema.touches.id,
@@ -524,13 +604,12 @@ async function reclassify(
         createdAt: schema.touches.createdAt,
       })
       .from(schema.touches)
-      .where(
-        and(eq(schema.touches.id, args.touchId), eq(schema.touches.orgId, args.orgId), eq(schema.touches.direction, 'in')),
-      )
+      .where(replyIs)
       .limit(1)
       .for('update')
     const row = current[0]
     if (!row) return { ok: false, reason: 'not_found' } as const
+    if (row.contactId !== seen.contactId) return CONTACT_CHANGED
     // `replyReclassifyIfStill`: read under the row lock, so a kind set a
     // moment ago is seen and stands.
     if (expected !== undefined && (row.replyKind ?? null) !== expected) {
@@ -539,15 +618,6 @@ async function reclassify(
     if (row.replyKind === 'opted_out') return { ok: false, reason: 'opt_out_is_not_a_choice' } as const
     if (row.replyKind === null && looksLikeOptOut(row.body)) return { ok: false, reason: 'reads_as_opt_out' } as const
 
-    const contact = row.contactId
-      ? (
-          await tx
-            .select({ email: schema.contacts.email, phone: schema.contacts.phone, linkedinUrl: schema.contacts.linkedinUrl })
-            .from(schema.contacts)
-            .where(and(eq(schema.contacts.id, row.contactId), eq(schema.contacts.orgId, args.orgId)))
-            .limit(1)
-        )[0] ?? null
-      : null
     if (await anySuppressed(tx, args.orgId, replyKeys(row.channel as Channel, contact, row.recipient))) {
       return { ok: false, reason: 'suppressed' } as const
     }
@@ -674,6 +744,19 @@ const NOT_RECORDED =
   'suppression row today. Record the opt-out by hand on /suppressions (or finish the erasure). Answering them is ' +
   'not the fix. Nothing was drafted and nobody was resumed.'
 
+/**
+ * A stop from ANOTHER address on this thread, filed under this person and
+ * not recorded (review round 8): worded as round 7's alarm is, because
+ * "this person asked to stop … record it by hand" sent people to record
+ * the contact's own address — who never asked — while the sender stayed
+ * unrecorded.
+ */
+const NOT_RECORDED_ANOTHER_ADDRESS =
+  'A reply from another address on this thread asked to stop, and no suppression row matches that address. Record ' +
+  'THAT address — the reply’s From, shown on /inbox — on /suppressions, never this contact’s: they are not treated ' +
+  'as the one who asked. Until it is recorded, no answer to this contact is drafted. Nothing was drafted and nobody ' +
+  'was resumed.'
+
 const TEMPLATE_REQUIRED: Readonly<Record<'sms' | 'whatsapp', string>> = {
   sms:
     'This reply came by SMS, and under DLT an answer must be a registered template, not free text. Use Draft SMS ' +
@@ -686,6 +769,11 @@ const TEMPLATE_REQUIRED: Readonly<Record<'sms' | 'whatsapp', string>> = {
 const PAUSED_ELSEWHERE =
   'This person is paused for another reason, not by this reply. Resume them on /contacts first, if that is right — ' +
   'answering a reply only ends the pause the reply itself caused. Nothing was drafted.'
+
+const SHARED_NUMBER_HELD =
+  'A text from a number this contact shares asked to stop, and it could not be recorded. Until it is, nobody who ' +
+  'holds the number can be resumed — and answering this reply would resume them. Record the number on /suppressions ' +
+  '(it is in the provider’s inbound log), then answer. Nothing was drafted.'
 
 /**
  * The audit actions that mean "somebody asked to stop, and it was NOT
@@ -745,18 +833,31 @@ export async function replyQueueDraft(
   try {
     return await db.transaction(async (transaction) => {
       const tx = transaction as unknown as AgencyDb
-      const locked = await tx
-        .select()
-        .from(schema.touches)
-        .where(
-          and(
-            eq(schema.touches.id, args.inboundTouchId),
-            eq(schema.touches.orgId, args.orgId),
-            eq(schema.touches.direction, 'in'),
-          ),
-        )
-        .limit(1)
-        .for('update')
+      const replyIs = and(
+        eq(schema.touches.id, args.inboundTouchId),
+        eq(schema.touches.orgId, args.orgId),
+        eq(schema.touches.direction, 'in'),
+      )
+      // Contact before touch (review round 6, [14]), the order every writer
+      // that holds a person and their messages takes. The reply is READ to
+      // learn whose it is, that person is locked — every check below is about
+      // them, and the resume at the end lifts only the pause read here
+      // (review round 3) — and only then is the reply locked, which is what
+      // serialises two people answering it. Locking the reply first held it
+      // while waiting for the person, and an erasure holds the person while
+      // it scrubs that very reply: the two deadlocked on a real Postgres, and
+      // the answer to a person being erased could be the one that committed.
+      const [seen] = await tx.select({ contactId: schema.touches.contactId }).from(schema.touches).where(replyIs).limit(1)
+      if (!seen) refuse('not_found', 'That reply is not in this inbox.')
+      const contacts = seen?.contactId
+        ? await tx
+            .select()
+            .from(schema.contacts)
+            .where(and(eq(schema.contacts.id, seen.contactId), eq(schema.contacts.orgId, args.orgId)))
+            .limit(1)
+            .for('update')
+        : []
+      const locked = await tx.select().from(schema.touches).where(replyIs).limit(1).for('update')
       const reply = locked[0] ?? refuse('not_found', 'That reply is not in this inbox.')
       // 0019: on SMS and WhatsApp an answer is a registered template, never
       // free text — 0019's CHECK would refuse this row as a 500. An opt-out
@@ -768,15 +869,13 @@ export async function replyQueueDraft(
       const contactId =
         reply.contactId ??
         refuse('no_contact', 'This reply is not attached to a contact, so there is nobody to address an answer to.')
-
-      // Locked, like the reply: every check below is about this row, and the
-      // resume at the end lifts only the pause read here (review round 3).
-      const contacts = await tx
-        .select()
-        .from(schema.contacts)
-        .where(and(eq(schema.contacts.id, contactId), eq(schema.contacts.orgId, args.orgId)))
-        .limit(1)
-        .for('update')
+      // Somebody else's now, between the read and the lock: the person locked
+      // above is not the one this reply names, and nothing below may be
+      // decided about either. A contact is only ever taken off a reply by its
+      // deletion or erasure, which the line above already answers.
+      if (contactId !== seen?.contactId) {
+        refuse('no_contact', 'The contact this reply came from changed while the answer was being drafted. Nothing was drafted; reload the inbox.')
+      }
       const contact = contacts[0] ?? refuse('no_contact', 'The contact this reply came from is no longer in the CRM.')
 
       // The campaign: the one the message they answered went out under, unless
@@ -836,13 +935,25 @@ export async function replyQueueDraft(
       // An opt-out that FAILED to record leaves no suppression row, so the
       // check above cannot see it; the audit row is what remains. Refused
       // however old it is: nobody has recorded it since, or the suppression
-      // check would have answered first.
-      if (await optOutNotRecorded(tx, args.orgId, contact.id)) refuse('opt_out_not_recorded', NOT_RECORDED)
+      // check would have answered first. A colleague's, in its own words —
+      // the address to record is theirs (review round 8).
+      const unrecorded = await unrecordedOptOut(tx, args.orgId, contact)
+      if (unrecorded?.own) refuse('opt_out_not_recorded', NOT_RECORDED)
+      if (unrecorded?.fromAnotherAddress) refuse('opt_out_not_recorded', NOT_RECORDED_ANOTHER_ADDRESS)
       // Answering ends only the pause the reply caused. Any other pause — a
       // teammate's, an unsubscribe's, an erasure that could not finish — is
       // somebody else's decision, and undoing it is theirs to make on /contacts.
       if (contact.pausedAt && pauseReasonClass(contact.pausedReason) !== 'replied') {
         refuse('paused_for_another_reason', PAUSED_ELSEWHERE)
+      }
+      // A shared number's holder, whose own reply's pause it is (review round
+      // 12): Resume on /contacts refuses any pause of theirs until the
+      // number's STOP is recorded, and answering resumed them past it — and,
+      // writing `contact.resumed`, spent the row that held them, with the
+      // number still unrecorded. Asked under the contact's lock, as Resume
+      // asks it; refused, the draft never exists.
+      if (contact.pausedAt && (await heldForUnrecordedSharedNumber(tx, args.orgId, contact))) {
+        refuse('opt_out_not_recorded', SHARED_NUMBER_HELD)
       }
 
       const live = await tx
@@ -944,23 +1055,56 @@ export async function replyQueueDraft(
 }
 
 /**
- * Has this person an opt-out that was never recorded?
+ * Has this person an opt-out that was never recorded — and whose was it?
  *
  * Two readings, either of which is enough:
  *
  *  - the audit log says so. `contact.*` rows name the contact as their
  *    subject; `unsubscribe.not_recorded` names the touch and carries the
  *    contact in `detail`.
- *  - a reply of theirs was read as an opt-out (`reply_kind = 'opted_out'`)
- *    and no suppression row matches the address it came FROM today — the
- *    compliance page's own must-be-zero predicate, with the send path's own
- *    keys (`suppressionKeysFor`: the address and its domain). A From that
- *    cannot be read is counted, as the page counts it: no row could match
- *    it. This is the reading that survives a fault that failed the
- *    suppression AND the audit row beside it — the `.catch(() => {})` on
- *    that write means the log alone can say nothing. Found by review.
+ *  - a reply filed under them was read as an opt-out (`reply_kind =
+ *    'opted_out'`) and no suppression row matches the address it came FROM
+ *    today — the compliance page's own must-be-zero predicate, with the
+ *    send path's own keys (`suppressionKeysFor`: the address and its
+ *    domain). A From that cannot be read is counted, as the page counts it:
+ *    no row could match it. This is the reading that survives a fault that
+ *    failed the suppression AND the audit row beside it — the
+ *    `.catch(() => {})` on that write means the log alone can say nothing.
+ *    Found by review.
+ *
+ * Not read: the audit row of a stop from somebody ELSE that was filed under
+ * this person — a colleague replying all to our message (review round 7).
+ * Its row is about the reply, or the message it answered, and names them
+ * only as `filedUnder`, because it was not their opt-out: read here it
+ * locked them out for good, however old, even once the colleague was
+ * suppressed.
+ *
+ * The colleague's opted-out REPLY still holds them through the second
+ * reading, and is reported apart (review round 8): `own` is an opt-out of
+ * theirs — the audit log, or an opted-out reply from their own address (or
+ * one that cannot be told apart from it, `replyIsFromTheContact`) — and
+ * `fromAnotherAddress` an opted-out reply from somebody else on the thread.
+ * The callers word the two differently, because the fix is different: a
+ * person told "this person asked to stop" recorded the CONTACT's address,
+ * which satisfied the Resume gate and left the sender unrecorded. Only a
+ * suppression on the reply's own From — what this reading looks for —
+ * ends `fromAnotherAddress`. Null when there is neither.
  */
-async function optOutNotRecorded(db: AgencyDb, orgId: string, contactId: string): Promise<boolean> {
+interface UnrecordedOptOut {
+  readonly own: boolean
+  readonly fromAnotherAddress: boolean
+}
+
+async function unrecordedOptOut(
+  db: AgencyDb,
+  orgId: string,
+  contact: {
+    readonly id: string
+    readonly email: string | null
+    readonly phone: string | null
+    readonly linkedinUrl: string | null
+  },
+): Promise<UnrecordedOptOut | null> {
   const rows = await db
     .select({ id: schema.auditLog.id })
     .from(schema.auditLog)
@@ -969,13 +1113,14 @@ async function optOutNotRecorded(db: AgencyDb, orgId: string, contactId: string)
         eq(schema.auditLog.orgId, orgId),
         inArray(schema.auditLog.action, OPT_OUT_NOT_RECORDED_ACTIONS),
         or(
-          and(eq(schema.auditLog.subjectType, 'contact'), eq(schema.auditLog.subjectId, contactId)),
-          sql`${schema.auditLog.detail}->>'contactId' = ${contactId}`,
+          and(eq(schema.auditLog.subjectType, 'contact'), eq(schema.auditLog.subjectId, contact.id)),
+          sql`${schema.auditLog.detail}->>'contactId' = ${contact.id}`,
         ),
       ),
     )
     .limit(1)
-  if (rows.length > 0) return true
+  let own = rows.length > 0
+  let fromAnotherAddress = false
 
   const optedOut = await db
     .select({ channel: schema.touches.channel, from: schema.touches.recipient })
@@ -983,19 +1128,26 @@ async function optOutNotRecorded(db: AgencyDb, orgId: string, contactId: string)
     .where(
       and(
         eq(schema.touches.orgId, orgId),
-        eq(schema.touches.contactId, contactId),
+        eq(schema.touches.contactId, contact.id),
         eq(schema.touches.direction, 'in'),
         eq(schema.touches.replyKind, 'opted_out'),
       ),
     )
   for (const r of optedOut) {
-    const keys = (CHANNELS as readonly string[]).includes(r.channel)
-      ? suppressionKeysFor(r.from ?? '', r.channel as Channel)
-      : null
-    if (keys === null || keys.length === 0) return true
-    if (!(await anySuppressed(db, orgId, keys))) return true
+    if (own && fromAnotherAddress) break
+    const channel = (CHANNELS as readonly string[]).includes(r.channel) ? (r.channel as Channel) : null
+    const keys = channel ? suppressionKeysFor(r.from ?? '', channel) : null
+    if (keys !== null && keys.length > 0 && (await anySuppressed(db, orgId, keys))) continue
+    // Unrecorded. Whose: an unreadable From, or one that cannot be told
+    // apart from the contact's own address, is theirs — the reading that
+    // holds them as it always did.
+    if (channel !== null && keys !== null && keys.length > 0 && !replyIsFromTheContact(r.from, channel, contact)) {
+      fromAnotherAddress = true
+    } else {
+      own = true
+    }
   }
-  return false
+  return own || fromAnotherAddress ? { own, fromAnotherAddress } : null
 }
 
 /** The channels a reply can arrive on, as the compliance page reads them. */
@@ -1046,14 +1198,53 @@ const RESUME_NOT_RECORDED =
   'for it. Record it by hand on /suppressions if it is not there yet. An opt-out is not something to resume, so the ' +
   'pause stays. Nothing was changed.'
 
+/**
+ * A holder of a shared number whose STOP could not be recorded
+ * (`sharedNumberOptOutReason` in sms.ts): they may never have sent it, so the
+ * sentence does not say they asked — and recording the NUMBER is what lifts it.
+ * "The next text from the number" is any text, since review round 9: only a
+ * STOP eased the hold before (`releaseWhereSuppressed` in sms.ts).
+ */
+const RESUME_SHARED_NUMBER =
+  'A text from a number this contact shares asked to stop, and it could not be recorded — this pause holds everyone ' +
+  'who holds the number until it is. Record the number on /suppressions (it is in the provider’s inbound log); ' +
+  'then this pause can be lifted, or the next text from the number lifts it to an ordinary hold. Nothing was changed.'
+
+/**
+ * The same holder, paused by something else that stood — a teammate's hold,
+ * an unsubscribe — which the hard hold no longer writes over (review round
+ * 9). That pause is theirs to lift as ever, but not while the number is
+ * unrecorded: a text to it could go the moment it was.
+ */
+const RESUME_SHARED_NUMBER_KEPT =
+  'A text from a number this contact shares asked to stop, and it could not be recorded. Until it is, nobody who ' +
+  'holds the number can be resumed, whatever paused them. Record the number on /suppressions (it is in the ' +
+  'provider’s inbound log), then resume them. Nothing was changed.'
+
 const RESUME_ERASURE =
   'This person asked to be erased, and the erasure did not complete — this pause is what holds them until it does. ' +
   'An owner finishes it with Erase… on /contacts. Nothing was changed.'
 
-const RESUME_UNRECORDED_OPT_OUT =
-  'This person asked to stop — by unsubscribing, asking to be erased, or in a reply — and no suppression row matches ' +
-  'their addresses: the audit log says the opt-out could not be recorded, or a reply of theirs read as an opt-out ' +
-  'matches no suppression row. Record it by hand on /suppressions first. Nothing was changed.'
+/**
+ * A contact's own unrecorded opt-out, and what is still to be recorded for
+ * it: the address it was about (review round 9), named by what it is and
+ * never by its value.
+ */
+function resumeUnrecordedOptOut(record: readonly string[]): string {
+  const what = record.length <= 1 ? (record[0] ?? 'it') : `${record.slice(0, -1).join(', ')} and ${record[record.length - 1]}`
+  return (
+    'This person asked to stop — by unsubscribing, asking to be erased, or in a reply — and the opt-out could not be ' +
+    'recorded: the audit log says so, or a reply of theirs read as an opt-out matches no suppression row. Record ' +
+    `${what} on /suppressions first: a suppression on another of their addresses does not record it. Nothing was changed.`
+  )
+}
+
+/** `NOT_RECORDED_ANOTHER_ADDRESS`, for Resume: the address to record is the sender's (review round 8). */
+const RESUME_UNRECORDED_ANOTHER_ADDRESS =
+  'A reply from another address on this thread, filed under this contact, asked to stop, and no suppression row ' +
+  'matches that address. Record THAT address — the reply’s From, shown on /inbox — on /suppressions first, never ' +
+  'this contact’s: they are not treated as the one who asked, and recording their address does not record the ' +
+  'opt-out. Nothing was changed.'
 
 const RESUME_CHANGED =
   'This contact’s pause changed since this page loaded. Reload the page and read why before resuming them. ' +
@@ -1087,11 +1278,26 @@ const RESUME_NOT_PAUSED = 'This contact is not paused, so there is nothing to re
  *    `check_send` already say they are never resumed. The fix is to record
  *    the opt-out or finish the erasure, so this refuses even once the
  *    opt-out has been recorded by hand: an opt-out is not something to undo.
- *  - any other pause while `optOutNotRecorded` — the inbox's own reading,
+ *    Except a shared number's holder (`isSharedNumberOptOutPause`), who may
+ *    have sent nothing: lifted once the number is recorded (review round 8).
+ *  - any pause of a contact held for a shared number's unrecorded STOP —
+ *    that hard hold, or a pause of their own that stood and a row listing
+ *    them (`heldForUnrecordedSharedNumber`, review round 9) — while the
+ *    number they hold has no phone suppression in the org.
+ *  - any other pause while `unrecordedOptOut` — the inbox's own reading,
  *    the audit row or an opted_out reply no suppression row matches — holds
- *    for them AND no suppression row matches any of their addresses today.
- *    Recorded by hand since, the suppression row enforces it, and the pause
- *    is a person's to lift again.
+ *    an opt-out of THEIRS AND a key it was about has no suppression row
+ *    today (`ownOptOutStillToRecord`, review round 9: the channel the row
+ *    names, the address the reply came from, every address for an
+ *    erasure). A suppression on another of their addresses records nothing
+ *    — a number's ended an email opt-out, and the email went. Recorded by
+ *    hand since, the suppression row enforces it, and the pause is a
+ *    person's to lift again.
+ *  - any other pause while an opted-out reply from ANOTHER address on the
+ *    thread, filed under them, matches no suppression row (review round 8).
+ *    Only a suppression on that reply's From ends it: one on the contact's
+ *    own address — what "this person asked to stop" sent people to record —
+ *    does not, and the sentence names the address to record.
  *
  * A resume that happens writes its `contact.resumed` row in the SAME
  * transaction, uncaught (review round 4): the route wrote it after the
@@ -1138,15 +1344,38 @@ export async function contactResumeByHand(
     if (!contact.pausedAt) return { ok: false, reason: 'not_paused', message: RESUME_NOT_PAUSED } as const
 
     const pausedFor = pauseReasonClass(contact.pausedReason)
-    if (pausedFor === 'opt_out_not_recorded') {
+    const sharedHard = isSharedNumberOptOutPause(contact.pausedReason)
+    if (pausedFor === 'opt_out_not_recorded' && !sharedHard) {
       return { ok: false, reason: 'opt_out_not_recorded', message: RESUME_NOT_RECORDED } as const
     }
     if (pausedFor === 'erasure') return { ok: false, reason: 'erasure', message: RESUME_ERASURE } as const
-    if (
-      (await optOutNotRecorded(tx, args.orgId, contact.id)) &&
-      !(await anySuppressed(tx, args.orgId, everyKeyOf(contact)))
-    ) {
-      return { ok: false, reason: 'opt_out_not_recorded', message: RESUME_UNRECORDED_OPT_OUT } as const
+    // A shared number's holder (review round 8, the follow-up r9-sms named):
+    // held hard while the number's STOP is unrecorded, and released once a
+    // person has recorded the number — a hand-recorded number with no later
+    // text from it left them refused for good, the lockout round 8 removed
+    // for a retry. And a holder whose own pause stood instead (review round
+    // 9: the hard hold no longer writes over a teammate's or an
+    // unsubscribe's): theirs to lift as ever, once the number is recorded.
+    if (await heldForUnrecordedSharedNumber(tx, args.orgId, contact)) {
+      return { ok: false, reason: 'opt_out_not_recorded', message: sharedHard ? RESUME_SHARED_NUMBER : RESUME_SHARED_NUMBER_KEPT } as const
+    }
+    // Their own unrecorded opt-out is ended only by a suppression on the key
+    // it was about (review round 9): the channel its audit row names, the
+    // address their reply came from, or every address of theirs for an
+    // erasure — never by a key of another channel, which let a NUMBER's
+    // suppression end an EMAIL opt-out. A colleague's only by one on the
+    // reply's own From — the rows `unrecordedOptOut` found unmatched — never
+    // on the contact's (review round 8): recording the contact's address
+    // unlocked this Resume and left the person who asked unrecorded.
+    const unrecorded = await unrecordedOptOut(tx, args.orgId, contact)
+    if (unrecorded?.own) {
+      const record = await ownOptOutStillToRecord(tx, args.orgId, contact)
+      if (record.length > 0) {
+        return { ok: false, reason: 'opt_out_not_recorded', message: resumeUnrecordedOptOut(record) } as const
+      }
+    }
+    if (unrecorded?.fromAnotherAddress) {
+      return { ok: false, reason: 'opt_out_not_recorded', message: RESUME_UNRECORDED_ANOTHER_ADDRESS } as const
     }
     if (!(await resumeContact(tx, args.orgId, contact.id, { expectedReason }))) {
       return { ok: false, reason: 'changed_meanwhile', message: RESUME_CHANGED } as const
@@ -1163,18 +1392,158 @@ export async function contactResumeByHand(
   })
 }
 
-/** Every suppression key the contact's own addresses produce, on every channel. */
-function everyKeyOf(contact: {
+/** One address an opt-out was about: its suppression keys, any of which records it, and what to call it. */
+interface OptOutAddress {
+  readonly label: string
+  readonly keys: readonly { readonly kind: string; readonly value: string }[]
+}
+
+/** What each channel's address on a contact is called, in a sentence that never holds the value. */
+const ADDRESS_WORDS: Record<Channel, string> = {
+  email: 'their email address',
+  linkedin: 'their LinkedIn profile',
+  sms: 'their phone number',
+  voice: 'their phone number',
+  whatsapp: 'their phone number',
+}
+
+/** The contact's own address on a channel, when it can be read. */
+function ownAddressOn(
+  channel: Channel,
+  contact: { readonly email: string | null; readonly phone: string | null; readonly linkedinUrl: string | null },
+): OptOutAddress[] {
+  const keys = suppressionKeysFor(addressFor(channel, contact), channel)
+  return keys && keys.length > 0 ? [{ label: ADDRESS_WORDS[channel], keys }] : []
+}
+
+/** Every address of theirs, one per channel's field — what an erasure records. */
+function everyAddressOf(contact: {
   readonly email: string | null
   readonly phone: string | null
   readonly linkedinUrl: string | null
-}): { readonly kind: string; readonly value: string }[] {
-  const keys: { kind: string; value: string }[] = []
-  for (const channel of CHANNELS) {
-    const address = addressFor(channel, contact)
-    if (address) keys.push(...(suppressionKeysFor(address, channel) ?? []))
+}): OptOutAddress[] {
+  return (['email', 'sms', 'linkedin'] as const).flatMap((channel) => ownAddressOn(channel, contact))
+}
+
+/** A stored address on a channel — a reply's From, the address a message went to — when it can be read. */
+function storedAddress(channel: Channel, value: string | null, label: string): OptOutAddress[] {
+  const keys = value ? suppressionKeysFor(value, channel) : null
+  return keys && keys.length > 0 ? [{ label, keys }] : []
+}
+
+const FROM_WORDS = 'the address their reply came from (shown on /inbox)'
+const SENT_TO_WORDS = 'the address the message they unsubscribed from went to'
+const UNREADABLE_WORDS = 'the address it was about, which can no longer be read from their record'
+
+/**
+ * What a contact's OWN unrecorded opt-out still needs recorded before Resume
+ * may lift their pause (review round 9): one entry per address with no
+ * suppression row in the org, by what it is. Empty when every one is on the
+ * list.
+ *
+ * Each opt-out is about the key it was asked on, and is recorded by a
+ * suppression on THAT key — one on another channel's key records nothing
+ * (any key of the contact's ended it, so a number's suppression ended an
+ * email opt-out, and the email went):
+ *
+ *  - a `contact.opt_out_not_recorded` row: its channel (`detail.channel`) —
+ *    the address the reply it names came from, and the contact's own
+ *    address on that channel; with no channel, every address of theirs;
+ *  - an `unsubscribe.not_recorded` row: the address the message went to,
+ *    and the contact's own email;
+ *  - a `contact.erasure_failed` row: every address of theirs — an erasure
+ *    keeps a suppression on each;
+ *  - an opted-out reply of theirs no suppression matches (the second reading
+ *    `unrecordedOptOut` makes): the address it came from, or, unreadable,
+ *    their own address on its channel.
+ *
+ * An opt-out none of whose addresses can be read is never recorded here,
+ * and says so: nothing on the list could be shown to match it. A
+ * colleague's opted-out reply is not theirs, and is judged apart.
+ */
+async function ownOptOutStillToRecord(
+  db: AgencyDb,
+  orgId: string,
+  contact: {
+    readonly id: string
+    readonly email: string | null
+    readonly phone: string | null
+    readonly linkedinUrl: string | null
+  },
+): Promise<string[]> {
+  const optOuts: OptOutAddress[][] = []
+  const recipientOf = async (touchId: string): Promise<string | null> => {
+    const [t] = await db
+      .select({ recipient: schema.touches.recipient })
+      .from(schema.touches)
+      .where(and(eq(schema.touches.orgId, orgId), eq(schema.touches.id, touchId)))
+      .limit(1)
+    return t?.recipient ?? null
   }
-  return keys
+
+  const rows = await db
+    .select({
+      action: schema.auditLog.action,
+      subjectType: schema.auditLog.subjectType,
+      subjectId: schema.auditLog.subjectId,
+      detail: schema.auditLog.detail,
+    })
+    .from(schema.auditLog)
+    .where(
+      and(
+        eq(schema.auditLog.orgId, orgId),
+        inArray(schema.auditLog.action, OPT_OUT_NOT_RECORDED_ACTIONS),
+        or(
+          and(eq(schema.auditLog.subjectType, 'contact'), eq(schema.auditLog.subjectId, contact.id)),
+          sql`${schema.auditLog.detail}->>'contactId' = ${contact.id}`,
+        ),
+      ),
+    )
+  for (const row of rows) {
+    const detail = (row.detail ?? {}) as Record<string, unknown>
+    const touchId = typeof detail['touchId'] === 'string' ? detail['touchId'] : row.subjectType === 'touch' ? row.subjectId : null
+    if (row.action === 'contact.erasure_failed') {
+      optOuts.push(everyAddressOf(contact))
+    } else if (row.action === 'unsubscribe.not_recorded') {
+      optOuts.push([...storedAddress('email', touchId ? await recipientOf(touchId) : null, SENT_TO_WORDS), ...ownAddressOn('email', contact)])
+    } else {
+      const channel = (CHANNELS as readonly unknown[]).includes(detail['channel']) ? (detail['channel'] as Channel) : null
+      if (channel === null) {
+        optOuts.push(everyAddressOf(contact))
+      } else {
+        optOuts.push([...storedAddress(channel, touchId ? await recipientOf(touchId) : null, FROM_WORDS), ...ownAddressOn(channel, contact)])
+      }
+    }
+  }
+
+  const optedOut = await db
+    .select({ channel: schema.touches.channel, from: schema.touches.recipient })
+    .from(schema.touches)
+    .where(
+      and(
+        eq(schema.touches.orgId, orgId),
+        eq(schema.touches.contactId, contact.id),
+        eq(schema.touches.direction, 'in'),
+        eq(schema.touches.replyKind, 'opted_out'),
+      ),
+    )
+  for (const r of optedOut) {
+    const channel = (CHANNELS as readonly string[]).includes(r.channel) ? (r.channel as Channel) : null
+    if (channel === null) {
+      optOuts.push(everyAddressOf(contact))
+      continue
+    }
+    const from = storedAddress(channel, r.from, FROM_WORDS)
+    if (from.length > 0 && !replyIsFromTheContact(r.from, channel, contact)) continue
+    optOuts.push(from.length > 0 ? from : ownAddressOn(channel, contact))
+  }
+
+  const record = new Set<string>()
+  for (const addresses of optOuts) {
+    if (addresses.length === 0) record.add(UNREADABLE_WORDS)
+    for (const a of addresses) if (!(await anySuppressed(db, orgId, a.keys))) record.add(a.label)
+  }
+  return [...record]
 }
 
 export type ContactPauseOutcome =
@@ -1194,8 +1563,8 @@ const ALREADY_PAUSED: Record<Exclude<PauseReasonClass, 'replied'>, string> = {
     'reason should change. Nothing was changed.',
   unsubscribed: 'This contact unsubscribed and is already paused for it; that pause stands. Nothing was changed.',
   opt_out_not_recorded:
-    'This contact is already paused because they asked to stop and the opt-out could not be recorded; that pause ' +
-    'stands. Record the opt-out on /suppressions. Nothing was changed.',
+    'This contact is already paused because an opt-out could not be recorded — theirs, or a text from a number they ' +
+    'share; that pause stands. Record it on /suppressions. Nothing was changed.',
   erasure:
     'This contact is already paused because their erasure did not complete; that pause stands. Nothing was changed.',
   other: 'This contact is already paused, and that pause stands — /contacts shows why. Nothing was changed.',

@@ -496,12 +496,54 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     ])}`
   },
   // Two writers: a reply filed under a contact (`recordInboundReply`, the
-  // contact as subject), and an SMS STOP nobody could place — a number no
-  // single contact holds, or a text whose recording failed (`sms.ts`'s
-  // `optOutLost`, the DoveSoft route) — with no subject and no contact at
-  // all. That one names no contact, because there is none to look for.
+  // contact as subject), and an SMS STOP with no subject and no contact at
+  // all. That one comes two ways. `sms.ts`'s `optOutLost` LOOKED: a number
+  // no single contact holds, or one that could not be read — there is no
+  // contact to name. The DoveSoft route's `record_failed` did not: the
+  // recording THREW, most often inside the one matched contact's
+  // `recordInboundReply`, which rolled back, so whose number it was is not
+  // known and the contact who holds it is to be looked for (review round 5,
+  // [14]; it read "a number no single contact holds", and the person
+  // following up recorded a bare suppression and never paused them). Nor
+  // can it know that nothing was written (review round 7, [8]): a shared
+  // number's holders may have been held in one org before another threw,
+  // and an earlier delivery may have recorded it all — so the sentence says
+  // to CHECK /suppressions, and that the holders may be paused already.
+  //
+  // And a reply's stop from somebody OTHER than the contact it was filed
+  // under (`fromIsContact: false`, review round 7, [7]): a colleague in the
+  // thread replying all. Written about the reply or the message it
+  // answered, with the contact as `filedUnder`, never as the subject — the
+  // inbox reads a row about the contact as THEIR opt-out nobody recorded —
+  // and it names the address to record: the sender's, not the contact's.
+  //
+  // And the contacts who HOLD a number whose STOP could not be recorded,
+  // other than the one it was filed under (`sharedNumber`, review round 8):
+  // one row per org, about the text when it is stored here, never naming
+  // them as the subject or `contactId` — the inbox read a row that did as
+  // their own opt-out, however old, and they were locked out for good by a
+  // fault DoveSoft's retry recovers from. They are held hard until the
+  // number is suppressed, and then eased to the ordinary hold.
   'contact.opt_out_not_recorded': (c) => {
+    if (flag(c.d, 'sharedNumber') === true) return sharedNumberOptOut(c.d)
+    if (flag(c.d, 'fromIsContact') === false) {
+      const lead = `could not record an opt-out from a reply sent by somebody other than the contact at ${c.co} it was filed under`
+      const contact = 'the contact is not treated as the one who asked'
+      return word(c.d, 'why') === 'record_failed'
+        ? `${lead} — recording the reply failed, so the sender may not be on the suppression list: a retry may record it, ` +
+            `but check /suppressions for the address the reply came from and record it there if it is missing; ${contact}`
+        : `${lead} — the sender is NOT on the suppression list; read their address from the reply and record it by hand; ${contact}`
+    }
     if (c.row.subjectType !== 'contact' && !has(c.d, 'contactId') && !has(c.d, 'touchId')) {
+      if (word(c.d, 'why') === 'record_failed') {
+        return (
+          'could not record an opt-out texted in: recording the text failed, so whose number it was is not known, and ' +
+          'part of it may already be recorded — by an earlier delivery, or by this one before it failed; it may not be on ' +
+          'the suppression list. It was refused so DoveSoft retries, but until a retry is recorded, check /suppressions ' +
+          "for the number in the provider's inbound log and record it there if it is missing — anybody holding the " +
+          'number may already be paused; pause whoever holds it and is not'
+        )
+      }
       const why = own(UNPLACED_OPT_OUT_WHY, word(c.d, 'why'))
       return `could not record an opt-out texted from a number no single contact holds${
         why ? ` (${why})` : ''
@@ -522,12 +564,19 @@ const SENTENCES: Readonly<Record<string, Template>> = {
       word(c.d, 'replacedPauseFor') === 'replied' ? ', replacing the pause their reply caused' : ''
     }`
   },
-  // Two writers: the contacts route (a person pressing Resume) and the inbox,
-  // which resumes only the pause a reply caused and records its CLASS.
+  // Three writers: the contacts route (a person pressing Resume), the inbox,
+  // which resumes only the pause a reply caused and records its CLASS, and
+  // `dispatchTouch`, lifting the reply's pause a stuck-send recovery put
+  // back over an answer the provider had taken after all (`answerTouchId`,
+  // review round 5).
   'contact.resumed': (c) => {
     const why = own(PAUSED_FOR, word(c.d, 'pausedFor'))
     return `resumed a contact at ${c.co}${why ? ` who had been paused ${why}` : ''}${
-      has(c.d, 'inboundTouchId') ? ', to answer their reply' : ''
+      has(c.d, 'inboundTouchId')
+        ? ', to answer their reply'
+        : has(c.d, 'answerTouchId')
+          ? ', because the answer to it went after all'
+          : ''
     }`
   },
   'contact.timezone_set': (c) => {
@@ -927,16 +976,57 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   // A suppression is claimed only where the row says one was written:
   // `suppressed: true`. A row with no key — an unreadable number's, before
   // r5 wrote `suppressed: false` there — had none written, and read as if it had.
+  //
+  // Four writers in sms.ts (review round 6): a text filed under nobody; one
+  // filed under a contact, whose OTHER holders were held — `filedUnder`
+  // says whether under another contact in this org or a contact in another
+  // org; and a redelivery of either that only wrote a missing suppression
+  // (`redelivered`) — or, since review round 8, eased holders an earlier
+  // delivery had held hard (`released`), in the filed org too.
   'sms.inbound_unmatched': (c) => {
-    const why = own(SMS_UNMATCHED, word(c.d, 'why')) ?? 'that could not be placed'
     const optOut = flag(c.d, 'optOut') === true
-    return `received a text from a number ${why}, so it was filed under nobody${
-      optOut
-        ? flag(c.d, 'suppressed') === true
-          ? '; it asked to stop, and the number was put on the suppression list'
-          : '; it asked to stop, and the number is NOT on the suppression list — follow up by hand'
-        : ''
-    }`
+    const stop = optOut
+      ? flag(c.d, 'suppressed') === true
+        ? '; it asked to stop, and the number was put on the suppression list'
+        : '; it asked to stop, and the number is NOT on the suppression list — follow up by hand'
+      : ''
+    const contacts = num(c.d, 'contacts')
+    const redelivered = flag(c.d, 'redelivered') === true
+    const filedUnder = word(c.d, 'filedUnder')
+    // The hold REPLACES the pause a holder's own unanswered reply had caused
+    // (review round 7), so answering that reply no longer lifts it — named
+    // by class and count, never the reason.
+    const replacedN = word(c.d, 'replacedPauseFor') === 'replied' ? (num(c.d, 'replacedPauses') ?? 1) : 0
+    const replaced =
+      replacedN <= 0
+        ? ''
+        : contacts === 1 && replacedN === 1
+          ? '; the hold replaced the pause their reply had caused'
+          : `; the hold replaced the pause a reply had caused for ${replacedN} of them`
+    // The holders a delivery eased from the hard hold an unrecorded STOP
+    // left them in, once the number was suppressed (review round 8).
+    const eased = released(c.d)
+    if (filedUnder === 'another_org') {
+      const here = contacts !== null && contacts > 1 ? `${contacts} contacts here hold` : 'a contact here holds'
+      return redelivered
+        ? `received again a text from a number ${here}, which it had filed under a contact in another organisation${stop}${eased}`
+        : `received a text from a number ${here}, and filed it under a contact in another organisation that this system had texted${held(
+            c.d, 'contact here holding it', 'contacts here holding it',
+          )}${replaced}${stop}${eased}`
+    }
+    if (filedUnder === 'another_contact') {
+      return redelivered
+        ? `received again a text from a number more than one contact here holds, which it had filed under one of them${stop}${eased}`
+        : `received a text from a number more than one contact here holds, and filed it under the one this system had texted${held(
+            c.d, 'other contact holding it', 'other contacts holding it',
+          )}${replaced}${stop}${eased}`
+    }
+    const why = own(SMS_UNMATCHED, word(c.d, 'why')) ?? 'that could not be placed'
+    return redelivered
+      ? `received again a text from a number ${why}, which it had filed under nobody; nobody was paused again${stop}${eased}`
+      : `received a text from a number ${why}, so it was filed under nobody${held(
+          c.d, 'contact holding the number', 'contacts holding the number',
+        )}${replaced}${stop}${eased}`
   },
   // The two DoveSoft pushes this deployment could not read (/api/inbound/dovesoft/*).
   // Which field was missing, by name — never a value, a number or the words.
@@ -969,6 +1059,96 @@ function aChannel(channel: string | null): string {
   return /^(SMS|[aeiou])/i.test(name) ? `an ${name}` : `a ${name}`
 }
 
+/**
+ * What a text from a shared number did to the contacts holding it, from
+ * `sms.inbound_unmatched`'s counts: how many were paused, of how many, and
+ * how many of their waiting messages were cancelled — or nothing when it
+ * did neither. Said whenever EITHER count is above zero (review round 6):
+ * a holder already paused is not paused again, and their drafts are still
+ * cancelled. `one` and `many` name who, as the row's writer counts them.
+ */
+function held(d: unknown, one: string, many: string): string {
+  const paused = num(d, 'paused') ?? 0
+  const cancelled = num(d, 'cancelledQueued') ?? 0
+  const of = num(d, 'contacts')
+  if (paused <= 0 && cancelled <= 0) return ''
+  const were = (n: number): string => (n === 1 ? 'was' : 'were')
+  const messages = (n: number): string => `${n} queued message${n === 1 ? '' : 's'}`
+  let who: string | null = null
+  if (paused > 0) {
+    if (of !== null && paused >= of) {
+      who = of === 1 ? `the ${one} was paused` : of === 2 ? `both ${many} were paused` : `all ${of} ${many} were paused`
+    } else if (of !== null) {
+      who = `${paused} of the ${of} ${many} ${were(paused)} paused`
+    } else {
+      who = `${paused === 1 ? `a ${one}` : `${paused} ${many}`} ${were(paused)} paused`
+    }
+  }
+  if (who === null) {
+    const to = of === 1 ? `the ${one}` : `the ${many}`
+    return `; ${messages(cancelled)} to ${to} ${were(cancelled)} cancelled (already paused, so not paused again)`
+  }
+  return `; ${who}${cancelled > 0 ? ` and ${messages(cancelled)} cancelled` : ''}`
+}
+
+/**
+ * `contact.opt_out_not_recorded` for the contacts holding a number whose
+ * STOP could not be recorded, other than the one it was filed under
+ * (`sharedNumber`, review round 8). Whose words the text was is not said
+ * of them — they may have sent nothing — and what holds them, and what ends
+ * it, is: Resume is refused until the number is on the suppression list,
+ * and the next text DoveSoft delivers from it after that (its retry of this
+ * one included) makes it an ordinary hold Resume lifts — except for a holder
+ * whose own pause stood (`kept`, review round 9), which no text changes.
+ *
+ * Which retry comes depends on why (review round 10, [6]): a recording that
+ * failed is answered 500 whatever the push carried, so DoveSoft retries it;
+ * a suppression that failed is answered 500 only when the push carried a
+ * message id — without one its retry could not be told from a new text, so
+ * it is answered 200 and no retry comes.
+ */
+function sharedNumberOptOut(d: unknown): string {
+  const n = num(d, 'contacts') ?? 1
+  const p = num(d, 'paused') ?? n
+  const holds = n === 1 ? 'a contact here holds' : `${n} contacts here hold`
+  const why =
+    word(d, 'why') === 'record_failed'
+      ? 'recording the text failed, so the number may not be on the suppression list; a retry may record it, but check ' +
+        '/suppressions for the number on their record and record it there if it is missing'
+      : 'the number is NOT on the suppression list; record it by hand on /suppressions, from their record'
+  const unpaused =
+    p >= n ? '' : p <= 0 ? '; none of them could be paused — pause them by hand' : `; only ${p} of the ${n} could be paused — pause the rest by hand`
+  // A holder already held by a pause of their own keeps it (review round 9):
+  // no text eases it, and Resume lifts it — where Resume may — only once the
+  // number is recorded. `kept` counts them, and `paused` includes them.
+  const k = Math.min(num(d, 'kept') ?? 0, n)
+  const kept =
+    k <= 0
+      ? ''
+      : `; ${k === n ? (n === 1 ? 'they were' : 'all of them were') : `${k} of them ${k === 1 ? 'was' : 'were'}`} already held by a ` +
+        'pause of their own, which stands — no text changes it, and Resume lifts it, where Resume may, only once the number is recorded'
+  const retry = word(d, 'why') === 'record_failed' ? 'its retry of this one included' : 'its retry of this one included, where the push carried a message id'
+  return (
+    `could not record an opt-out texted from a number ${holds} — ${why}. ` +
+    'They are not treated as the one who asked, but are held until it is recorded: Resume is refused until then, ' +
+    `and the next text DoveSoft delivers from the number after that — ${retry} — makes it an ` +
+    `ordinary hold that Resume lifts${kept}${unpaused}`
+  )
+}
+
+/**
+ * `sms.inbound_unmatched`'s word on the holders a delivery eased (review
+ * round 8): held hard while the STOP was not recorded, now held as anyone
+ * sharing the number is. A count, never who.
+ */
+function released(d: unknown): string {
+  const n = num(d, 'released') ?? 0
+  if (n <= 0) return ''
+  return n === 1
+    ? '; a contact here held while the opt-out was not recorded is now held as anyone sharing the number is, which Resume lifts'
+    : `; ${n} contacts here held while the opt-out was not recorded are now held as anyone sharing the number is, which Resume lifts`
+}
+
 /** Why `sms.inbound_unmatched` filed a text under nobody — `sms.ts`'s own reasons. */
 const SMS_UNMATCHED: Readonly<Record<string, string>> = {
   no_contact: 'no contact has',
@@ -977,13 +1157,13 @@ const SMS_UNMATCHED: Readonly<Record<string, string>> = {
 }
 
 /**
- * Why an SMS STOP nobody could place was not recorded: `sms.ts`'s reasons
- * and the DoveSoft route's. Anything else is an error's class name, which
- * says nothing a person can act on, and is left out.
+ * Why an SMS STOP nobody could place was not recorded: `sms.ts`'s reasons.
+ * Anything else is an error's class name, which says nothing a person can
+ * act on, and is left out. The DoveSoft route's `record_failed` has a
+ * sentence of its own: that writer never learned whose number it was.
  */
 const UNPLACED_OPT_OUT_WHY: Readonly<Record<string, string>> = {
   unparseable_number: 'the number could not be read',
-  record_failed: 'recording the text failed',
 }
 
 /** Every action this page has a sentence for. The test iterates it. */
