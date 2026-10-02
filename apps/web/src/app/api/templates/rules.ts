@@ -69,6 +69,7 @@ export const TEMPLATE_REFUSAL_STATUS: Readonly<Record<TemplateRefusal, number>> 
   bad_sender: 400,
   bad_category: 400,
   bad_body: 400,
+  bad_name: 400,
   bad_language: 400,
   duplicate: 409,
 }
