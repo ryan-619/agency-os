@@ -34,9 +34,11 @@ import { getDb } from '@/lib/db'
  *  - `update`: name, title and addresses (`contactPatchInput`). The email is
  *    folded, a duplicate is refused with a sentence, and an address a
  *    suppression row matches cannot be edited away (`contactsUpdate` says
- *    why). The audit row names the fields that changed and never their
- *    values — an address in an audit detail is an address in every export
- *    of the audit log (§2.3).
+ *    why) — nor, until the number is recorded, the phone of a contact held
+ *    because a number they share asked to stop (review round 9). The audit
+ *    row names the fields that changed and never their values — an address
+ *    in an audit detail is an address in every export of the audit log
+ *    (§2.3).
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -134,8 +136,11 @@ export async function PATCH(
     }
     const r = await contactsUpdate(db, user.orgId, id, parsed.data)
     if (!r.ok) {
-      const status =
-        r.reason === 'no_such_contact' ? 404 : r.reason === 'duplicate' || r.reason === 'changed_meanwhile' || r.reason === 'suppressed' ? 409 : 400
+      // `shared_number_hold` (review round 9): a phone held for a shared
+      // number's unrecorded STOP is a conflict with state, like `suppressed`,
+      // and its sentence says what to record first.
+      const conflict = ['duplicate', 'changed_meanwhile', 'suppressed', 'shared_number_hold'].includes(r.reason)
+      const status = r.reason === 'no_such_contact' ? 404 : conflict ? 409 : 400
       return NextResponse.json({ error: r.message, reason: r.reason }, { status })
     }
     if (r.changed.length > 0) {
