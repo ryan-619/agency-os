@@ -21,7 +21,7 @@ import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import { REFUSALS_A_CORRECTION_RESOLVES, pausedSentence } from '@agency/core'
 import {
-  approveDraft, contactResumeByHand, pauseContactOverriding, pauseReasonClass, previewSend, recordInboundReply, recordInboundSms, replyQueueDraft,
+  addSuppression, approveDraft, contactResumeByHand, pauseContactOverriding, pauseReasonClass, previewSend, recordInboundReply, recordInboundSms, replyQueueDraft,
   resumeContact, schema, sharedNumberHoldReason, smsDraft,
   type AgencyDb, type InboundLog,
 } from '../src/index.js'
@@ -690,6 +690,64 @@ describe('a text from a number several contacts hold (review round 6)', () => {
     expect((await contact(own)).pausedReason).toBe(OWN)
     expect((await contact(manual)).pausedReason).toBe('legal hold (by sam@agency.test)')
     expect(((await audits('sms.inbound_unmatched'))[0]?.detail as Record<string, unknown>)['released']).toBeUndefined()
+  })
+
+  /**
+   * Review round 9, [6], the reviewer's probe: RESUME_SHARED_NUMBER promises
+   * that once the number is recorded "the next text from the number lifts it
+   * to an ordinary hold" — but only another STOP eased anybody. A person
+   * records the number by hand (the push had no message id, so no retry
+   * came), and the number's next text, an ordinary one, left the twin held
+   * hard. Now any text does, where the number is suppressed in their org.
+   */
+  it('eases a hard-held twin by the number’s next ordinary text, once a person has recorded the number', async () => {
+    const work = await holder(a, 'Jo (work)')
+    const twin = await holder(a, 'Jo (reception)')
+    await texted(a, work)
+    await failOnce(test.pg, { table: 'suppressions', event: 'INSERT' })
+    expect(await inbound({ text: 'Wrong number. STOP', providerMessageId: null, log: log() })).toMatchObject({
+      matched: 'contact', contactId: work, optOutNotRecorded: true,
+    })
+    expect(pauseReasonClass((await contact(twin)).pausedReason)).toBe('opt_out_not_recorded')
+
+    // An ordinary text before anybody records it eases nobody: the number is unsuppressed.
+    const early = new Date(NOON_IST.getTime() + 60_000)
+    await inbound({ text: 'Sorry, who is this?', providerMessageId: 'mo-2', receivedAt: early })
+    expect(pauseReasonClass((await contact(twin)).pausedReason)).toBe('opt_out_not_recorded')
+
+    await addSuppression(db, { orgId: a.orgId, kind: 'phone', value: PHONE, reason: 'recorded by hand', source: 'manual' })
+    const next = new Date(NOON_IST.getTime() + 3_600_000)
+    expect(await inbound({ text: 'Is the meeting still on?', providerMessageId: 'mo-3', receivedAt: next })).toMatchObject({
+      matched: 'contact', contactId: work,
+    })
+    expect((await contact(twin)).pausedReason).toBe(sharedNumberHoldReason(next))
+    expect((await audits('sms.inbound_unmatched')).map((r) => r.detail).at(-1)).toMatchObject({
+      why: 'ambiguous', optOut: false, filedUnder: 'another_contact', released: 1,
+    })
+    const eased = await contact(twin)
+    expect(await contactResumeByHand(db, { orgId: a.orgId, contact: { id: twin }, expectedReason: eased.pausedReason, actor: a.userId })).toEqual({ ok: true })
+    // The contact the STOP was filed under asked: their own pause stands.
+    expect(pauseReasonClass((await contact(work)).pausedReason)).toBe('opt_out_not_recorded')
+  })
+
+  it('eases the holders of a STOP filed under nobody by the number’s next ordinary text, in the org that recorded it', async () => {
+    const inA = await holder(a, 'Jo')
+    const inB = await holder(b, 'Jo')
+    await failOnce(test.pg, { table: 'suppressions', event: 'INSERT', when: `NEW.org_id = '${a.orgId}'` })
+    expect(await inbound({ text: 'STOP', providerMessageId: null, log: log() })).toMatchObject({
+      matched: 'none', why: 'ambiguous', optOutNotRecorded: true, optOutNotRecordedIn: [{ orgId: a.orgId, contactId: inA }],
+    })
+    expect(pauseReasonClass((await contact(inA)).pausedReason)).toBe('opt_out_not_recorded')
+    expect(pauseReasonClass((await contact(inB)).pausedReason)).toBe('other')
+
+    await addSuppression(db, { orgId: a.orgId, kind: 'phone', value: PHONE, reason: 'recorded by hand', source: 'manual' })
+    const next = new Date(NOON_IST.getTime() + 3_600_000)
+    expect(await inbound({ text: 'Hello?', providerMessageId: 'mo-2', receivedAt: next })).toMatchObject({ matched: 'none', why: 'ambiguous' })
+    expect((await contact(inA)).pausedReason).toBe(sharedNumberHoldReason(next))
+    const rows = (await audits('sms.inbound_unmatched')).filter((r) => (r.detail as Record<string, unknown>)['optOut'] === false)
+    expect(rows.map((r) => [r.orgId, (r.detail as Record<string, unknown>)['released']]).sort()).toEqual(
+      [[a.orgId, 1], [b.orgId, undefined]].sort(),
+    )
   })
 
   it('names another org whose suppression failed too, after its loud path ran, for the route to alarm', async () => {

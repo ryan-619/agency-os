@@ -551,9 +551,14 @@ export async function handleDoveSoftDlr(
  *    error log repeats until somebody looks — the recorder has already
  *    audited it, and taken the loud path if it was a STOP;
  *  - a STOP from a number no single contact holds whose suppression could
- *    not be written: 500, because nothing was written for it and a retry
- *    re-attempts the suppression. The recorder's `contact.opt_out_not_recorded`
- *    row and the error line are the record, and /compliance counts it;
+ *    not be written: 500, because a retry re-attempts the suppression. The
+ *    recorder's `contact.opt_out_not_recorded` row and the error line are
+ *    the record, and /compliance counts it. Except, as above, for a push
+ *    with no message id (review round 9): such a text is known on a
+ *    redelivery by a hash of its id alone, so every retry held every holder
+ *    again — undoing a teammate's Resume and cancelling drafts written
+ *    since — and wrote another set of rows. 200 after the alarms, and the
+ *    error line says the missing suppression is a person's to record;
  *
  *  and for both of those, when the text was a STOP that nobody recorded,
  *  the `opt_out_not_recorded` alarm is AWAITED before the answer, with no
@@ -722,6 +727,24 @@ export async function handleDoveSoftMo(
     return { status: 400, body: { error: 'unreadable sender number', matched: 'none', why: outcome.why } }
   }
   if (outcome.optOutNotRecorded) {
+    // The filed branch's rule (review round 9, [11]): a text filed under
+    // nobody is known on a redelivery by a hash of its message id alone
+    // (`messageHash`), so a push with no id comes back as a NEW text — every
+    // holder held again, a teammate's Resume undone, drafts written since
+    // cancelled, and another set of rows — on every retry while a write kept
+    // failing. Answered 200 once the alarms have gone, and the line says
+    // what is left to a person.
+    if (mo.providerMessageId === null) {
+      deps.log.error('OPT-OUT NOT RECORDED — a STOP from a number no single contact holds could not be suppressed, and the push carried no message id, so a redelivery could not be told from a new text: it was answered 200, and what is missing must be recorded by hand', {
+        why: outcome.why,
+        orgConfigured: deps.orgId !== null,
+        alarm: alarmed,
+        ...(alarms.length > 1 ? { orgs: alarms.length } : {}),
+        messageId: false,
+      })
+      for (const alarm of alarms) await deps.alarm(alarm)
+      return { status: 200, body: { matched: 'none', why: outcome.why, optOut: outcome.optOut, suppressed: outcome.suppressed } }
+    }
     deps.log.error('OPT-OUT NOT RECORDED — a STOP from a number no single contact holds could not be suppressed', {
       why: outcome.why,
       orgConfigured: deps.orgId !== null,

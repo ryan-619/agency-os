@@ -37,6 +37,7 @@ import type { AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
 import type { ConsentRow, ContactRow } from './contacts.js'
 import { isUniqueViolation } from './pg-errors.js'
+import { heldForUnrecordedSharedNumber, sharedNumberHolderRowExists } from './sms.js'
 
 export type ConsentWriteChannel = 'email' | 'sms' | 'voice' | 'whatsapp'
 
@@ -369,7 +370,14 @@ export type ContactsUpdateOutcome =
     }
   | {
       readonly ok: false
-      readonly reason: 'no_such_contact' | 'unreadable' | 'no_address' | 'duplicate' | 'suppressed' | 'changed_meanwhile'
+      readonly reason:
+        | 'no_such_contact'
+        | 'unreadable'
+        | 'no_address'
+        | 'duplicate'
+        | 'suppressed'
+        | 'shared_number_hold'
+        | 'changed_meanwhile'
       readonly message: string
     }
 
@@ -384,6 +392,13 @@ const KIND_WORDS: Record<SuppressionKind, string> = {
   phone: 'phone number',
   linkedin: 'LinkedIn profile',
 }
+
+/** `contactsUpdate`'s refusal for a shared number's holder (review round 9). Never the number itself. */
+const SHARED_NUMBER_HOLD_EDIT =
+  'A text from a number this contact holds asked to stop, and it could not be recorded — they are held until it is, ' +
+  'and the hold is lifted by the number’s suppression. Changing or clearing their phone now would leave a hold ' +
+  'nothing could lift. Record the number on /suppressions and resume them first; changing a number on the ' +
+  'suppression list is then an owner’s decision, as for any suppressed address. Nothing was changed.'
 
 /** Every suppression key a stored value produces; none for an empty or unreadable one. */
 function keysOf(field: AddressField, value: string | null): { kind: SuppressionKind; value: string }[] {
@@ -426,6 +441,15 @@ function blankIsNull(v: string | null): string | null {
  * about the old address — and writes `contact.bounce_cleared` naming the
  * code it lifted. The same-address-different-case edit changes nothing and
  * so lifts nothing.
+ *
+ * And the phone of a contact held because a number they share asked to stop
+ * and it could not be recorded (`heldForUnrecordedSharedNumber`) is not
+ * changed or cleared until the number is recorded (review round 9): the
+ * hold is lifted by the NUMBER's suppression, read off their phone, so
+ * moving them off it left a hold nothing could lift — Resume judged the new
+ * phone, and no later text from the number found them. A change of spelling
+ * that keeps the number is allowed. Repeated in the UPDATE: a hard hold or a
+ * row naming them that lands between the check and the write fails the edit.
  */
 export async function contactsUpdate(
   db: AgencyDb,
@@ -536,6 +560,14 @@ export async function contactsUpdate(
     }
   }
 
+  // A shared number's holder, while its STOP is unrecorded. Reached only
+  // when the number's key is being dropped and no suppression matches it —
+  // one that did was refused just above, as the owner's decision.
+  const phoneDropped = dropping.some((k) => k.kind === 'phone')
+  if (phoneDropped && (await heldForUnrecordedSharedNumber(db, orgId, old))) {
+    return { ok: false, reason: 'shared_number_hold', message: SHARED_NUMBER_HOLD_EDIT }
+  }
+
   if (next.email) {
     const taken = await db
       .select({ id: schema.contacts.id })
@@ -574,6 +606,13 @@ export async function contactsUpdate(
           sql`${schema.contacts.linkedinUrl} IS NOT DISTINCT FROM ${old.linkedinUrl}`,
           ...(dropping.length > 0
             ? [sql`NOT EXISTS (SELECT 1 FROM ${schema.suppressions} WHERE ${suppressedAmong(dropping)})`]
+            : []),
+          // The pause and the rows the shared-number check read, when it ran.
+          ...(phoneDropped
+            ? [
+                sql`${schema.contacts.pausedReason} IS NOT DISTINCT FROM ${old.pausedReason}`,
+                sql`NOT ${sharedNumberHolderRowExists(orgId, id)}`,
+              ]
             : []),
         ),
       )
