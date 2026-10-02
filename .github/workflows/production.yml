@@ -99,12 +99,32 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - run: npm ci
+      # A third-party action, in the job that holds every production
+      # credential: pinned to a full commit (the one `master` and `v1` named
+      # when it was pinned), never a branch or a tag, which a push to that
+      # repository could move — and flyctl itself pinned by version.
       - name: Install flyctl
         if: inputs.action == 'worker'
-        uses: superfly/flyctl-actions/setup-flyctl@master
+        uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # v1
+        with:
+          version: 0.4.111
+      # Two steps, so a credential reaches only the action that uses it:
+      # status, migrate, deploy and release see the database and Vercel
+      # only; the worker's own secrets — Fly, the model, the mailboxes,
+      # Slack, DoveSoft — reach the worker step alone.
       - name: ${{ inputs.action }}
+        if: inputs.action != 'worker'
         env:
           ACTION: ${{ inputs.action }}
+          PRODUCTION_DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TEAM: ${{ secrets.VERCEL_TEAM }}
+        run: tools/production.sh "$ACTION"
+      - name: worker
+        if: inputs.action == 'worker'
+        env:
           PRODUCTION_DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
@@ -132,4 +152,4 @@ jobs:
           UNSUBSCRIBE_SECRET: ${{ secrets.UNSUBSCRIBE_SECRET }}
           DOVESOFT_API_KEY: ${{ secrets.DOVESOFT_API_KEY }}
           DOVESOFT_ENTITY_ID: ${{ secrets.DOVESOFT_ENTITY_ID }}
-        run: tools/production.sh "$ACTION"
+        run: tools/production.sh worker
