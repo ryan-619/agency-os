@@ -77,6 +77,7 @@ export type TemplateRefusal =
   | 'bad_sender'
   | 'bad_category'
   | 'bad_body'
+  | 'bad_name'
   | 'bad_language'
   | 'duplicate'
 
@@ -97,17 +98,58 @@ type Checked =
   | { readonly ok: false; readonly reason: TemplateRefusal; readonly message: string }
 
 /**
+ * The first field holding a U+0000, as its refusal (review round 9).
+ *
+ * Postgres refuses U+0000 in text, so a template carrying one — a pasted
+ * body, a corrupted or hand-edited export — failed its INSERT, and the
+ * fault reached the route whole: a 500, and drizzle's message, every bound
+ * parameter, in the platform log; an import lost its per-line report for
+ * every line before the bad one. Every field is read, the name and language
+ * included, because each is stored as typed. It is refused, never stored
+ * with U+FFFD in its place as an inbound text's is: a template is the words
+ * registered on the portal EXACTLY, and words with a character replaced are
+ * words nobody registered — the operator would scrub every message drafted
+ * from them.
+ */
+function nulRefusal(input: TemplateInput): Extract<Checked, { ok: false }> | null {
+  const fields: readonly (readonly [string | null | undefined, TemplateRefusal, string])[] = [
+    [input.externalId, 'bad_external_id', input.channel === 'whatsapp' ? 'WhatsApp template name' : input.channel === 'sms' ? 'DLT template id' : 'template id'],
+    [input.senderId, 'bad_sender', input.channel === 'sms' ? 'DLT header' : 'sender'],
+    [input.category, 'bad_category', 'category'],
+    [input.body, 'bad_body', 'template text'],
+    [input.name, 'bad_name', 'name'],
+    [input.language, 'bad_language', 'language'],
+  ]
+  for (const [value, reason, label] of fields) {
+    if (typeof value === 'string' && value.includes('\u0000')) {
+      return {
+        ok: false,
+        reason,
+        message:
+          `The ${label} has a NUL character (U+0000) in it. No registered template carries one, the database cannot ` +
+          'store one, and replacing it would record words that were never registered — copy it again from the portal ' +
+          'it was registered on. Nothing was recorded.',
+      }
+    }
+  }
+  return null
+}
+
+/**
  * Read a template the way 0019 will store it: the header upper-cased, the
  * category folded, the body parsed (a `{#…#}` kind this system does not know
  * is refused — rendering from it could only fail the operator's scrub). Each
  * refusal names what to fix, because a template that will not store is a
- * message that cannot be drafted.
+ * message that cannot be drafted. A U+0000 in any field is refused first
+ * (`nulRefusal`), so no later check reads one.
  */
 function checkTemplate(input: TemplateInput): Checked {
   const channel = input.channel
   if (!(TEMPLATE_CHANNEL_LIST as readonly string[]).includes(channel)) {
     return { ok: false, reason: 'bad_channel', message: `"${String(channel)}" is not a template channel (sms, whatsapp or voice).` }
   }
+  const nul = nulRefusal(input)
+  if (nul) return nul
   const externalId = input.externalId.trim()
   if (!externalId || /\s/.test(externalId) || externalId.length > MAX_EXTERNAL_ID) {
     return {
