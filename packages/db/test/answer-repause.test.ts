@@ -335,6 +335,89 @@ describe('an answer to a reply that never goes', () => {
       expect((await auditRows('contact.resumed')).filter((r) => r.actor === 'system')).toEqual([])
     })
 
+    /**
+     * Review round 6, [15]. The guard above read only the audit log — rows
+     * stamped at or after the recovery's `contact.paused` — and a reply's
+     * `contact.replied` row is neither certain nor late enough: it is
+     * written best-effort (a caught savepoint), and stamped with `now()`,
+     * the reply transaction's START, which can be before the recovery's
+     * though the reply committed after it. Either way the lift resumed the
+     * person with that reply unanswered (the reviewer's probe, variants A
+     * and B). Now the touches decide: an inbound row of theirs, other than
+     * the reply answered, stored at or after the answer row, keeps them
+     * paused — compared in SQL against the answer's stored `created_at`.
+     */
+    it('leaves the pause when a reply that landed meanwhile has a log row stamped BEFORE the recovery’s', async () => {
+      const { replied, answer } = await answered()
+      // The reply's transaction began 3 ms before the recovery's: its row is
+      // stamped then, as `now()` stamps it on a real Postgres.
+      await test.pg.exec(`
+        CREATE FUNCTION stamp_reply_early() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+          NEW.created_at := (SELECT created_at FROM audit_log WHERE action = 'contact.paused' ORDER BY created_at DESC LIMIT 1)
+            - interval '3 milliseconds';
+          RETURN NEW;
+        END $$;
+        CREATE TRIGGER stamp_reply_early BEFORE INSERT ON audit_log
+          FOR EACH ROW WHEN (NEW.action = 'contact.replied') EXECUTE FUNCTION stamp_reply_early();
+      `)
+      let second: string | null = null
+      const p = recoveredInFlight(async () => {
+        second = await reply('<reply-2@rentman.io>', LATER)
+      })
+      expect(await send(answer, p)).toMatchObject({ sent: true })
+      // The shape the old guard could not see: the second reply's row sits
+      // before the recovery's.
+      const [repaused] = await auditRows('contact.paused')
+      const late = (await auditRows('contact.replied')).filter((r) => r.createdAt < repaused!.createdAt)
+      expect(late).toHaveLength(2)
+      expect(second).not.toBeNull()
+
+      expect(await touchRow(answer.id)).toMatchObject({ status: 'sent' })
+      const after = await contactRow()
+      expect(after.pausedAt).not.toBeNull()
+      expect(after.pausedReason).toBe(replied)
+      expect((await auditRows('contact.resumed')).filter((r) => r.actor === 'system')).toEqual([])
+    })
+
+    it('leaves the pause when a reply that landed meanwhile left no log row at all', async () => {
+      const { replied, answer } = await answered()
+      // The reply's audit write is best-effort: a fault there loses the row
+      // and keeps the reply.
+      await failOnce(test.pg, { table: 'audit_log', event: 'INSERT', when: "NEW.action = 'contact.replied'" })
+      let second: string | null = null
+      const p = recoveredInFlight(async () => {
+        second = await reply('<reply-2@rentman.io>', LATER)
+      })
+      expect(await send(answer, p)).toMatchObject({ sent: true })
+      expect(second).not.toBeNull()
+      expect(await touchRow(second!)).toMatchObject({ direction: 'in', contactId })
+      // Only the first reply's row is in the log.
+      expect(await auditRows('contact.replied')).toHaveLength(1)
+
+      expect(await touchRow(answer.id)).toMatchObject({ status: 'sent' })
+      const after = await contactRow()
+      expect(after.pausedAt).not.toBeNull()
+      expect(after.pausedReason).toBe(replied)
+      expect((await auditRows('contact.resumed')).filter((r) => r.actor === 'system')).toEqual([])
+    })
+
+    it('a reply from before the answer was drafted does not hold the lift: it was in front of whoever answered', async () => {
+      // Two replies, then one answer: the person answering read both, and
+      // drafting resumed them. Only a reply stored AFTER the answer is new.
+      const inboundId = await reply()
+      await reply('<reply-0@rentman.io>', NOON)
+      const drafted = await replyQueueDraft(db, {
+        orgId, inboundTouchId: inboundId, subject: 'Re: the gap', body: 'Talk in January.', actor: userId, now: NOON,
+      })
+      if (!drafted.ok) throw new Error(`not drafted: ${drafted.reason}`)
+      const approved = await approveDraft(db, { orgId, touchId: drafted.touchId, contactId, campaignId, approvedBy: userId, now: NOON })
+      if (!approved.ok) throw new Error(`not approved: ${approved.reason}`)
+      expect(await send(approved.touch, recoveredInFlight())).toMatchObject({ sent: true })
+      expect((await contactRow()).pausedAt).toBeNull()
+      expect((await auditRows('contact.resumed')).filter((r) => r.actor === 'system')).toHaveLength(1)
+    })
+
     it('leaves a teammate’s hold placed meanwhile', async () => {
       const { answer } = await answered()
       const hold = async () => {

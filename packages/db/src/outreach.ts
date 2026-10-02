@@ -668,6 +668,9 @@ async function recordRecoveredSend(
  *    that row's stored `created_at`, never a `Date` read back. A reply that
  *    arrived meanwhile kept the recovery's reason (`pauseContact` keeps the
  *    first), and is unanswered;
+ *  - no reply of theirs is stored since the answer was drafted — read from
+ *    `touches`, not the log, whose row for a reply may be missing or stamped
+ *    before the recovery's (review round 6, [15]);
  *  - the stored reason is still exactly the reply's `replied <instant>`
  *    (`resumeContact`'s `expectedReason`, in the UPDATE's own predicate).
  *
@@ -729,6 +732,32 @@ async function liftRecoveryPause(
     )
     .limit(1)
   if (since.length > 0) return false
+
+  // The log alone is not enough for a reply (review round 6, [15]): its
+  // `contact.replied` row is written best-effort, and stamped with `now()`
+  // — the reply transaction's START, which can fall before the recovery's
+  // row though the reply committed after it. So the touches decide too: an
+  // inbound row of theirs stored at or after the ANSWER was drafted, other
+  // than the reply it answers, is a reply nobody has answered. Compared in
+  // SQL against the answer's stored `created_at`. A reply in flight is not
+  // missed: one inserted before the caller locked this contact held a
+  // key-share lock on it, so that lock waited for the reply to commit and
+  // this read sees it; one inserted after waits for this transaction, and
+  // its own pause then lands on a person this has resumed.
+  const newerReply = await db
+    .select({ id: schema.touches.id })
+    .from(schema.touches)
+    .where(
+      and(
+        eq(schema.touches.orgId, orgId),
+        eq(schema.touches.contactId, contactId),
+        eq(schema.touches.direction, 'in'),
+        sql`${schema.touches.id} <> ${answer.answersTouchId}`,
+        sql`${schema.touches.createdAt} >= (SELECT a.created_at FROM touches a WHERE a.id = ${answer.id})`,
+      ),
+    )
+    .limit(1)
+  if (newerReply.length > 0) return false
 
   const reason = replyPauseReason(reply)
   if (!(await resumeContact(db, orgId, contactId, { expectedReason: reason }))) return false
