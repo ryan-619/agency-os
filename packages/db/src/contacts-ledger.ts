@@ -450,6 +450,9 @@ function blankIsNull(v: string | null): string | null {
  * phone, and no later text from the number found them. A change of spelling
  * that keeps the number is allowed. Repeated in the UPDATE: a hard hold or a
  * row naming them that lands between the check and the write fails the edit.
+ * Only while they are paused, and only by a row that still governs them —
+ * one no later resume of theirs has spent (review round 10): an unpaused
+ * contact has no hold to strand.
  */
 export async function contactsUpdate(
   db: AgencyDb,
@@ -562,9 +565,14 @@ export async function contactsUpdate(
 
   // A shared number's holder, while its STOP is unrecorded. Reached only
   // when the number's key is being dropped and no suppression matches it —
-  // one that did was refused just above, as the owner's decision.
+  // one that did was refused just above, as the owner's decision. And only
+  // while they are PAUSED (review round 10): what the refusal protects is a
+  // pause the number's suppression would lift, and a contact who is not
+  // paused has none to strand — read as held, a contact a person had resumed
+  // once the number was recorded could never have the phone changed after
+  // an owner removed its suppression.
   const phoneDropped = dropping.some((k) => k.kind === 'phone')
-  if (phoneDropped && (await heldForUnrecordedSharedNumber(db, orgId, old))) {
+  if (phoneDropped && old.pausedAt !== null && (await heldForUnrecordedSharedNumber(db, orgId, old))) {
     return { ok: false, reason: 'shared_number_hold', message: SHARED_NUMBER_HOLD_EDIT }
   }
 
@@ -607,11 +615,12 @@ export async function contactsUpdate(
           ...(dropping.length > 0
             ? [sql`NOT EXISTS (SELECT 1 FROM ${schema.suppressions} WHERE ${suppressedAmong(dropping)})`]
             : []),
-          // The pause and the rows the shared-number check read, when it ran.
+          // The pause and the rows the shared-number check read, when it ran:
+          // a row listing a paused contact that landed since fails the edit.
           ...(phoneDropped
             ? [
                 sql`${schema.contacts.pausedReason} IS NOT DISTINCT FROM ${old.pausedReason}`,
-                sql`NOT ${sharedNumberHolderRowExists(orgId, id)}`,
+                sql`(${schema.contacts.pausedAt} IS NULL OR NOT ${sharedNumberHolderRowExists(orgId, id)})`,
               ]
             : []),
         ),

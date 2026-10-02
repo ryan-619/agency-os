@@ -1052,6 +1052,15 @@ function isSharedNumberHoldPause(reason: string): boolean {
  * not be recorded in their org: a holder whose own pause was stronger, or
  * somebody's to keep, kept it (review round 9), and the row names them all
  * the same. Read in the org's own slice of the log.
+ *
+ * Only while it still governs them (review round 10): a row stops counting
+ * once a `contact.resumed` row for them is NEWER than it. Resume succeeds
+ * for a contact a governing row lists only once the number is recorded, so
+ * a resume after the row is a person having lifted the hold it stood for;
+ * read forever, the row refused every later pause of theirs — a teammate's
+ * included — and froze their phone, once an owner removed the number's
+ * suppression. Compared in SQL against the stored `created_at`s, never a
+ * `Date` read back. A newer row lists them afresh.
  */
 function sharedNumberHolderRow(orgId: string, contactId: string): SQL | undefined {
   return and(
@@ -1059,6 +1068,14 @@ function sharedNumberHolderRow(orgId: string, contactId: string): SQL | undefine
     eq(schema.auditLog.action, 'contact.opt_out_not_recorded'),
     sql`${schema.auditLog.detail}->>'sharedNumber' = 'true'`,
     sql`${schema.auditLog.detail}->'holders' @> ${JSON.stringify([contactId])}::jsonb`,
+    sql`NOT EXISTS (
+      SELECT 1 FROM audit_log resumed
+      WHERE resumed.org_id = ${orgId}
+        AND resumed.action = 'contact.resumed'
+        AND resumed.subject_type = 'contact'
+        AND resumed.subject_id = ${contactId}
+        AND resumed.created_at > ${schema.auditLog.createdAt}
+    )`,
   )
 }
 
@@ -1070,7 +1087,8 @@ export function sharedNumberHolderRowExists(orgId: string, contactId: string): S
 /**
  * Whether this contact holds a number a STOP came from that could not be
  * recorded in their org — the hard hold's shape on their pause, or a row
- * that lists them (`sharedNumberHolderRow`) — AND their phone, the number
+ * that lists them and that no later resume of theirs has spent
+ * (`sharedNumberHolderRow`, review round 10) — AND their phone, the number
  * they held, has no phone suppression in the org today. While it does,
  * nothing that would let a text go to that number may happen to them:
  * Resume refuses whatever paused them, and their phone may not be changed
