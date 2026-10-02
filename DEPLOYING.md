@@ -625,11 +625,26 @@ only when Vercel holds a pending record of THIS run, waits for
 `true` — job 1 set a new token on Fly and Vercel in this run — and no record
 of this run can be read, the job dies, because the live web app still runs
 on the old token and every call it makes to the worker is refused; run the
-action again. The one exception is a record of a LATER run, which
-`tools/vercel-env.mjs superseded` finds by comparing run ids: that is a
-re-run of an old run's second job after a newer run has wired, and it
-prints "nothing of this run is waiting to be recorded — a later run has
-wired since…" and passes. Both markers are encrypted, readable Vercel
+action again. The one exception is a record of a LATER run that the later
+run's own web job has promoted to `AGENT_INTERNAL_TOKEN_WIRED`, which
+`tools/vercel-env.mjs superseded <FROM> <TO>` finds by comparing run ids
+and then the marker (review round 10): that is a re-run of an old run's
+second job after a newer run has wired, and it prints "nothing of this run
+is waiting to be recorded — a later run has wired since (run <id>); the web
+app is not redeployed" and passes. A later run's record is written by that
+run's FIRST job, so it says only that the run set a newer token, not that
+the web app was redeployed with it: while the later run's web job has not
+finished, the job dies with "Workflow run <id> set a newer token and its
+web job has not finished — re-run that run's worker-web job, or the worker
+action. This job deployed and recorded nothing, and until one of them
+finishes the live web app may still run on a token the worker no longer
+accepts." An empty later record (`<run id>/`, Fly gave that run no
+digest), which no web job can promote, passes with `::warning::run <id>
+left AGENT_INTERNAL_TOKEN_PENDING with no digest, so whether its web job
+finished cannot be checked; …` printed before the pass line. The helper
+prints the later run's id, and only that, on stdout whenever FROM holds a
+later run's record (exit 0 or 1), and nothing on stdout on a 2; a call
+without TO exits 2. Both markers are encrypted, readable Vercel
 production variables that hold no secret and that nothing in the app reads.
 A run cut off part-way — Fly re-tokened and
 Vercel not, or Vercel set and never redeployed or never recorded — is
@@ -904,9 +919,14 @@ contacts holding the number, other than the one it was filed under, are
 paused with a reason Resume refuses, saying a text from a number they share
 asked to stop — unless a pause of their own already holds them (their own
 unrecorded opt-out, an unfinished erasure, an unsubscribe, a teammate's
-hold), which stands and is counted `kept` on the audit row; Resume then
-refuses whatever paused them until the number is recorded, and their phone
-cannot be moved off the number or cleared on `/contacts` meanwhile. The
+hold), which stands and is counted `kept` on the audit row — except when
+that audit row could not be written, and then a teammate's or an
+unsubscribe's pause is replaced by the hold after all, because the row is
+what held them; Resume then
+refuses whatever paused them until the number is recorded, and while they
+are paused their phone cannot be moved off the number or cleared on
+`/contacts`. A person's Resume after that ends what the row says about
+them, so a later pause of theirs is an ordinary one. The
 next delivery from the number that finds it suppressed — the retry, or any
 later text, whatever it says — eases the hard hold to an ordinary one, and
 once the number is on `/suppressions` Resume can lift them, all but a kept
@@ -917,8 +937,13 @@ unread text might have been a STOP — with an
 `sms.*_unreadable` audit row and an error line, so DoveSoft retries. A STOP
 from a number no single contact holds whose suppression could not be written
 is 500, so it is retried too — with the same exception for a push with no
-message id, answered 200 after the alarms, because such a text is known on
-a redelivery by a hash of its id alone; that one, and a STOP from a number
+message id where contacts hold the number, or where `DOVESOFT_ORG_ID` is
+unset and a retry has nowhere to write it: answered 200 after the alarms,
+because such a text is known on a redelivery by a hash of its id alone, so
+its retry would hold every holder again, or write nowhere. A STOP from a
+number NO contact holds, with `DOVESOFT_ORG_ID` set, stays 500 with or
+without an id (review round 10), because its retry holds nobody and only
+writes the suppression. Every such unplaced STOP, and one from a number
 that cannot be read (400), also raise the Slack opt-out alarm before answering, one in
 each org where it failed, naming a contact there who holds the number and
 linking `/suppressions`. Where nobody holds it, or it could not be read, the

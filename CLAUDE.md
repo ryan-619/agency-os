@@ -27,7 +27,7 @@ tested against a fetch that records and never sends, and against PGlite —
 never against DoveSoft itself, whose push formats and `mobiles` format are
 assumptions to confirm before a real send. Calls
 and WhatsApp over DoveSoft are not built: DoveSoft publishes no API for
-either. Nine review rounds, and the follow-ups they left open, have been fixed
+either. Ten review rounds, and the follow-ups they left open, have been fixed
 on top of both releases; each fix is stated below where the rule it changed
 lives.
 
@@ -79,9 +79,20 @@ to redeploy the web app, waits for `/api/health?strict=1`, promotes the
 pending record to the `AGENT_INTERNAL_TOKEN_WIRED` marker LAST, and waits
 for the worker to show live. When `REDEPLOY` arrived `true` and no record
 of this run can be read, it dies, because the live web app still runs on
-the old token — unless a LATER run's record is there, which is a re-run of
-an old run's web job and passes (`vercel-env.mjs superseded`, comparing run
-ids; review round 9); a dropped output still reads the record alone,
+the old token — unless a LATER run's record is there AND that run's own
+web job has promoted it to `AGENT_INTERNAL_TOKEN_WIRED`, which is a re-run
+of an old run's web job and passes (`vercel-env.mjs superseded <FROM>
+<TO>`, comparing run ids, then the marker; review rounds 9 and 10). A later
+run whose own web job has not finished stops the re-run: "Workflow run <id>
+set a newer token and its web job has not finished — re-run that run's
+worker-web job, or the worker action." — because that record is the later
+run's FIRST job's, and says only that it set a newer token, not that the
+web app was redeployed with it. An empty later record (`<run>/`, Fly gave
+that run no digest), which no web job can promote, passes with a warning
+that its web job could not be checked. The helper prints the later run's
+id, and only that, on stdout, and `production.sh` reads it directly rather
+than through `vercel_env`, whose `die` would print into the substitution. A
+dropped output still reads the record alone,
 fail-open. Round 7 drew the line at a step, and a step is
 not a credential boundary: `tools/production.sh` un-exported the secrets and
 ran the Vercel CLI — which `npx` installs at run time, and whose `build`
@@ -708,7 +719,21 @@ The fourteen added with 0018, one line each:
   finish the erasure, and never to resume them — except a shared number's
   holder (`isSharedNumberOptOutPause`), worded as a holder: a text from a
   number they share asked to stop, it may not have been them, and a person
-  records the number on /suppressions before the pause can be lifted. One
+  records the number on /suppressions before the pause can be lifted. And a
+  holder whose OWN pause stood (review round 10): when `facts.sharedNumberHold`
+  — previewSend's fact — holds, the paused summary (`pauseWords`) and the
+  other-refusal branch append "They also hold a phone number a text came
+  from that asked to stop, and it could not be recorded — it may not have
+  been them — so Resume is refused until a person records the number on
+  /suppressions; do not suggest resuming them before that.", and its data
+  carries `facts.sharedNumberHold`; before, a teammate's pause there read
+  "until a person resumes them on /contacts", which Resume refused.
+  `get_consent`'s first line for such a person reads "paused: nothing is
+  sent to them, and they cannot be resumed until a person records a phone
+  number they share on /suppressions — a text from it asked to stop and
+  could not be recorded, and it may not have been them" in place of "until
+  a person resumes them", and its data carries `sharedNumberHold` (from
+  `consentLedgerFor`). One
   hold round 8 added is not told apart here yet, stated: a contact a
   colleague's unrecorded stop was filed under reads as an ordinary `replied`
   pause (§2, "The opt-out reader runs first"). A prefix test used to call a
@@ -956,7 +981,9 @@ all of a contact held for a shared number's unrecorded STOP, that hard hold
 or a pause of their own the holders' loud path kept and a row listing them
 (`heldForUnrecordedSharedNumber` in `sms.ts`, review round 9), while the
 number on their phone has no phone suppression in their org, refused for a
-kept pause `RESUME_SHARED_NUMBER_KEPT`, which does not say they asked —
+kept pause `RESUME_SHARED_NUMBER_KEPT`, which does not say they asked (a
+row listing them counts only until a `contact.resumed` row for them is
+NEWER than it: review round 10, below) —
 and any pause at all while the inbox's own `unrecordedOptOut` reading
 holds: an opt-out of THEIRS while an address it was about has no
 suppression row (`ownOptOutStillToRecord`, review round 9) — for a
@@ -978,8 +1005,22 @@ suppression row matches, refused
 this gate and left the person who asked unrecorded (`contactResumeByHand`
 in `packages/db/src/inbox.ts`) — the button used to resume whatever the
 class, including the pauses that are the only protection left when an
-opt-out could not be stored. Both resume paths lift
-only the pause they were asked about (`resumeContact`'s `expectedReason`,
+opt-out could not be stored. A shared-number row stops governing a holder
+once a `contact.resumed` row for them is newer than it (review round 10,
+`sharedNumberHolderRow`, and so `sharedNumberHolderRowExists`, the stored
+`created_at`s compared in SQL, never a `Date` read back): Resume lifts a
+pause of a holder a governing row lists only once the number is recorded,
+so a later resume is a person having lifted the hold, and read for ever
+the row refused every later pause of theirs, a teammate's included, and
+froze their phone once an owner removed the number's suppression. A newer
+row lists them afresh. Any writer of `contact.resumed` spends it —
+`/inbox`'s answer and `dispatchTouch`'s recovered-send lift as well, though
+each lifts only a `replied` pause, which a listed holder holds only when
+the hold itself could not be written for them (the row's `paused`
+shortfall), so there was no hold to protect — and `/contacts` Resume and
+the inbox's answer, which disagreed about such a holder, now agree. Both
+resume paths lift only the pause they were asked about
+(`resumeContact`'s `expectedReason`,
 in the UPDATE's predicate): the inbox the pause it READ under its locks,
 and `/contacts` the pause the PAGE SHOWED (review round 4). Every Resume
 button — the ledger, the company page's People, `/suppressions`' paused
@@ -999,10 +1040,34 @@ Record the number on /suppressions, then Resume; until the number is
 recorded there, Resume is refused." The ledger read the pause's class
 alone, said such a holder had asked to stop and offered no Resume, while
 the route lifts it once the number is recorded; only the contact's own
-unrecorded opt-out and an unfinished erasure show no Resume now. And
-`/suppressions`' paused list opens "Held from every campaign — most often
-because they replied; each row says why", where it read "A contact who
-replied.", false of a holder who may have sent nothing. A pause that
+unrecorded opt-out and an unfinished erasure show no Resume now. Since
+review round 10 `resumeOfferFor` also takes the ledger row's
+`sharedNumberHold` (from `consentLedgerFor`), so a holder whose OWN pause
+stood (`holdHard`'s `kept`) — a teammate's or an unsubscribe's, which by
+its shape alone got a plain Resume the route then refused
+`RESUME_SHARED_NUMBER_KEPT` — gets `record_number` on `/contacts`, the
+note beside Resume; and `/approvals`' paused block (`approveBlock`, through
+`decisionView(decision, preview.facts)` and
+`CandidateDecision.sharedNumberHold`) adds "A text from a number they share
+asked to stop and could not be recorded — they may not have sent it — so
+they cannot be resumed until the number is recorded on /suppressions."
+**Stated residual:** `/suppressions`' paused list, `/inbox` and the company
+page's People still decide the note by the pause's SHAPE alone
+(`isSharedNumberOptOutPause`), so a kept holder reads a plain Resume there
+with no note, and Resume's 409 (`RESUME_SHARED_NUMBER_KEPT`) is what says
+what to do — giving them the fact would be one
+`heldForUnrecordedSharedNumber` read per paused row on unbounded lists.
+And `/suppressions`' paused list opens "Held from every campaign — most
+often because they replied; each row says why", where it read "A contact
+who replied.", false of a holder who may have sent nothing; since review
+round 10 it names every paused person ("(no name recorded)" otherwise)
+beside their email, else their phone, else their id (`pausedContacts` in
+`campaigns.ts` returns `firstName`, `lastName` and `phone`), and a shared
+number's holder's row shows "The number they share: <phone>" under the
+note, with, for `contacts:write`, a "Fill it in above" button that sets the
+add form to kind phone with that value — it adds nothing itself. `/inbox`
+shows "The number they share: <phone>" beside its note too, from
+`inboxTouches`' contact projection, which carries `phone` now. A pause that
 changed since is a 409 `changed_meanwhile` ("Reload the page …"), an
 unpaused contact a 409 `not_paused`, a missing one a 404, and a body with no
 `pausedReason` a 400; the guarded `resumeContact` also requires `paused_at
@@ -1397,10 +1462,14 @@ PERSON as if the message were rendered from one of the channel's active
 templates — a non-promotional one where there is one — and says so
 (`template.source: 'any_active'`), never silently. Beside the facts it
 reports `pausedReason`, `pausedFor` (the reason's class), `consentRecorded`
-(the row as stored — the same value as `facts.consent`), `evidenceStale` and
-`evidenceSuperseded`, for a screen to say, and decides through
-`decideGathered`, so a dry run words a superseded scan exactly as the sender
-does.
+(the row as stored — the same value as `facts.consent`), `evidenceStale`,
+`evidenceSuperseded` and, since review round 10, `sharedNumberHold` —
+Resume's own answer (`heldForUnrecordedSharedNumber`), asked in
+`sendFactsFor` for a paused contact only, one `audit_log` read per send
+attempt to one, and false when they are not paused; `consentLedgerFor`
+carries it too — for a screen to say, and decides through
+`decideGathered`, so a dry run words a superseded scan, and a shared
+number's kept holder, exactly as the sender does.
 
 **A pause is its own fact, never a consent.** `SendFacts` carries a required
 `paused` and an optional `pausedFor` — a `pauseReasonClass`, never the
@@ -1413,7 +1482,24 @@ enrolment read it that way for ever after the hold was lifted. The paused
 branch of `sendFactsFor` also used to short-circuit, so a paused AND
 suppressed person read as "not suppressed" on every preview; suppression,
 consent and the cap are gathered for them too, and `decideSend` orders the
-refusals: a suppression and a recorded refusal outrank the pause.
+refusals: a suppression and a recorded refusal outrank the pause. And
+`decideGathered` words a `paused` refusal of a shared number's holder whose
+own pause stood (review round 10): when `sharedNumberHold` holds and the
+class is `replied`, `manual`, `unsubscribed` or `other`, it appends
+`SHARED_NUMBER_HOLD_SENTENCE` ("A text from a number they share also asked
+to stop, and it could not be recorded — they may not have sent it — so
+Resume is refused until the number is recorded on /suppressions."), because
+`pausedSentence` alone said "until a person resumes them there" of a pause
+Resume refuses. The sender's own decision (`dispatchTouch`'s return value,
+what LinkedIn's Start shows) and every dry run — the ledger's "Why can't I
+reach them?", `/approvals`' rule line, enrolment, the inbox's answer,
+`smsDraft` — word it alike; the hard hold's own shape, an own unrecorded
+opt-out and an erasure keep their `pausedSentence`, which already says to
+record something or finish the erasure. `touches.error` is not written for
+a decided refusal, so no stored row changes. **Stated residual:**
+`dispatchTouch`'s last look before the provider — a pause that landed after
+the decision, "This contact was paused a moment ago." — words it with
+`pausedSentence` alone.
 
 **The ledger says never-asked, refused and granted are three facts.**
 `/contacts` shows each person's consent and suppression answer from
@@ -1433,14 +1519,20 @@ would suppress an address that may belong to somebody who never asked. Phones
 are stored as E.164 on edit, a LinkedIn URL must be one `normaliseLinkedIn`
 can read, and changing the email clears a bounce mark in the same UPDATE.
 Nor off a number held for an unrecorded shared-number STOP (review round
-9): while `heldForUnrecordedSharedNumber` holds, a phone change or clear
-that drops the number's key is refused `shared_number_hold` (409 from
-`PATCH /api/contacts/[id]`), and the UPDATE repeats the condition — the
-pause it read, and no row listing them landed since — because the hold is
-lifted by the NUMBER's suppression, read off their phone, and a contact
-moved off it held a pause nothing could lift. A change of spelling that
-keeps the number goes through; once the number is suppressed, moving the
-phone off it is the owner's decision above.
+9): while the contact is PAUSED and `heldForUnrecordedSharedNumber`
+holds, a phone change or clear that drops the number's key is refused
+`shared_number_hold` (409 from `PATCH /api/contacts/[id]`), and the UPDATE
+repeats the condition — the pause it read, and `(paused_at IS NULL OR NOT
+EXISTS (<a governing row>))` — because the hold is lifted by the NUMBER's
+suppression, read off their phone, and a contact moved off it held a pause
+nothing could lift. Only while paused (review round 10, `old.pausedAt !==
+null`): an unpaused contact has no hold to strand, and read as held, a
+contact any row had ever listed — resumed once the number was recorded —
+could never have their phone changed or cleared after an owner removed the
+number's suppression; and only by a row no later resume of theirs has
+spent (§2, "The send path"). A change of spelling that keeps the number
+goes through; once the number is suppressed, moving the phone off it is
+the owner's decision above.
 
 **An import writes no consent row; a company carries a declared zone,
 editable, never derived from `country`.** `/contacts/import` drops a phone
@@ -1578,8 +1670,12 @@ plainer of two true reasons) from superseded alone;
 rewording there fails the test rather than going quiet. A `paused`
 candidate's block says the draft can
 wait until the pause is lifted, never to deny it: a denial is a person's no,
-and blocks re-enrolment. A `no_template` or `template_mismatch` block says
-the operator would not deliver it: deny, then draft again from an active
+and blocks re-enrolment — and for a shared number's holder whose own pause
+stood (`decisionView(decision, preview.facts)` carrying `sharedNumberHold`,
+review round 10) it adds that they cannot be resumed until the number is
+recorded on /suppressions (§2, "The send path"). A `no_template` or
+`template_mismatch` block says the operator would not deliver it: deny,
+then draft again from an active
 registered template. `approveBlock(decision, channel)` takes the draft's
 channel (`drafts.tsx` passes `d.channel` at every call), and on SMS and
 WhatsApp neither the paused block nor the default one says "choose someone
@@ -2536,7 +2632,30 @@ one rather than replace it (review round 9, `/settings/templates` below).
   shortfall is still a write that failed — and `kept`, present when above
   zero, counts those whose own pause stood, while Resume refuses any pause
   of a holder the row lists until the number is recorded
-  (`heldForUnrecordedSharedNumber`; §2, "The send path"). The row's subject is
+  (`heldForUnrecordedSharedNumber`; §2, "The send path") — a row that
+  governs them only until a later `contact.resumed` row of theirs spends it
+  (review round 10). A kept holder is held by that row alone, appended after every hold
+  has committed, so **when the row's append FAILS** (review round 10) each
+  kept holder whose pause Resume would lift once the number is recorded —
+  class `manual`, `unsubscribed` or `other` (`RESUMABLE_ONCE_RECORDED`) —
+  gets the hard hold written over that pause after all, through `holdHard`'s
+  `overResumable`, under the same `FOR NO KEY UPDATE` lock, replacing
+  exactly the reason read; a kept own unrecorded opt-out or unfinished
+  erasure stands, and the `OPT-OUT NOT RECORDED — follow up by hand` line
+  carries `rowWritten: false`, `keptContactIds` and `heldHardInstead`. When
+  the row is written nothing changes. The cost, stated: a teammate's or an
+  unsubscribe's pause replaced this way loses its reason text on the
+  contact row — it survives only in that pause's own audit row — so once
+  the number is recorded and the hold eases to the ordinary one, the person
+  pressing Resume sees the shared-number hold, not the original reason;
+  that is the behaviour before round 9 for those classes, and only when
+  the row could not be written. And a residual: a Resume that lands in the
+  milliseconds between `holdHard`'s commit for a kept holder and the row's
+  commit still lifts their pause while the number is unrecorded. That needs
+  a person's click in that gap, and where their org's holds committed
+  `holdEach` has already cancelled their queued, awaiting-approval and
+  approved messages, so a text to the number needs a new draft and a new
+  approval. The row's subject is
   the filed inbound touch where it is stored in that org and otherwise
   nothing — never a holder, as subject or `detail.contactId`. Round 7 gave
   each holder the asker's own pause and a row naming them, which `/inbox`
@@ -2567,8 +2686,14 @@ one rather than replace it (review round 9, `/settings/templates` below).
   all — a teammate's or an unsubscribe's, never their own unrecorded
   opt-out or an erasure. The contact it was filed under keeps the
   asker's pause and row. `/audit` words the row as a number N contacts here
-  hold, not treated as the one who asked, held until it is recorded, with
-  `kept` as "K of them were already held by a pause of their own, which
+  hold, not treated as the one who asked, held until it is recorded, and
+  says the next text DoveSoft delivers from the number after that makes it
+  an ordinary hold that Resume lifts — "its retry of this one included,
+  where the push carried a message id" for a row whose `why` is not
+  `record_failed` (review round 10: a suppression that failed is answered
+  200 for an id-less push, so no retry comes), and unqualified for `why:
+  'record_failed'`, which the route answers 500 whatever the push carried —
+  with `kept` as "K of them were already held by a pause of their own, which
   stands — no text changes it, and Resume lifts it, where Resume may, only
   once the number is recorded", and
   `/compliance` and the digest count one row per org where they counted one
@@ -2591,8 +2716,10 @@ one rather than replace it (review round 9, `/settings/templates` below).
   **200** after the same awaited alarms, with an error line saying it
   carried no message id and that what is missing must be recorded by hand
   (`duplicate`, `orgs`, `alarm`, `messageId: false`); since review round 9
-  so is a STOP filed under nobody (below), and an unreadable number is
-  still a 400. Every org whose holders were held gets an
+  so is a STOP filed under nobody whose retry would hold its holders again,
+  or that has nowhere to be written (below — since review round 10 not one
+  from a number no contact holds where `DOVESOFT_ORG_ID` is set), and an
+  unreadable number is still a 400. Every org whose holders were held gets an
   `sms.inbound_unmatched` row (`why: 'ambiguous'`, `filedUnder:
   'another_org'|'another_contact'`, `contacts`, `paused`, `cancelledQueued`,
   and for a STOP `optOut` and `suppressed`), the filed org included when a
@@ -2666,7 +2793,14 @@ one rather than replace it (review round 9, `/settings/templates` below).
   a hash of its id alone (`messageHash`, below), so every retry of such a
   push held every holder again — undoing a teammate's Resume and
   cancelling drafts written since — and wrote another set of rows, the
-  filed branch's reason (review round 8) restated. For both, the
+  filed branch's reason (review round 8) restated. Only where that is what
+  a retry would do (review round 10): the 200 is for `why: 'ambiguous'`,
+  where holders exist and a retry re-holds them, and for `no_contact` with
+  no `DOVESOFT_ORG_ID`, where a retry has nowhere to write. A no-id STOP
+  from a number NO contact holds, with `DOVESOFT_ORG_ID` set, is a **500**
+  again, so DoveSoft's retry writes the suppression in that org — the one
+  write the 200 gave up on for good — and that retry holds and releases
+  nobody (`retryOnlyRecords` in the route's `webhook.ts`). For both, the
   `opt_out_not_recorded` Slack alarm is AWAITED before the answer, as a
   filed STOP's is — **one per org where the suppression failed** (review
   round 6): the recorder reports each as `optOutNotRecordedIn`, `{ orgId,
@@ -2763,8 +2897,9 @@ one rather than replace it (review round 9, `/settings/templates` below).
   number's holder is found, by a later delivery and by Resume alike,
   through their CURRENT phone, and one whose phone was edited after the
   STOP was eased by no delivery and refused by Resume for good — so
-  `contactsUpdate` refuses that edit while they are held
-  (`shared_number_hold`, §2, "The send path").
+  `contactsUpdate` refuses that edit while they are held and paused
+  (`shared_number_hold`, §2, "The send path"; only while paused since
+  review round 10).
 
 **`/settings/templates`** records registrations and registers nothing: add
 one by hand, switch one off or on (idempotent, audited
@@ -3481,7 +3616,10 @@ no retry ever came and the duplicate's write of the missing suppression
 was never reached — but only when the push carried a message id (since
 review round 8 for a STOP filed under a contact, and review round 9 for one
 filed under nobody), because without one its retry is recorded as a new
-text, so such a push is answered 200 after the same alarms — and raises the
+text, so such a push is answered 200 after the same alarms — except, since
+review round 10, a STOP from a number no contact holds where
+`DOVESOFT_ORG_ID` is set, which is a 500 whatever the push carried, because
+its retry holds nobody and only writes the suppression — and raises the
 alarm again on each delivery that fails again, while a redelivery whose
 finishing faulted is a 500 with no alarm;
 and on the worker's IMAP path, before the reply triage for a stop whose
@@ -3632,8 +3770,12 @@ to generate the secret with `openssl rand -hex 32` or percent-encode it,
 that a GET push puts a text's number and words in the request log so POST is
 the form to ask for, that texts are matched in every org with
 `DOVESOFT_ORG_ID` only the home of a number no contact holds — it decides
-nothing about one a contact does — and (review round 6) that a number
-several contacts share is filed under the one this system texted, with the
+nothing about one a contact does — that without it a STOP from such a
+number is recorded nowhere and answered 500 so DoveSoft retries, "200 when
+the push carried no message id, since its retry could not be told from a
+new text" (review round 10; it said "answered 500" alone), and (review
+round 6) that a number several contacts share is filed under the one
+this system texted, with the
 others held, or otherwise under nobody with every holder held; the hub's "What this
 deployment can do" table has no DoveSoft row. `/settings/templates` is the
 one settings page added since, and it writes (§2, "SMS through DoveSoft"). `/settings/mail` checks the WEB
@@ -3737,7 +3879,7 @@ absent.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 6368 tests in 214 files: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice + the 0018 release + DoveSoft SMS (0019) + nine review rounds
+npm test                 # 6368 tests in 214 files: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice + the 0018 release + DoveSoft SMS (0019) + ten review rounds
 npx vitest run --maxWorkers=1 --minWorkers=1   # the same suite on a machine short of memory
 npm run build            # packages, then the Next app
 
@@ -3861,7 +4003,7 @@ process, keeps the finished data directory, and hands each test a COPY via
 a new instance rather than attaching to one. Measured: the whole suite went
 from **290s to 97s** single-worker, with the same tests passing, and
 `apps/voice` alone from 9.8s to 4.4s. The suite has grown several times
-over since: at 0019, after DoveSoft and nine review rounds, it is 6,368
+over since: at 0019, after DoveSoft and ten review rounds, it is 6,368
 tests in 214 files, and the full single-worker run at `5168c17` took
 1,471 s — every test green. (At 0018 it was 4,246 in 154 and took 1,088 s.)
 
