@@ -5109,12 +5109,19 @@ the one above it can be turned off:
    and is drawn by RULE, never by tier: `writes_internal_state` (20 tools,
    among them `pause_contact` and `add_suppression`, which only ever STOP
    outreach) runs at once; `leaves_the_building` (`queue_touch`,
-   `enrol_contacts`), `reopens_outreach` (`resume_contact`),
+   `enrol_contacts`), `reopens_outreach` (`resume_contact`, and
+   `update_campaign` when its input sets a campaign `active` — that releases
+   messages a person approved and then held by pausing it, so `classifyRisk`
+   reads the input for it; pausing, renaming and re-capping stay internal),
    `connector_unreviewed` (every third-party tool) and `delegation` (medium,
-   but the one place a prepaid budget runs away) keep their card. An internal
+   but the one place a prepaid budget runs away) keep their card. No
+   card-free tool deletes anything, and the agent can never turn auto-send on
+   (`create_campaign` writes `false`, and on an auto-send campaign
+   `update_campaign` may only pause). An internal
    write is granted single-use and audited `agent.tool_allow` with its real
    tier and rule, exactly as a read is, so it does not slip past the ledger.
-   `risk.test.ts` pins the carded agency tools to exactly those three, so a
+   `risk.test.ts` pins the carded agency tools, asked with no input, to
+   exactly those three (and `update_campaign` to its one carded input), so a
    tool added or reclassified later fails until somebody chooses its side;
    `gate.test.ts` drives the real classifier through the gate both ways, and
    fails seven ways if the decision is put back to `risk === 'low'`. The

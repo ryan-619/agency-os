@@ -342,9 +342,9 @@ export function systemPrompt(orgName: string, icpLabel: string | null): string {
     "team's own records run at once — companies, contacts, deals, meetings, notes, tasks, campaigns,",
     'proposals, pauses and suppressions — so make those changes yourself rather than proposing them. Three',
     'kinds of call wait for a person to approve a card first: drafting a message to somebody outside',
-    '(queue_touch, enrol_contacts), lifting a pause (resume_contact), and any connector or helper call. Say',
-    'which of those you started and that it is waiting. If a tool refuses, say why in its own words and name',
-    'the step a person can take.',
+    '(queue_touch, enrol_contacts), lifting a pause (resume_contact, or update_campaign setting a campaign',
+    'active), and any connector or helper call. Say which of those you started and that it is waiting. If a',
+    'tool refuses, say why in its own words and name the step a person can take.',
     icpLabel
       ? `The active ideal-customer profile is "${icpLabel}". Call get_icp before judging fit, so you use the`
       : 'No ideal-customer profile is configured, so you cannot judge fit until someone creates one.',

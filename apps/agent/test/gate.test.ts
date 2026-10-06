@@ -862,6 +862,21 @@ describe('internal writes run without a card; what reaches a person keeps one', 
     expect(emitted.some((e) => e.kind === 'approval_requested')).toBe(true)
   })
 
+  it('parks update_campaign on a person when it sets a campaign active, and runs it when it pauses one', async () => {
+    const ensureApproval = vi.fn(async () => approvalRow())
+    const { deps, emitted } = makeDeps({ ensureApproval })
+    const canUseTool = makeCanUseTool(deps)
+    await canUseTool('mcp__agency__update_campaign', { campaignId: 'c-1', status: 'active' }, options())
+    expect(ensureApproval).toHaveBeenCalledTimes(1)
+    expect(emitted.some((e) => e.kind === 'approval_requested')).toBe(true)
+
+    const pause = vi.fn()
+    const paused = makeDeps({ ensureApproval: pause })
+    const result = await makeCanUseTool(paused.deps)('mcp__agency__update_campaign', { campaignId: 'c-1', status: 'paused' }, options())
+    expect(result).toEqual({ behavior: 'allow' })
+    expect(pause).not.toHaveBeenCalled()
+  })
+
   it('still parks a third-party connector tool on a person', async () => {
     const ensureApproval = vi.fn(async () => approvalRow())
     const { deps } = makeDeps({ ensureApproval })

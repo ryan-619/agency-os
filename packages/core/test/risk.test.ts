@@ -287,6 +287,31 @@ describe('runsWithoutApproval', () => {
     expect(carded).toEqual(['enrol_contacts', 'queue_touch', 'resume_contact'])
   })
 
+  /**
+   * The one internal write that can open outreach rather than record it:
+   * a campaign set active again releases messages a person approved and
+   * then held by pausing it. Read from the call's input, so the tripwire
+   * above — which asks with none — does not list it.
+   */
+  it('keeps a card on update_campaign only when it sets a campaign active', () => {
+    const active = call('mcp__agency__update_campaign', { campaignId: 'c-1', status: 'active' })
+    expect(active).toMatchObject({ risk: 'high', rule: 'reopens_outreach', refuse: false })
+    expect(runsWithoutApproval(active)).toBe(false)
+    for (const input of [
+      { campaignId: 'c-1', status: 'paused' },
+      { campaignId: 'c-1', status: 'done' },
+      { campaignId: 'c-1', name: 'Q4 follow-ups' },
+      { campaignId: 'c-1', dailyCap: 10, quietStart: '20:00' },
+    ]) {
+      const v = call('mcp__agency__update_campaign', input)
+      expect(v.rule, JSON.stringify(input)).toBe('writes_internal_state')
+      expect(runsWithoutApproval(v), JSON.stringify(input)).toBe(true)
+    }
+    // Setting a NEW campaign active opens nothing: it holds no messages, and
+    // filling it is enrol_contacts, which keeps its card.
+    expect(runsWithoutApproval(call('mcp__agency__create_campaign', { name: 'New', channel: 'email', status: 'active' }))).toBe(true)
+  })
+
   it('runs the two internal writes that can only STOP outreach', () => {
     // Protective writes. Slowing an agent down from recording "leave me
     // alone" is the wrong direction to be cautious in.

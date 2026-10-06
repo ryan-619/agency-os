@@ -150,10 +150,12 @@ export const AGENCY_TOOL_RISK = {
   list_tasks: ['low', 'read_only', 'Reads open tasks, optionally one person’s or one company’s.'],
 
   // --- the operator's CRM, campaign, pipeline and ops tools (2026-10-06).
-  //     Reads are low; internal writes are medium, and the gate still asks a
-  //     person before each one. Drafting openers to people outside the
-  //     company is high, as `queue_touch` is, and so is lifting a pause.
-  //     Grouped by the file that implements them.
+  //     Reads are low; internal writes are medium, and run without a card
+  //     (`runsWithoutApproval`). Drafting openers to people outside the
+  //     company is high, as `queue_touch` is, and so is lifting a pause —
+  //     a person's, or a campaign's (`update_campaign` setting one active,
+  //     read from its input in `classifyRisk`). Grouped by the file that
+  //     implements them.
   // records.ts — companies and contacts
   list_contacts: ['low', 'read_only', 'Reads the people recorded at a company, with how each may be reached.'],
   add_company: ['medium', 'writes_internal_state', 'Adds a company to the CRM by its domain. Nothing is scanned or sent until asked.'],
@@ -330,13 +332,26 @@ export function classifyRisk(call: ToolCall): RiskVerdict {
     const row = (AGENCY_TOOL_RISK as Readonly<Record<string, readonly [Risk, RiskRule, string]>>)[
       parsed.bareName
     ]
-    if (row) return verdict(row[0], row[1], row[2])
-    return verdict(
-      'high',
-      'unregistered_tool',
-      'This agency tool has no risk classification, so it cannot be run.',
-      true,
-    )
+    if (!row) {
+      return verdict(
+        'high',
+        'unregistered_tool',
+        'This agency tool has no risk classification, so it cannot be run.',
+        true,
+      )
+    }
+    // A campaign set active releases what it holds — messages a person
+    // approved and then held by pausing it. That is lifting a pause,
+    // `resume_contact`'s rule, whatever else the same call changes; pausing,
+    // renaming and re-capping stay internal writes.
+    if (parsed.bareName === 'update_campaign' && call.input.status === 'active') {
+      return verdict(
+        'high',
+        'reopens_outreach',
+        'Sets a campaign active, so the messages it holds may go out — a person decides that.',
+      )
+    }
+    return verdict(row[0], row[1], row[2])
   }
 
   // 7. A connector added at runtime (§6). Usable, but with a human on every
@@ -376,9 +391,11 @@ export function classifyRisk(call: ToolCall): RiskVerdict {
  *    `pause_contact` and `add_suppression`, can only ever STOP outreach — the
  *    conservative direction, and the one an agent should never be slowed in.
  *  - `leaves_the_building` (`queue_touch`, `enrol_contacts`) and
- *    `reopens_outreach` (`resume_contact`) keep their card: the first drafts
- *    words for a person outside, the second lifts a hold that may be the only
- *    thing keeping a message from somebody who asked to stop. Both are what
+ *    `reopens_outreach` (`resume_contact`, and `update_campaign` setting a
+ *    campaign active) keep their card: the first drafts words for a person
+ *    outside, the second lifts a hold that may be the only thing keeping a
+ *    message from somebody who asked to stop — or, for a campaign, the hold a
+ *    person put on everything it had approved. Both are what
  *    §2.1 and §2.4 exist for, and an operator's "control everything" is not
  *    read as reaching them — that needs saying in so many words.
  *  - `connector_unreviewed` keeps its card. A third-party server's tool can

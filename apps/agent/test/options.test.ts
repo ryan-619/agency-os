@@ -394,6 +394,7 @@ describe('the system prompt', () => {
       expect(prompt).toMatch(new RegExp(`wait for a person to approve a card first:[\\s\\S]*${waits}`))
     }
     expect(prompt).toMatch(/any connector or helper call/)
+    expect(prompt).toMatch(/update_campaign setting a campaign\s+active/)
   })
 
   it('names every operator tool, with the limit each group keeps', () => {
