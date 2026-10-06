@@ -1,4 +1,5 @@
 import type { Env } from './env'
+import { agentConfigFrom, type AgentVariable } from './agent-config'
 
 /**
  * What THIS deployment can actually do.
@@ -37,6 +38,13 @@ export interface Deployment {
    * so without it an approved message stays approved forever.
    */
   readonly worker: boolean
+  /**
+   * `AGENT_URL` or `AGENT_INTERNAL_TOKEN` is SET to a value the worker client
+   * cannot use, by name (`agentConfigFrom`) — so `worker` is false because of
+   * a value, not an absence, and a page can say which variable to correct.
+   * Absent when neither is malformed; optional so an older literal reads so.
+   */
+  readonly agentMisconfigured?: readonly AgentVariable[]
   /** Mail goes to a local development sink rather than a real relay. */
   readonly mailIsLocalSink: boolean
   /**
@@ -69,9 +77,9 @@ const LOCAL_MAIL = /^(localhost|127\.0\.0\.1|\[?::1\]?|mailpit|host\.docker\.int
 /**
  * The facts, from the configuration, as a pure function — so a test can
  * state them over an object and a page can never be told something the
- * variables do not say. `worker` is the same two-variable rule the chat
- * route uses (`agentConfigured()`), restated here rather than imported so
- * that this function reads nothing but its argument.
+ * variables do not say. `worker` is the rule the chat route uses
+ * (`agentConfigured()`), through the same pure reader, `agentConfigFrom`, so
+ * a malformed AGENT_URL is "not configured" here exactly as it is there.
  */
 export function flagsFrom(
   e: Pick<
@@ -89,8 +97,10 @@ export function flagsFrom(
   >,
 ): Deployment {
   const resend = Boolean(e.RESEND_WEBHOOK_SECRET && e.RESEND_API_KEY)
+  const agent = agentConfigFrom(e)
   return {
-    worker: Boolean(e.AGENT_URL && e.AGENT_INTERNAL_TOKEN),
+    worker: agent.state === 'configured',
+    ...(agent.state === 'misconfigured' ? { agentMisconfigured: agent.variables } : {}),
     mailIsLocalSink: LOCAL_MAIL.test(e.SMTP_HOST.trim()),
     inbound: e.INBOUND_WEBHOOK_SECRET || resend ? 'webhook' : 'none',
     smsInbound: Boolean(e.DOVESOFT_WEBHOOK_SECRET),

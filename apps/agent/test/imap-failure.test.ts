@@ -25,6 +25,14 @@ describe('imapFailure', () => {
     expect(JSON.stringify(out)).not.toContain('myagencyos')
   })
 
+  it('does not blame the host for a lookup that may only mean the machine is offline', () => {
+    const notFound = imapFailure(Object.assign(new Error('x'), { code: 'ENOTFOUND' }))
+    expect(notFound.hint).toContain('online')
+    const timedOut = imapFailure(Object.assign(new Error('x'), { code: 'EAI_AGAIN' }))
+    expect(timedOut).toEqual({ reason: 'EAI_AGAIN', hint: expect.stringContaining('may be offline') })
+    expect(timedOut.hint).not.toContain('IMAP_HOST')
+  })
+
   it("passes imapflow's own codes, and the server's bracketed code, through bare", () => {
     expect(imapFailure(Object.assign(new Error('x'), { code: 'NoConnection' }))).toEqual({ reason: 'NoConnection' })
     expect(imapFailure(Object.assign(new Error('x'), { serverResponseCode: 'UNAVAILABLE' }))).toEqual({ reason: 'UNAVAILABLE' })

@@ -1,5 +1,6 @@
 import 'server-only'
 import { env } from '@/lib/env'
+import { agentConfigFrom, type AgentConfig } from '@/lib/agent-config'
 
 /**
  * The web app's side of the worker boundary (PROMPT.md §3).
@@ -15,11 +16,18 @@ import { env } from '@/lib/env'
  * process, and CI builds this app with no secrets to keep it that way.
  */
 
-export type AgentUnavailable = { readonly ok: false; readonly reason: 'not_configured' | 'unreachable' }
+export type AgentUnavailable = {
+  readonly ok: false
+  readonly reason: 'not_configured' | 'misconfigured' | 'unreachable'
+}
+
+/** The worker's address and token as validated by `agentConfigFrom` — never read raw. */
+export function agentConfig(): AgentConfig {
+  return agentConfigFrom(env())
+}
 
 export function agentConfigured(): boolean {
-  const e = env()
-  return Boolean(e.AGENT_URL && e.AGENT_INTERNAL_TOKEN)
+  return agentConfig().state === 'configured'
 }
 
 /**
@@ -35,15 +43,15 @@ export async function startTurn(body: {
   userId: string
   text: string
 }): Promise<Response | AgentUnavailable> {
-  const e = env()
-  if (!e.AGENT_URL || !e.AGENT_INTERNAL_TOKEN) return { ok: false, reason: 'not_configured' }
+  const c = agentConfig()
+  if (c.state !== 'configured') return { ok: false, reason: c.state }
 
   try {
-    return await fetch(`${e.AGENT_URL}/internal/turns`, {
+    return await fetch(`${c.url}/internal/turns`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        authorization: `Bearer ${e.AGENT_INTERNAL_TOKEN}`,
+        authorization: `Bearer ${c.token}`,
       },
       body: JSON.stringify(body),
       // Node's fetch buffers a response body by default when duplex is not
@@ -59,12 +67,12 @@ export async function startTurn(body: {
 }
 
 export async function interruptTurn(turnId: string): Promise<boolean> {
-  const e = env()
-  if (!e.AGENT_URL || !e.AGENT_INTERNAL_TOKEN) return false
+  const c = agentConfig()
+  if (c.state !== 'configured') return false
   try {
-    const res = await fetch(`${e.AGENT_URL}/internal/turns/${encodeURIComponent(turnId)}/interrupt`, {
+    const res = await fetch(`${c.url}/internal/turns/${encodeURIComponent(turnId)}/interrupt`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${e.AGENT_INTERNAL_TOKEN}` },
+      headers: { authorization: `Bearer ${c.token}` },
       cache: 'no-store',
     })
     return res.ok
@@ -89,16 +97,16 @@ export interface ProbeAnswer {
  * wrong problem.
  */
 export async function probeConnector(orgId: string, connectorId: string): Promise<ProbeAnswer | null> {
-  const e = env()
-  if (!e.AGENT_URL || !e.AGENT_INTERNAL_TOKEN) return null
+  const c = agentConfig()
+  if (c.state !== 'configured') return null
   try {
     const res = await fetch(
-      `${e.AGENT_URL}/internal/connectors/${encodeURIComponent(connectorId)}/probe`,
+      `${c.url}/internal/connectors/${encodeURIComponent(connectorId)}/probe`,
       {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          authorization: `Bearer ${e.AGENT_INTERNAL_TOKEN}`,
+          authorization: `Bearer ${c.token}`,
         },
         body: JSON.stringify({ orgId }),
         cache: 'no-store',

@@ -123,6 +123,12 @@ export interface DeploymentFactInput {
   readonly flags: Deployment
   /** `agentConfigured()` — what the chat route asks before it forwards a turn. */
   readonly agent: boolean
+  /**
+   * `agentMisconfiguredSentence(flags.agentMisconfigured)` when AGENT_URL or
+   * AGENT_INTERNAL_TOKEN holds a value chat cannot use — handed in, because
+   * this module takes no value imports. Undefined otherwise.
+   */
+  readonly agentProblem?: string
   /** `secretsKeyFromEnv() !== null` — a key that decodes; `malformed` is set but refused. */
   readonly secretsKey: 'valid' | 'malformed' | 'unset'
   /** The platform's own `VERCEL_ENV`, or undefined off Vercel. */
@@ -199,9 +205,13 @@ export function deploymentFacts(i: DeploymentFactInput): readonly DeploymentFact
     {
       area: 'Chat',
       on: i.agent,
+      // A value that cannot be used is named, by variable: chat is off
+      // because of what was typed, not because nothing was (review round 15).
       sentence: i.agent
         ? 'The agent runs in the configured worker; chat turns are forwarded to it.'
-        : 'Unavailable here: the agent runs only in the worker, which cannot run on a serverless host.',
+        : i.agentProblem !== undefined
+          ? i.agentProblem
+          : 'Unavailable here: the agent runs only in the worker, which cannot run on a serverless host.',
       vars: ['AGENT_URL', 'AGENT_INTERNAL_TOKEN'],
     },
     {

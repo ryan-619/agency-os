@@ -658,8 +658,18 @@ export function imapFailure(err: unknown): { reason?: string; hint?: string } {
       hint: 'the mailbox refused IMAP_USER or IMAP_PASSWORD — Google needs the whole address and an app password',
     }
   }
-  if (reason === 'ENOTFOUND' || reason === 'EAI_AGAIN') {
-    return { reason, hint: 'IMAP_HOST is not a server name that resolves — e.g. imap.gmail.com' }
+  // macOS answers ENOTFOUND for every name while the machine is offline, and
+  // EAI_AGAIN is a resolver that did not answer in time: neither proves the
+  // host is wrong, and a laptop reconnecting after sleep must not be told it
+  // is (review round 15).
+  if (reason === 'ENOTFOUND') {
+    return {
+      reason,
+      hint: 'IMAP_HOST did not resolve — check it is a server name, e.g. imap.gmail.com, and that this machine is online',
+    }
+  }
+  if (reason === 'EAI_AGAIN') {
+    return { reason, hint: 'a DNS lookup timed out — this machine may be offline; it is retried' }
   }
   return { reason }
 }

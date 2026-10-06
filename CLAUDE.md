@@ -27,7 +27,7 @@ tested against a fetch that records and never sends, and against PGlite —
 never against DoveSoft itself, whose push formats and `mobiles` format are
 assumptions to confirm before a real send. Calls
 and WhatsApp over DoveSoft are not built: DoveSoft publishes no API for
-either. Fourteen review rounds, and the follow-ups they left open, have been fixed
+either. Fifteen review rounds, and the follow-ups they left open, have been fixed
 on top of both releases; each fix is stated below where the rule it changed
 lives.
 
@@ -37,7 +37,24 @@ machine"), which needs no public address, because everything but chat is
 the worker reaching out. Chat is the script's one opt-in inbound route: an
 ngrok tunnel on the operator's free static domain to the worker's API port,
 with `AGENT_URL` and the same `AGENT_INTERNAL_TOKEN` set in Vercel once
-(DEPLOYING.md, "If you do want chat on the live site"). The script asks a server name until it is one and Google's IMAP username until
+(DEPLOYING.md, "If you do want chat on the live site"). Since review round
+15 ngrok runs with `--inspect=false` (its inspector kept every forwarded
+request, the bearer included, on an unauthenticated `127.0.0.1:4040`), chat
+is ON only once ngrok's log says the tunnel on that domain started, a watcher
+stops ngrok when the worker exits, a tunnel an earlier run left on the port
+is stopped first (matched only where the command line STARTS with ngrok — an
+unanchored `pkill -f` killed the shell running the tests), a key or token
+exported in the calling shell is never used, and a saved token can be
+`copy`'d to the clipboard again or replaced. And a malformed `AGENT_URL` or
+`AGENT_INTERNAL_TOKEN` in Vercel turns CHAT off rather than the site: the
+two are read loosely by `env()` and judged by `agentConfigFrom`
+(`apps/web/src/lib/agent-config.ts`), the one reader `lib/agent.ts` and
+`flagsFrom` share, because `env()` throws for every route on any failure —
+on 2026-10-02 one did, and every page, the one-click unsubscribe and every
+inbound webhook answered 500 while `/api/health` blamed the database. A
+configuration that does not parse throws `InvalidEnvironmentError`, which
+`/api/health` reports as `config: invalid`, the deploy gate prints, and the
+unsubscribe POST now catches and logs `OPT-OUT NOT RECORDED`. The script asks a server name until it is one and Google's IMAP username until
 it is a whole address, because a mistyped host reconnected every five
 minutes for ever; and the worker's reconnect line now carries `reason` (the
 error's code or the server's, e.g. `ENOTFOUND`, `authentication_failed`)
@@ -3968,8 +3985,10 @@ npm run smoke:agent -- --connector deepwiki   # the Phase 3 gate (§6's "no rest
                               # and on a Mac keeps it awake (caffeinate -is) and can keep its answers in the
                               # login Keychain, each value base64 on security's stdin, never its argv.
                               # CHAT is optional: an ngrok tunnel on the operator's static domain to the
-                              # worker's API port, started from an EMPTY environment, the Anthropic key and
-                              # an AGENT_INTERNAL_TOKEN made onto the clipboard for Vercel (with AGENT_URL);
+                              # worker's API port, started from an EMPTY environment with --inspect=false,
+                              # ON only once ngrok logs the tunnel started, stopped by a watcher when the
+                              # worker exits; the Anthropic key and an AGENT_INTERNAL_TOKEN made onto the
+                              # clipboard for Vercel (with AGENT_URL; a saved one can be `copy`'d again);
                               # with chat off the worker is handed no Anthropic key
 ./tools/run-worker.sh --reconfigure   # ask every question again
 ./tools/run-worker.sh --forget        # delete the saved answers

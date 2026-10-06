@@ -61,6 +61,23 @@ describe('flagsFrom', () => {
     expect(flagsFrom({ ...BARE, AGENT_URL: 'http://127.0.0.1:3002', AGENT_INTERNAL_TOKEN: 't'.repeat(32) }).worker).toBe(true)
   })
 
+  /**
+   * A value that cannot be used is not a worker, and is named. On 2026-10-02
+   * an AGENT_URL saved without its scheme failed env() for every route; it is
+   * judged by agentConfigFrom now, as the chat route judges it (round 15).
+   */
+  it('reads a malformed worker address or token as no worker, and names the variable', () => {
+    const noScheme = flagsFrom({ ...BARE, AGENT_URL: 'calm-otter-42.ngrok-free.app', AGENT_INTERNAL_TOKEN: 't'.repeat(64) })
+    expect(noScheme.worker).toBe(false)
+    expect(noScheme.agentMisconfigured).toEqual(['AGENT_URL'])
+    const short = flagsFrom({ ...BARE, AGENT_URL: 'https://calm-otter-42.ngrok-free.app', AGENT_INTERNAL_TOKEN: 'short' })
+    expect(short.worker).toBe(false)
+    expect(short.agentMisconfigured).toEqual(['AGENT_INTERNAL_TOKEN'])
+    const fine = flagsFrom({ ...BARE, AGENT_URL: 'https://calm-otter-42.ngrok-free.app/', AGENT_INTERNAL_TOKEN: 't'.repeat(64) })
+    expect(fine.worker).toBe(true)
+    expect(fine.agentMisconfigured).toBeUndefined()
+  })
+
   it.each(['mailpit', 'localhost', '127.0.0.1', 'host.docker.internal', ' MAILPIT '])(
     'knows %s is a local sink',
     (host) => {

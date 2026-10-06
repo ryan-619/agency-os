@@ -34,11 +34,15 @@
  *    survives a reconfigure that turns sending off;
  *  - chat runs only with a tunnel: an ngrok stub stands in for ngrok, which is
  *    started from an EMPTY environment (no credential reaches a third
- *    party's binary), with the domain on its argv and nothing secret; the
- *    worker gets the Anthropic key and the saved AGENT_INTERNAL_TOKEN only
- *    when chat is on, and the token is made on a key press only onto the
- *    clipboard and into the Keychain — and never over an unsubscribe secret
- *    still waiting to be pasted;
+ *    party's binary), with the domain on its argv, its request inspector
+ *    off, and nothing secret; chat is ON only once ngrok says the tunnel on
+ *    that domain started, ngrok is stopped when the worker exits, and a
+ *    tunnel an earlier run left on the port is stopped; the worker gets the
+ *    Anthropic key and the saved AGENT_INTERNAL_TOKEN only when chat is on,
+ *    never a value exported in the shell, and the token is made on a key
+ *    press only onto the clipboard and into the Keychain — never over an
+ *    unsubscribe secret still waiting to be pasted — and a saved one can be
+ *    copied again or replaced;
  *  - a server name is asked until it is one, and Google's IMAP username until
  *    it is a whole address;
  *  - Neon's pooled endpoint is refused, saved or not;
@@ -119,12 +123,57 @@ function clipboard(): string | undefined {
 /** Whether anything ran npx — which nothing may. */
 const npxRan = () => existsSync(join(logs, 'npx'))
 
-function run(repo: string, args: string[] = []) {
+function run(repo: string, args: string[] = [], extra: Record<string, string> = {}) {
   return spawnSync('bash', [join(repo, 'tools/run-worker.sh'), ...args], {
     cwd: repo,
-    env: { PATH: `${bin}:${process.env.PATH}`, HOME: dir, KEYCHAIN: keychain, LOGS: logs },
+    env: { PATH: `${bin}:${process.env.PATH}`, HOME: dir, KEYCHAIN: keychain, LOGS: logs, ...extra },
     encoding: 'utf8',
     timeout: 30_000,
+  })
+}
+
+/**
+ * ngrok: records its argv, its environment and its pid, says on stdout — the
+ * script's log of it — what the real agent says once a tunnel is up, then
+ * stays up as a tunnel does. `line` replaces that saying (an error that
+ * retries for ever, say). The log path is written in, because ngrok is
+ * started from an empty environment and $LOGS does not reach it.
+ */
+function ngrokStub(line = `t=2026-10-06T00:00:00+0000 lvl=info msg="started tunnel" obj=tunnels name=command_line addr=http://127.0.0.1:3002 url=https://${CHAT_DOMAIN}`): void {
+  stub('ngrok', [
+    `printf "%s\\n" "$*" >> "${logs}/ngrok-argv"`,
+    `env > "${logs}/ngrok-env"`,
+    `echo $$ > "${logs}/ngrok-pid"`,
+    `printf '%s\\n' '${line}'`,
+    'exec sleep 30',
+  ].join('\n'))
+}
+
+/** Whether `pid` is gone within `ms`, polled — the watcher checks every two seconds. */
+function goneWithin(pid: number, ms: number): boolean {
+  const until = Date.now() + ms
+  for (;;) {
+    try {
+      process.kill(pid, 0)
+    } catch {
+      return true
+    }
+    if (Date.now() > until) return false
+    spawnSync('sleep', ['0.2'])
+  }
+}
+
+const ngrokPid = (): number => Number(readFileSync(join(logs, 'ngrok-pid'), 'utf8').trim())
+
+/** Whether a child of this process has exited within `ms`, by its own exit event. */
+function exitedWithin(child: ReturnType<typeof spawn>, ms: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true)
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms)
+    child.once('exit', () => {
+      clearTimeout(timer)
+      resolve(true)
+    })
   })
 }
 
@@ -309,12 +358,6 @@ describe('tools/run-worker.sh', () => {
   describe('chat, through an ngrok tunnel', () => {
     const ngrokArgv = () => (existsSync(join(logs, 'ngrok-argv')) ? readFileSync(join(logs, 'ngrok-argv'), 'utf8') : undefined)
     const ngrokEnv = () => readFileSync(join(logs, 'ngrok-env'), 'utf8')
-    /**
-     * ngrok: records its argv and environment, then stays up as a tunnel
-     * does. The log path is written in, because ngrok is started from an
-     * empty environment — $LOGS does not reach it.
-     */
-    const ngrok = () => stub('ngrok', `printf "%s\\n" "$*" >> "${logs}/ngrok-argv"; env > "${logs}/ngrok-env"; exec sleep 5`)
     const saveChat = () => {
       save('DATABASE_URL', DB)
       save('SMTP_PASSWORD', SMTP_PASSWORD)
@@ -322,12 +365,17 @@ describe('tools/run-worker.sh', () => {
       save('ANTHROPIC_API_KEY', ANTHROPIC_KEY)
       save('AGENT_INTERNAL_TOKEN', CHAT_TOKEN)
     }
+    const noChat = () => {
+      const worker = calls()[1]!.env
+      expect(worker.ANTHROPIC_API_KEY).toBeUndefined()
+      expect(worker.AGENT_INTERNAL_TOKEN).not.toBe(CHAT_TOKEN)
+      expect(worker.AGENT_INTERNAL_TOKEN?.length).toBeGreaterThanOrEqual(32)
+    }
 
     it('runs the tunnel and hands the worker the key and the saved token — none of them on any argv, nothing to ngrok', () => {
-      ngrok()
+      ngrokStub()
       saveChat()
-      const repo = layout()
-      const r = run(repo)
+      const r = run(layout())
       expect(r.status, r.stderr).toBe(0)
       expect(r.stdout).toContain(`chat:     ON  — the live site reaches this Mac at https://${CHAT_DOMAIN}`)
       const worker = calls()[1]!.env
@@ -335,8 +383,12 @@ describe('tools/run-worker.sh', () => {
       expect(worker.AGENT_INTERNAL_TOKEN).toBe(CHAT_TOKEN)
       expect(worker.AGENT_MODEL).toBe('claude-haiku-4-5')
       expect(worker.AGENT_BIND).toBe('127.0.0.1')
-      // The API port, on the domain, and nothing else.
-      expect(ngrokArgv()).toBe(`http 127.0.0.1:3002 --url=https://${CHAT_DOMAIN} --log=stdout --log-level=warn\n`)
+      // The API port, on the domain, with the request inspector OFF: on, it
+      // keeps every forwarded request — the bearer included — on an
+      // unauthenticated local page (review round 15).
+      expect(ngrokArgv()).toBe(
+        `http 127.0.0.1:3002 --url=https://${CHAT_DOMAIN} --inspect=false --log=stdout --log-format=logfmt --log-level=info\n`,
+      )
       // ngrok's environment holds no credential this script was handed.
       const env = ngrokEnv()
       for (const secret of [DB, SMTP_PASSWORD, ANTHROPIC_KEY, CHAT_TOKEN]) expect(env).not.toContain(secret)
@@ -349,15 +401,25 @@ describe('tools/run-worker.sh', () => {
       }
     })
 
+    /**
+     * The worker here exits at once, as one that refuses to boot does, and
+     * the exec leaves nothing in the script to stop ngrok: the watcher does,
+     * or the tunnel held the domain out of reach of Ctrl-C (review round 15).
+     */
+    it('stops ngrok when the worker exits', () => {
+      ngrokStub()
+      saveChat()
+      const r = run(layout())
+      expect(r.status, r.stderr).toBe(0)
+      expect(goneWithin(ngrokPid(), 6_000)).toBe(true)
+    })
+
     it('leaves chat off, says why, and hands the worker no key when ngrok is not installed', () => {
       saveChat()
       const r = run(layout())
       expect(r.status, r.stderr).toBe(0)
       expect(r.stdout).toContain("chat:     OFF — ngrok is not installed: 'brew install ngrok'")
-      const worker = calls()[1]!.env
-      expect(worker.ANTHROPIC_API_KEY).toBeUndefined()
-      expect(worker.AGENT_INTERNAL_TOKEN).not.toBe(CHAT_TOKEN)
-      expect(worker.AGENT_INTERNAL_TOKEN?.length).toBeGreaterThanOrEqual(32)
+      noChat()
     })
 
     it('leaves chat off, and says so, when ngrok cannot open the domain', () => {
@@ -367,11 +429,35 @@ describe('tools/run-worker.sh', () => {
       expect(r.status, r.stderr).toBe(0)
       expect(r.stderr).toContain('ERR_NGROK_4018')
       expect(r.stdout).toContain(`chat:     OFF — ngrok could not open ${CHAT_DOMAIN}`)
-      expect(calls()[1]!.env.ANTHROPIC_API_KEY).toBeUndefined()
+      noChat()
+    })
+
+    /**
+     * ngrok that cannot reach or sign in to its edge does not exit — it
+     * retries for ever — so "still running after three seconds" said ON and
+     * handed the worker the key while nothing was served (review round 15).
+     */
+    it('leaves chat off, and stops ngrok, when it stays up without ever opening the tunnel', () => {
+      ngrokStub('t=2026-10-06T00:00:00+0000 lvl=eror msg="failed to reconnect session" obj=tunnels.session err="no route"')
+      saveChat()
+      const r = run(layout(), [], { AGENCY_TUNNEL_WAIT_SECONDS: '2' })
+      expect(r.status, r.stderr).toBe(0)
+      expect(r.stderr).toContain('failed to reconnect session')
+      expect(r.stdout).toContain(`chat:     OFF — ngrok could not open ${CHAT_DOMAIN}`)
+      noChat()
+      expect(goneWithin(ngrokPid(), 3_000)).toBe(true)
+    })
+
+    it('does not take a tunnel on another domain for this one', () => {
+      ngrokStub('t=2026-10-06T00:00:00+0000 lvl=info msg="started tunnel" obj=tunnels url=https://someone-else.ngrok-free.app')
+      saveChat()
+      const r = run(layout(), [], { AGENCY_TUNNEL_WAIT_SECONDS: '2' })
+      expect(r.stdout).toContain(`chat:     OFF — ngrok could not open ${CHAT_DOMAIN}`)
+      noChat()
     })
 
     it('hands the worker no key when chat was never turned on, whatever is saved', () => {
-      ngrok()
+      ngrokStub()
       save('DATABASE_URL', DB)
       save('ANTHROPIC_API_KEY', ANTHROPIC_KEY)
       const r = run(layout())
@@ -379,6 +465,59 @@ describe('tools/run-worker.sh', () => {
       expect(r.stdout).toContain('chat:     OFF — no inbound route')
       expect(calls()[1]!.env.ANTHROPIC_API_KEY).toBeUndefined()
       expect(ngrokArgv()).toBeUndefined()
+    })
+
+    /** With chat off it would publish a port whose token nobody holds (review round 15). */
+    it('stops a tunnel an earlier run left on the worker’s port', async () => {
+      save('DATABASE_URL', DB)
+      const left = spawn('bash', ['-c', 'exec -a "ngrok http 127.0.0.1:3002 --url=https://old.ngrok-free.app" sleep 30'], {
+        stdio: 'ignore',
+        detached: true,
+      })
+      // A shell whose command line merely MENTIONS the tunnel: the first
+      // version's unanchored pattern killed exactly this — the shell running
+      // the test suite.
+      const bystander = spawn('bash', ['-c', 'sleep 30; : ngrok http 127.0.0.1:3002 --url=x'], { stdio: 'ignore', detached: true })
+      try {
+        spawnSync('sleep', ['0.3'])
+        const r = run(layout())
+        expect(r.status, r.stderr).toBe(0)
+        expect(r.stdout).toContain("Stopped an ngrok tunnel an earlier run left on this worker's port.")
+        // Its own child: polled with kill(0) it would read as alive until
+        // this process reaps it, so its exit is awaited instead.
+        expect(await exitedWithin(left, 3_000)).toBe(true)
+        expect(bystander.exitCode === null && bystander.signalCode === null).toBe(true)
+      } finally {
+        for (const p of [left.pid!, bystander.pid!]) {
+          try {
+            process.kill(p)
+          } catch {
+            // already gone
+          }
+        }
+      }
+    })
+
+    /**
+     * A key or token exported in the calling shell was used when Enter was
+     * pressed, and saved under this service: every teammate's turn billed to
+     * a key nobody chose here (review round 15). Only a saved or typed value
+     * counts.
+     */
+    it('ignores a key or token exported in the shell', () => {
+      save('DATABASE_URL', DB)
+      save('CHAT_URL', `https://${CHAT_DOMAIN}`)
+      save('AGENT_INTERNAL_TOKEN', CHAT_TOKEN)
+      ngrokStub()
+      const r = run(layout(), [], { ANTHROPIC_API_KEY: 'sk-ant-AMBIENT-shell-key', AGENT_INTERNAL_TOKEN: 'a'.repeat(64) })
+      expect(r.status, r.stderr).toBe(0)
+      expect(r.stdout).toContain('chat:     OFF — no Anthropic API key was given')
+      const [build, worker] = calls()
+      expect(build!.env.ANTHROPIC_API_KEY).toBeUndefined()
+      expect(build!.env.AGENT_INTERNAL_TOKEN).toBeUndefined()
+      expect(worker!.env.ANTHROPIC_API_KEY).toBeUndefined()
+      expect(worker!.env.AGENT_INTERNAL_TOKEN).not.toBe('a'.repeat(64))
+      expect(saved('ANTHROPIC_API_KEY')).toBeUndefined()
     })
   })
 
@@ -465,7 +604,14 @@ interface Dialog {
   /** Configure sending (the unsubscribe question is asked only then). */
   readonly smtp: boolean
   /** Turn chat on: the domain, then the key typed at its prompt ('' keeps a saved one). */
-  readonly chat?: { readonly domain: string; readonly key: string; readonly pasteFirst?: boolean; readonly saved?: boolean }
+  readonly chat?: {
+    readonly domain: string
+    readonly key: string
+    readonly pasteFirst?: boolean
+    readonly saved?: boolean
+    /** Typed at the saved token's prompt: '' keeps it, `copy` or `new`. */
+    readonly token?: '' | 'copy' | 'new'
+  }
   /** The IMAP hosts and usernames typed, in order, when reply detection is configured. */
   readonly imap?: { readonly hosts: readonly string[]; readonly users: readonly string[] }
   /** Typed at the unsubscribe prompt: '' is Enter. */
@@ -495,8 +641,9 @@ function dialog(d: Dialog): Turn[] {
   t.push(['Turn on CHAT on the live site', d.chat ? 'y' : 'n'])
   if (d.chat) {
     t.push(['Your ngrok static domain', d.chat.domain], ['Anthropic API key', d.chat.key])
+    if (d.chat.saved) t.push(['AGENT_INTERNAL_TOKEN: Enter keeps', d.chat.token ?? ''])
     if (d.chat.pasteFirst) t.push(['Paste it into Vercel first', ''])
-    if (!d.chat.saved) t.push(['Press Enter once both are saved', ''])
+    if (!d.chat.saved || (d.chat.token ?? '') !== '') t.push(['Press Enter once both are saved', ''])
   }
   if (d.remember !== undefined) t.push(['Remember these answers', d.remember])
   return t
@@ -599,7 +746,7 @@ describe.runIf(PTY)('tools/run-worker.sh, answered at its prompts', () => {
   })
 
   it('on a Mac, chat yes: one token, on the clipboard and saved, the key in the Keychain — and the worker runs with both', async () => {
-    stub('ngrok', 'exec sleep 5')
+    ngrokStub()
     const r = await answered(layout(), [], { smtp: false, chat: { domain: `https://${CHAT_DOMAIN}/`, key: ANTHROPIC_KEY }, remember: 'y' })
     const token = r.worker.AGENT_INTERNAL_TOKEN
     expect(token).toMatch(/^[0-9a-f]{64}$/)
@@ -613,7 +760,7 @@ describe.runIf(PTY)('tools/run-worker.sh, answered at its prompts', () => {
   })
 
   it('on a Mac, a new unsubscribe secret is not overwritten on the clipboard before it is pasted', async () => {
-    stub('ngrok', 'exec sleep 5')
+    ngrokStub()
     const r = await answered(layout(), [], {
       smtp: true, unsubscribe: 'new', confirmNew: 'y',
       chat: { domain: CHAT_DOMAIN, key: ANTHROPIC_KEY, pasteFirst: true }, remember: 'y',
@@ -626,18 +773,49 @@ describe.runIf(PTY)('tools/run-worker.sh, answered at its prompts', () => {
   })
 
   it('on a Mac, --reconfigure with chat on: Enter keeps the saved key and token — never a rotation', async () => {
-    stub('ngrok', 'exec sleep 5')
+    ngrokStub()
     save('DATABASE_URL', DB)
     save('ANTHROPIC_API_KEY', ANTHROPIC_KEY)
     save('AGENT_INTERNAL_TOKEN', CHAT_TOKEN)
     const r = await answered(layout(), ['--reconfigure'], { smtp: false, chat: { domain: CHAT_DOMAIN, key: '', saved: true }, remember: 'y' })
     expect(r.worker.ANTHROPIC_API_KEY).toBe(ANTHROPIC_KEY)
     expect(r.worker.AGENT_INTERNAL_TOKEN).toBe(CHAT_TOKEN)
-    expect(r.transcript).toContain('Kept the AGENT_INTERNAL_TOKEN saved in your Keychain')
+    expect(r.transcript).toContain('Kept. Vercel must hold the same token')
     // Vercel's AGENT_URL is named all the same: a saved token may have been
     // set beside another address.
     expect(r.transcript).toContain(`and AGENT_URL = https://${CHAT_DOMAIN} (Production)`)
     expect(clipboard()).toBeUndefined()
+  })
+
+  /**
+   * Vercel keeps the token Sensitive and never shows it back, so the
+   * Keychain's copy is the only one a person can put back in step (review
+   * round 15): `copy` puts the SAVED token on the clipboard, unchanged.
+   */
+  it('on a Mac, --reconfigure with chat on: copy puts the saved token on the clipboard again — no rotation', async () => {
+    ngrokStub()
+    save('DATABASE_URL', DB)
+    save('ANTHROPIC_API_KEY', ANTHROPIC_KEY)
+    save('AGENT_INTERNAL_TOKEN', CHAT_TOKEN)
+    const r = await answered(layout(), ['--reconfigure'], { smtp: false, chat: { domain: CHAT_DOMAIN, key: '', saved: true, token: 'copy' }, remember: 'y' })
+    expect(clipboard()).toBe(CHAT_TOKEN)
+    expect(saved('AGENT_INTERNAL_TOKEN')).toBe(CHAT_TOKEN)
+    expect(r.worker.AGENT_INTERNAL_TOKEN).toBe(CHAT_TOKEN)
+    expect(r.transcript).toContain(`AGENT_URL            = https://${CHAT_DOMAIN}`)
+    expect(r.transcript).not.toContain(CHAT_TOKEN)
+  })
+
+  it('on a Mac, --reconfigure with chat on: new replaces the saved token, on the clipboard and in the Keychain', async () => {
+    ngrokStub()
+    save('DATABASE_URL', DB)
+    save('ANTHROPIC_API_KEY', ANTHROPIC_KEY)
+    save('AGENT_INTERNAL_TOKEN', CHAT_TOKEN)
+    const r = await answered(layout(), ['--reconfigure'], { smtp: false, chat: { domain: CHAT_DOMAIN, key: '', saved: true, token: 'new' }, remember: 'y' })
+    const token = r.worker.AGENT_INTERNAL_TOKEN
+    expect(token).toMatch(/^[0-9a-f]{64}$/)
+    expect(token).not.toBe(CHAT_TOKEN)
+    expect(clipboard()).toBe(token)
+    expect(saved('AGENT_INTERNAL_TOKEN')).toBe(token)
   })
 
   it('on a Mac, --reconfigure with chat turned off: the saved key and token survive being remembered, and the worker gets neither', async () => {

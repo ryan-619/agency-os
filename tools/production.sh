@@ -185,7 +185,10 @@ verify() {
   want=$(expected_migration)
   [ -n "$want" ] || die "Could not read EXPECTED_MIGRATION."
   for _ in $(seq 1 30); do
-    body=$(curl -fsS --max-time 15 "$SITE/api/health?strict=1" || true)
+    # No -f: a 503's body is the answer worth reading — it names the class of
+    # failure and nothing more (the route reports no value), where -f printed
+    # "last answer: none" for a deployment whose configuration did not parse.
+    body=$(curl -sS --max-time 15 "$SITE/api/health?strict=1" || true)
     if node -e '
       const h = JSON.parse(process.argv[1] || "{}"), want = process.argv[2]
       process.exit(h.database === "ok" && h.schema?.expected === want && h.schema?.applied === want ? 0 : 1)
@@ -195,7 +198,14 @@ verify() {
     fi
     sleep 10
   done
-  echo "last answer: ${body:-none}"
+  echo "last answer: $(printf '%s' "${body:-none}" | head -c 600)"
+  case "$body" in
+    *'"config":"invalid"'*)
+      echo "This deployment's environment variables do not parse. Its runtime log (Vercel → Logs)" >&2
+      echo "names the variable after 'Invalid environment configuration'. Until it is corrected," >&2
+      echo "promote the previous deployment (Vercel → Deployments → Promote), then fix it and deploy again." >&2
+      ;;
+  esac
   die "$SITE did not report migration $want within five minutes."
 }
 
@@ -347,7 +357,13 @@ worker() {
   add WEB_PUBLIC_URL "$SITE"
   local wire=true
   digest=$(fly_token_digest) || die "Could not list the Fly app's secrets."
+  # AGENT_URL must still point at THIS app: run-worker.sh's chat option has
+  # the operator set AGENT_URL and the token by hand for a tunnel to their own
+  # machine, and the marker alone would then keep that wiring while Fly held
+  # another token (review round 15). A value set Sensitive never reads back,
+  # so it never matches, and the run wires afresh — the safe direction.
   if [ -n "$digest" ] && vercel_env has AGENT_INTERNAL_TOKEN && vercel_env has AGENT_URL \
+    && VALUE="https://$APP.fly.dev" vercel_env equals AGENT_URL \
     && VALUE="$APP:$digest" vercel_env equals "$MARKER"; then
     wire=false
     echo "wiring: Vercel was wired to this app's current token by a run that finished; keeping it"

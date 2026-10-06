@@ -19,6 +19,7 @@ import { describe, expect, it } from 'vitest'
 import { HEARTBEAT_RETIRED_AFTER_DAYS, heartbeatReport, heartbeatReportedStatus } from '@agency/db/queries'
 import { deploymentFacts, sendingAnswer, workerLine, workerModes, type DeploymentFactInput } from '../src/app/settings/facts'
 import { RETIRED_WORKER_WORDS } from '../src/lib/dashboard-view'
+import { agentMisconfiguredSentence } from '../src/lib/agent-config'
 
 const NOW = new Date('2026-09-30T12:00:00Z')
 const DAY = 86_400
@@ -202,6 +203,33 @@ describe('the clause is the digest’s', () => {
  * a mailbox" sat beside "Worker last seen 2 minutes ago · sending and
  * reading a mailbox". Review round 3, finding [20].
  */
+describe('the Chat fact', () => {
+  const input = (over: Partial<DeploymentFactInput['flags']> = {}, agent = false, agentProblem?: string): DeploymentFactInput => ({
+    flags: { worker: false, mailIsLocalSink: false, inbound: 'none', cron: false, slack: false, unsubscribe: false, ...over },
+    agent,
+    ...(agentProblem === undefined ? {} : { agentProblem }),
+    secretsKey: 'unset',
+    vercelEnv: undefined,
+    inboundJson: false,
+    inboundResend: false,
+    rescanBatchSize: 25,
+  })
+  const chat = (i: DeploymentFactInput) => deploymentFacts(i).find((f) => f.area === 'Chat')!
+
+  /** Off because of a value, not an absence: it says which variable (review round 15). */
+  it('names a variable set to a value chat cannot use', () => {
+    const c = chat(input({ agentMisconfigured: ['AGENT_URL'] }, false, agentMisconfiguredSentence(['AGENT_URL'])))
+    expect(c.on).toBe(false)
+    expect(c.sentence).toContain('AGENT_URL is set here but is not a full http(s) address')
+    expect(c.sentence).toContain('So chat is off.')
+  })
+
+  it('keeps its sentences for configured and absent', () => {
+    expect(chat(input({ worker: true }, true)).sentence).toBe('The agent runs in the configured worker; chat turns are forwarded to it.')
+    expect(chat(input()).sentence).toBe('Unavailable here: the agent runs only in the worker, which cannot run on a serverless host.')
+  })
+})
+
 describe('the Replies fact', () => {
   const input = (over: Partial<DeploymentFactInput['flags']> = {}, i: Partial<DeploymentFactInput> = {}): DeploymentFactInput => ({
     flags: { worker: false, mailIsLocalSink: false, inbound: 'none', cron: false, slack: false, unsubscribe: false, ...over },

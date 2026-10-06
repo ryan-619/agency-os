@@ -27,6 +27,7 @@ import {
 export function ChatPanel({
   sessionId,
   agentAvailable,
+  agentMisconfigured,
   archived = false,
   canDecide,
   initialBlocks = [],
@@ -39,6 +40,12 @@ export function ChatPanel({
    */
   sessionId: string
   agentAvailable: boolean
+  /**
+   * Set when chat is off because AGENT_URL or AGENT_INTERNAL_TOKEN holds a
+   * value that cannot be used: the sentence naming which (agent-config.ts),
+   * never the value. "Not both set" would be false of it.
+   */
+  agentMisconfigured?: string
   /**
    * Hidden from the thread list. Read-only here, because a turn started in a
    * thread the list does not show is a conversation its owner cannot find
@@ -254,6 +261,14 @@ export function ChatPanel({
           <div className="note">
             <strong>This thread is archived.</strong> It is read-only while it is out of the list;
             put it back in the list to carry on the conversation.
+          </div>
+        ) : agentMisconfigured !== undefined ? (
+          <div className="note">
+            <strong>Chat is off.</strong> {agentMisconfigured} Your threads still work: you can
+            start, rename and archive them now.
+            {state.blocks.length > 0 ? (
+              <> This conversation is shown above and is read-only until the value is corrected.</>
+            ) : null}
           </div>
         ) : (
           <div className="note">

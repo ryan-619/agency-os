@@ -684,6 +684,22 @@ describe('the worker action', () => {
       expect(webDeploys(r.web)).toHaveLength(1)
     })
 
+    /**
+     * run-worker.sh's chat option has the operator point AGENT_URL at a
+     * tunnel to their own machine, with a token of its own, by hand; the
+     * marker of an earlier Fly wiring then still matched Fly's digest, and the
+     * run kept a wiring that no longer pointed at Fly (review round 15).
+     */
+    it('an AGENT_URL repointed away from this app since is no wiring of it', () => {
+      wired()
+      setVercel({ ...vercelVars(), AGENT_URL: 'https://calm-otter-42.ngrok-free.app' })
+      const r = runWorkflow()
+      expectBothJobs(r)
+      expect(staged(r.worker)).toHaveLength(1)
+      expectWiredTogether()
+      expect(webDeploys(r.web)).toHaveLength(1)
+    })
+
     it('a record for another app is not a record for this one', () => {
       wired()
       setVercel({ ...vercelVars(), [MARKER]: `${APP}-old:${digestOf('a'.repeat(64))}` })

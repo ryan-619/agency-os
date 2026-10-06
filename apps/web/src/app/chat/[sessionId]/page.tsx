@@ -9,7 +9,8 @@ import { ChatPanel } from '@/components/chat/panel'
 import { ChatThreads, type ThreadView } from '@/components/chat/threads'
 import { blocksFromTranscript } from '@/components/chat/reducer'
 import { getDb } from '@/lib/db'
-import { agentConfigured } from '@/lib/agent'
+import { agentConfig } from '@/lib/agent'
+import { agentMisconfiguredSentence } from '@/lib/agent-config'
 
 /**
  * One chat thread, and the list of the others (PROMPT.md §8.1).
@@ -79,6 +80,7 @@ export default async function ChatThreadPage({ params }: { params: Promise<{ ses
   }
 
   const principal = { id: user.id, orgId: user.orgId, role: user.role }
+  const agent = agentConfig()
 
   return (
     <Shell user={user} current="chat" signOut={signOutAction}>
@@ -101,7 +103,8 @@ export default async function ChatThreadPage({ params }: { params: Promise<{ ses
           <ChatPanel
             key={thread.id}
             sessionId={thread.id}
-            agentAvailable={agentConfigured()}
+            agentAvailable={agent.state === 'configured'}
+            agentMisconfigured={agent.state === 'misconfigured' ? agentMisconfiguredSentence(agent.variables) : undefined}
             archived={thread.archived}
             canDecide={can(principal, 'approvals:decide')}
             initialBlocks={initialBlocks}

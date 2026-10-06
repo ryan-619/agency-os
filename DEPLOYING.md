@@ -592,16 +592,48 @@ the domain and the Anthropic API key (hidden, saved in the Keychain), and,
 the first time, makes an `AGENT_INTERNAL_TOKEN`, puts it on the clipboard
 (after any new unsubscribe secret is pasted — it waits for you) and saves
 it, and tells you to add `AGENT_INTERNAL_TOKEN` (Sensitive) and `AGENT_URL`
-(the domain, `https://…`) in Vercel, then redeploy. A token kept from an
-earlier run is not shown again, and the script names the `AGENT_URL` Vercel
-must hold beside it. Every later run starts
-`ngrok http 127.0.0.1:3002 --url=<domain>` from an EMPTY environment — the
-database URL, the mail passwords and the Anthropic key are never inherited
-by ngrok — and the worker with the key and the saved token, on
-`claude-haiku-4-5` unless `AGENT_MODEL` says otherwise. If ngrok is
-missing, or stops at once (no authtoken, a domain that is not yours), chat
-stays off, the summary says why, and the worker is handed no key; with
-chat off it never is. Ctrl-C or closing the window stops both.
+(the domain, `https://…`) in Vercel, then redeploy. With a token saved from
+an earlier run it asks: Enter keeps it, `copy` puts that same token on the
+clipboard again (Vercel never shows a Sensitive value back, so this is the
+way to put the two in step), and `new` makes a new one; either of the last
+two names the `AGENT_URL` Vercel must hold beside it. A key or token
+exported in your shell is never used — only one saved or typed here.
+
+Every later run starts `ngrok http 127.0.0.1:3002 --url=<domain>
+--inspect=false` from an EMPTY environment — the database URL, the mail
+passwords and the Anthropic key are never inherited by ngrok. **The
+inspector is off on purpose:** on, ngrok keeps every request it forwards —
+the bearer token in its `Authorization` header, the chat text, the answers
+carrying lead data — on `127.0.0.1:4040`, readable and replayable by
+anything on the Mac with no password. **Know what ngrok still sees:** it
+terminates TLS at its edge, so ngrok's service receives the bearer and every
+chat exchange in the clear on its way to your Mac — a third party carrying
+lead data, which is the price of a free tunnel. Chat is reported ON only
+once ngrok's own log says the tunnel on YOUR domain started (it waits up to
+20 seconds); ngrok that cannot reach or sign in to its edge retries forever
+without exiting, and is then stopped, chat stays off, the summary says why
+and shows ngrok's last lines, and the worker is handed no key — with chat off
+it never is. A small watcher stops ngrok within two seconds of the worker
+exiting, however it exits — Ctrl-C, closing the window, a crash or a refusal
+to boot — and every run first stops a tunnel an earlier run left on the
+worker's port. The worker runs on `claude-haiku-4-5` unless `AGENT_MODEL`
+says otherwise.
+
+**A value Vercel cannot use turns chat off, not the site.** `AGENT_URL` must
+be a full address starting `https://`, and `AGENT_INTERNAL_TOKEN` the whole
+token (at least 32 characters). A malformed one used to make every page 500
+— the one-click unsubscribe and the inbound webhooks included — while
+`/api/health` blamed the database (2026-10-02). Now chat is off, the chat
+panel and `/settings/deployment` name the variable (never the value), and
+everything else works. A configuration that does not parse at all is
+reported by `/api/health` as `config: invalid` rather than as a database
+fault, and the Production workflow's deploy gate prints that answer and how
+to roll back.
+
+**Moving chat to Fly later.** The `worker` action wires `AGENT_URL` and the
+token itself. It keeps an earlier wiring only while `AGENT_URL` still points
+at its own app, so a run after you pointed `AGENT_URL` at your Mac wires
+afresh, and the Mac's tunnel then answers nobody.
 
 ## The worker, on Fly.io
 

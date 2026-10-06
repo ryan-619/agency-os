@@ -77,7 +77,25 @@ export async function POST(
 ): Promise<Response> {
   const { token } = await context.params
 
-  const secret = env().UNSUBSCRIBE_SECRET
+  // env() throws when ANY variable fails its schema — a value for another
+  // feature entirely — and outside a try that was Next's bare 500 with no
+  // line saying an opt-out was lost (review round 15). The logger reads no
+  // environment, so the loud line is still written; the class only.
+  let secret: string | undefined
+  try {
+    secret = env().UNSUBSCRIBE_SECRET
+  } catch (err) {
+    const error = err instanceof Error ? err.name : 'UnknownError'
+    if (TOKEN_SHAPE.test(token)) {
+      log.error('OPT-OUT NOT RECORDED — the web app’s environment does not parse, so no unsubscribe can be verified', {
+        path: 'unsubscribe',
+        error,
+      })
+    } else {
+      log.warn('unsubscribe refused: environment does not parse', { path: 'unsubscribe', error })
+    }
+    return page(503, 'Unsubscribe', COPY.unavailable)
+  }
   if (!secret) {
     // A well-shaped token here was minted by a worker that HAS the secret,
     // so a person asked to be left alone and this deployment cannot tell

@@ -88,6 +88,14 @@ if [ "$MODE" = forget ]; then
   exit 0
 fi
 
+# ── Nothing from the calling shell stands in for an answer ───────────────────
+# Every value below is one saved in the Keychain or typed at a prompt. An
+# ANTHROPIC_API_KEY or AGENT_INTERNAL_TOKEN already exported in the shell was
+# used when Enter was pressed, billed every teammate's chat turn to a key
+# nobody chose here, and was then saved under this service (review round 15).
+# Cleared before the build too, which must hold no credential at all.
+for n in "${SAVED_NAMES[@]}"; do unset "$n"; done
+
 # ── Before anything is asked: can this checkout run the worker at all? ───────
 NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
 if [ "$NODE_MAJOR" -lt 22 ]; then
@@ -385,37 +393,76 @@ if [ "$LOADED" = no ]; then
     elif [ -n "$SAVED_CHAT_KEY" ]; then export ANTHROPIC_API_KEY="$SAVED_CHAT_KEY"
     fi
     unset V
-    if [ -n "$SAVED_CHAT_TOKEN" ]; then
-      export AGENT_INTERNAL_TOKEN="$SAVED_CHAT_TOKEN"
-      printf '  Kept the AGENT_INTERNAL_TOKEN saved in your Keychain — Vercel must hold the same one,\n' >&3
-      printf '  and AGENT_URL = %s (Production). If it says anything else, change it\n' "$CHAT_URL" >&3
-      printf '  there and redeploy.\n' >&3
-    elif [ "$CAN_MAKE" = yes ]; then
+    # A new secret this run put on the clipboard is pasted before another
+    # replaces it there.
+    wait_for_clipboard() {
       if [ -n "$ON_CLIPBOARD" ]; then
         printf '  The new %s is still on your clipboard. Paste it into Vercel first,\n' "$ON_CLIPBOARD" >&3
         printf '  then press Enter: ' >&3
         read -r _ <&3
       fi
+    }
+    vercel_needs() {
+      printf '  In Vercel → Settings → Environment Variables (Production), set:\n' >&3
+      printf '    AGENT_INTERNAL_TOKEN = paste the clipboard (mark it Sensitive)\n' >&3
+      printf '    AGENT_URL            = %s\n' "$CHAT_URL" >&3
+      printf '  then redeploy. Press Enter once both are saved: ' >&3
+      read -r _ <&3
+    }
+    make_chat_token() {
+      wait_for_clipboard
+      local fresh
       fresh=$(openssl rand -hex 32)
       if printf '%s' "$fresh" | pbcopy \
         && kc_put AGENT_INTERNAL_TOKEN "$fresh" && [ "$(kc_get AGENT_INTERNAL_TOKEN || true)" = "$fresh" ]; then
         export AGENT_INTERNAL_TOKEN="$fresh"
         ON_CLIPBOARD=AGENT_INTERNAL_TOKEN
         printf '  A new AGENT_INTERNAL_TOKEN is on your clipboard (it is not shown) and saved in your Keychain.\n' >&3
-        printf '  In Vercel → Settings → Environment Variables (Production), add:\n' >&3
-        printf '    AGENT_INTERNAL_TOKEN = paste the clipboard (mark it Sensitive)\n' >&3
-        printf '    AGENT_URL            = %s\n' "$CHAT_URL" >&3
-        printf '  then redeploy. Press Enter once both are saved: ' >&3
-        read -r _ <&3
+        vercel_needs
       else
         printf '' | pbcopy || true
         printf '  Could not put a token on the clipboard and in your Keychain, so chat stays off.\n' >&3
+        unset AGENT_INTERNAL_TOKEN
       fi
-      unset fresh
+    }
+    if [ -n "$SAVED_CHAT_TOKEN" ] && [ "$CAN_MAKE" = yes ]; then
+      # Vercel keeps the token Sensitive and never shows it back, so the
+      # Keychain's copy is the only one a person can put back in step: Enter
+      # keeps it, `copy` puts it on the clipboard again, `new` replaces it
+      # (review round 15 — a kept token Vercel did not hold could be neither).
+      export AGENT_INTERNAL_TOKEN="$SAVED_CHAT_TOKEN"
+      printf '  AGENT_INTERNAL_TOKEN: Enter keeps the one saved in your Keychain (Vercel must hold the same one);\n' >&3
+      printf '  type copy to put it on the clipboard again, or new to make a new one: ' >&3
+      read -r V <&3
+      case "${V:-}" in
+        copy | COPY | Copy)
+          wait_for_clipboard
+          if printf '%s' "$SAVED_CHAT_TOKEN" | pbcopy; then
+            ON_CLIPBOARD=AGENT_INTERNAL_TOKEN
+            printf '  The saved AGENT_INTERNAL_TOKEN is on your clipboard (it is not shown).\n' >&3
+            vercel_needs
+          else
+            printf '  Could not put it on the clipboard; the saved token is kept as it is.\n' >&3
+          fi
+          ;;
+        new | NEW | New) make_chat_token ;;
+        *)
+          printf '  Kept. Vercel must hold the same token, and AGENT_URL = %s (Production);\n' "$CHAT_URL" >&3
+          printf '  if either says anything else, type copy next time, or change AGENT_URL there and redeploy.\n' >&3
+          ;;
+      esac
+      unset V
+    elif [ "$CAN_MAKE" = yes ]; then
+      make_chat_token
     else
       printf '  Paste the AGENT_INTERNAL_TOKEN Vercel holds (hidden; Enter leaves chat off): ' >&3
       read -r -s V <&3; printf '\n' >&3
-      [ -n "${V:-}" ] && export AGENT_INTERNAL_TOKEN="$V"
+      if [ ${#V} -ge 32 ]; then
+        export AGENT_INTERNAL_TOKEN="$V"
+      elif [ -n "${V:-}" ]; then
+        # The worker refuses a shorter one at boot, and so does the site.
+        printf '  That is shorter than 32 characters, so it is not the token; chat stays off.\n' >&3
+      fi
       unset V
     fi
   else
@@ -489,7 +536,20 @@ SMS=no;       [ -n "${DOVESOFT_API_KEY:-}" ] && [ -n "${DOVESOFT_ENTITY_ID:-}" ]
 RECEIVING=no; [ -n "${IMAP_HOST:-}" ] && [ -n "${IMAP_USER:-}" ] && [ -n "${IMAP_PASSWORD:-}" ] && RECEIVING=yes
 
 # ── Chat: the tunnel, before the summary says it is on ───────────────────────
-CHAT=no; CHAT_WHY=""
+# The worker's API is the port after its health port (apps/agent/src/
+# worker.ts). Only that port is tunnelled: it answers /internal/* to the
+# bearer alone, and /livez and /readyz, which say nothing usable.
+API_PORT=$(( ${AGENT_PORT:-3001} + 1 ))
+# A tunnel an earlier run left on this worker's port — one whose watcher
+# (below) did not get to stop it — is stopped first, whatever its domain:
+# with chat off it would publish a port whose token nobody holds, and with
+# chat on it holds the domain, which ngrok will not open twice. Anchored to
+# the start of the command line, so it matches ngrok itself and never a
+# shell, an editor or a script whose own command line merely mentions it.
+if pkill -f "^([^ ]*/)?ngrok http 127\.0\.0\.1:$API_PORT( |\$)" >/dev/null 2>&1; then
+  echo "Stopped an ngrok tunnel an earlier run left on this worker's port."
+fi
+CHAT=no; CHAT_WHY=""; NGROK_PID=""
 if [ -n "${CHAT_URL:-}" ]; then
   if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
     CHAT_WHY="no Anthropic API key was given ('$0 --reconfigure' to add one)"
@@ -498,27 +558,39 @@ if [ -n "${CHAT_URL:-}" ]; then
   elif ! command -v ngrok >/dev/null 2>&1; then
     CHAT_WHY="ngrok is not installed: 'brew install ngrok', then 'ngrok config add-authtoken <your token>' once"
   else
-    # The worker's API is the port after its health port (apps/agent/src/
-    # worker.ts). Only that port is tunnelled: it answers /internal/* to the
-    # bearer alone, and /livez and /readyz, which say nothing usable.
-    API_PORT=$(( ${AGENT_PORT:-3001} + 1 ))
     CHAT_HOST="${CHAT_URL#https://}"
-    # A tunnel an earlier run left behind holds the domain, and ngrok refuses
-    # a second endpoint on it. Only this exact command is stopped.
-    pkill -f "ngrok http 127.0.0.1:$API_PORT --url=$CHAT_URL" >/dev/null 2>&1 || true
     NGROK_LOG="$(mktemp -t agency-ngrok.XXXXXX)"
     # From an EMPTY environment: everything this script exported — the
     # database URL, the mail passwords, the Anthropic key — would otherwise
     # be inherited by a third party's binary. ngrok needs only PATH, and HOME
     # for its own config, where its authtoken lives.
+    #
+    # --inspect=false: ngrok's request inspector is on by default, and keeps
+    # every request it forwards — the bearer in its Authorization header, the
+    # chat text, the answers that carry lead data — on 127.0.0.1:4040, where
+    # anything on this Mac can read and replay it with no authentication
+    # (review round 15). The log records what ngrok did, never a request.
     env -i PATH="$PATH" HOME="$HOME" USER="${USER:-}" \
-      ngrok http "127.0.0.1:$API_PORT" --url="$CHAT_URL" --log=stdout --log-level=warn >"$NGROK_LOG" 2>&1 &
+      ngrok http "127.0.0.1:$API_PORT" --url="$CHAT_URL" --inspect=false \
+      --log=stdout --log-format=logfmt --log-level=info >"$NGROK_LOG" 2>&1 &
     NGROK_PID=$!
-    sleep 3
-    if kill -0 "$NGROK_PID" 2>/dev/null; then
-      CHAT=yes
-    else
-      echo "ngrok stopped at once — the last lines it wrote:" >&2
+    # ON only once ngrok says the tunnel on THIS domain started. A process
+    # that has not exited proves nothing: ngrok that cannot reach or sign in
+    # to its edge retries for ever, and "the live site reaches this Mac"
+    # would be false while the worker was handed the key (review round 15).
+    for _ in $(seq 1 "${AGENCY_TUNNEL_WAIT_SECONDS:-20}"); do
+      kill -0 "$NGROK_PID" 2>/dev/null || break
+      if awk -v want="url=$CHAT_URL" \
+        '/lvl=info/ { for (i = 1; i <= NF; i++) if ($i == want) found = 1 } END { exit !found }' "$NGROK_LOG"; then
+        CHAT=yes
+        break
+      fi
+      sleep 1
+    done
+    if [ "$CHAT" != yes ]; then
+      kill "$NGROK_PID" 2>/dev/null || true
+      NGROK_PID=""
+      echo "ngrok did not open $CHAT_HOST — the last lines it wrote:" >&2
       tail -n 5 "$NGROK_LOG" >&2 || true
       CHAT_WHY="ngrok could not open $CHAT_HOST (is 'ngrok config add-authtoken' done, and is it your domain?)"
     fi
@@ -584,8 +656,18 @@ else
   WORKER_TOKEN="$(openssl rand -base64 32)"
   unset ANTHROPIC_API_KEY
 fi
-# ngrok, when started, is in this process group: Ctrl-C and closing the
-# window stop it with the worker.
+# ngrok must not outlive the worker, and the exec below leaves nothing here to
+# stop it: a worker that refuses to boot or crashes left the tunnel holding
+# the domain, out of reach of Ctrl-C and of closing the window (review round
+# 15). exec keeps this PID, so the watcher waits on the worker itself and
+# stops ngrok within two seconds of its exit, however it exits. It ignores
+# the hang-up a closed window sends, and runs from an empty environment, so
+# it holds no credential; its argv is two process ids.
+if [ -n "$NGROK_PID" ]; then
+  env -i PATH="$PATH" /bin/bash -c \
+    'trap "" HUP INT; while kill -0 "$1" 2>/dev/null; do sleep 2; done; kill "$2" 2>/dev/null || true' \
+    agency-tunnel-watch "$$" "$NGROK_PID" </dev/null >/dev/null 2>&1 &
+fi
 AGENT_INTERNAL_TOKEN="$WORKER_TOKEN" \
   NODE_ENV=production \
   AGENT_BIND=127.0.0.1 \
