@@ -125,6 +125,24 @@ for tool in tsc tsx; do
   fi
 done
 
+# ── One worker per machine ─────────────────────────────────────────────────
+# A run stops any ngrok tunnel on the worker's API port before it opens its
+# own (below), so a SECOND run typed in another window while a worker was up
+# stopped the live worker's tunnel — and then died on the ports that worker
+# holds, leaving it running with no tunnel and chat on the site down. So a run
+# refuses first, before it builds, asks or touches anything, while either of
+# the worker's ports answers. --forget changes only the Keychain, and may run
+# beside a worker. The probe is a subshell: a failed connect cannot end this one.
+if [ "$MODE" != forget ]; then
+  for port in "${AGENT_PORT:-3001}" "$(( ${AGENT_PORT:-3001} + 1 ))"; do
+    if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+      echo "Port $port on this machine is already in use — a worker is most likely running here already." >&2
+      echo "Stop it first (Ctrl-C in its window), then run this again. Nothing was changed." >&2
+      exit 1
+    fi
+  done
+fi
+
 # Keep the Mac awake while the worker runs. Mail queued while the lid was
 # shut is not lost — it goes, re-checked against every rule, when the worker
 # next runs — but it goes late. -i (no idle sleep) and -s (no system sleep on

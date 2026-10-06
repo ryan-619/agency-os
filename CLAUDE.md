@@ -38,10 +38,12 @@ proposals, meetings, deal owners and tasks — and, in place of a terminal, the
 worker itself: its heartbeat and health, its recent warnings, the outbound
 queue, and a re-scan of a few stale companies. The `agency` server has
 forty-nine tools: twenty-six low (reads and scans, which run at once), twenty
-medium and three high, and every medium and high call still raises an
-approval card before it runs — the gate is unchanged (§8). Whether internal
-writes should run without a card is a decision about the gate, the
-operator's to make; until it is made, they ask.
+medium and three high. The operator decided the gate question the same day:
+the twenty medium tools — writes to the agency's own records — run at once
+too, and a card is raised only for what reaches a person or lifts a hold
+(`queue_touch`, `enrol_contacts`, `resume_contact`, and `update_campaign`
+setting a campaign active), every connector tool and delegation
+(`runsWithoutApproval`, §8, Ring 1).
 
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
@@ -55,7 +57,11 @@ request, the bearer included, on an unauthenticated `127.0.0.1:4040`), chat
 is ON only once ngrok's log says the tunnel on that domain started, a watcher
 stops ngrok when the worker exits, a tunnel an earlier run left on the port
 is stopped first (matched only where the command line STARTS with ngrok — an
-unanchored `pkill -f` killed the shell running the tests), a key or token
+unanchored `pkill -f` killed the shell running the tests) — and a run
+refuses to start at all, before it builds or asks anything, while either of
+the worker's ports already answers, because `--imap` typed in a second
+window beside a live worker stopped that worker's tunnel and then died on
+its ports, leaving chat on the site down (2026-10-06) — a key or token
 exported in the calling shell is never used, and a saved token can be
 `copy`'d to the clipboard again or replaced. And a malformed `AGENT_URL` or
 `AGENT_INTERNAL_TOKEN` in Vercel turns CHAT off rather than the site: the
@@ -5346,9 +5352,11 @@ new database.
 
 **The operator's tools reached the prompt and the seed on 2026-10-06.** The
 prompt opens with how to work — "do it with the tools rather than describing
-how they could", read, act, confirm, report, one change at a time with its
-reason, because "every change runs only after a person approves its card" —
-and has a section per group naming each tool and the limit it keeps: a new
+how they could", read, act, confirm, report — and, since the gate decision
+the same day, says that reads, scans and changes to the team's own records
+run at once ("make those changes yourself rather than proposing them") and
+names what still waits for a card — and has a section per group naming each
+tool and the limit it keeps: a new
 contact has no consent, auto-send is an owner's, a text is drafted by a
 person, nothing in the calendar invites anybody, there is no terminal, a
 suppression is never undone, and what a connector returns is a lead to

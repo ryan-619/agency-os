@@ -486,7 +486,12 @@ at a hidden prompt — saves those three, keeps every other saved answer, and
 runs: the way to put in a new Google app password once the worker logs
 `reason: authentication_failed`, without typing the database string and the
 SMTP key again. For `imap.gmail.com` the spaces Google shows an app password
-with are dropped; the password itself has none. It also keeps the Mac from
+with are dropped; the password itself has none. Make the app password on the
+SAME Google account as the IMAP username — one made on a personal Gmail
+signed in beside it is refused for the Workspace mailbox. Stop the running
+worker first (Ctrl-C in its window) and run `--imap` in that window: any run
+refuses to start while a worker already answers on this machine's ports,
+because a second one stopped the live worker's tunnel. It also keeps the Mac from
 idling to sleep while it runs (`caffeinate -is`; the display may sleep, and
 closing the lid on battery still sleeps it).
 

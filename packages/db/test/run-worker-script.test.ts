@@ -45,6 +45,9 @@
  *    copied again or replaced;
  *  - a server name is asked until it is one, and Google's IMAP username until
  *    it is a whole address;
+ *  - a run refuses, before it builds, asks or stops any tunnel, while either
+ *    of the worker's ports already answers — a second run typed beside a
+ *    live worker stopped its tunnel and then died on its ports;
  *  - `--imap` asks reply detection's three questions alone, over the saved
  *    answers — a new Google app password, saved without the spaces Google
  *    shows it with — and keeps every other saved answer as it was;
@@ -52,7 +55,9 @@
  *  - `--forget` removes every saved answer.
  */
 import { spawn, spawnSync } from 'node:child_process'
+import { once } from 'node:events'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -537,6 +542,55 @@ describe('tools/run-worker.sh', () => {
         } catch {
           // already gone
         }
+      }
+    })
+
+    /**
+     * What happened on the operator's Mac: `--imap` typed in a second window
+     * while the worker ran stopped that worker's tunnel, then died on the
+     * ports it held — chat on the site down, the worker still up. Either
+     * port answering stops a run before it builds, asks or touches a tunnel.
+     */
+    it.each([
+      ['health', AGENT_PORT],
+      ['API', API_PORT],
+    ])('refuses to run beside a worker already on its %s port, stopping no tunnel', async (_which, port) => {
+      save('DATABASE_URL', DB)
+      const busy = createServer().listen(Number(port), '127.0.0.1')
+      await once(busy, 'listening')
+      const live = spawn('bash', ['-c', `exec -a "ngrok http 127.0.0.1:${API_PORT} --url=https://live.ngrok-free.app" sleep 30`], {
+        stdio: 'ignore',
+        detached: true,
+      })
+      try {
+        spawnSync('sleep', ['0.3'])
+        const r = run(layout(), ['--imap'])
+        expect(r.status, r.stderr).toBe(1)
+        expect(r.stderr).toContain(`Port ${port} on this machine is already in use`)
+        expect(r.stdout).not.toContain('Stopped an ngrok tunnel')
+        expect(calls()).toEqual([])
+        expect(await exitedWithin(live, 500)).toBe(false)
+        expect(saved('DATABASE_URL')).toBe(DB)
+      } finally {
+        try {
+          process.kill(live.pid!)
+        } catch {
+          // already gone
+        }
+        busy.close()
+      }
+    })
+
+    it('lets --forget run beside a worker: it changes only the Keychain', async () => {
+      save('DATABASE_URL', DB)
+      const busy = createServer().listen(Number(AGENT_PORT), '127.0.0.1')
+      await once(busy, 'listening')
+      try {
+        const r = run(layout(), ['--forget'])
+        expect(r.status, r.stderr).toBe(0)
+        expect(readdirSync(keychain)).toEqual([])
+      } finally {
+        busy.close()
       }
     })
 
