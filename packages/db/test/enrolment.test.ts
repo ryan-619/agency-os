@@ -685,6 +685,42 @@ describe('enrolling a campaign', () => {
     expect(await outbound()).toHaveLength(2)
   })
 
+  /**
+   * The agent's tool is cut off at 30 s by its MCP call, and drafted on
+   * past it while the model was told the call failed (review round 16). A
+   * caller's `stopWhen` ends the run as the limit does, and the next
+   * enrolment continues.
+   */
+  it('stops when the caller says so, as the limit does — truncated and out of time — and continues next time', async () => {
+    await scan()
+    await contact()
+    await contact({ email: 'sam@rentman.io' })
+    let asked = 0
+    // The first company passes; the second draft is refused the time.
+    const first = ok(await enrol({ stopWhen: () => ++asked > 2 }))
+    expect(first.queued).toHaveLength(1)
+    expect(first).toMatchObject({ truncated: true, outOfTime: true })
+    expect(await outbound()).toHaveLength(1)
+    const log = await db.select().from(schema.auditLog).where(eq(schema.auditLog.action, 'campaign.enrolled'))
+    expect(log[0]!.detail).toMatchObject({ queued: 1, truncated: true })
+    const second = ok(await enrol())
+    expect(second).toMatchObject({ truncated: false, outOfTime: false })
+    expect(second.queued).toHaveLength(1)
+    expect(await outbound()).toHaveLength(2)
+  })
+
+  it('leaves a dry run’s suppression hint null when time ran out before every planned draft was checked', async () => {
+    await scan()
+    await contact()
+    await contact({ email: 'sam@rentman.io' })
+    await addSuppression(db, { orgId, kind: 'email', value: 'sam@rentman.io', reason: 'asked to stop', source: 'manual' })
+    let asked = 0
+    // Every draft is planned (one company, two people: three asks), then the check stops after one preview.
+    const dry = ok(await enrol({ dryRun: true, stopWhen: () => ++asked > 4 }))
+    expect(dry.queued).toHaveLength(2)
+    expect(dry).toMatchObject({ truncated: false, outOfTime: true, suppressedHint: null })
+  })
+
   it('takes the highest-scoring companies first when the limit bites', async () => {
     const low = await company('aaa.io', 'Aaa')
     await scan(low)

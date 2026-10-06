@@ -533,7 +533,32 @@ describe('runRescan', () => {
     const lock = body.indexOf("pg_advisory_xact_lock(hashtext('cron.rescan'), hashtext(")
     expect(body.indexOf('db.transaction(')).toBeLessThan(lock)
     expect(lock).toBeGreaterThan(-1)
-    expect(lock).toBeLessThan(body.indexOf('liveClaimUntil('))
+    expect(lock).toBeLessThan(body.indexOf('liveClaim(t, orgId, now)'))
+  })
+
+  /**
+   * A claim's `until` is its whole budget; a run with nothing due ends in a
+   * second, and the tool said the rescan "is running now" for minutes after
+   * (review round 16). The `scan.cron_run` row a run writes as it ends
+   * releases the claim for this reader — and only one at or after the claim.
+   */
+  it('reads a claim as released once its run has written scan.cron_run — an earlier run’s row releases nothing', async () => {
+    const t0 = new Date('2026-09-30T03:17:00.000Z')
+    const inside = new Date(t0.getTime() + 60_000)
+    // Yesterday's run, before this claim.
+    await db.insert(schema.auditLog).values({
+      orgId, actor: 'system', action: 'scan.cron_run', detail: {}, createdAt: new Date(t0.getTime() - 86_400_000),
+    })
+    expect(await claimRescan(db, { orgId, now: t0, budgetMs: 240_000 })).toEqual({ claimed: true })
+    const [claim] = await claims()
+    // The claim row is stamped by the database's clock; place the run's end after it.
+    expect(await rescanClaimHeldUntil(db, orgId, inside)).not.toBeNull()
+    await db.insert(schema.auditLog).values({
+      orgId, actor: 'system', action: 'scan.cron_run', detail: {}, createdAt: new Date(claim!.createdAt.getTime() + 1_000),
+    })
+    expect(await rescanClaimHeldUntil(db, orgId, inside)).toBeNull()
+    // The nightly run's own claim keeps the plain reading: a second delivery waits out the whole claim.
+    expect(await claimRescan(db, { orgId, now: inside, budgetMs: 240_000 })).toMatchObject({ claimed: false })
   })
 
   it('reads a claim whose until cannot be read as holding nothing', async () => {

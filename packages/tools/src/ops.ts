@@ -547,8 +547,9 @@ export const queueStatus: AgencyToolSpec<typeof queueStatusShape> = {
   name: 'queue_status',
   description:
     'Read what is waiting to go out for this organisation, and why: drafts awaiting a person’s approval, approved ' +
-    'and auto-send messages due now or deferred (and when the next may go), messages being sent, refusals in the ' +
-    'last 24 hours by reason and failures by channel, agent tool calls waiting on a person, open LinkedIn steps, ' +
+    'and auto-send messages due now or deferred (and when the next may go), messages being sent, refusals by ' +
+    'reason and failures by channel among messages that changed in the last 24 hours, agent tool calls waiting ' +
+    'on a person, open LinkedIn steps, ' +
     'and approved messages on a channel this worker carries no provider for. Counts only — no recipient, subject ' +
     'or body. A read.',
   shape: queueStatusShape,
@@ -563,8 +564,13 @@ export const queueStatus: AgencyToolSpec<typeof queueStatusShape> = {
     const t = schema.touches
     // When a row last changed: the claim, the refusal or the failure is an
     // UPDATE, which the trigger stamps; a row inserted in that state has only
-    // its creation.
+    // its creation. No column records the moment of the refusal itself, and
+    // any later UPDATE re-stamps it — deleting or erasing a contact is one
+    // (ON DELETE SET NULL) — so the lines say which clock they read (review
+    // round 16). Leaving out rows with no contact would hide a real refusal
+    // too: an agent's draft names nobody until a person picks the recipient.
     const changedAt = sql`coalesce(${t.updatedAt}, ${t.createdAt})`
+    const changedRecently = sql`${changedAt} >= ${since}::timestamptz`
 
     const [live, refused, failed, agentApprovals, steps] = await Promise.all([
       ctx.db
@@ -583,16 +589,14 @@ export const queueStatus: AgencyToolSpec<typeof queueStatusShape> = {
         .select({ code: t.refusalCode, total: sql<number>`count(*)::int`.mapWith(Number) })
         .from(t)
         .where(and(
-          eq(t.orgId, ctx.orgId), eq(t.direction, 'out'), eq(t.status, 'refused'),
-          sql`${changedAt} >= ${since}::timestamptz`,
+          eq(t.orgId, ctx.orgId), eq(t.direction, 'out'), eq(t.status, 'refused'), changedRecently,
         ))
         .groupBy(t.refusalCode),
       ctx.db
         .select({ channel: t.channel, total: sql<number>`count(*)::int`.mapWith(Number) })
         .from(t)
         .where(and(
-          eq(t.orgId, ctx.orgId), eq(t.direction, 'out'), eq(t.status, 'failed'),
-          sql`${changedAt} >= ${since}::timestamptz`,
+          eq(t.orgId, ctx.orgId), eq(t.direction, 'out'), eq(t.status, 'failed'), changedRecently,
         ))
         .groupBy(t.channel),
       ctx.db
@@ -679,6 +683,9 @@ export const queueStatus: AgencyToolSpec<typeof queueStatusShape> = {
             ? `; a LinkedIn hand-over a person started and never finished is failed by /tasks after ` +
               `${LINKEDIN_STEP_STUCK_MINUTES} minutes.`
             : '.'),
+      // Which clock, once, before the two lines that read it.
+      'Refused and failed below count messages that last CHANGED in the last 24 hours: no column records the ' +
+        'moment of a refusal itself, so a later change to an old one — deleting its contact, say — counts it again.',
       refusedTotal === 0
         ? 'Refused in the last 24 hours: none.'
         : `Refused in the last 24 hours: ${refusedTotal} — ` +
@@ -703,7 +710,14 @@ export const queueStatus: AgencyToolSpec<typeof queueStatusShape> = {
               `${smsWithoutProvider.total === 1 ? 'waits' : 'wait'} with no SMS provider on this worker: ` +
               `${smsWithoutProvider.total === 1 ? 'it stays' : 'they stay'} approved, with no reason on ` +
               `${smsWithoutProvider.total === 1 ? 'it' : 'them'}, until DOVESOFT_API_KEY and DOVESOFT_ENTITY_ID ` +
-              'are set where the worker runs. Its log names this state "sms rows waiting: no provider".',
+              'are set where the worker runs. ' +
+              // The sender writes that line, and the worker starts a sender
+              // only when it carries a provider: a mailbox or DoveSoft. With
+              // SMS off here, that is the mailbox (review round 16).
+              (mailboxSends
+                ? 'Its log names this state "sms rows waiting: no provider".'
+                : 'This worker sends from no mailbox either, so it runs no sender at all, and nothing in its log ' +
+                  'names this state.'),
           ]
         : []),
       ...(emailWithoutProvider

@@ -70,12 +70,19 @@ export type EnrolOutcome =
        * time is `already_enrolled` next time.
        */
       readonly truncated: boolean
+      /**
+       * True when the caller's `stopWhen` ended the run before the limit —
+       * `truncated` is true beside it, and enrolling again continues the same
+       * way. Always false for a caller that passes none.
+       */
+      readonly outOfTime: boolean
       readonly limit: number
       /**
        * Dry run only: how many of the planned drafts the send path would
        * refuse as suppressed if they were sent now. A hint read through
        * `previewSend`; the plan does not change because of it. Null when
-       * drafts were actually written.
+       * drafts were actually written, or when `stopWhen` ended the check
+       * before every planned draft was read.
        */
       readonly suppressedHint: number | null
     }
@@ -106,6 +113,14 @@ export async function enrolCampaign(
     readonly dryRun?: boolean
     readonly limit?: number
     readonly now?: Date
+    /**
+     * Asked before each company, each draft and each dry-run preview: true
+     * ends the run there, as the limit does (`truncated`, `outOfTime`), so a
+     * caller with a time budget — the agent's tool, which an MCP call cuts
+     * off at 30 s — answers inside it rather than drafting on after it has
+     * been told the call failed. The web route passes none.
+     */
+    readonly stopWhen?: () => boolean
   },
 ): Promise<EnrolOutcome> {
   const now = args.now ?? new Date()
@@ -180,8 +195,16 @@ export async function enrolCampaign(
   const queued: EnrolQueued[] = []
   const skipped: EnrolSkipped[] = []
   let truncated = false
+  let outOfTime = false
+  const stop = (): boolean => {
+    if (args.stopWhen?.() !== true) return false
+    truncated = true
+    outOfTime = true
+    return true
+  }
 
   companies: for (const c of companies) {
+    if (stop()) break
     // A cheap first pass from the list's own scan and score, so findings are
     // read only for companies that could qualify. The decision that counts is
     // the one below, over the rows `latestScanWithFindings` returns.
@@ -252,6 +275,7 @@ export async function enrolCampaign(
         truncated = true
         break companies
       }
+      if (stop()) break companies
       if (dryRun) {
         queued.push({ touchId: null, contactId: p.id, companyId: c.companyId })
         continue
@@ -280,6 +304,12 @@ export async function enrolCampaign(
   if (dryRun) {
     suppressedHint = 0
     for (const q of queued) {
+      if (args.stopWhen?.() === true) {
+        // A count of some of them would read as a count of all.
+        suppressedHint = null
+        outOfTime = true
+        break
+      }
       const preview = await previewSend(db, { orgId: args.orgId, contactId: q.contactId, campaignId: campaign.id, now })
       if (preview.ok && preview.facts.suppressed) suppressedHint++
     }
@@ -302,7 +332,7 @@ export async function enrolCampaign(
     }).catch(() => {})
   }
 
-  return { ok: true, dryRun, status, queued, skipped, truncated, limit, suppressedHint }
+  return { ok: true, dryRun, status, queued, skipped, truncated, outOfTime, limit, suppressedHint }
 }
 
 function boundedLimit(limit: number | undefined): number {

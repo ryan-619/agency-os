@@ -928,7 +928,12 @@ time, never its reason.
   auto-send campaign, and never sets active a campaign the worker paused for
   bouncing; `enrol_contacts` (high) is `enrolCampaign` on a supervised
   campaign only, its drafts `awaiting_approval`, and says so if an owner
-  switched auto-send on during the call; `list_drafts` (`approvals:decide`)
+  switched auto-send on during the call — at most 50 a call, and it stops
+  drafting at 20 s (`enrolCampaign`'s `stopWhen`, `outOfTime`), because the
+  MCP call is cut off at 30 s while the handler drafted on, so the model said
+  enrolment failed while drafts landed, and a retry could draft twice the
+  approved number (review round 16); enrolling again continues, as past the
+  limit; `list_drafts` (`approvals:decide`)
   is `/approvals` read four previews at a time, the recipient masked, a
   LinkedIn message's words withheld by `linkedinThreadWithheld`, an SMS
   named by its DLT template id.
@@ -983,8 +988,16 @@ onto a taken name with a 500 and `POST` called every fault a duplicate.
 different pause of the same class written while the card waited is the one
 lifted — the approver approved lifting that class for that person.
 `rescan_stale` reads the nightly rescan's claim and takes none, because a
-claim would make that night's run skip the org; a cron starting during the
-call can scan the same company once more. A web `PATCH` that clears a
+claim would make that night's run skip the org; a cron starting while one of
+its scans is still running — up to that scan's 162 s worst case, well past
+the call's answer at 25 s — can scan the same company once more. It reads a
+claim as released once the run has written its `scan.cron_run` row (compared
+in SQL against the claim's stored `created_at`), where the claim's `until`
+alone, its whole five-minute budget, said the rescan "is running now" for
+minutes after it ended (review round 16); `claimRescan` keeps the plain
+reading. `queue_status`'s "last 24 hours" counts messages that last CHANGED
+then, and says so: no column records the moment of a refusal, and any later
+UPDATE — deleting the contact, say — counts an old one again. A web `PATCH` that clears a
 bounce still records `contact.bounce_cleared` as System (`contactsUpdate`'s
 default actor). And `recent_errors` does not see a line written straight to
 stderr — the entry point's "failed to start", or the recorder lines the

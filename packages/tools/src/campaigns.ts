@@ -48,7 +48,7 @@
 import { z } from 'zod'
 import { and, eq } from 'drizzle-orm'
 import {
-  ENROL_LIMIT_DEFAULT, ENROL_LIMIT_MAX, REFUSALS_THE_CLOCK_RESOLVES, TEMPLATE_CHANNELS, can, enrolSkipCounts,
+  ENROL_LIMIT_DEFAULT, REFUSALS_THE_CLOCK_RESOLVES, TEMPLATE_CHANNELS, can, enrolSkipCounts,
   type Channel, type EnrolSkip, type SendDecision, type SendRefusalCode,
 } from '@agency/core'
 import {
@@ -59,7 +59,7 @@ import {
 } from '@agency/db'
 import * as schema from '@agency/db/schema'
 import {
-  bounded, fail, ok, type AgencyToolSpec, type ToolContext, type ToolErrorCode, type ToolOutcome,
+  TOOL_TIME_BUDGET_MS, bounded, fail, ok, type AgencyToolSpec, type ToolContext, type ToolErrorCode, type ToolOutcome,
 } from './spec.js'
 
 const NOTHING_SENT = 'Nothing was sent.'
@@ -726,6 +726,16 @@ async function senderNameOf(ctx: ToolContext): Promise<string | null> {
   return rows[0]?.name?.trim() || null
 }
 
+/**
+ * The most openers one enrol_contacts call drafts: the Enrol button's
+ * default. Each costs several round trips, and an MCP call is cut off at
+ * 30 s, so a call also stops drafting at `ENROL_DRAFT_BUDGET_MS` — and
+ * enrolling again continues, as it does past the limit.
+ */
+const ENROL_TOOL_MAX = ENROL_LIMIT_DEFAULT
+/** Drafting stops here, leaving the rest of the budget for the audit row and the answer. */
+const ENROL_DRAFT_BUDGET_MS = TOOL_TIME_BUDGET_MS - 5_000
+
 const enrolContactsShape = {
   campaignId: z.uuid().describe('The supervised email or LinkedIn campaign to enrol into, by the id list_campaigns shows.'),
   dryRun: z
@@ -736,9 +746,9 @@ const enrolContactsShape = {
     .number()
     .int()
     .min(1)
-    .max(ENROL_LIMIT_MAX)
+    .max(ENROL_TOOL_MAX)
     .optional()
-    .describe(`At most this many drafts, highest-scoring companies first. Default ${ENROL_LIMIT_DEFAULT}, at most ${ENROL_LIMIT_MAX}.`),
+    .describe(`At most this many drafts, highest-scoring companies first. Default and most ${ENROL_TOOL_MAX}.`),
 }
 
 export const enrolContacts: AgencyToolSpec<typeof enrolContactsShape> = {
@@ -767,8 +777,12 @@ export const enrolContacts: AgencyToolSpec<typeof enrolContactsShape> = {
     }
 
     const dryRun = input.dryRun === true
+    const startedAt = Date.now()
     const senderName = await senderNameOf(ctx)
     const r = await enrolCampaign(ctx.db, {
+      // Answer inside the MCP call: past it the model is told the call
+      // failed while drafts would go on landing (review round 16).
+      stopWhen: () => Date.now() - startedAt >= ENROL_DRAFT_BUDGET_MS,
       orgId: ctx.orgId,
       campaignId: campaign.id,
       // The route's own row (`campaign.enrolled`) names the agent.
@@ -790,6 +804,7 @@ export const enrolContacts: AgencyToolSpec<typeof enrolContactsShape> = {
       queued: r.queued.length,
       skipped: r.skipped.length,
       truncated: r.truncated,
+      outOfTime: r.outOfTime,
       limit: r.limit,
     })
 
@@ -807,8 +822,17 @@ export const enrolContacts: AgencyToolSpec<typeof enrolContactsShape> = {
       : 'Each draft waits on /approvals for a person to read it and choose to send it; the worker re-checks every ' +
         'rule at the moment of sending. '
     const truncatedWords = r.truncated
-      ? `It stopped at the limit of ${r.limit}, highest-scoring companies first; enrolling again continues with the ` +
-        'rest — everyone drafted this time is skipped next time. '
+      ? `${
+          r.outOfTime
+            ? `It stopped after ${plural(r.queued.length, r.dryRun ? 'planned draft' : 'draft')} to answer inside its time limit`
+            : `It stopped at the limit of ${r.limit}`
+        }, highest-scoring companies first; enrolling again continues with the rest — everyone drafted this time is ` +
+        'skipped next time. '
+      : ''
+    // A dry run that planned everyone but ran out of time reading the
+    // suppression list says so, rather than reading as "none of them".
+    const hintWords = r.dryRun && r.outOfTime && !r.truncated && r.suppressedHint === null
+      ? ' It ran out of time checking them against it just now; the send path checks each one anyway.'
       : ''
 
     const data = {
@@ -819,6 +843,7 @@ export const enrolContacts: AgencyToolSpec<typeof enrolContactsShape> = {
       skipped,
       skippedTotal: r.skipped.length,
       truncated: r.truncated,
+      outOfTime: r.outOfTime,
       limit: r.limit,
       suppressedHint: r.suppressedHint,
     }
@@ -831,7 +856,7 @@ export const enrolContacts: AgencyToolSpec<typeof enrolContactsShape> = {
             `would get a draft. ${skippedSaid}`,
           ...skipLines,
           'The send path refuses anyone on the suppression list — enrolment does not read it, on purpose.' +
-            (r.suppressedHint ? ` Checked just now, ${r.suppressedHint} of these would be.` : ''),
+            (r.suppressedHint ? ` Checked just now, ${r.suppressedHint} of these would be.` : '') + hintWords,
           `${truncatedWords}${approvalWords}${inactive}This was a dry run: nothing was written. ${ENROL_NOTHING_SENT}`,
         ]),
       )

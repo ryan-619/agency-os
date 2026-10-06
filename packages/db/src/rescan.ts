@@ -210,12 +210,33 @@ export async function claimRescan(
  * at this moment is waited for and then seen, rather than read as absent.
  * The same reading of a claim, too: a live `scan.cron_started` row whose
  * `until` is still ahead, and a `until` that cannot be read holds nothing.
+ *
+ * And one reading of its own: a claim with a `scan.cron_run` row for the org
+ * at or after it — the row a run writes as it ends — is a run that has
+ * ended, compared in SQL against the claim's STORED `created_at`. A claim's
+ * `until` is its whole budget, about five minutes, and a run with nothing
+ * due ends in a second; read alone, it told a person the rescan "is running
+ * now" for minutes after it had finished (review round 16). `claimRescan`
+ * keeps the plain reading: a second delivery waits out the whole claim.
  */
 export async function rescanClaimHeldUntil(db: AgencyDb, orgId: string, now: Date): Promise<Date | null> {
   return db.transaction(async (tx) => {
     const t = tx as unknown as AgencyDb
     await t.execute(sql`SELECT pg_advisory_xact_lock(hashtext('cron.rescan'), hashtext(${orgId}))`)
-    return liveClaimUntil(t, orgId, now)
+    const held = await liveClaim(t, orgId, now)
+    if (!held) return null
+    const ended = await t
+      .select({ id: schema.auditLog.id })
+      .from(schema.auditLog)
+      .where(
+        and(
+          eq(schema.auditLog.orgId, orgId),
+          eq(schema.auditLog.action, 'scan.cron_run'),
+          sql`${schema.auditLog.createdAt} >= (SELECT a.created_at FROM audit_log a WHERE a.id = ${held.id})`,
+        ),
+      )
+      .limit(1)
+    return ended.length > 0 ? null : held.until
   })
 }
 
@@ -226,9 +247,14 @@ export async function rescanClaimHeldUntil(db: AgencyDb, orgId: string, now: Dat
  * read.
  */
 async function liveClaimUntil(db: AgencyDb, orgId: string, now: Date): Promise<Date | null> {
+  return (await liveClaim(db, orgId, now))?.until ?? null
+}
+
+/** The live claim itself: its row's id beside its `until`. */
+async function liveClaim(db: AgencyDb, orgId: string, now: Date): Promise<{ id: string; until: Date } | null> {
   const lookback = new Date(now.getTime() - RESCAN_MIN_AGE_HOURS * 3_600_000)
   const claims = await db
-    .select({ detail: schema.auditLog.detail })
+    .select({ id: schema.auditLog.id, detail: schema.auditLog.detail })
     .from(schema.auditLog)
     .where(
       and(
@@ -239,7 +265,7 @@ async function liveClaimUntil(db: AgencyDb, orgId: string, now: Date): Promise<D
     )
   for (const c of claims) {
     const held = claimUntil(c.detail)
-    if (held !== null && held.getTime() > now.getTime()) return held
+    if (held !== null && held.getTime() > now.getTime()) return { id: c.id, until: held }
   }
   return null
 }

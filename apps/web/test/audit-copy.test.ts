@@ -300,7 +300,9 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
     campaignId: SUBJECT, statusFrom: 'paused', statusTo: 'active', renamed: false, dailyCapChanged: true,
     quietHoursChanged: false, turnId: SUBJECT,
   },
-  'agent.enrol_contacts': { campaignId: SUBJECT, dryRun: false, queued: 14, skipped: 3, truncated: false, limit: 50, turnId: SUBJECT },
+  'agent.enrol_contacts': {
+    campaignId: SUBJECT, dryRun: false, queued: 14, skipped: 3, truncated: false, outOfTime: false, limit: 50, turnId: SUBJECT,
+  },
   'agent.list_drafts': { total: 4, returned: 4, checked: 3, turnId: SUBJECT },
   // --- end campaigns.ts ---
 

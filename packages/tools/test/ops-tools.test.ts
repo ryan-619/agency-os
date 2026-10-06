@@ -482,6 +482,33 @@ describe('the ops tools', () => {
       expect(on.ok && (on.data as Q).waitingWithoutProvider).toEqual({ sms: 0, email: 0 })
     })
 
+    /**
+     * The sender writes "sms rows waiting: no provider", and the worker starts
+     * a sender only when it carries a mailbox or DoveSoft. One with neither
+     * logs nothing of the kind (review round 16).
+     */
+    it('points at the sender’s log line only when this worker runs a sender', async () => {
+      const none = await run(queueStatus, {}, { ops: opsWith({ health: { sms: 'off', outreach: 'receive-only' } }) })
+      expect(none.ok).toBe(true)
+      if (!none.ok) return
+      expect(none.summary).toContain('1 approved SMS (1 due now) waits with no SMS provider on this worker')
+      expect(none.summary).not.toContain('"sms rows waiting: no provider"')
+      expect(none.summary).toContain('it runs no sender at all, and nothing in its log names this state')
+    })
+
+    /**
+     * No column records when a message was refused, and any later UPDATE
+     * re-stamps the row — deleting its contact is one. The lines say which
+     * clock they read (review round 16).
+     */
+    it('says its 24 hours are by when each message last changed', async () => {
+      const out = await run(queueStatus, {}, { ops: opsWith() })
+      expect(out.ok && out.summary).toContain(
+        'Refused and failed below count messages that last CHANGED in the last 24 hours: no column records the ' +
+          'moment of a refusal itself, so a later change to an old one — deleting its contact, say — counts it again.',
+      )
+    })
+
     it('names approved email waiting with no mailbox when this worker sends no email', async () => {
       const out = await run(queueStatus, {}, { ops: opsWith({ health: { outreach: 'receive-only' } }) })
       expect(out.ok).toBe(true)

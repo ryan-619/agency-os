@@ -665,7 +665,7 @@ describe('the campaign tools', () => {
       })
 
       expect(audited).toEqual([
-        { action: 'agent.enrol_contacts', detail: { campaignId: id, dryRun: false, queued: 2, skipped: 1, truncated: false, limit: 50 } },
+        { action: 'agent.enrol_contacts', detail: { campaignId: id, dryRun: false, queued: 2, skipped: 1, truncated: false, outOfTime: false, limit: 50 } },
       ])
       safeDetail(audited[0]!.detail)
       expect(summary).toContain('wrote 2 drafts, each awaiting approval')
@@ -688,7 +688,7 @@ describe('the campaign tools', () => {
       expect(summary).toContain('nothing was written')
       expect(summary.endsWith(ENROL_NOTHING_SENT)).toBe(true)
       expect(audited).toEqual([
-        { action: 'agent.enrol_contacts', detail: { campaignId: id, dryRun: true, queued: 1, skipped: 0, truncated: false, limit: 50 } },
+        { action: 'agent.enrol_contacts', detail: { campaignId: id, dryRun: true, queued: 1, skipped: 0, truncated: false, outOfTime: false, limit: 50 } },
       ])
     })
 
@@ -720,7 +720,7 @@ describe('the campaign tools', () => {
       expect(summary).toContain('It stopped at the limit of 1')
       expect(summary.endsWith(ENROL_NOTHING_SENT)).toBe(true)
       expect(audited).toEqual([
-        { action: 'agent.enrol_contacts', detail: { campaignId: id, dryRun: false, queued: 1, skipped: 0, truncated: true, limit: 1 } },
+        { action: 'agent.enrol_contacts', detail: { campaignId: id, dryRun: false, queued: 1, skipped: 0, truncated: true, outOfTime: false, limit: 1 } },
       ])
     })
 
