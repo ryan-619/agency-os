@@ -879,9 +879,16 @@ act, confirm, report — and names every one with its limit (§8).
 **Only the summary reaches the model.** `apps/agent/src/mcp/agency.ts` returns
 `outcome.summary` and never `data`, so an id the model needs for a later call
 is PRINTED: a contact's, a campaign's, a meeting's, a proposal's, and — since
-this change — a task's in `list_tasks`, which `complete_task` names. An
-address is not: `list_contacts` masks an email to `…@domain`, and a pause is
-shown by its class (`pauseReasonClass`) and time, never its reason.
+this change — a task's in `list_tasks`, which `complete_task` names. Review
+round 16 found five more an act needed and no read printed, and prints them:
+`book_meeting`'s meeting, `create_task`'s task, the deal in `get_pipeline`
+and `update_deal`, and every `search_crm` match (`· id <uuid>`), which the
+contact tools' `contactId` already claimed it gave; and `list_meetings`
+reaches a year ahead, where it stopped at 60 days. An address is not:
+`list_contacts` masks an email to `…@domain`, and so does `search_crm` for a
+contact now (a number-only label is withheld), though it still finds them by
+the whole address; a pause is shown by its class (`pauseReasonClass`) and
+time, never its reason.
 
 - **`records.ts`** — `list_contacts` (`contacts:read`, what `/contacts`
   reads: consent per channel as recorded, suppression standing, the pause's
@@ -903,11 +910,21 @@ shown by its class (`pauseReasonClass`) and time, never its reason.
   holder's, an own unrecorded opt-out, an erasure, a colleague's stop — is
   worded as `/contacts` words it. `add_suppression` is `addSuppression`,
   source `manual` (a person approved it), with the route's
-  `suppression.added` row; its summary never echoes the value.
+  `suppression.added` row; its summary never echoes the value. Since review
+  round 16 it takes a `contactId` and records that person's OWN email, phone
+  or LinkedIn key as stored, never a domain from one person: the model sees
+  addresses by their domain only, so a value it typed for "Jo asked us to
+  stop" was a guess — recorded, reported as the opt-out, while Jo stayed
+  sendable. A typed `value` is still taken, and its summary says how many
+  contacts on file the key covers ("It matches no contact on file …").
 - **`campaigns.ts`** — `list_campaigns` (`campaigns:read`); `create_campaign`
   makes a SUPERVISED email or LinkedIn campaign — no auto-send input, the
   form's defaults; `update_campaign` passes the status and auto-send it read
-  (`expectStatus`), changes neither channel nor auto-send, may only PAUSE an
+  (`expectStatus`) — and, setting a campaign active, the status the MODEL
+  read (`statusRead`, required; review round 16), because the card can wait
+  half an hour and a teammate's pause in that time must stand, where the
+  handler's own read after approval undid it — changes neither channel nor
+  auto-send, may only PAUSE an
   auto-send campaign, and never sets active a campaign the worker paused for
   bouncing; `enrol_contacts` (high) is `enrolCampaign` on a supervised
   campaign only, its drafts `awaiting_approval`, and says so if an owner
@@ -941,7 +958,13 @@ shown by its class (`pauseReasonClass`) and time, never its reason.
   companies through `rescanQueue` (never `.inbound`; a refused host takes no
   slot), scans them through `scan_company`'s own writer at the cron's
   timeouts, raced against 25 s (`TOOL_TIME_BUDGET_MS`, inside the MCP call's
-  30), and reports a scan still running rather than waiting for it.
+  30), and reports a scan still running rather than waiting for it — one
+  that records itself only if it finishes inside its worst case (162 s), and
+  is abandoned unrecorded after. A site stays taken until its REQUEST ends,
+  not when the race is lost (review round 16: abandoning closes nothing, and
+  the next call started a second request beside the first), and an
+  abandoned or failed scan is counted as `abandoned` or `failed`, never as
+  `unreachable`, which claims a recorded scan.
 
 **`book_meeting` recorded a day nobody typed**, found while these were
 written: V8 rolls `2026-02-30` to 2 March, and its own pattern let the string

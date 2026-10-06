@@ -443,7 +443,7 @@ describe('the campaign tools', () => {
 
     it('reactivates a campaign a person paused, and leaves what it was not asked to change', async () => {
       const id = await campaign({ name: 'Held', status: 'paused', dailyCap: 7 })
-      const summary = summaryOf(await run(updateCampaign, { campaignId: id, status: 'active' }, member()))
+      const summary = summaryOf(await run(updateCampaign, { campaignId: id, status: 'active', statusRead: 'paused' }, member()))
       expect(await campaignRow(id)).toMatchObject({ status: 'active', dailyCap: 7, name: 'Held' })
       expect(summary).toContain('It is active: messages in it that a person has approved can go')
       expect(summary.endsWith(NOTHING_SENT)).toBe(true)
@@ -469,7 +469,7 @@ describe('the campaign tools', () => {
 
     it('never changes the channel or auto-send — the model’s extra keys are not inputs', async () => {
       const id = await campaign({ name: 'Q4', channel: 'linkedin', status: 'paused' })
-      await run(updateCampaign, { campaignId: id, status: 'active', channel: 'email', autoSend: true })
+      await run(updateCampaign, { campaignId: id, status: 'active', statusRead: 'paused', channel: 'email', autoSend: true })
       expect(await campaignRow(id)).toMatchObject({ channel: 'linkedin', autoSend: false, status: 'active' })
     })
 
@@ -494,10 +494,41 @@ describe('the campaign tools', () => {
       expect(audited).toEqual([])
     })
 
+    /**
+     * The card waits for a person, and a teammate can pause the campaign in
+     * that time. Built on the handler's own read, the approved card set it
+     * active again and the next tick sent the messages the teammate held
+     * (review round 16). It is built on the status the model read now.
+     */
+    it('will not set active a campaign a teammate paused after the model read it', async () => {
+      const id = await campaign({ name: 'Q4', status: 'active', dailyCap: 25 })
+      // The model read "active"; Sam pauses it on /campaigns while the card waits.
+      await db.update(schema.campaigns).set({ status: 'paused' }).where(eq(schema.campaigns.id, id))
+      for (const change of [{ status: 'active' as const }, { status: 'active' as const, dailyCap: 40 }]) {
+        const out = refusal(await run(updateCampaign, { campaignId: id, statusRead: 'active', ...change }))
+        expect(out.code).toBe('invalid_state')
+        expect(out.message).toMatch(/^This campaign was set to paused while it was being edited/)
+      }
+      expect(await campaignRow(id)).toMatchObject({ status: 'paused', dailyCap: 25 })
+      expect(await auditRows('campaign.updated')).toEqual([])
+    })
+
+    it('asks for the status it read before setting a campaign active, and writes nothing without it', async () => {
+      const id = await campaign({ name: 'Q4', status: 'paused' })
+      const out = refusal(await run(updateCampaign, { campaignId: id, status: 'active' }))
+      expect(out.code).toBe('invalid_state')
+      expect(out.message).toMatch(/^Give statusRead/)
+      expect((await campaignRow(id)).status).toBe('paused')
+      // Pausing needs none: it only stops messages.
+      const live = await campaign({ name: 'Live', status: 'active' })
+      summaryOf(await run(updateCampaign, { campaignId: live, status: 'paused' }))
+      expect((await campaignRow(live)).status).toBe('paused')
+    })
+
     it('refuses a save whose auto-send changed since it was read, rather than turning it back off', async () => {
       const id = await campaign({ name: 'Q4', status: 'paused' })
       const raced = racing(() => db.update(schema.campaigns).set({ autoSend: true }).where(eq(schema.campaigns.id, id)))
-      const out = refusal(await run(updateCampaign, { campaignId: id, status: 'active' }, { db: raced }))
+      const out = refusal(await run(updateCampaign, { campaignId: id, status: 'active', statusRead: 'paused' }, { db: raced }))
       expect(out).toEqual({
         code: 'invalid_state',
         message:
@@ -521,7 +552,7 @@ describe('the campaign tools', () => {
         ['a rename', { name: 'Renamed' }],
         ['a new cap', { dailyCap: 100 }],
         ['new quiet hours', { quietStart: '23:00' }],
-        ['reactivation', { status: 'active' }],
+        ['reactivation', { status: 'active', statusRead: 'paused' }],
         ['finishing it', { status: 'done' }],
         ['a pause with a rename beside it', { status: 'paused', name: 'Renamed' }],
       ])('refuses %s, and writes nothing', async (_what, change) => {
@@ -540,7 +571,7 @@ describe('the campaign tools', () => {
       it('is not set active here — a person reactivates it after correcting the list', async () => {
         const id = await campaign({ name: 'Bouncing', status: 'active' })
         expect(await campaignAutoPause(db, { orgId, campaignId: id, detail: BOUNCED })).toBe(true)
-        const out = refusal(await run(updateCampaign, { campaignId: id, status: 'active' }))
+        const out = refusal(await run(updateCampaign, { campaignId: id, status: 'active', statusRead: 'paused' }))
         expect(out.code).toBe('not_permitted')
         expect(out.message).toContain(
           'the worker paused it because too many messages bounced (12% of the addresses it wrote to, 3 of 25)',
@@ -554,7 +585,7 @@ describe('the campaign tools', () => {
         const id = await campaign({ name: 'Bouncing', status: 'active' })
         await campaignAutoPause(db, { orgId, campaignId: id, detail: BOUNCED })
         summaryOf(await run(updateCampaign, { campaignId: id, status: 'done' }))
-        expect(refusal(await run(updateCampaign, { campaignId: id, status: 'active' })).code).toBe('not_permitted')
+        expect(refusal(await run(updateCampaign, { campaignId: id, status: 'active', statusRead: 'done' })).code).toBe('not_permitted')
         expect((await campaignRow(id)).status).toBe('done')
       })
 
@@ -571,7 +602,7 @@ describe('the campaign tools', () => {
           detail: { name: 'Bouncing', channel: 'email', autoSend: false, dailyCap: 5, status: 'active' },
         })
         await db.update(schema.campaigns).set({ status: 'paused' }).where(eq(schema.campaigns.id, id))
-        summaryOf(await run(updateCampaign, { campaignId: id, status: 'active' }))
+        summaryOf(await run(updateCampaign, { campaignId: id, status: 'active', statusRead: 'paused' }))
         expect((await campaignRow(id)).status).toBe('active')
       })
     })
@@ -956,7 +987,7 @@ describe('the campaign tools', () => {
     expect(idIn(listed, '“Second”')).toBe(other)
 
     // The ids as printed are the ids the next tools take.
-    const updated = summaryOf(await run(updateCampaign, { campaignId: idIn(listed, '“Printed”'), status: 'active' }))
+    const updated = summaryOf(await run(updateCampaign, { campaignId: idIn(listed, '“Printed”'), status: 'active', statusRead: 'draft' }))
     expect(idIn(updated, 'Updated the campaign “Printed”')).toBe(row.id)
     expect((await campaignRow(row.id)).status).toBe('active')
     summaryOf(await run(enrolContacts, { campaignId: idIn(listed, '“Printed”') }))

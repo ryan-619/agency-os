@@ -189,6 +189,8 @@ describe('the notes and tasks tools', () => {
       const log = await db.select().from(schema.auditLog).where(eq(schema.auditLog.action, 'task.created'))
       expect(log.map((l) => l.actor)).toEqual(['agent'])
       expect(summary).toContain('assigned to Sam Okafor')
+      // complete_task names a task by its id, and only the summary reaches the model.
+      expect(summary).toContain(`Created task ${rows[0]!.id}, “Send the scope”`)
       expect(summary).toContain('no email, message or calendar event')
       expect(summary.endsWith('Nothing was sent.')).toBe(true)
     })

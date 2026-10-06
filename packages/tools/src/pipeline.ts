@@ -68,7 +68,10 @@ export const getPipeline: AgencyToolSpec<typeof pipelineShape> = {
     await ctx.audit('agent.get_pipeline', { stage: input.stage ?? null, returned: rows.length })
     const lines = rows.map(
       (r) =>
-        `${r.stage.padEnd(9)} ${r.domain}${r.name ? ` (${r.name})` : ''}${r.nextAction ? ` — next: ${r.nextAction}` : ''}`,
+        // The id is printed because only this summary reaches the model, and
+        // set_deal_owner names a deal by it.
+        `${r.stage.padEnd(9)} ${r.domain}${r.name ? ` (${r.name})` : ''}${r.nextAction ? ` — next: ${r.nextAction}` : ''}` +
+        ` · deal ${r.dealId}`,
     )
     return ok(
       rows.map((r) => ({
@@ -163,7 +166,7 @@ export const updateDeal: AgencyToolSpec<typeof updateDealShape> = {
       { dealId: deal.id, domain, stage: deal.stage, nextAction: deal.nextAction, closed: deal.closedAt !== null },
       `${domain}: stage ${deal.stage}${deal.nextAction ? `, next: ${deal.nextAction}` : ''}${
         deal.closedAt ? ' (closed)' : ''
-      }.`,
+      } (deal ${deal.id}).`,
     )
   },
 }
@@ -237,7 +240,8 @@ export const bookMeeting: AgencyToolSpec<typeof bookMeetingShape> = {
     })
     return ok(
       { meetingId: result.meeting.id, domain, startsAt: startsAt.toISOString(), timeZone: input.timeZone, deal: result.deal },
-      `Recorded a meeting with ${domain} at ${startsAt.toISOString()} (${input.timeZone}). The deal is at ` +
+      `Recorded meeting ${result.meeting.id} with ${domain} at ${startsAt.toISOString()} (${input.timeZone}). ` +
+        'reschedule_meeting, cancel_meeting and record_meeting_outcome name it by that id. The deal is at ' +
         `"${result.deal.split(':')[1]}". No invitation was sent.`,
     )
   },

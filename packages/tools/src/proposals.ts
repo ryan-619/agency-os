@@ -571,9 +571,9 @@ const listMeetingsShape = {
     .number()
     .int()
     .min(1)
-    .max(60)
+    .max(366)
     .optional()
-    .describe('How far ahead to look, in days — and how far back with includePast. Default 14.'),
+    .describe('How far ahead to look, in days (at most a year) — and how far back with includePast. Default 14.'),
   includePast: z
     .boolean()
     .optional()

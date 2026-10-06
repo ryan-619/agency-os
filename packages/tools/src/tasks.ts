@@ -237,7 +237,7 @@ export const createTask: AgencyToolSpec<typeof createTaskShape> = {
         assigneeUserId: r.task.assigneeUserId,
         dueAt: r.task.dueAt?.toISOString() ?? null,
       },
-      `Created a task “${r.task.title}”${parts}. It is on the task list and nowhere else — no email, ` +
+      `Created task ${r.task.id}, “${r.task.title}”${parts}. It is on the task list and nowhere else — no email, ` +
         `message or calendar event. ${NOTHING_SENT}`,
     )
   },

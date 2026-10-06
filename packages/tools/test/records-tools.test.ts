@@ -786,7 +786,12 @@ describe('the records tools', () => {
       expect(log[0]).toMatchObject({
         actor: 'agent', subjectType: 'suppression', detail: { kind: 'email', value: 'stop@example-corp.com', reason: 'asked by phone to stop' },
       })
-      expect(audited).toEqual([{ action: 'agent.add_suppression', detail: { suppressionId: rows[0]!.id, kind: 'email', alreadyPresent: false } }])
+      expect(audited).toEqual([{
+        action: 'agent.add_suppression',
+        detail: { suppressionId: rows[0]!.id, kind: 'email', alreadyPresent: false, contactId: null, contactsCovered: 0 },
+      }])
+      // A typed value that matches nobody on file says so, rather than reading as the opt-out recorded.
+      expect(summary).toContain('It matches no contact on file')
       idsOnly(audited[0]!.detail)
     })
 
@@ -827,6 +832,58 @@ describe('the records tools', () => {
       const theirs = await db.select().from(schema.suppressions).where(eq(schema.suppressions.orgId, otherOrgId))
       expect(theirs).toEqual([expect.objectContaining({ value: 'shared@rentman.io', reason: 'THEIRS', source: 'reply' })])
       expect(JSON.stringify(out)).not.toContain('THEIRS')
+    })
+
+    /**
+     * The tools show the model an address by its domain only, so a value it
+     * typed for "Jo asked us to stop" was a guess: recorded, reported as the
+     * opt-out, and Jo stayed sendable (review round 16). Named by contactId,
+     * Jo's own stored key is recorded, and never printed.
+     */
+    it.each([
+      ['email', 'jo@rentman.io'],
+      ['phone', '+31201234567'],
+      ['linkedin', 'in/jo-bloggs'],
+    ] as const)('records a contact’s own %s by contactId — the stored key, never printed', async (kind, key) => {
+      const out = await run(addSuppression, { kind, contactId: joId, reason: 'asked on a call to stop' })
+      const summary = summaryOf(out)
+      const rows = await db.select().from(schema.suppressions).where(eq(schema.suppressions.orgId, orgId))
+      expect(rows).toEqual([expect.objectContaining({ kind, value: key, source: 'manual' })])
+      expect(summary).toContain('Jo Bloggs’s')
+      expect(summary).toContain('on file on any channel')
+      expect(summary).not.toContain(key)
+      expect(summary).not.toContain('31201234567')
+      expect(audited[0]!.detail).toMatchObject({ kind, contactId: joId, contactsCovered: 1 })
+    })
+
+    it('says how many contacts a typed value covers, and that a domain covers a company', async () => {
+      expect(summaryOf(await run(addSuppression, { kind: 'email', value: 'JO@rentman.io', reason: 'asked' })))
+        .toContain('It is the email address of 1 contact on file.')
+      expect(summaryOf(await run(addSuppression, { kind: 'domain', value: 'rentman.io', reason: 'the whole company asked' })))
+        .toContain('1 contact on file has an address at it.')
+    })
+
+    it('refuses a domain taken from one person, both or neither of contactId and value, and a contact with nothing of that kind', async () => {
+      expect(refusalOf(await run(addSuppression, { kind: 'domain', contactId: joId, reason: 'asked' })).message)
+        .toMatch(/^A whole domain is never taken from one person/)
+      expect(refusalOf(await run(addSuppression, { kind: 'email', contactId: joId, value: 'jo@rentman.io', reason: 'asked' })).message)
+        .toMatch(/exactly one of the two/)
+      expect(refusalOf(await run(addSuppression, { kind: 'email', reason: 'asked' })).message).toMatch(/exactly one of the two/)
+      const [noPhone] = await db.insert(schema.contacts)
+        .values({ orgId, companyId, firstName: 'Mo', email: 'mo@rentman.io' })
+        .returning({ id: schema.contacts.id })
+      expect(refusalOf(await run(addSuppression, { kind: 'phone', contactId: noPhone!.id, reason: 'asked' })).message)
+        .toBe('Mo has no phone number on file, so there is none of theirs to record. Nothing was added.')
+      expect(await db.select().from(schema.suppressions).where(eq(schema.suppressions.orgId, orgId))).toEqual([])
+      expect(audited).toEqual([])
+    })
+
+    it('answers another org’s contact exactly like nobody, and records nothing', async () => {
+      const theirs = refusalOf(await run(addSuppression, { kind: 'email', contactId: rivalContactId, reason: 'asked' }))
+      const none = refusalOf(await run(addSuppression, { kind: 'email', contactId: '7d0f4a1e-2b3c-4d5e-8f60-718293a4b5c6', reason: 'asked' }))
+      expect(theirs).toEqual(none)
+      expect(theirs.code).toBe('not_found')
+      expect(await db.select().from(schema.suppressions)).toEqual([])
     })
 
     it('refuses a role can() does not know, and records nothing', async () => {

@@ -288,7 +288,9 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'agent.update_contact': { contactId: SUBJECT, fields: ['title', 'timeZone'], bounceCleared: false, turnId: SUBJECT },
   'agent.pause_contact': { contactId: SUBJECT, replacedPauseFor: 'replied', turnId: SUBJECT },
   'agent.resume_contact': { contactId: SUBJECT, pausedFor: 'manual', turnId: SUBJECT },
-  'agent.add_suppression': { suppressionId: SUBJECT, kind: 'email', alreadyPresent: false, turnId: SUBJECT },
+  'agent.add_suppression': {
+    suppressionId: SUBJECT, kind: 'email', alreadyPresent: false, contactId: SUBJECT, contactsCovered: 1, turnId: SUBJECT,
+  },
   // --- end records.ts ---
 
   // --- campaigns.ts tools (2026-10-06): this file's actions go below ---
@@ -325,7 +327,8 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
     smsWithoutProvider: 1, emailWithoutProvider: 0, ownView: true, turnId: SUBJECT,
   },
   'agent.rescan_stale': {
-    scanned: 3, reached: 2, unreachable: 1, stillRunning: 0, skipped: 1, remaining: 4, companyIds: [SUBJECT],
+    scanned: 3, reached: 2, unreachable: 1, abandoned: 0, failed: 0, stillRunning: 0, skipped: 1, remaining: 4,
+    companyIds: [SUBJECT],
     cronRunning: false, turnId: SUBJECT,
   },
   // --- end ops.ts ---

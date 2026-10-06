@@ -575,6 +575,8 @@ describe('the ops tools', () => {
       scanned: number
       reached: number
       unreachable: number
+      abandoned: number
+      failed: number
       stillRunning: number
       skipped: number
       waiting: number
@@ -679,7 +681,8 @@ describe('the ops tools', () => {
       expect(audited).toEqual([{
         action: 'agent.rescan_stale',
         detail: {
-          scanned: 0, reached: 0, unreachable: 0, stillRunning: 0, skipped: 0, remaining: 6, companyIds: [], cronRunning: true,
+          scanned: 0, reached: 0, unreachable: 0, abandoned: 0, failed: 0, stillRunning: 0, skipped: 0, remaining: 6,
+          companyIds: [], cronRunning: true,
         },
       }])
       // It read the claim; it took none.
@@ -711,6 +714,8 @@ describe('the ops tools', () => {
       expect(out.data as R).toMatchObject({ scanned: 1, reached: 0, stillRunning: 1, unreachable: 0 })
       expect((out.data as R).companies[0]).toMatchObject({ domain: 'never.io', outcome: 'still_running', score: null })
       expect(out.summary).toContain('never.io (Never Scanned) — still running — ask again shortly')
+      // It promises a self-recording finish only within the worst case.
+      expect(out.summary).toMatch(/records itself if it finishes within \d+ seconds of starting, and is abandoned unrecorded after that/)
       expect(audited[0]!.detail).toMatchObject({ scanned: 1, stillRunning: 1, companyIds: [ids.get('never.io')] })
       expect(await scansOf('never.io')).toHaveLength(0)
 
@@ -731,15 +736,44 @@ describe('the ops tools', () => {
       expect(stored[0]!.ok).toBe(true)
     })
 
-    it('abandons a scan that outlives its worst case, recording nothing for it', async () => {
+    it('abandons a scan that outlives its worst case, recording nothing for it — and counts it as abandoned, not unreachable', async () => {
       const never = new Map([['never.io', new Promise<SiteProfile>(() => {})]])
       const tool = makeRescanStale({ deadlineMs: 2_000, scanWorstCaseMs: 50 })
       const out = await run(tool, { limit: 1 }, { ops: opsWith({ scan: scanner({ slow: never }) }) })
       expect(out.ok).toBe(true)
       if (!out.ok) return
-      expect(out.data as R).toMatchObject({ scanned: 1, reached: 0, unreachable: 1, stillRunning: 0 })
+      expect(out.data as R).toMatchObject({ scanned: 1, reached: 0, unreachable: 0, abandoned: 1, failed: 0, stillRunning: 0 })
+      expect(audited[0]!.detail).toMatchObject({ unreachable: 0, abandoned: 1, failed: 0 })
       expect(out.summary).toContain('abandoned: the scan outlived the longest its timeouts allow, and nothing was recorded')
       expect(await scansOf('never.io')).toHaveLength(0)
+    })
+
+    /**
+     * Abandoning a scan closes nothing: its request is still open to the
+     * site. Released when the race was lost, the next call started a second
+     * request beside it, and each later call another (review round 16).
+     */
+    it('holds an abandoned scan’s site until its request ends, so asking again does not start a second beside it', async () => {
+      let end!: (p: SiteProfile) => void
+      const open = new Map([['never.io', new Promise<SiteProfile>((resolve) => { end = resolve })]])
+      const tool = makeRescanStale({ deadlineMs: 2_000, scanWorstCaseMs: 50 })
+      const ops = opsWith({ scan: scanner({ slow: open }) })
+      const first = await run(tool, { limit: 1 }, { ops })
+      expect(first.ok && (first.data as R).companies[0]!.outcome).toBe('abandoned')
+
+      scanned.length = 0
+      const again = await run(tool, { limit: 1 }, { ops: opsWith({ scan: scanner() }) })
+      expect(again.ok).toBe(true)
+      expect(scanned).not.toContain('never.io')
+      expect(again.ok && again.summary).toContain('1 is still being scanned from an earlier request')
+
+      // The request ends: the site is free again, and the abandoned scan still recorded nothing.
+      end(reached('never.io'))
+      await new Promise((r) => setTimeout(r, 20))
+      expect(await scansOf('never.io')).toHaveLength(0)
+      scanned.length = 0
+      await run(tool, { limit: 1 }, { ops: opsWith({ scan: scanner() }) })
+      expect(scanned).toEqual(['never.io'])
     })
 
     it('says the failure of a scan by its class only, recording nothing', async () => {
@@ -751,6 +785,7 @@ describe('the ops tools', () => {
       expect(out.ok).toBe(true)
       if (!out.ok) return
       expect(out.summary).toContain('the scan failed before anything was recorded (TypeError)')
+      expect(out.data as R).toMatchObject({ unreachable: 0, failed: 1, abandoned: 0 })
       expect(out.summary).not.toContain('secret')
       expect(out.summary).not.toContain('postgres://')
       expect(await scansOf('never.io')).toHaveLength(0)
@@ -761,7 +796,7 @@ describe('the ops tools', () => {
       expect(audited).toEqual([{
         action: 'agent.rescan_stale',
         detail: {
-          scanned: 3, reached: 2, unreachable: 1, stillRunning: 0, skipped: 1, remaining: 4,
+          scanned: 3, reached: 2, unreachable: 1, abandoned: 0, failed: 0, stillRunning: 0, skipped: 1, remaining: 4,
           companyIds: [ids.get('never.io'), ids.get('unreached.io'), ids.get('stale-old.io')],
           cronRunning: false,
         },

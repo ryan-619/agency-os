@@ -883,7 +883,7 @@ function scoreWords(r: ScoreResult): string {
   return `${r.score}/100, ${r.disqualified ? `disqualified — ${clip(r.disqualified, 80)}` : r.tier || 'below threshold'}`
 }
 
-function outcomeLine(t: Due, o: Settled | typeof STILL_RUNNING): string {
+function outcomeLine(t: Due, o: Settled | typeof STILL_RUNNING, worstCaseMs: number): string {
   const label = `${t.domain}${t.name ? ` (${clip(t.name, 60)})` : ''}`
   const before = t.lastOkAt
     ? `last observed ${day(t.lastOkAt)}`
@@ -891,7 +891,10 @@ function outcomeLine(t: Due, o: Settled | typeof STILL_RUNNING): string {
       ? 'no scan had reached the site before'
       : 'never scanned before'
   if (o === STILL_RUNNING) {
-    return `  ${label} — still running — ask again shortly; it records itself if it finishes (${before})`
+    return (
+      `  ${label} — still running — ask again shortly; it records itself if it finishes within ` +
+      `${Math.round(worstCaseMs / 1000)} seconds of starting, and is abandoned unrecorded after that (${before})`
+    )
   }
   switch (o.kind) {
     case 'reached':
@@ -935,10 +938,12 @@ export function makeRescanStale(options: RescanStaleOptions = {}): AgencyToolSpe
   const deadlineMs = options.deadlineMs ?? TOOL_TIME_BUDGET_MS
   const worstCaseMs = options.scanWorstCaseMs ?? rescanWorstCaseMs(RESCAN_SCAN_TIMEOUTS)
   /**
-   * `<org>:<company>` for every scan this tool started that has not settled.
-   * A scan still running when a call answered is not started a second time
-   * by the next: the person was told to ask again, and asking again must not
-   * put two scans of one site side by side.
+   * `<org>:<company>` for every scan this tool started whose REQUEST has not
+   * ended. A scan still running when a call answered is not started a
+   * second time by the next: the person was told to ask again, and asking
+   * again must not put two scans of one site side by side. An abandoned
+   * scan keeps its key until the scanner's own promise settles, because
+   * abandoning it closes nothing — its request is still open to the site.
    */
   const inFlight = new Set<string>()
 
@@ -948,7 +953,9 @@ export function makeRescanStale(options: RescanStaleOptions = {}): AgencyToolSpe
       `Re-scan a few companies (2 by default, at most ${RESCAN_STALE_MAX}) whose evidence is stale or missing — ` +
       'no scan that reached the site within the ICP’s freshness window — the oldest first, by requesting only ' +
       'their own public pages: posture review from the outside, not a security test. It answers within about ' +
-      `${Math.round(deadlineMs / 1000)} seconds, and a scan still running then records itself when it finishes. ` +
+      `${Math.round(deadlineMs / 1000)} seconds; a scan still running then records itself if it finishes within ` +
+      `${Math.round(worstCaseMs / 1000)} seconds of starting, the longest its timeouts allow, and is abandoned ` +
+      'unrecorded after that. ' +
       'Never scans an inbound lead with no website or a host the scanner refuses, skips a company tried in the ' +
       `last ${RESCAN_MIN_AGE_HOURS} hours, and does nothing while the nightly rescan is running.`,
     shape: rescanShape,
@@ -975,7 +982,8 @@ export function makeRescanStale(options: RescanStaleOptions = {}): AgencyToolSpe
       const { companies, due: queue } = await dueForRescan(ctx.db, ctx.orgId, staleDays, now)
       if (heldUntil) {
         await ctx.audit('agent.rescan_stale', {
-          scanned: 0, reached: 0, unreachable: 0, stillRunning: 0, skipped: 0, remaining: queue.length, companyIds: [],
+          scanned: 0, reached: 0, unreachable: 0, abandoned: 0, failed: 0, stillRunning: 0, skipped: 0,
+          remaining: queue.length, companyIds: [],
           cronRunning: true,
         })
         return ok(
@@ -1006,15 +1014,25 @@ export function makeRescanStale(options: RescanStaleOptions = {}): AgencyToolSpe
       // binding here when no worker handed one in.
       const scan: OpsScan =
         ctx.ops?.scan ?? ((domain, definition, o) => scanDomain(domain, definition, { ...o, ...RESCAN_SCAN_TIMEOUTS }))
-      const boundedScan: OpsScan = (domain, definition, o) =>
-        within(Promise.resolve().then(() => scan(domain, definition, o)), worstCaseMs)
-
       const work = picked.map((target) => {
         const k = key(target.companyId)
+        const release = (): void => {
+          inFlight.delete(k)
+        }
         inFlight.add(k)
+        let requested = false
+        // The key is released when the scanner's own promise settles, never
+        // when the race against the worst case is lost.
+        const boundedScan: OpsScan = (domain, definition, o) => {
+          requested = true
+          const request = Promise.resolve().then(() => scan(domain, definition, o))
+          request.then(release, release)
+          return within(request, worstCaseMs)
+        }
         // Through the one writer of a scan and its score. It never rejects:
         // a scan that outlives this call settles in the background, records
-        // itself if it finishes, and must not become an unhandled rejection.
+        // itself if it finishes within its worst case, and must not become
+        // an unhandled rejection.
         return scanAndRecord(ctx, target.domain, target.companyId, target.name, icp, boundedScan)
           .then((out): Settled => ({
             kind: out.result.reachable ? 'reached' : 'unreachable', scanId: out.scanId, result: out.result,
@@ -1026,7 +1044,10 @@ export function makeRescanStale(options: RescanStaleOptions = {}): AgencyToolSpe
                 ? { kind: 'abandoned' }
                 : { kind: 'failed', error: errorClass(err) },
           )
-          .finally(() => inFlight.delete(k))
+          .finally(() => {
+            // Refused or failed before any request was made: nothing holds the site.
+            if (!requested) release()
+          })
       })
       const outcomes = await settledBy(work, Math.max(0, deadlineMs - (Date.now() - startedAt)))
 
@@ -1034,13 +1055,19 @@ export function makeRescanStale(options: RescanStaleOptions = {}): AgencyToolSpe
       const reached = kinds.filter((k) => k === 'reached').length
       const stillRunning = kinds.filter((k) => k === 'still_running').length
       const refusedAtScan = kinds.filter((k) => k === 'refused').length
-      const unreachable = picked.length - reached - stillRunning - refusedAtScan
+      // Only a scan RECORDED as unreachable is one; an abandoned or failed
+      // scan recorded nothing, and is counted as what it was.
+      const unreachable = kinds.filter((k) => k === 'unreachable').length
+      const abandoned = kinds.filter((k) => k === 'abandoned').length
+      const failed = kinds.filter((k) => k === 'failed').length
       const remaining = queue.length - reached
 
       await ctx.audit('agent.rescan_stale', {
         scanned: picked.length,
         reached,
         unreachable,
+        abandoned,
+        failed,
         stillRunning,
         skipped: skipped.length + refusedAtScan,
         remaining,
@@ -1101,6 +1128,8 @@ export function makeRescanStale(options: RescanStaleOptions = {}): AgencyToolSpe
           scanned: picked.length,
           reached,
           unreachable,
+          abandoned,
+          failed,
           stillRunning,
           skipped: skipped.length + refusedAtScan,
           waiting: waiting.length,
@@ -1125,7 +1154,7 @@ export function makeRescanStale(options: RescanStaleOptions = {}): AgencyToolSpe
             }
           }),
         },
-        bounded([head, ...picked.map((t, i) => outcomeLine(t, outcomes[i] ?? STILL_RUNNING)), ...tail], BUDGET),
+        bounded([head, ...picked.map((t, i) => outcomeLine(t, outcomes[i] ?? STILL_RUNNING, worstCaseMs)), ...tail], BUDGET),
       )
     },
   }

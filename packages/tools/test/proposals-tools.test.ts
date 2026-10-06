@@ -491,6 +491,10 @@ describe('the proposals, meetings, deal-owner and task tools', () => {
       await meeting({ startsAt: at(2 * DAY) })
       const far = await meeting({ startsAt: at(20 * DAY) })
       expect(summaryOf(await run(listMeetings, { days: 30 }))).toContain(far.id)
+      // A meeting booked a quarter ahead can still be found to cancel or move (review round 16: 60 days was the cap).
+      const quarter = await meeting({ startsAt: at(100 * DAY) })
+      expect(summaryOf(await run(listMeetings, { days: 120 }))).toContain(quarter.id)
+      expect(summaryOf(await run(listMeetings, { days: 30 }))).not.toContain(quarter.id)
       const cut = await run(listMeetings, { limit: 1 })
       expect(summaryOf(cut)).toContain('(the first 1; more are booked)')
       expect(cut.ok && cut.data).toMatchObject({ omitted: { upcoming: true, past: false } })

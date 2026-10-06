@@ -433,6 +433,13 @@ const updateCampaignShape = {
     .enum(['active', 'paused', 'done'])
     .optional()
     .describe('active lets messages a person approved go; paused holds every message in it; done finishes it.'),
+  statusRead: z
+    .enum(['draft', 'active', 'paused', 'done'])
+    .optional()
+    .describe(
+      'The status list_campaigns showed for it when you read it. Required when you set status active: if it is ' +
+        'not that status any more — a teammate paused it while this change waited for approval — nothing is saved.',
+    ),
 }
 
 /**
@@ -490,7 +497,8 @@ export const updateCampaign: AgencyToolSpec<typeof updateCampaignShape> = {
   description:
     'Change a supervised campaign: rename it, change its daily cap or quiet hours, or set it active, paused or ' +
     'done. It never changes a campaign’s channel or turns auto-send on, and an auto-send campaign can only be ' +
-    'paused here. A campaign the worker paused because its addresses bounced is reactivated by a person on ' +
+    'paused here. Setting one active needs statusRead, the status you read, and is refused if it has changed ' +
+    'since. A campaign the worker paused because its addresses bounced is reactivated by a person on ' +
     '/campaigns. Changing a campaign sends nothing.',
   shape: updateCampaignShape,
   async handler(input, ctx): Promise<ToolOutcome<unknown>> {
@@ -506,6 +514,22 @@ export const updateCampaign: AgencyToolSpec<typeof updateCampaignShape> = {
       input.quietEnd === undefined && input.status === undefined
     ) {
       return fail('invalid_state', `Say what to change: name, dailyCap, quietStart, quietEnd or status. ${NOTHING_WRITTEN}`)
+    }
+
+    // Setting a campaign active lets its approved messages go, so it is
+    // built on the status the model READ, never on this read: the card may
+    // have waited half an hour, and a teammate's pause in that time must
+    // stand (review round 16). The form sends the status it loaded for the
+    // same reason. Pausing or finishing only stops messages.
+    if (input.status === 'active' && input.statusRead === undefined) {
+      return fail(
+        'invalid_state',
+        'Give statusRead — the status list_campaigns showed for this campaign — when setting it active, so a pause ' +
+          `made since you read it is not undone. ${NOTHING_WRITTEN}`,
+      )
+    }
+    if (input.statusRead !== undefined && input.statusRead !== current.status) {
+      return fail('invalid_state', refusedSave({ ok: false, reason: 'status_changed', status: current.status }))
     }
 
     const next = {
@@ -590,7 +614,7 @@ export const updateCampaign: AgencyToolSpec<typeof updateCampaignShape> = {
       // expected.
       saved = await updateCampaignRow(ctx.db, ctx.orgId, current.id, { ...parsed.data, autoSend: current.autoSend }, {
         autoSend: current.autoSend,
-        status: current.status as CampaignStatus,
+        status: (input.statusRead ?? current.status) as CampaignStatus,
       })
     } catch (err) {
       if (isUniqueViolation(err)) {

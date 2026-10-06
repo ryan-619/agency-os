@@ -485,6 +485,35 @@ describe('the reporting tools', () => {
       expect(out.summary).toContain('Searched companies, contacts, deals, campaigns, meetings, proposals, touches.')
     })
 
+    /**
+     * The contact tools say to name a person by the id search_crm gives; it
+     * printed none, and the person's whole address, which list_contacts
+     * masks (review round 16).
+     */
+    it('prints each match’s id, and a person’s address by its domain only', async () => {
+      const [jane] = await db.insert(schema.contacts).values({
+        orgId, companyId, email: 'jane.doe@rentman.io', firstName: 'Jane', lastName: 'Doe', title: 'CTO',
+      }).returning({ id: schema.contacts.id })
+      const [phoneOnly] = await db.insert(schema.contacts).values({
+        orgId, companyId, phone: '+447700900123',
+      }).returning({ id: schema.contacts.id })
+      const byName = await run(searchCrm, { query: 'Jane', sections: ['contacts'] })
+      if (!byName.ok) throw new Error(byName.message)
+      expect(byName.summary).toContain(`Jane Doe — …@rentman.io · CTO`)
+      expect(byName.summary).toContain(`· id ${jane!.id}`)
+      expect(byName.summary).not.toContain('jane.doe@')
+      // Searched by the whole address, it still finds her — and does not print it back.
+      const byAddress = await run(searchCrm, { query: 'jane.doe@rentman.io', sections: ['contacts'] })
+      expect(byAddress.ok && byAddress.summary).toContain(`· id ${jane!.id}`)
+      // The first line echoes the query the person typed; no match line repeats it.
+      expect(byAddress.ok && byAddress.summary.split('\n').slice(1).join('\n')).not.toMatch(/jane\.doe@rentman/)
+      const byPhone = await run(searchCrm, { query: '7700900123', sections: ['contacts'] })
+      if (!byPhone.ok) throw new Error(byPhone.message)
+      expect(byPhone.summary).toContain(`(no name recorded — a phone number on file)`)
+      expect(byPhone.summary).toContain(`· id ${phoneOnly!.id}`)
+      expect(byPhone.summary.split('\n').slice(1).join('\n')).not.toContain('+447700900123')
+    })
+
     it('never returns a connector, a chat or an agent prompt', async () => {
       await db.insert(schema.chatSessions).values({ orgId, userId, title: 'kestrel plan' })
       await db.insert(schema.connectors).values({ orgId, name: 'kestrel', kind: 'http', config: { url: 'https://kestrel.example/mcp' } })

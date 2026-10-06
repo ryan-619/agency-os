@@ -158,7 +158,10 @@ const personShape = {
     .string()
     .max(254)
     .optional()
-    .describe('Who, by their email address on file. Give this or contactId, not both.'),
+    .describe(
+      'Who, by their email address on file, as the person you are helping gave it (the tools print an address ' +
+        'by its domain only). Give this or contactId, not both.',
+    ),
 }
 
 interface FoundContact {
@@ -1261,10 +1264,26 @@ const addSuppressionShape = {
   kind: z
     .enum(SUPPRESSION_KINDS)
     .describe(
-      'What the value is: an email address, a whole email domain, a phone number in international form, or a ' +
-        'LinkedIn profile URL.',
+      'What to suppress: an email address, a whole email domain, a phone number, or a LinkedIn profile. With ' +
+        'contactId: email, phone or linkedin — that person’s own, as stored.',
     ),
-  value: z.string().min(1).max(500).describe('The address, domain, number or profile URL to suppress.'),
+  contactId: z
+    .uuid()
+    .optional()
+    .describe(
+      'The person who asked, by the id list_contacts or search_crm gave: their own address of this kind, as ' +
+        'stored, is recorded — the way to record a contact’s address, which the tools print by its domain only. ' +
+        'Give this or value.',
+    ),
+  value: z
+    .string()
+    .min(1)
+    .max(500)
+    .optional()
+    .describe(
+      'The exact address, domain, number or profile URL the person you are helping gave you — never a guess. ' +
+        'Give this or contactId.',
+    ),
   reason: z
     .string()
     .min(1)
@@ -1272,28 +1291,119 @@ const addSuppressionShape = {
     .describe('Why, in a few words, kept with the row — e.g. "asked by phone to stop". A row nobody can explain gets removed.'),
 }
 
+type SuppressionKindName = (typeof SUPPRESSION_KINDS)[number]
+
+/** A contact's own address of a kind, as stored — never a domain, which their colleagues share. */
+const OWN_ADDRESS: Record<Exclude<SuppressionKindName, 'domain'>, { readonly field: 'email' | 'phone' | 'linkedinUrl'; readonly words: string }> = {
+  email: { field: 'email', words: 'email address' },
+  phone: { field: 'phone', words: 'phone number' },
+  linkedin: { field: 'linkedinUrl', words: 'LinkedIn profile' },
+}
+
+/**
+ * How many contacts of this org the stored key covers — the send path's own
+ * reading of each contact's address (`suppressionKeysFor`'s shapes:
+ * `normaliseEmail`, the domain after the `@`, E.164, `normaliseLinkedIn`).
+ * Read so the summary can say a typed value matched nobody, rather than
+ * report a guess as an opt-out recorded.
+ */
+async function contactsTheKeyCovers(ctx: ToolContext, kind: SuppressionKindName, key: string): Promise<number> {
+  const base = eq(schema.contacts.orgId, ctx.orgId)
+  const near =
+    kind === 'email'
+      ? sql`lower(btrim(${schema.contacts.email})) = ${key}`
+      : kind === 'domain'
+        ? sql`split_part(lower(btrim(${schema.contacts.email})), '@', 2) = ${key}`
+        : kind === 'phone'
+          ? sql`${schema.contacts.phone} IS NOT NULL`
+          : sql`${schema.contacts.linkedinUrl} IS NOT NULL`
+  const rows = await ctx.db
+    .select({ email: schema.contacts.email, phone: schema.contacts.phone, linkedinUrl: schema.contacts.linkedinUrl })
+    .from(schema.contacts)
+    .where(and(base, near))
+    .limit(20_000)
+  return rows.filter((c) =>
+    kind === 'email'
+      ? normaliseEmail(c.email ?? '') === key
+      : kind === 'domain'
+        ? (normaliseEmail(c.email ?? '') ?? '').split('@')[1] === key
+        : kind === 'phone'
+          ? normalisePhone(c.phone ?? '') === key
+          : normaliseLinkedIn(c.linkedinUrl ?? '') === key,
+  ).length
+}
+
 export const addSuppression: AgencyToolSpec<typeof addSuppressionShape> = {
   name: 'add_suppression',
   description:
     'Put an email address, a whole email domain, a phone number or a LinkedIn profile on the suppression list, ' +
-    'with the reason — after which no channel may contact it again, whatever any campaign says. Only an owner ' +
-    'can take a row off. It only ever stops messages; nothing is sent.',
+    'with the reason — after which no channel may contact it again, whatever any campaign says. To record a ' +
+    'contact’s own address, name them by contactId: the tools print addresses by their domain only, so a value ' +
+    'typed from that would be a guess. Only an owner can take a row off. It only ever stops messages; nothing ' +
+    'is sent.',
   shape: addSuppressionShape,
   async handler(input, ctx): Promise<ToolOutcome<unknown>> {
     // POST /api/suppressions's own gate: any member may add an opt-out.
     if (!can(ctx.principal, 'contacts:write')) {
       return fail('not_permitted', `The person you are helping cannot add to the suppression list. ${NOTHING_SENT}`)
     }
+    const byContact = input.contactId !== undefined
+    const byValue = input.value !== undefined && input.value.trim() !== ''
+    if (byContact === byValue) {
+      return fail(
+        'invalid_state',
+        'Give contactId — the person whose own address to record — or value, the exact address you were given: ' +
+          'exactly one of the two. Nothing was added.',
+      )
+    }
+
+    // A contact's own address, read here and never printed: the model is
+    // shown addresses by their domain only, and a value typed from that
+    // would record a key that matches nobody (review round 16).
+    let value: string
+    let whose: string | null = null
+    if (byContact) {
+      if (input.kind === 'domain') {
+        return fail(
+          'invalid_state',
+          'A whole domain is never taken from one person: it would stop every address at their company. ' +
+            'Name the kind of their own address (email, phone or linkedin) — or, if the whole company asked, give ' +
+            'the domain as value. Nothing was added.',
+        )
+      }
+      const found = await contactFor(ctx, { contactId: input.contactId })
+      if (!found.ok) return fail(found.code, found.message)
+      const own = OWN_ADDRESS[input.kind]
+      const stored = found.contact[own.field]
+      whose = nameOf(found.contact)
+      if (!stored || !stored.trim()) {
+        return fail('invalid_state', `${whose} has no ${own.words} on file, so there is none of theirs to record. Nothing was added.`)
+      }
+      value = stored
+    } else {
+      value = input.value!
+    }
+
     // A person's add on the suppressions page is `manual` (0018), and a person
     // approved this one; the audit rows say the agent asked.
     const r = await addSuppressionRow(ctx.db, {
       orgId: ctx.orgId,
       kind: input.kind,
-      value: input.value,
+      value,
       reason: input.reason,
       source: 'manual',
     })
-    if (!r.ok) return fail('invalid_state', `${r.message} Nothing was added.`)
+    if (!r.ok) {
+      // The writer's sentence quotes what it could not read; of a contact's
+      // stored address that is their address, which is not printed.
+      return fail(
+        'invalid_state',
+        whose === null
+          ? `${r.message} Nothing was added.`
+          : `${whose}’s ${OWN_ADDRESS[input.kind as Exclude<SuppressionKindName, 'domain'>].words} on file could not be ` +
+              'read as one, so no suppression could match it — correct it on /contacts, then record it. Nothing was added.',
+      )
+    }
 
     // The route's own row, through the builder it uses: the one place the log
     // holds the value, by design (audit.ts).
@@ -1320,16 +1430,36 @@ export const addSuppression: AgencyToolSpec<typeof addSuppressionShape> = {
       )
       .limit(1)
     const suppressionId = rows[0]?.id ?? null
-    await ctx.audit('agent.add_suppression', { suppressionId, kind: input.kind, alreadyPresent: r.alreadyPresent })
+    const covers = await contactsTheKeyCovers(ctx, input.kind, r.value)
+    await ctx.audit('agent.add_suppression', {
+      suppressionId,
+      kind: input.kind,
+      alreadyPresent: r.alreadyPresent,
+      contactId: input.contactId ?? null,
+      contactsCovered: covers,
+    })
 
     const words = KIND_WORDS[input.kind]
+    const what =
+      whose !== null
+        ? `${whose}’s ${OWN_ADDRESS[input.kind as Exclude<SuppressionKindName, 'domain'>].words} on file`
+        : words.gave
+    const coverage =
+      whose !== null
+        ? ''
+        : input.kind === 'domain'
+          ? ` ${plural(covers, 'contact')} on file ${covers === 1 ? 'has an address' : 'have addresses'} at it.`
+          : covers === 0
+            ? ' It matches no contact on file: if the person who asked is in the CRM, their address is a different ' +
+              'one — name them by contactId to record their own.'
+            : ` It is the ${words.label.toLowerCase()} of ${plural(covers, 'contact')} on file.`
     return ok(
-      { suppressionId, kind: input.kind, alreadyPresent: r.alreadyPresent },
+      { suppressionId, kind: input.kind, alreadyPresent: r.alreadyPresent, contactId: input.contactId ?? null, contactsCovered: covers },
       r.alreadyPresent
-        ? `${words.label} suppression was already recorded — ${words.gave} was on the suppression list, and nothing ` +
-            `changed. Nothing will be sent to it. ${NOTHING_SENT}`
-        : `${words.label} suppression recorded — nothing will be sent to ${words.gave} on any channel, whatever a ` +
-            `campaign says; only an owner can take it off, on /suppressions. ${NOTHING_SENT}`,
+        ? `${words.label} suppression was already recorded — ${what} was on the suppression list, and nothing ` +
+            `changed. Nothing will be sent to it.${coverage} ${NOTHING_SENT}`
+        : `${words.label} suppression recorded — nothing will be sent to ${what} on any channel, whatever a ` +
+            `campaign says; only an owner can take it off, on /suppressions.${coverage} ${NOTHING_SENT}`,
     )
   },
 }
