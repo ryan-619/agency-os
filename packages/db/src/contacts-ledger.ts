@@ -35,7 +35,7 @@ import {
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
-import type { ConsentRow, ContactRow } from './contacts.js'
+import { linkedinUnreadable, phoneNotInternational, type ConsentRow, type ContactRow } from './contacts.js'
 import { isUniqueViolation } from './pg-errors.js'
 import { heldForUnrecordedSharedNumber, resumeAsksSharedNumber, sharedNumberHolderRowExists } from './sms.js'
 
@@ -505,9 +505,7 @@ export async function contactsUpdate(
         return {
           ok: false,
           reason: 'unreadable',
-          message:
-            `"${raw}" is not a number in international form. Include the country code, like ` +
-            '+1 415 555 0100 — without one it cannot be matched against an opt-out.',
+          message: phoneNotInternational(raw),
         }
       }
       if (v !== old.phone) next.phone = v
@@ -521,9 +519,7 @@ export async function contactsUpdate(
         return {
           ok: false,
           reason: 'unreadable',
-          message:
-            `"${raw}" could not be read as a LinkedIn profile. Paste the full URL, like ` +
-            'linkedin.com/in/jane-doe — a bare handle does not say whether it is a person or a company.',
+          message: linkedinUnreadable(raw),
         }
       }
       next.linkedinUrl = raw

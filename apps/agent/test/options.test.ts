@@ -371,6 +371,38 @@ describe('the system prompt', () => {
     }
   })
 
+  /**
+   * The operator's tools (2026-10-06). Chat is meant to carry out what it is
+   * asked, so the prompt says how — read, act, confirm — and states each
+   * group's limit where the model could otherwise overstep it: no consent
+   * is recorded with a new contact, auto-send is an owner's, a text is a
+   * person's, nothing in the calendar invites anybody, and there is no
+   * terminal behind the worker tools.
+   */
+  it('tells the model to carry a request out with the tools, a person approving each change', () => {
+    expect(prompt).toMatch(/do it with the tools rather than describing how they could/i)
+    expect(prompt).toMatch(/Every change runs only after a person approves its card/)
+  })
+
+  it('names every operator tool, with the limit each group keeps', () => {
+    for (const tool of [
+      'list_contacts', 'add_company', 'update_company', 'import_companies', 'add_contact', 'update_contact',
+      'pause_contact', 'resume_contact', 'add_suppression', 'list_campaigns', 'create_campaign', 'update_campaign',
+      'enrol_contacts', 'list_drafts', 'generate_proposal', 'get_proposal', 'list_meetings', 'reschedule_meeting',
+      'cancel_meeting', 'record_meeting_outcome', 'set_deal_owner', 'complete_task', 'worker_status',
+      'recent_errors', 'queue_status', 'rescan_stale',
+    ]) {
+      expect(prompt, tool).toContain(tool)
+    }
+    expect(prompt).toMatch(/never record or imply consent nobody gave/i)
+    expect(prompt).toMatch(/you cannot turn auto-send on/i)
+    expect(prompt).toMatch(/you cannot draft\s+or send one/i)
+    expect(prompt).toMatch(/none of them invites or tells anybody/i)
+    expect(prompt).toMatch(/There is no terminal and you cannot run commands/)
+    expect(prompt).toMatch(/never try to undo a suppression/i)
+    expect(prompt).toMatch(/never as evidence about a company's security/i)
+  })
+
   it('says so rather than inventing a profile when none is configured', () => {
     const none = systemPrompt('Agency', null)
     expect(none).toMatch(/No ideal-customer profile is configured/i)

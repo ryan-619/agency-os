@@ -1,8 +1,9 @@
 import { NextResponse } from 'next/server'
 import { assertCan } from '@agency/core'
-import { appendAudit, campaignInput, createCampaign, type AgencyDb } from '@agency/db/queries'
+import { appendAudit, campaignInput, createCampaign, isUniqueViolation, type AgencyDb } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
+import { log } from '@/lib/logger'
 
 /**
  * Create a campaign (PROMPT.md §8.4).
@@ -57,8 +58,14 @@ export async function POST(request: Request): Promise<NextResponse> {
   let row
   try {
     row = await createCampaign(db, user.orgId, parsed.data)
-  } catch {
-    return NextResponse.json({ error: `A campaign called "${parsed.data.name}" already exists.` }, { status: 409 })
+  } catch (err) {
+    // Only a duplicate name is the person's to fix; every other fault read as
+    // one before, which sent them to rename a campaign that did not exist.
+    if (isUniqueViolation(err)) {
+      return NextResponse.json({ error: `A campaign called "${parsed.data.name}" already exists.` }, { status: 409 })
+    }
+    log.error('campaign create failed', { error: err instanceof Error ? err.name : 'UnknownError' })
+    return NextResponse.json({ error: 'The campaign could not be created. Nothing was saved; try again.' }, { status: 500 })
   }
   await appendAudit(db, {
     orgId: user.orgId,

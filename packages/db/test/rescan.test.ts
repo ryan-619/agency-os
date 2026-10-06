@@ -21,7 +21,7 @@ import { SEED_DIR } from '../src/paths.js'
 import { recordScan, type AgencyDb, type CompanyListRow } from '../src/repository.js'
 import {
   RESCAN_MARGIN_MS, RESCAN_MIN_AGE_HOURS, RESCAN_SCAN_TIMEOUTS,
-  claimRescan, listOrgIds, rescanQueue, rescanWorstCaseMs, runRescan, selectRescanTargets,
+  claimRescan, listOrgIds, rescanClaimHeldUntil, rescanQueue, rescanWorstCaseMs, runRescan, selectRescanTargets,
   type RescanDeps, type RescanScan, type RescanResult,
 } from '../src/rescan.js'
 
@@ -507,6 +507,33 @@ describe('runRescan', () => {
     const now = new Date()
     expect(await claimRescan(db, { orgId: other!.id, now, budgetMs: 240_000 })).toEqual({ claimed: true })
     expect(await claimRescan(db, { orgId, now, budgetMs: 240_000 })).toEqual({ claimed: true })
+  })
+
+  /**
+   * The agent's `rescan_stale` must not scan beside a run, and must not take
+   * a claim either — a claim it took would make the night's delivery skip
+   * the org. So the claim can be READ on its own: the same reading of a
+   * claim, under the same lock, and nothing written.
+   */
+  it('can be read without being taken: rescanClaimHeldUntil sees what claimRescan wrote, and writes nothing', async () => {
+    const t0 = new Date('2026-09-30T03:17:00.000Z')
+    const budgetMs = 240_000
+    expect(await rescanClaimHeldUntil(db, orgId, t0)).toBeNull()
+    expect(await claims()).toHaveLength(0)
+
+    expect(await claimRescan(db, { orgId, now: t0, budgetMs })).toEqual({ claimed: true })
+    const until = new Date(t0.getTime() + budgetMs + RESCAN_MARGIN_MS)
+    expect(await rescanClaimHeldUntil(db, orgId, new Date(t0.getTime() + 60_000))).toEqual(until)
+    expect(await rescanClaimHeldUntil(db, orgId, until)).toBeNull()
+    expect(await claims()).toHaveLength(1)
+
+    const here = dirname(fileURLToPath(import.meta.url))
+    const source = readFileSync(join(here, '..', 'src', 'rescan.ts'), 'utf8')
+    const body = source.slice(source.indexOf('export async function rescanClaimHeldUntil'))
+    const lock = body.indexOf("pg_advisory_xact_lock(hashtext('cron.rescan'), hashtext(")
+    expect(body.indexOf('db.transaction(')).toBeLessThan(lock)
+    expect(lock).toBeGreaterThan(-1)
+    expect(lock).toBeLessThan(body.indexOf('liveClaimUntil('))
   })
 
   it('reads a claim whose until cannot be read as holding nothing', async () => {

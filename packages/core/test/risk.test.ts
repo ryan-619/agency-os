@@ -172,10 +172,16 @@ describe('the registry cannot drift from what is reachable', () => {
     )
   })
 
-  it('has exactly one tool that leaves the building, and it is high', () => {
+  /**
+   * Two tools draft words for somebody outside the company: `queue_touch`,
+   * one message, and `enrol_contacts`, an opener per person. Both are high,
+   * so a person approves the call before any draft exists — and every draft
+   * still waits on /approvals before anything is sent.
+   */
+  it('has exactly two tools that leave the building, and both are high', () => {
     const leaving = AGENCY_TOOL_NAMES.filter((n) => AGENCY_TOOL_RISK[n][1] === 'leaves_the_building')
-    expect(leaving).toEqual(['queue_touch'])
-    expect(AGENCY_TOOL_RISK.queue_touch[0]).toBe('high')
+    expect(leaving).toEqual(['queue_touch', 'enrol_contacts'])
+    for (const name of leaving) expect(AGENCY_TOOL_RISK[name][0], name).toBe('high')
   })
 
   /**
@@ -199,7 +205,49 @@ describe('the registry cannot drift from what is reachable', () => {
       expect(AGENCY_TOOL_RISK[name][1], name).toBe('writes_internal_state')
     }
     expect(reads.length + writes.length).toBe(14)
-    expect(AGENCY_TOOL_NAMES).toHaveLength(23)
+  })
+
+  /**
+   * The operator's tools (2026-10-06): what chat needs to run the CRM,
+   * campaigns, the pipeline and the worker. Reads are low; an internal write
+   * is medium; the scan of a few stale companies is low like `scan_company`;
+   * drafting openers and lifting a pause are high. None of the internal
+   * writes is low — every one of them still raises a card.
+   */
+  it('classifies the operator tools: reads low, internal writes medium, outreach and resume high', () => {
+    const reads = [
+      'list_contacts', 'list_campaigns', 'list_drafts', 'get_proposal', 'list_meetings',
+      'worker_status', 'recent_errors', 'queue_status',
+    ] as const
+    const writes = [
+      'add_company', 'update_company', 'import_companies', 'add_contact', 'update_contact', 'pause_contact',
+      'add_suppression', 'create_campaign', 'update_campaign', 'generate_proposal', 'reschedule_meeting',
+      'cancel_meeting', 'record_meeting_outcome', 'set_deal_owner', 'complete_task',
+    ] as const
+    for (const name of reads) {
+      expect(AGENCY_TOOL_RISK[name][0], name).toBe('low')
+      expect(AGENCY_TOOL_RISK[name][1], name).toBe('read_only')
+    }
+    for (const name of writes) {
+      expect(AGENCY_TOOL_RISK[name][0], name).toBe('medium')
+      expect(AGENCY_TOOL_RISK[name][1], name).toBe('writes_internal_state')
+    }
+    expect(AGENCY_TOOL_RISK.rescan_stale).toEqual([
+      'low', 'derived_write', AGENCY_TOOL_RISK.rescan_stale[2],
+    ])
+    expect(AGENCY_TOOL_RISK.enrol_contacts.slice(0, 2)).toEqual(['high', 'leaves_the_building'])
+    expect(AGENCY_TOOL_RISK.resume_contact.slice(0, 2)).toEqual(['high', 'reopens_outreach'])
+    expect(reads.length + writes.length + 3).toBe(26)
+    expect(AGENCY_TOOL_NAMES).toHaveLength(23 + 26)
+  })
+
+  it('never lets a write run without a person: every non-read tool but the scans is medium or high', () => {
+    const scans = new Set(['scan_company', 'score_company', 'rescan_stale'])
+    for (const name of AGENCY_TOOL_NAMES) {
+      const [risk, rule] = AGENCY_TOOL_RISK[name]
+      if (rule === 'read_only' || scans.has(name)) continue
+      expect(risk, name).not.toBe('low')
+    }
   })
 
   it('gives every registered tool an explanation a human could act on', () => {

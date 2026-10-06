@@ -125,8 +125,10 @@ export function createAgencyMcpServer(deps: McpDeps) {
     name: 'agency',
     version: '1.0.0',
     instructions:
-      'The agency CRM. Every company, scan, finding and score the team has. Reads are free; anything ' +
-      'that drafts a message to someone outside the company needs a human to approve it first.',
+      'The agency CRM: companies, people, scans, findings, scores, campaigns, drafts, deals, meetings, ' +
+      'proposals, tasks and the worker that sends. Reads and scans run at once; every change asks a person ' +
+      'first, and anything that drafts a message to someone outside the company is approved before it is ' +
+      'written and again before it is sent.',
     tools,
     timeout: TOOL_TIMEOUT_MS,
   })

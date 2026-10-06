@@ -275,6 +275,19 @@ describe('the notes and tasks tools', () => {
       idsOnly(audited[0]!.detail)
     })
 
+    /**
+     * Only the summary reaches the model, and complete_task names a task by
+     * its id — so every listed task carries its id in the summary itself.
+     */
+    it('prints each task’s id in the summary, so complete_task can name it', async () => {
+      const out = await run(listTasks, {})
+      if (!out.ok) throw new Error(out.message)
+      const ids = (await db.select({ id: schema.tasks.id, title: schema.tasks.title }).from(schema.tasks))
+        .filter((t) => ['Overdue for Sam', 'Later for Priya', 'Nobody’s, undated'].includes(t.title))
+      expect(ids).toHaveLength(3)
+      for (const t of ids) expect(out.summary, t.title).toContain(`task ${t.id}`)
+    })
+
     it('includes done ones when open is false', async () => {
       const titles = listed(await run(listTasks, { open: false })).map((t) => t.title)
       expect(titles).toHaveLength(4)

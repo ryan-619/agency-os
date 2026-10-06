@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server'
 import { assertCan } from '@agency/core'
-import { appendAudit, contactInput, createContact, type AgencyDb } from '@agency/db/queries'
+import {
+  appendAudit, contactInput, createContact, linkedinIsReadable, linkedinUnreadable, type AgencyDb,
+} from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
 
@@ -41,6 +43,13 @@ export async function POST(request: Request): Promise<NextResponse> {
       { error: `${first?.path.join('.') ?? 'input'}: ${first?.message ?? 'Invalid.'}` },
       { status: 400 },
     )
+  }
+
+  // A LinkedIn URL is stored only when it can be read as a profile, as an
+  // edit requires: one that cannot gives no suppression key, so an opt-out
+  // recorded against the person's profile would never match them.
+  if (parsed.data.linkedinUrl && !linkedinIsReadable(parsed.data.linkedinUrl)) {
+    return NextResponse.json({ error: linkedinUnreadable(parsed.data.linkedinUrl) }, { status: 400 })
   }
 
   const db = getDb() as unknown as AgencyDb

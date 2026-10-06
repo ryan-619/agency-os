@@ -218,11 +218,14 @@ async function seedInTransaction(
   // exist as editable rows from the first boot rather than as a later data
   // migration — Settings → Agents in Phase 3 edits these.
   //
-  // Two are seeded DISABLED. `prospector` has no sourcing connector to work
-  // with until Phase 3, and `closer` drafts outbound messages, which belongs
-  // with Phase 4's single send path and its consent rules. An agent that is
-  // present but off is honest about what exists; one that is on and cannot do
-  // its job teaches the model a false shape of the business (§12).
+  // Two are seeded DISABLED. `prospector` has no sourcing tool of its own — a
+  // subagent is granted agency tools only, never a connector's — so it works
+  // from the domains it is given, and `closer` drafts outbound messages, which
+  // an owner turns on deliberately. An agent that is present but off is
+  // honest about what exists; one that is on and cannot do its job teaches
+  // the model a false shape of the business (§12). Each was given the
+  // operator tools that fit its job on 2026-10-06; a database seeded before
+  // then keeps its rows as they were, and Settings → Agents edits them.
   //
   // Left untouched if present, for the same reason as the ICP: once the team
   // edits a prompt, a re-seed must not silently revert it.

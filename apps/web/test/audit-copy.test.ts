@@ -274,6 +274,61 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
     workerAlert: 'not_needed',
     campaignPauses: { found: 1, posted: 0, readThrough: { at: '2026-09-30T06:40:12.123456Z', id: SUBJECT } },
   },
+
+  // --- records.ts tools (2026-10-06): this file's actions go below ---
+  // Ids, counts, flags and fixed words only. The rows each tool writes as its
+  // route does (company.updated, contact.created, contact.updated,
+  // contact.timezone_set, contact.paused, contact.resumed, suppression.added)
+  // are above, actor `agent`.
+  'agent.list_contacts': { companyId: SUBJECT, returned: 3, more: false, turnId: SUBJECT },
+  'agent.add_company': { companyId: SUBJECT, created: true, turnId: SUBJECT },
+  'agent.update_company': { companyId: SUBJECT, fields: ['name', 'timeZone'], turnId: SUBJECT },
+  'agent.import_companies': { added: 3, alreadyPresent: 1, refused: 1, duplicates: 0, turnId: SUBJECT },
+  'agent.add_contact': { contactId: SUBJECT, companyId: SUBJECT, turnId: SUBJECT },
+  'agent.update_contact': { contactId: SUBJECT, fields: ['title', 'timeZone'], bounceCleared: false, turnId: SUBJECT },
+  'agent.pause_contact': { contactId: SUBJECT, replacedPauseFor: 'replied', turnId: SUBJECT },
+  'agent.resume_contact': { contactId: SUBJECT, pausedFor: 'manual', turnId: SUBJECT },
+  'agent.add_suppression': { suppressionId: SUBJECT, kind: 'email', alreadyPresent: false, turnId: SUBJECT },
+  // --- end records.ts ---
+
+  // --- campaigns.ts tools (2026-10-06): this file's actions go below ---
+  'agent.list_campaigns': { status: null, matched: 3, returned: 3, turnId: SUBJECT },
+  'agent.create_campaign': { campaignId: SUBJECT, channel: 'email', status: 'draft', autoSend: false, turnId: SUBJECT },
+  'agent.update_campaign': {
+    campaignId: SUBJECT, statusFrom: 'paused', statusTo: 'active', renamed: false, dailyCapChanged: true,
+    quietHoursChanged: false, turnId: SUBJECT,
+  },
+  'agent.enrol_contacts': { campaignId: SUBJECT, dryRun: false, queued: 14, skipped: 3, truncated: false, limit: 50, turnId: SUBJECT },
+  'agent.list_drafts': { total: 4, returned: 4, checked: 3, turnId: SUBJECT },
+  // --- end campaigns.ts ---
+
+  // --- proposals.ts tools (2026-10-06): this file's actions go below ---
+  'agent.generate_proposal': {
+    domain: 'rentman.io', proposalId: SUBJECT, scanId: SUBJECT, workstreams: 2, scopeItems: 4, turnId: SUBJECT,
+  },
+  'agent.get_proposal': { proposalId: SUBJECT, companyId: SUBJECT, stale: false, superseded: true, turnId: SUBJECT },
+  'agent.list_meetings': { days: 14, includePast: true, upcoming: 2, past: 1, turnId: SUBJECT },
+  'agent.reschedule_meeting': {
+    meetingId: SUBJECT, replacementId: SUBJECT, startsAt: '2026-09-22T14:00:00.000Z', timeZone: 'Europe/London', turnId: SUBJECT,
+  },
+  'agent.cancel_meeting': { meetingId: SUBJECT, companyId: SUBJECT, turnId: SUBJECT },
+  'agent.record_meeting_outcome': { meetingId: SUBJECT, companyId: SUBJECT, outcome: 'no_show', previous: 'held', turnId: SUBJECT },
+  'agent.set_deal_owner': { dealId: SUBJECT, companyId: SUBJECT, ownerUserId: OTHER_USER, previousOwnerUserId: null, turnId: SUBJECT },
+  'agent.complete_task': { taskId: SUBJECT, companyId: SUBJECT, alreadyDone: false, turnId: SUBJECT },
+  // --- end proposals.ts ---
+
+  // --- ops.ts tools (2026-10-06): this file's actions go below ---
+  'agent.worker_status': { status: 'live', schema: 'ok', ownView: true, turnId: SUBJECT },
+  'agent.recent_errors': { returned: 3, kinds: 5, ownView: true, turnId: SUBJECT },
+  'agent.queue_status': {
+    awaiting: 3, approved: 4, queued: 1, sending: 1, refused: 3, failed: 1, agentApprovals: 2, linkedinSteps: 1,
+    smsWithoutProvider: 1, emailWithoutProvider: 0, ownView: true, turnId: SUBJECT,
+  },
+  'agent.rescan_stale': {
+    scanned: 3, reached: 2, unreachable: 1, stillRunning: 0, skipped: 1, remaining: 4, companyIds: [SUBJECT],
+    cronRunning: false, turnId: SUBJECT,
+  },
+  // --- end ops.ts ---
 }
 
 describe('sentenceFor', () => {

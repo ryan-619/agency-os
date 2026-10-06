@@ -36,6 +36,7 @@ export type RiskRule =
   | 'derived_write'
   | 'writes_internal_state'
   | 'leaves_the_building'
+  | 'reopens_outreach'
   | 'delegation'
   | 'connector_unreviewed'
 
@@ -147,6 +148,42 @@ export const AGENCY_TOOL_RISK = {
   create_task: ['medium', 'writes_internal_state', 'Creates a task for a teammate with an optional due date. Nothing is sent.'],
   // reporting-and-task-tools
   list_tasks: ['low', 'read_only', 'Reads open tasks, optionally one person’s or one company’s.'],
+
+  // --- the operator's CRM, campaign, pipeline and ops tools (2026-10-06).
+  //     Reads are low; internal writes are medium, and the gate still asks a
+  //     person before each one. Drafting openers to people outside the
+  //     company is high, as `queue_touch` is, and so is lifting a pause.
+  //     Grouped by the file that implements them.
+  // records.ts — companies and contacts
+  list_contacts: ['low', 'read_only', 'Reads the people recorded at a company, with how each may be reached.'],
+  add_company: ['medium', 'writes_internal_state', 'Adds a company to the CRM by its domain. Nothing is scanned or sent until asked.'],
+  update_company: ['medium', 'writes_internal_state', 'Changes a company’s name, country or time zone in the CRM. Nothing leaves the building.'],
+  import_companies: ['medium', 'writes_internal_state', 'Adds a list of companies to the CRM by domain, leaving any already there alone. Nothing is sent.'],
+  add_contact: ['medium', 'writes_internal_state', 'Adds a person at a company to the CRM. It records no consent, and nothing is sent.'],
+  update_contact: ['medium', 'writes_internal_state', 'Changes a person’s details under the rules a teammate editing them meets. Nothing is sent.'],
+  pause_contact: ['medium', 'writes_internal_state', 'Holds a person from every campaign. It only ever stops messages; nothing is sent.'],
+  resume_contact: ['high', 'reopens_outreach', 'Lifts a person’s pause, so campaigns may write to them again — a person decides that.'],
+  add_suppression: ['medium', 'writes_internal_state', 'Puts an address, domain, number or profile on the suppression list. It only ever stops messages.'],
+  // campaigns.ts — campaigns and drafts
+  list_campaigns: ['low', 'read_only', 'Reads the campaigns: channel, status, daily cap, quiet hours and what each holds.'],
+  create_campaign: ['medium', 'writes_internal_state', 'Creates a supervised email or LinkedIn campaign; every message in it waits for a person’s approval.'],
+  update_campaign: ['medium', 'writes_internal_state', 'Renames, re-caps, pauses or reactivates a supervised campaign. It never turns auto-send on.'],
+  enrol_contacts: ['high', 'leaves_the_building', 'Drafts openers to people outside the company into a supervised campaign; each still waits on /approvals before anything is sent.'],
+  list_drafts: ['low', 'read_only', 'Reads the messages waiting for approval, with what the send rules would say of each.'],
+  // proposals.ts — proposals, meetings, deals and tasks
+  generate_proposal: ['medium', 'writes_internal_state', 'Writes a draft proposal from the company’s latest scan for the team. It refuses stale evidence, and nothing is sent.'],
+  get_proposal: ['low', 'read_only', 'Reads a proposal’s scope, workstreams and price range, and whether its evidence is still current.'],
+  list_meetings: ['low', 'read_only', 'Reads upcoming and recent meetings, each in its own time zone.'],
+  reschedule_meeting: ['medium', 'writes_internal_state', 'Moves a recorded meeting to a new time. No invitation or message is sent.'],
+  cancel_meeting: ['medium', 'writes_internal_state', 'Cancels a recorded meeting in the CRM. Nobody is told by this.'],
+  record_meeting_outcome: ['medium', 'writes_internal_state', 'Records whether a meeting was held or the other side did not show. Nothing is sent.'],
+  set_deal_owner: ['medium', 'writes_internal_state', 'Assigns a deal to a teammate. Nothing is sent.'],
+  complete_task: ['medium', 'writes_internal_state', 'Marks a task done. A LinkedIn step is never closed this way. Nothing is sent.'],
+  // ops.ts — the worker, in place of a terminal
+  worker_status: ['low', 'read_only', 'Reads what the worker is doing: its heartbeat, whether it sends and reads replies, and its health.'],
+  recent_errors: ['low', 'read_only', 'Reads the worker’s recent warnings and errors by kind, with no values in them.'],
+  queue_status: ['low', 'read_only', 'Reads what is waiting to go out and why: approvals, deferrals, refusals and channels nothing carries.'],
+  rescan_stale: ['low', 'derived_write', 'Re-scans a few companies whose evidence is stale or missing, from their own public pages.'],
 } as const satisfies Readonly<Record<string, readonly [Risk, RiskRule, string]>>
 
 export type AgencyToolName = keyof typeof AGENCY_TOOL_RISK

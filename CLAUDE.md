@@ -31,6 +31,18 @@ either. Fifteen review rounds, and the follow-ups they left open, have been fixe
 on top of both releases; each fix is stated below where the rule it changed
 lives.
 
+**Then the operator's tools (2026-10-06), on no migration** (§2, "The
+operator's tools"): chat runs the CRM it reads — companies and people, pauses
+and suppressions, campaigns and enrolment, what waits on `/approvals`,
+proposals, meetings, deal owners and tasks — and, in place of a terminal, the
+worker itself: its heartbeat and health, its recent warnings, the outbound
+queue, and a re-scan of a few stale companies. The `agency` server has
+forty-nine tools: twenty-six low (reads and scans, which run at once), twenty
+medium and three high, and every medium and high call still raises an
+approval card before it runs — the gate is unchanged (§8). Whether internal
+writes should run without a card is a decision about the gate, the
+operator's to make; until it is made, they ask.
+
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
 machine"), which needs no public address, because everything but chat is
@@ -169,7 +181,7 @@ below. **Phase 4's is proved against a local SMTP sink, not a real mailbox.**
 | | proved | not proved |
 |---|---|---|
 | Phase 2 | **the whole thing, live.** `npm run smoke:agent` PASSED on 2026-09-25: one turn, 22 tool calls, 284 events, a cost reported, and an evidence-backed ranking of the pipeline's top three built from `scan_company`/`score_company`/`get_company` against the real database | nothing outstanding |
-| Phase 3 | **PASSED.** The agent named `mcp__deepwiki__ask_wiki_question`, `read_wiki_contents` and `read_wiki_structure` alongside its own nine (the `agency` server has twenty-three tools now), on a worker that had been running since BEFORE the connector row was written — §6's "no restart" promise, in the sequence that actually tests it | the agent *calling* a connector's tool in anger (it enumerates them; the gate asks it to enumerate); and the gate has NOT been re-run since connectors moved off the CLI's argv onto `setMcpServers` (§2, "The runtime is assembled") — that hand-over is verified against the real CLI 2.1.269 binary with no model call, and `npm run smoke:agent -- --connector deepwiki` should pass again before Phase 3 is claimed on it |
+| Phase 3 | **PASSED.** The agent named `mcp__deepwiki__ask_wiki_question`, `read_wiki_contents` and `read_wiki_structure` alongside its own nine (the `agency` server has forty-nine tools now), on a worker that had been running since BEFORE the connector row was written — §6's "no restart" promise, in the sequence that actually tests it | the agent *calling* a connector's tool in anger (it enumerates them; the gate asks it to enumerate); and the gate has NOT been re-run since connectors moved off the CLI's argv onto `setMcpServers` (§2, "The runtime is assembled") — that hand-over is verified against the real CLI 2.1.269 binary with no model call, and `npm run smoke:agent -- --connector deepwiki` should pass again before Phase 3 is claimed on it |
 | Phase 4 | draft → approved in the UI → deferred for quiet hours (live, 21:50 London) → sent in a real SMTP transaction → deal `contacted` → a reply by Message-ID pauses, ties, moves the deal to `replied` → "unsubscribe" suppresses. One test per §2.1 rule. | deliverability through a real mailbox; IMAP IDLE against a live server (the drain on new mail and the retry of a message that failed to record are proved against a fake mailbox that models imapflow's `idle()`, `apps/agent/test/inbox-drain.test.ts`); a provider webhook with a real secret |
 | Phase 5 | live, in the browser: a `replied` deal dragged to `meeting` (HTML5 drop → `deal.moved` audit row) → meeting recorded from the company page at 15:00 London, stored as 14:00Z → brief generated from the rows → proposal generated from the scan (8 scope items with evidence, 2 workstreams, USD 9,600–15,600 at a 1,200 day rate) → `sent` → `accepted` closes the deal `won`. A stranger on `/book/agency` became a company, a contact with E.164 phone, three consent rows carrying the form's wording, a meeting, and a deal at `meeting`. | the agent's `book_meeting`/`update_deal` in a live turn (same blocker as Phase 2); a calendar invitation (deliberately not sent from here) |
 | Phase 6 | the whole Definition of Done, end to end against the real service: a SIGNED webhook is answered with `<ConversationRelay>` carrying the disclosure, the relay socket opens against the URL that TwiML handed out, four scripted questions qualify the caller, asking for a person produces the `end` frame whose `HandoffData` makes `/twiml/action` return a `<Dial>`, and the row ends with `answered_at`, `disclosed_ai_at`, an outcome, Twilio's duration and recording URL, a transcript containing the caller's own words, and a summary. `apps/voice/test/service.test.ts`. | Twilio itself — the carrier, the STT and the TTS. A2P 10DLC has not cleared and there are no Twilio credentials, so no real telephone call has been placed to this service |
@@ -727,14 +739,22 @@ recorded-session mode, so anything needing the SDK to be *defined* is also
 untestable — and a package that CANNOT import the SDK cannot drag it into the
 Next module graph, which CI builds with no secrets on purpose.
 
-Twenty-three tools ship (`AGENCY_TOOL_NAMES`). Seventeen are low risk:
+Forty-nine tools ship (`AGENCY_TOOL_NAMES`). Twenty-six are low risk:
 `get_icp`, `search_companies`, `get_company`, `scan_company`, `score_company`,
 `get_pipeline`, `check_send`, `get_consent`, `get_replies`, `get_scan_history`,
 `get_evidence_changes`, `get_stale_companies`, `get_pipeline_metrics`,
-`get_company_timeline`, `get_compliance_summary`, `search_crm`, `list_tasks`.
-Five are medium — they write internal state, never anything outbound, and
-their summaries say nothing was sent: `update_deal`, `book_meeting`,
-`classify_reply`, `add_note`, `create_task`. One is high: `queue_touch`.
+`get_company_timeline`, `get_compliance_summary`, `search_crm`, `list_tasks`,
+and since 2026-10-06 `list_contacts`, `list_campaigns`, `list_drafts`,
+`get_proposal`, `list_meetings`, `worker_status`, `recent_errors`,
+`queue_status` and `rescan_stale`. Twenty are medium — they write internal
+state, never anything outbound, and their summaries say nothing was sent:
+`update_deal`, `book_meeting`, `classify_reply`, `add_note`, `create_task`,
+and the operator's fifteen (below). Three are high: `queue_touch`,
+`enrol_contacts` — the other tool that drafts for somebody outside the
+company — and `resume_contact`, which lets campaigns write to a person again.
+The registry pins both directions (`packages/core/test/risk.test.ts`): the
+only `leaves_the_building` tools are `queue_touch` and `enrol_contacts`, both
+high, and no write but the three scans is low.
 `get_pipeline` and `update_deal` arrived with Phase 5, once `deals` was a
 table something writes — before that a tool that reliably returned `[]` would
 have taught the model a false shape of the business. `draft_outreach` is the
@@ -845,6 +865,107 @@ a role `can()` does not know — that role gets `not_permitted`. **Only the tool
 summary reaches the model (§5.5)**: a reply's words appear there only as a
 bounded first line, never the body or the reply's own subject, and no audit
 detail carries any of its text.
+
+### The operator's tools (2026-10-06)
+
+**Chat carries out what it is asked.** Twenty-six tools in four files, each a
+thin layer over the function the web route for the same act calls, after the
+same checks, so the agent's write and a person's are the same row refused for
+the same reasons in the same words; where the route writes its own audit row,
+the tool writes it too with actor `agent`, beside its own `agent.<tool>` row
+(ids, counts, flags, fixed words). The system prompt says how to work — read,
+act, confirm, report — and names every one with its limit (§8).
+
+**Only the summary reaches the model.** `apps/agent/src/mcp/agency.ts` returns
+`outcome.summary` and never `data`, so an id the model needs for a later call
+is PRINTED: a contact's, a campaign's, a meeting's, a proposal's, and — since
+this change — a task's in `list_tasks`, which `complete_task` names. An
+address is not: `list_contacts` masks an email to `…@domain`, and a pause is
+shown by its class (`pauseReasonClass`) and time, never its reason.
+
+- **`records.ts`** — `list_contacts` (`contacts:read`, what `/contacts`
+  reads: consent per channel as recorded, suppression standing, the pause's
+  class, the bounce). `add_company` and `import_companies` (50 at most) add
+  through `importCompanies` with source `agent`, only a host the scanner
+  would request (`isScannableHost` — the importer's own check passes
+  `169.254.169.254`) and never an `.inbound` placeholder; neither scans.
+  `update_company` is `companiesUpdate`. `add_contact` is `createContact` and
+  records no consent. `update_contact` is `contactsUpdate` with every refusal
+  it words, plus one rule of the agent's own: no email, phone or LinkedIn
+  change while a message to the person is awaiting approval, approved, queued
+  or sending, because the sender reads the address at the moment it sends.
+  `pause_contact` is `contactPauseByHand` with `<why> (by the agent, for <the
+  chat owner>)`, a teammate's hold (`manual`), and refuses a reason that
+  opens "opt-out not recorded", which nobody could lift. `resume_contact`
+  (high) takes the `pausedFor` class the model read, refuses when the pause
+  is now of another class, and hands `contactResumeByHand` the CURRENT
+  reason, so every refusal Resume has — the shared number's, the kept
+  holder's, an own unrecorded opt-out, an erasure, a colleague's stop — is
+  worded as `/contacts` words it. `add_suppression` is `addSuppression`,
+  source `manual` (a person approved it), with the route's
+  `suppression.added` row; its summary never echoes the value.
+- **`campaigns.ts`** — `list_campaigns` (`campaigns:read`); `create_campaign`
+  makes a SUPERVISED email or LinkedIn campaign — no auto-send input, the
+  form's defaults; `update_campaign` passes the status and auto-send it read
+  (`expectStatus`), changes neither channel nor auto-send, may only PAUSE an
+  auto-send campaign, and never sets active a campaign the worker paused for
+  bouncing; `enrol_contacts` (high) is `enrolCampaign` on a supervised
+  campaign only, its drafts `awaiting_approval`, and says so if an owner
+  switched auto-send on during the call; `list_drafts` (`approvals:decide`)
+  is `/approvals` read four previews at a time, the recipient masked, a
+  LinkedIn message's words withheld by `linkedinThreadWithheld`, an SMS
+  named by its DLT template id.
+- **`proposals.ts`** — `generate_proposal` (`deals:write`, `created_by` NULL
+  as an agent's task) refuses as the company page's Generate button does;
+  `get_proposal` says whether the evidence is current, stale or superseded;
+  `list_meetings` prints each in its own zone with UTC; `reschedule_meeting`
+  takes an instant with its offset on a date that exists — and, as
+  `rescheduleMeeting` does, only for a meeting that has started (a future one
+  is cancelled and booked again); `cancel_meeting` and
+  `record_meeting_outcome` (`held`, `no_show`) refuse as the route does;
+  `set_deal_owner` refuses a revoked teammate; `complete_task` closes a task
+  in the chat owner's name and never a `linkedin_send` step.
+- **`ops.ts`, in place of a terminal** — `worker_status`, `recent_errors`
+  and `queue_status` (`chat:use`) and `rescan_stale` (`companies:write`).
+  `ToolContext.ops` is optional (`OpsContext`, built by `startWorker` from
+  `healthInputs()`, `apps/agent/src/ops/context.ts`); without it each tool
+  answers from the database and says the worker's own view is not here.
+  `recent_errors` reads a ring of the worker's last 200 kinds of warn and
+  error line (`apps/agent/src/ops/recent-log.ts`) that keeps the message
+  literal, the level, a count, first and last seen and an error class or code
+  on an allow-list — never another field, because field values carry ids,
+  hosts and reasons. `queue_status` counts outbound rows by status and
+  channel, deferred apart from due, refusals and failures in the last day,
+  pending approvals, open LinkedIn steps, and a channel the worker carries no
+  provider for. `rescan_stale` picks at most three stale or never-scanned
+  companies through `rescanQueue` (never `.inbound`; a refused host takes no
+  slot), scans them through `scan_company`'s own writer at the cron's
+  timeouts, raced against 25 s (`TOOL_TIME_BUDGET_MS`, inside the MCP call's
+  30), and reports a scan still running rather than waiting for it.
+
+**`book_meeting` recorded a day nobody typed**, found while these were
+written: V8 rolls `2026-02-30` to 2 March, and its own pattern let the string
+through. `instantFrom` (`packages/tools/src/instant.ts`) is now the one
+reading for both meeting tools, refusing an impossible date, hour 24 and an
+instant with no offset. **And two routes the tools sit beside were fixed:**
+`POST /api/contacts` stored a phone as typed — `createContact` stores E.164
+now, or refuses in the edit's words (`phoneNotInternational`), because a
+number in any other form matches no suppression key and no text sent back —
+and stored a LinkedIn URL no profile could be read from, which the route now
+refuses first (`linkedinIsReadable`); and the campaign routes answer only a
+unique violation as "already exists" (409), where `PATCH` answered a rename
+onto a taken name with a 500 and `POST` called every fault a duplicate.
+
+**Stated residuals.** `resume_contact` matches a pause by its CLASS, so a
+different pause of the same class written while the card waited is the one
+lifted — the approver approved lifting that class for that person.
+`rescan_stale` reads the nightly rescan's claim and takes none, because a
+claim would make that night's run skip the org; a cron starting during the
+call can scan the same company once more. A web `PATCH` that clears a
+bounce still records `contact.bounce_cleared` as System (`contactsUpdate`'s
+default actor). And `recent_errors` does not see a line written straight to
+stderr — the entry point's "failed to start", or the recorder lines the
+inbox forwards.
 
 ### packages/scanner
 `fetch.ts` does the I/O; `extract.ts` is pure. That split is not cosmetic — it
@@ -3950,7 +4071,7 @@ absent.
 npm install
 npm run typecheck        # packages AND tests, strict
 npx tsc --build          # compile packages to dist/ only
-npm test                 # 6411 tests in 216 files: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice + the 0018 release + DoveSoft SMS (0019) + fourteen review rounds
+npm test                 # 6741 tests in 226 files: domain + migrations + invariants + seed + parity + agent + send path + pipeline + voice + the 0018 release + DoveSoft SMS (0019) + fifteen review rounds + the operator's tools
 npx vitest run --maxWorkers=1 --minWorkers=1   # the same suite on a machine short of memory
 npm run build            # packages, then the Next app
 
@@ -4083,6 +4204,8 @@ from **290s to 97s** single-worker, with the same tests passing, and
 over since: at 0019, after DoveSoft and twelve review rounds, it is 6,411
 tests in 216 files, and the full single-worker run at `b83c693` took
 1,567 s — every test green. (At 0018 it was 4,246 in 154 and took 1,088 s.)
+With the operator's tools (2026-10-06) it is 6,741 tests in 226 files, and
+the full run with two workers took 1,026 s, every test green.
 
 `freshDb()` remains and `migrations.test.ts` and `schema-parity.test.ts`
 still use it — a test about applying migrations cannot start from a database
@@ -5138,6 +5261,25 @@ CONFLICT (org_id, slug) DO NOTHING`, so a live database's subagents do NOT
 pick these up** — "re-seeding updates grants" was proposed and dropped for
 exactly that reason. Change them in Settings → Agents; the seed only shapes a
 new database.
+
+**The operator's tools reached the prompt and the seed on 2026-10-06.** The
+prompt opens with how to work — "do it with the tools rather than describing
+how they could", read, act, confirm, report, one change at a time with its
+reason, because "every change runs only after a person approves its card" —
+and has a section per group naming each tool and the limit it keeps: a new
+contact has no consent, auto-send is an owner's, a text is drafted by a
+person, nothing in the calendar invites anybody, there is no terminal, a
+suppression is never undone, and what a connector returns is a lead to
+check, never evidence. For a NEW database the seeded helpers were given the
+operator tools their jobs need — the qualifier `get_stale_companies` and
+`rescan_stale`; the researcher `list_contacts`, `get_proposal` and
+`list_meetings`, reads only; the prospector `add_company` and
+`import_companies`; the closer `list_contacts`, `list_campaigns`,
+`enrol_contacts`, `list_drafts`, `generate_proposal` and `get_proposal` —
+and the prospector's prompt no longer says no sourcing connector exists: a
+subagent is granted agency tools only, so it works from the domains it is
+given and asks the main chat to look companies up with a connector. A live
+database keeps its rows.
 
 ### Costs are strings, and the SDK's total is cumulative
 

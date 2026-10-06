@@ -21,7 +21,7 @@ import {
   activeIcpProfile, appendAudit, enabledAgentDefs, ensureApproval, expireApproval, readApproval,
   schema, type AgencyDb, type ApprovalRow,
 } from '@agency/db'
-import type { ToolContext } from '@agency/tools'
+import type { OpsContext, ToolContext } from '@agency/tools'
 import { makeCanUseTool } from '../gate/can-use-tool.js'
 import { createLedger } from '../gate/ledger.js'
 import { makePostToolUse, makePreToolUse, HOOK_TIMEOUT_SECONDS } from '../gate/pre-tool-use.js'
@@ -86,6 +86,14 @@ export interface SessionDeps {
   readonly turnTimeoutMs: number
   readonly cwd: string
   readonly now: () => Date
+  /**
+   * The worker's view of itself — its health, its recent warnings and errors,
+   * the scanner bound to the nightly rescan's timeouts — for the ops tools
+   * (packages/tools/src/ops.ts). Built once by `startWorker` and handed to
+   * every turn's tool context. Optional: a turn without it runs every tool,
+   * and the ops tools say the worker's own view is not available.
+   */
+  readonly ops?: OpsContext | undefined
 }
 
 export interface TurnRuntime {
@@ -223,6 +231,8 @@ export async function buildTurnRuntime(
     turnId,
     now: deps.now,
     audit,
+    // The worker's own view, the same object for every turn; never the model's to supply.
+    ...(deps.ops ? { ops: deps.ops } : {}),
   })
 
   const mcpServer = createAgencyMcpServer({

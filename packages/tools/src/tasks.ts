@@ -306,7 +306,9 @@ export const listTasks: AgencyToolSpec<typeof listTasksShape> = {
       const due = t.dueAt ? `due ${when(t.dueAt)}` : 'no due date'
       const who = t.assigneeUserId ? t.assigneeName?.trim() || t.assigneeEmail || 'a former teammate' : 'unassigned'
       const about = t.companyDomain ? ` — ${t.companyDomain}` : ''
-      return `[${state}] ${due} — “${t.title.replace(/\s+/g, ' ').trim()}”${about} — ${who}`
+      // The id is printed because only this summary reaches the model, and
+      // complete_task names a task by it.
+      return `[${state}] ${due} — “${t.title.replace(/\s+/g, ' ').trim()}”${about} — ${who} · task ${t.id}`
     })
     return ok(
       rows.map((t) => ({

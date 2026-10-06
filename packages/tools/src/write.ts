@@ -15,9 +15,10 @@ import {
 } from '@agency/db'
 import { UnscannableHostError, normaliseDomain, scanDomain } from '@agency/scanner'
 import * as schema from '@agency/db/schema'
-import { bounded, fail, ok, type AgencyToolSpec, type ToolContext, type ToolOutcome } from './spec.js'
+import { bounded, fail, ok, type AgencyToolSpec, type OpsScan, type ToolContext, type ToolOutcome } from './spec.js'
 
-async function requireIcp(
+/** The active ICP, parsed — or null when there is none or it does not parse. Shared with ops.ts. */
+export async function requireIcp(
   db: AgencyDb,
   orgId: string,
 ): Promise<{ id: string; definition: IcpDefinition } | null> {
@@ -33,19 +34,23 @@ async function requireIcp(
 /**
  * Scan one domain and write what came back.
  *
- * Shared by `scan_company` and by `score_company`'s re-scan path, so there is
- * exactly one writer of a scan and its score. `recordScan` computes the score
- * itself from the ICP row it stamps, inside one transaction, which is what
- * makes it impossible for the scan, its findings and its score to disagree.
+ * Shared by `scan_company`, by `score_company`'s re-scan path and by
+ * `rescan_stale` (ops.ts), so there is exactly one writer of a scan and its
+ * score. `recordScan` computes the score itself from the ICP row it stamps,
+ * inside one transaction, which is what makes it impossible for the scan,
+ * its findings and its score to disagree. `scan` is `scanDomain` unless a
+ * caller hands in the one it was given — `rescan_stale` takes the worker's,
+ * bound to the nightly rescan's timeouts.
  */
-async function scanAndRecord(
+export async function scanAndRecord(
   ctx: ToolContext,
   domain: string,
   companyId: string,
   companyName: string | null,
   icp: { id: string; definition: IcpDefinition },
+  scan: OpsScan = scanDomain,
 ) {
-  const { raw, profile } = await scanDomain(domain, icp.definition, {
+  const { raw, profile } = await scan(domain, icp.definition, {
     company: companyName ?? undefined,
   })
   return recordScan(ctx.db, {

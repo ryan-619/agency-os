@@ -52,6 +52,11 @@ export interface HeartbeatDeps {
  */
 const VERSION = process.env['npm_package_version'] ?? null
 
+/** The version every heartbeat row carries, for the worker's own view (`worker_status`). */
+export function workerVersion(): string | null {
+  return VERSION
+}
+
 /** The instant stamped on the last row that actually reached the database. */
 let lastWritten: Date | null = null
 

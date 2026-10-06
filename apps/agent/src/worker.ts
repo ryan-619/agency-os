@@ -8,13 +8,16 @@ import {
   sessionCostUsd, setSdkSessionId, usd, type AgencyDb, type MessageProvider,
 } from '@agency/db'
 import type { Channel } from '@agency/core'
+import type { OpsContext } from '@agency/tools'
 import type { AgentCredential } from './runtime/options.js'
 import type { Env } from './env.js'
 import type { Logger } from './logger.js'
 import { answerHealth, startHealthServer, type HealthInputs } from './health.js'
 import { acquireWorkerLock, type WorkerLock } from './boot/singleton.js'
 import { reconcileAfterRestart, recoverStuckSends, sweepExpired } from './boot/reconcile.js'
-import { lastHeartbeatAt, startHeartbeat } from './boot/heartbeat.js'
+import { lastHeartbeatAt, startHeartbeat, workerVersion } from './boot/heartbeat.js'
+import { createRecentLog, recordingLogger } from './ops/recent-log.js'
+import { opsContextFrom } from './ops/context.js'
 import { startSender, WORKER_SEND_CHANNELS } from './outreach/sender.js'
 import { createDoveSoftProvider, doveSoftConfigFrom } from './outreach/dovesoft.js'
 import { outreachOptions } from './outreach/options.js'
@@ -72,7 +75,15 @@ export interface RunningWorker {
  * serving a conversation whose previous turn is still marked as running.
  */
 export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
-  const { env, log } = deps
+  const { env } = deps
+  /**
+   * Every warn and error line this worker writes is also noted, as a kind
+   * and a count, for chat's `recent_errors` — the terminal this product does
+   * not have (§12). The line itself is written exactly as before; what is
+   * noted keeps no field value but an error's class or code (§2.3).
+   */
+  const recentLog = createRecentLog()
+  const log = recordingLogger(deps.log, recentLog)
 
   let pool: Pool | null = null
   // Nothing below exists yet, which is the point: /livez answers immediately
@@ -174,6 +185,21 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
   const running = new Map<string, TurnHandle>()
 
   /**
+   * The worker's view of itself for chat's ops tools (packages/tools/src/ops.ts):
+   * read from `healthInputs()`, the object /readyz and the heartbeat answer
+   * from, so the three cannot disagree. Built after the lock, with the boot
+   * instant the heartbeat stamps; the scanner it carries is bound to the
+   * nightly rescan's timeouts.
+   */
+  const ops: OpsContext = opsContextFrom({
+    health: healthInputs,
+    sms: senders.sms,
+    bootedAt: bootAt,
+    version: workerVersion(),
+    recentLog,
+  })
+
+  /**
    * Resolved ONCE, here, rather than on every turn.
    *
    * A malformed SECRETS_KEY is a configuration mistake, and it should be a
@@ -254,7 +280,7 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
       return true
     },
     startTurn: (req) =>
-      beginTurn({ req, db, env, log, halt, running, secretsKey, skills, credential }),
+      beginTurn({ req, db, env, log, halt, running, secretsKey, skills, credential, ops }),
   })
 
   const apiPort = env.AGENT_PORT + 1
@@ -402,8 +428,10 @@ async function beginTurn(args: {
   skills: { settingSources: readonly 'project'[]; skills?: 'all' }
   /** Decided once at boot; null when nothing can reach a model. */
   credential: AgentCredential | null
+  /** The worker's view of itself, for the ops tools — the same object every turn. */
+  ops: OpsContext
 }): Promise<{ ok: true; turn: TurnHandle } | { ok: false; status: number; message: string }> {
-  const { req, db, env, log, halt, running, secretsKey, skills, credential } = args
+  const { req, db, env, log, halt, running, secretsKey, skills, credential, ops } = args
 
   if (!credential) return { ok: false, status: 503, message: 'chat_disabled' }
   if (halt.halted()) return { ok: false, status: 503, message: 'runtime_halted' }
@@ -433,6 +461,7 @@ async function beginTurn(args: {
       skills,
       cwd: process.cwd(),
       now: () => new Date(),
+      ops,
     },
     {
       orgId: who.orgId,

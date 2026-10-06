@@ -13,6 +13,10 @@ export { getScanHistory, getEvidenceChanges, getStaleCompanies } from './evidenc
 export { getReplies, classifyReply } from './replies.js'
 export { getPipelineMetrics, getCompanyTimeline, getComplianceSummary, searchCrm } from './reporting.js'
 export { addNote, createTask, listTasks } from './tasks.js'
+export { listContacts, addCompany, updateCompany, importCompanies, addContact, updateContact, pauseContact, resumeContact, addSuppression } from './records.js'
+export { listCampaigns, createCampaign, updateCampaign, enrolContacts, listDrafts } from './campaigns.js'
+export { generateProposalTool, getProposal, listMeetings, rescheduleMeetingTool, cancelMeetingTool, recordMeetingOutcome, setDealOwnerTool, completeTask } from './proposals.js'
+export { workerStatus, recentErrors, queueStatus, rescanStale } from './ops.js'
 
 import { AGENCY_TOOL_NAMES } from '@agency/core'
 import type { AgencyToolSpec } from './spec.js'
@@ -24,6 +28,10 @@ import { getScanHistory, getEvidenceChanges, getStaleCompanies } from './evidenc
 import { getReplies, classifyReply } from './replies.js'
 import { getPipelineMetrics, getCompanyTimeline, getComplianceSummary, searchCrm } from './reporting.js'
 import { addNote, createTask, listTasks } from './tasks.js'
+import { listContacts, addCompany, updateCompany, importCompanies, addContact, updateContact, pauseContact, resumeContact, addSuppression } from './records.js'
+import { listCampaigns, createCampaign, updateCampaign, enrolContacts, listDrafts } from './campaigns.js'
+import { generateProposalTool, getProposal, listMeetings, rescheduleMeetingTool, cancelMeetingTool, recordMeetingOutcome, setDealOwnerTool, completeTask } from './proposals.js'
+import { workerStatus, recentErrors, queueStatus, rescanStale } from './ops.js'
 
 /**
  * Every tool the `agency` MCP server exposes.
@@ -62,6 +70,32 @@ export const AGENCY_TOOLS: readonly AgencyToolSpec[] = [
   addNote,
   createTask,
   listTasks,
+  listContacts,
+  addCompany,
+  updateCompany,
+  importCompanies,
+  addContact,
+  updateContact,
+  pauseContact,
+  resumeContact,
+  addSuppression,
+  listCampaigns,
+  createCampaign,
+  updateCampaign,
+  enrolContacts,
+  listDrafts,
+  generateProposalTool,
+  getProposal,
+  listMeetings,
+  rescheduleMeetingTool,
+  cancelMeetingTool,
+  recordMeetingOutcome,
+  setDealOwnerTool,
+  completeTask,
+  workerStatus,
+  recentErrors,
+  queueStatus,
+  rescanStale,
 ] as unknown as readonly AgencyToolSpec[]
 
 export { AGENCY_TOOL_NAMES }

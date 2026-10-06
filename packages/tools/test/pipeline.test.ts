@@ -181,6 +181,11 @@ describe('the pipeline tools', () => {
 
     it.each([
       ['a time that is not an instant', { startsAt: 'Thursday at 2', timeZone: 'Europe/London' }],
+      // V8 rolls each of these to a day nobody typed (2 March, 1 May, the next day).
+      ['30 February', { startsAt: '2026-02-30T10:00:00Z', timeZone: 'Europe/London' }],
+      ['31 April', { startsAt: '2026-04-31T10:00:00+01:00', timeZone: 'Europe/London' }],
+      ['hour 24', { startsAt: '2026-04-30T24:00:00Z', timeZone: 'Europe/London' }],
+      ['a time with no offset', { startsAt: '2026-04-30T10:00:00', timeZone: 'Europe/London' }],
       ['a timezone it does not know', { startsAt: at, timeZone: 'Mars/Olympus' }],
     ])('refuses %s', async (_label, over) => {
       const out = await run(bookMeeting, { domain: 'rentman.io', ...over })

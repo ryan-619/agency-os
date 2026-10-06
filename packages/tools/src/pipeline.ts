@@ -22,6 +22,7 @@ import { normaliseDomain } from '@agency/scanner'
 import * as schema from '@agency/db/schema'
 import { and, asc, eq, isNull } from 'drizzle-orm'
 import { bounded, fail, ok, type AgencyToolSpec, type ToolOutcome } from './spec.js'
+import { instantFrom } from './instant.js'
 
 // ---------------------------------------------------------------------------
 // get_pipeline
@@ -193,14 +194,13 @@ export const bookMeeting: AgencyToolSpec<typeof bookMeetingShape> = {
     const company = await findCompanyByDomain(ctx.db, ctx.orgId, domain)
     if (!company) return fail('not_found', `No company with domain "${domain}" is in the CRM.`)
 
-    // Insist on the ISO shape before parsing: V8's `new Date()` accepts a
-    // surprising range of strings ("Thursday at 2" among them) and turns them
-    // into a real, wrong instant.
-    const startsAt = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/.test(input.startsAt)
-      ? new Date(input.startsAt)
-      : new Date(Number.NaN)
-    if (Number.isNaN(startsAt.getTime())) {
-      return fail('invalid_state', `"${input.startsAt}" is not an ISO 8601 instant like 2026-09-18T14:00:00Z.`)
+    // Insist on the ISO shape, and on a date that exists, before parsing:
+    // V8's `new Date()` accepts a surprising range of strings ("Thursday at
+    // 2" among them) and rolls 30 February to 2 March, each a real, wrong
+    // instant (instant.ts).
+    const startsAt = instantFrom(input.startsAt)
+    if (startsAt === null) {
+      return fail('invalid_state', `"${input.startsAt}" is not an ISO 8601 instant like 2026-09-18T14:00:00Z, on a date that exists.`)
     }
 
     let contactId: string | null = null
