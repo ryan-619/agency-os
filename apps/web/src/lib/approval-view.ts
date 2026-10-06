@@ -645,12 +645,23 @@ export function approveFootnote(noSenderNote: string | null, channel = 'email'):
 export function approvedMessage(channel: string, noSenderNote: string | null): string {
   if (isLinkedIn(channel)) return LINKEDIN_APPROVED
   if (channel === 'sms') return noSenderNote === null ? SMS_APPROVED : SMS_APPROVED_NO_WORKER
-  return noSenderNote === null
-    ? 'Approved. The worker will send it on its next pass — after checking the suppression list, ' +
-        'consent, quiet hours and the daily cap again. If it lands in quiet hours it waits for morning.'
-    : 'Approved, and queued. No worker is configured on this deployment, so it goes only if one runs against ' +
-        'this database elsewhere — and every rule is checked at that moment, not now.'
+  return noSenderNote === null ? EMAIL_APPROVED : EMAIL_APPROVED_NO_WORKER
 }
+
+/**
+ * A worker being configured (AGENT_URL) says where chat goes, not that
+ * anything sends email: the documented laptop worker is reached for chat
+ * and asked separately whether to send, defaulting to No (review round 15).
+ * So the card says what sends it, as the SMS card does, and where to look.
+ */
+export const EMAIL_APPROVED =
+  'Approved. It goes on the next pass of a worker that sends email — SMTP_HOST and MAIL_FROM on its host, ' +
+  'which this page cannot see; the dashboard’s worker line says whether yours does — after the suppression ' +
+  'list, consent, quiet hours and the daily cap are checked again. If it lands in quiet hours it waits for morning.'
+
+const EMAIL_APPROVED_NO_WORKER =
+  'Approved, and queued. No worker is configured on this deployment, so it goes only if one runs against ' +
+  'this database elsewhere — and every rule is checked at that moment, not now.'
 
 /**
  * `nothingWillSendNote()` above the queue — only while a draft on it is one

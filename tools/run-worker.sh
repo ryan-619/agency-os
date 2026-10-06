@@ -634,8 +634,11 @@ if [ "$CHAT" = yes ]; then
 elif [ -n "${CHAT_URL:-}" ]; then
   echo "  chat:     OFF — $CHAT_WHY."
 else
-  echo "  chat:     OFF — no inbound route. The site's chat panel says no worker"
-  echo "            is connected, which is true."
+  echo "  chat:     OFF — no inbound route, so the site cannot reach this Mac."
+  echo "            If AGENT_URL is still set in Vercel from a run with chat on,"
+  echo "            the site's chat panel offers chat and says the worker is not"
+  echo "            responding; remove AGENT_URL there (and redeploy) to switch"
+  echo "            chat off on the site, or run again with chat on."
 fi
 echo
 echo "  The worker logs its own verdict as 'outreach: <mode>' and"

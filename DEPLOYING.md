@@ -460,8 +460,10 @@ other job is this worker reaching out. So:
 
 asks for the production connection string at a hidden prompt and runs the
 worker against Neon with **nothing on the machine exposed** — no port open, no
-tunnel, no inbound route. The chat panel keeps saying no worker is connected,
-which is true. It needs Node.js 22 and `npm ci` in the checkout, and builds
+tunnel, no inbound route. The chat panel says no worker is connected while
+`AGENT_URL` is unset in Vercel; if it is still set from a run with chat on,
+the panel offers chat and says the worker is not responding, so remove it
+there (and redeploy) whenever chat should be off on the site. It needs Node.js 22 and `npm ci` in the checkout, and builds
 the packages itself before it starts, because they run as compiled JavaScript
 and a `git pull` would otherwise run stale code — before any question is
 asked or any saved answer read, so the build holds no credential, and with

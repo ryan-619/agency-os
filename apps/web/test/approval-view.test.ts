@@ -15,7 +15,7 @@ import { TEMPLATE_CHANNELS, type SendFacts, type SendRefusalCode } from '@agency
 import { decideGathered } from '@agency/db/queries'
 import { describe, expect, it } from 'vitest'
 import {
-  ANSWER_EVIDENCE_NOTE, APPROVE_DOES_NOT_SEND, DEFERRED_CODES, EVIDENCE_LINES_SHOWN, MISSING_EVIDENCE_NOTE,
+  ANSWER_EVIDENCE_NOTE, APPROVE_DOES_NOT_SEND, DEFERRED_CODES, EMAIL_APPROVED, EVIDENCE_LINES_SHOWN, MISSING_EVIDENCE_NOTE,
   LINKEDIN_APPROVED, LINKEDIN_APPROVE_FOOTNOTE, NO_WORKER_FOOTNOTE, OTHER_CAMPAIGN_NOTE, STALE_EVIDENCE_NOTE,
   addressedByLabel, addressedByOf, approvability, approveBlock, approveFootnote, approvedMessage, campaignToCheck,
   candidateLine, queueNoSenderNote,
@@ -573,7 +573,22 @@ describe('a LinkedIn draft', () => {
 
   it('keeps the email words for email', () => {
     expect(approveFootnote(null, 'email')).toBe(APPROVE_DOES_NOT_SEND)
-    expect(approvedMessage('email', null)).toContain('The worker will send it on its next pass')
+    expect(approvedMessage('email', null)).toBe(EMAIL_APPROVED)
+  })
+
+  /**
+   * AGENT_URL is configuration: it says where chat goes. The documented
+   * laptop worker is reached for chat and asked separately whether to send,
+   * so "The worker will send it on its next pass" promised a send a worker
+   * with its mailbox off never makes (review round 15).
+   */
+  it('says an approved email goes from a worker that sends email, and where that is shown', () => {
+    const said = approvedMessage('email', null)
+    expect(said).not.toContain('The worker will send it on its next pass')
+    expect(said).toContain('a worker that sends email')
+    expect(said).toContain('SMTP_HOST and MAIL_FROM')
+    expect(said).toContain('the dashboard’s worker line says whether yours does')
+    expect(said).toContain('If it lands in quiet hours it waits for morning.')
   })
 
   it('shows the no-worker note above the queue only while a draft on it is one a worker would send', () => {
@@ -823,7 +838,7 @@ describe('what approving an SMS says', () => {
   })
 
   it('leaves the email and LinkedIn words as they were', () => {
-    expect(approvedMessage('email', null)).toContain('The worker will send it on its next pass')
+    expect(approvedMessage('email', null)).toBe(EMAIL_APPROVED)
     expect(approvedMessage('email', null)).not.toContain('DoveSoft')
     expect(approvedMessage('linkedin', null)).toBe(LINKEDIN_APPROVED)
   })

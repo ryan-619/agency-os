@@ -54,7 +54,19 @@ on 2026-10-02 one did, and every page, the one-click unsubscribe and every
 inbound webhook answered 500 while `/api/health` blamed the database. A
 configuration that does not parse throws `InvalidEnvironmentError`, which
 `/api/health` reports as `config: invalid`, the deploy gate prints, and the
-unsubscribe POST now catches and logs `OPT-OUT NOT RECORDED`. The script asks a server name until it is one and Google's IMAP username until
+unsubscribe POST now catches and logs `OPT-OUT NOT RECORDED`. Behind the
+tunnel `fetch` never throws, so a refused turn is read from what answered
+(`refusalFromUpstream` in `apps/web/src/lib/agent-refusal.ts`): ngrok's own
+page (its `ngrok-error-code` header) or anything not in the worker's JSON
+shape is `agent_unreachable` — "the computer running it may be off or
+asleep, or its tunnel is down" — and the worker's 401 is
+`agent_token_refused`, where the panel said "The agent could not start" of
+all three. An approved email's card says it goes on the next pass of "a
+worker that sends email" (`EMAIL_APPROVED`), never that "the worker will
+send it", because AGENT_URL says where chat goes and the laptop worker is
+asked separately whether to send; and the script's chat-OFF summary no
+longer says the panel shows no worker while an earlier run's `AGENT_URL`
+may still be set in Vercel. The script asks a server name until it is one and Google's IMAP username until
 it is a whole address, because a mistyped host reconnected every five
 minutes for ever; and the worker's reconnect line now carries `reason` (the
 error's code or the server's, e.g. `ENOTFOUND`, `authentication_failed`)

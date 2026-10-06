@@ -109,7 +109,7 @@ export function ChatPanel({
             tone: 'error',
             code: 'internal',
             text: messageForRefusal(detail.error),
-            retryable: detail.error !== 'agent_not_configured',
+            retryable: !NOT_RETRYABLE.has(detail.error ?? ''),
           } satisfies NoticeBlock,
         ],
       }))
@@ -340,12 +340,19 @@ function trim(usd: string): string {
   return Number.isFinite(n) ? n.toFixed(n < 0.01 ? 4 : 2) : usd
 }
 
+/** Refusals a retry cannot change: a value in this deployment has to be. */
+const NOT_RETRYABLE: ReadonlySet<string> = new Set(['agent_not_configured', 'agent_misconfigured', 'agent_token_refused'])
+
 function messageForRefusal(code: string | undefined): string {
   switch (code) {
     case 'agent_not_configured':
       return 'The agent worker is not configured for this deployment.'
+    case 'agent_misconfigured':
+      return 'Chat is off: AGENT_URL or AGENT_INTERNAL_TOKEN in this deployment is not a usable value — Settings → Deployment says which. Everything else still works.'
     case 'agent_unreachable':
-      return 'The agent worker is not responding. Everything else still works.'
+      return 'The agent worker is not responding — the computer running it may be off or asleep, or its tunnel is down. Everything else still works.'
+    case 'agent_token_refused':
+      return 'The agent worker refused this site’s token: AGENT_INTERNAL_TOKEN here is not the one the worker was started with. Everything else still works.'
     case 'chat_disabled':
       return 'The agent worker is running but cannot reach a model: it has neither an API key nor a developer login. Everything else still works.'
     case 'runtime_halted':
