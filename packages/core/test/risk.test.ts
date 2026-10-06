@@ -11,7 +11,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   AGENCY_TOOL_NAMES, AGENCY_TOOL_RISK, PERMITTED_TOOLS,
-  classifyRisk, parseToolName, type Risk, type RiskRule,
+  classifyRisk, parseToolName, runsWithoutApproval, type Risk, type RiskRule,
 } from '../src/risk.js'
 
 const call = (toolName: string, input: Record<string, unknown> = {}) =>
@@ -256,5 +256,63 @@ describe('the registry cannot drift from what is reachable', () => {
       expect(explain.length, name).toBeGreaterThan(20)
       expect(explain.endsWith('.'), name).toBe(true)
     }
+  })
+})
+
+/**
+ * Which calls run without a person deciding first (operator decision,
+ * 2026-10-06: internal writes run at once). The line is drawn by RULE, and
+ * these tests walk every agency tool through the REAL classifier, so a tool
+ * added or reclassified later lands on a side of the line somebody chose.
+ */
+describe('runsWithoutApproval', () => {
+  const verdictFor = (name: string) => call(`mcp__agency__${name}`)
+
+  it('runs every read, derived write and internal write at once', () => {
+    for (const name of AGENCY_TOOL_NAMES) {
+      const v = verdictFor(name)
+      if (['read_only', 'derived_write', 'writes_internal_state'].includes(v.rule)) {
+        expect(runsWithoutApproval(v), name).toBe(true)
+      }
+    }
+  })
+
+  /**
+   * The tripwire. Adding a tool that reaches a person — or reclassifying one —
+   * changes this list, and this test then fails until somebody decides on
+   * purpose which side of the line it belongs on.
+   */
+  it('keeps a card on exactly the agency tools that reach a person or lift a pause', () => {
+    const carded = AGENCY_TOOL_NAMES.filter((name) => !runsWithoutApproval(verdictFor(name))).sort()
+    expect(carded).toEqual(['enrol_contacts', 'queue_touch', 'resume_contact'])
+  })
+
+  it('runs the two internal writes that can only STOP outreach', () => {
+    // Protective writes. Slowing an agent down from recording "leave me
+    // alone" is the wrong direction to be cautious in.
+    expect(runsWithoutApproval(verdictFor('add_suppression'))).toBe(true)
+    expect(runsWithoutApproval(verdictFor('pause_contact'))).toBe(true)
+  })
+
+  it('keeps a card on any third-party connector tool, whatever it is called', () => {
+    for (const name of ['mcp__zapier__send_email', 'mcp__hubspot__create_note', 'mcp__deepwiki__ask_question']) {
+      const v = call(name)
+      expect(v.rule).toBe('connector_unreviewed')
+      expect(runsWithoutApproval(v), name).toBe(false)
+    }
+  })
+
+  it('keeps a card on delegation, which writes nothing itself but spends', () => {
+    const v = call('Agent', { description: 'research', prompt: 'look into acme', subagent_type: 'researcher' })
+    expect(v.rule).toBe('delegation')
+    expect(runsWithoutApproval(v)).toBe(false)
+  })
+
+  it('never runs a refused call, even one that names an internal-write rule', () => {
+    expect(runsWithoutApproval({ risk: 'medium', rule: 'writes_internal_state', explain: 'x', refuse: true })).toBe(false)
+    // And the real refusals the classifier makes stay refused.
+    expect(runsWithoutApproval(call('Bash', { command: 'ls' }))).toBe(false)
+    expect(runsWithoutApproval(call('mcp__agency__queue_touch', { channel: 'sms', body: 'hi' }))).toBe(false)
+    expect(runsWithoutApproval(call('mcp__agency__not_a_real_tool'))).toBe(false)
   })
 })

@@ -809,3 +809,74 @@ describe('abortableSleep', () => {
     await abortableSleep(60_000, ac.signal)
   })
 })
+
+/**
+ * Internal writes run at once (operator decision, 2026-10-06), and the rest of
+ * the line holds. These go through the REAL classifier and the real gate, so
+ * they prove the decision `runsWithoutApproval` makes is the one a turn gets —
+ * and that an internal write is still granted single-use and still audited,
+ * exactly as a read is, rather than slipping past the ledger.
+ */
+describe('internal writes run without a card; what reaches a person keeps one', () => {
+  it('runs an internal write at once — granted, audited as what it is, no card', async () => {
+    const ensureApproval = vi.fn()
+    const details: Record<string, unknown>[] = []
+    const { deps, emitted, ledger } = makeDeps({
+      ensureApproval,
+      audit: async (action, detail) => {
+        if (action === 'agent.tool_allow') details.push(detail)
+      },
+    })
+    const result = await makeCanUseTool(deps)(
+      'mcp__agency__add_note',
+      { companyId: 'c-1', body: 'Spoke to their CTO.' },
+      options(),
+    )
+    expect(result).toEqual({ behavior: 'allow' })
+    expect(ensureApproval).not.toHaveBeenCalled()
+    expect(emitted.some((e) => e.kind === 'approval_requested')).toBe(false)
+    // Single-use grant: the handler's ledger check still has something to spend.
+    expect(ledger.outstanding).toBe(1)
+    // Audited as an internal write, not dressed up as a read.
+    expect(details).toEqual([
+      expect.objectContaining({ toolName: 'mcp__agency__add_note', risk: 'medium', rule: 'writes_internal_state' }),
+    ])
+  })
+
+  it.each(['update_deal', 'add_company', 'create_campaign', 'generate_proposal', 'add_suppression', 'pause_contact'])(
+    'runs %s at once',
+    async (tool) => {
+      const ensureApproval = vi.fn()
+      const { deps } = makeDeps({ ensureApproval })
+      const result = await makeCanUseTool(deps)(`mcp__agency__${tool}`, {}, options())
+      expect(result).toEqual({ behavior: 'allow' })
+      expect(ensureApproval).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each(['queue_touch', 'enrol_contacts', 'resume_contact'])('still parks %s on a person', async (tool) => {
+    const ensureApproval = vi.fn(async () => approvalRow())
+    const { deps, emitted } = makeDeps({ ensureApproval })
+    await makeCanUseTool(deps)(`mcp__agency__${tool}`, { channel: 'email' }, options())
+    expect(ensureApproval).toHaveBeenCalledTimes(1)
+    expect(emitted.some((e) => e.kind === 'approval_requested')).toBe(true)
+  })
+
+  it('still parks a third-party connector tool on a person', async () => {
+    const ensureApproval = vi.fn(async () => approvalRow())
+    const { deps } = makeDeps({ ensureApproval })
+    await makeCanUseTool(deps)('mcp__zapier__send_email', { to: 'a@b.co' }, options())
+    expect(ensureApproval).toHaveBeenCalledTimes(1)
+  })
+
+  it('still parks delegation to a subagent on a person', async () => {
+    const ensureApproval = vi.fn(async () => approvalRow())
+    const { deps } = makeDeps({ ensureApproval })
+    await makeCanUseTool(deps)(
+      'Agent',
+      { description: 'research', prompt: 'look into acme', subagent_type: 'researcher' },
+      options(),
+    )
+    expect(ensureApproval).toHaveBeenCalledTimes(1)
+  })
+})

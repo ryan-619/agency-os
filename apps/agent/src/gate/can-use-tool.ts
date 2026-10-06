@@ -27,7 +27,7 @@
  * in this file that a disabled list can reach and come out allowed.
  */
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk'
-import { classifyRisk, type ChatEventBody } from '@agency/core'
+import { type ChatEventBody, classifyRisk, runsWithoutApproval } from '@agency/core'
 import { canonicalJson, connectorToolsIsDisabled, type ApprovalRow } from '@agency/db'
 import { fingerprint, type AuthorisationLedger } from './ledger.js'
 import type { ApprovalWaiter } from './waiter.js'
@@ -165,12 +165,18 @@ export function makeCanUseTool(deps: GateDeps): CanUseTool {
       }
       const fp = fingerprint(deps.turnId, toolName, canonicalJson(parsed.value))
 
-      // --- low: reads and derived, append-only writes (§5.4) -----------------
-      if (verdict.risk === 'low') {
+      // --- runs at once: reads, derived writes, and internal writes ----------
+      // `runsWithoutApproval` in packages/core is the one place this line is
+      // drawn, and it is drawn by RULE: internal writes run at once (operator
+      // decision, 2026-10-06); anything that reaches a person outside, lifts a
+      // pause, comes from a third-party connector or delegates keeps its card.
+      // The ledger grant and the audit row are exactly what a low call gets,
+      // so an internal write is still recorded and still single-use.
+      if (runsWithoutApproval(verdict)) {
         deps.ledger.grant(fp)
         deps.markGated(options.toolUseID)
         await deps.audit('agent.tool_allow', {
-          toolName, toolUseId: options.toolUseID, risk: 'low', rule: verdict.rule,
+          toolName, toolUseId: options.toolUseID, risk: verdict.risk, rule: verdict.rule,
         })
         // No `updatedInput`: the value the handler receives has to be the one
         // the fingerprint was taken over, or the ledger check fails on a call
@@ -182,7 +188,7 @@ export function makeCanUseTool(deps: GateDeps): CanUseTool {
         return allow()
       }
 
-      // --- medium and high: a person decides --------------------------------
+      // --- everything else: a person decides ---------------------------------
       const approval = await deps.ensureApproval({
         toolUseId: options.toolUseID,
         toolName,

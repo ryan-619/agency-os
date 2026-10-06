@@ -358,3 +358,42 @@ export function classifyRisk(call: ToolCall): RiskVerdict {
     true,
   )
 }
+
+/**
+ * Whether a classified call runs without a person deciding first.
+ *
+ * Reads, derived writes, and the agency's own INTERNAL writes run at once.
+ * Everything else raises an approval card.
+ *
+ * Internal writes used to raise a card too, and the operator decided against
+ * that (2026-10-06): an agent that has to ask before it adds a note, moves a
+ * deal or files a company cannot run the CRM, which is what chat is for. The
+ * line drawn is §2.4's own — "anything that leaves the building" — so it is
+ * drawn by RULE, never by tier:
+ *
+ *  - `writes_internal_state` runs at once. It changes this agency's own
+ *    records and nothing reaches anybody outside it. Two of those tools,
+ *    `pause_contact` and `add_suppression`, can only ever STOP outreach — the
+ *    conservative direction, and the one an agent should never be slowed in.
+ *  - `leaves_the_building` (`queue_touch`, `enrol_contacts`) and
+ *    `reopens_outreach` (`resume_contact`) keep their card: the first drafts
+ *    words for a person outside, the second lifts a hold that may be the only
+ *    thing keeping a message from somebody who asked to stop. Both are what
+ *    §2.1 and §2.4 exist for, and an operator's "control everything" is not
+ *    read as reaching them — that needs saying in so many words.
+ *  - `connector_unreviewed` keeps its card. A third-party server's tool can
+ *    send an email or post a message, and nobody here has read it.
+ *  - `delegation` keeps its card. It writes nothing itself (every tool a
+ *    subagent uses is classified on its own), but it is the one place a
+ *    budget runs away, and the API balance is prepaid and small.
+ *
+ * Keyed on the rule rather than `risk !== 'high'` because the tier is a
+ * statement about danger and the rule is a statement about WHO is affected —
+ * delegation is medium and still waits, and a future medium rule must be a
+ * deliberate addition here rather than one that slips through. A refused
+ * verdict never runs, whatever its rule.
+ */
+export function runsWithoutApproval(v: RiskVerdict): boolean {
+  if (v.refuse) return false
+  return v.risk === 'low' || v.rule === 'writes_internal_state'
+}

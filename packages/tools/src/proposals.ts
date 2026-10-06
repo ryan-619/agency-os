@@ -4,7 +4,8 @@
  * company page, the proposal page, a meeting's brief, the board and /tasks.
  *
  * Two reads (`low`: `get_proposal`, `list_meetings`) and six internal writes
- * (`medium`: the gate raises a card and a person decides before each one).
+ * (`medium`, run at once: `runsWithoutApproval` lets internal writes through
+ * without a card, granted single-use and audited).
  * Every write goes through the function the web route calls —
  * `generateProposal`, `rescheduleMeeting`, `cancelMeeting`,
  * `setMeetingOutcome`, `setDealOwner`, `tasksComplete` — so the agent's

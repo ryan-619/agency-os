@@ -5082,8 +5082,30 @@ the one above it can be turned off:
    `permissions.defaultMode` — the filter drops it silently, so it would read
    as protection that is not there. Caveat recorded rather than hidden: this
    tier is skipped on a machine that already has an IT-managed settings tier.
-3. **Ring 1 — `canUseTool`.** Returns `'ask'`-forced decisions for everything
-   above low risk. **It never returns `null`**: the SDK's own doc says a null
+3. **Ring 1 — `canUseTool`.** Grants and allows at once whatever
+   `runsWithoutApproval` (`packages/core/src/risk.ts`) says may run — reads,
+   derived writes, and the agency's own INTERNAL writes — and raises an
+   approval card for everything else. **Internal writes run at once by the
+   operator's decision (2026-10-06)**: an agent that must ask before it adds a
+   note, moves a deal or files a company cannot run the CRM, which is what
+   chat is for. The line is §2.4's own, "anything that leaves the building",
+   and is drawn by RULE, never by tier: `writes_internal_state` (20 tools,
+   among them `pause_contact` and `add_suppression`, which only ever STOP
+   outreach) runs at once; `leaves_the_building` (`queue_touch`,
+   `enrol_contacts`), `reopens_outreach` (`resume_contact`),
+   `connector_unreviewed` (every third-party tool) and `delegation` (medium,
+   but the one place a prepaid budget runs away) keep their card. An internal
+   write is granted single-use and audited `agent.tool_allow` with its real
+   tier and rule, exactly as a read is, so it does not slip past the ledger.
+   `risk.test.ts` pins the carded agency tools to exactly those three, so a
+   tool added or reclassified later fails until somebody chooses its side;
+   `gate.test.ts` drives the real classifier through the gate both ways, and
+   fails seven ways if the decision is put back to `risk === 'low'`. The
+   system prompt says the same, and its test pins both halves: a model told
+   every change waits proposes instead of acting, and one not told what DOES
+   wait claims to have sent what it only drafted. Ring 2 below is unchanged:
+   its `'ask'` only routes a call to this callback, which is what decides.
+   **It never returns `null`**: the SDK's own doc says a null
    sends no control_response and "the tool stays blocked indefinitely —
    permission prompts have no park deadline". A hang is the worst outcome in
    the phase because it is indistinguishable from the model thinking, so a

@@ -3,7 +3,8 @@
  * holds a person from every campaign, and the suppression list (2026-10-06).
  *
  * `list_contacts` is a READ (`low`). Every other tool here writes internal
- * state (`medium`, so the gate asks a person before each call) — except
+ * state (`medium`, and run at once: `runsWithoutApproval` lets internal
+ * writes through without a card) — except
  * `resume_contact`, which is `high`: lifting a pause lets campaigns write to
  * somebody again, and that is a person's decision (§2.4). None of them sends
  * anything, and every write's summary ends "Nothing was sent."

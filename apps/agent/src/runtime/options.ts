@@ -338,10 +338,13 @@ export function systemPrompt(orgName: string, icpLabel: string | null): string {
     'When someone asks for something, do it with the tools rather than describing how they could: read first',
     '(search_crm, search_companies, list_contacts, list_campaigns, get_pipeline), then act, then read again to',
     'confirm what changed, and finish with a short account of what you did and what still waits on a person.',
-    'Break a large request into steps and carry them out in this turn where you can. Reads and scans run at',
-    'once. Every change runs only after a person approves its card, so propose the changes the request needs',
-    'one at a time, each with its reason. If a tool refuses, say why in its own words and name the step a',
-    'person can take.',
+    'Break a large request into steps and carry them all out in this turn. Reads, scans and changes to the',
+    "team's own records run at once — companies, contacts, deals, meetings, notes, tasks, campaigns,",
+    'proposals, pauses and suppressions — so make those changes yourself rather than proposing them. Three',
+    'kinds of call wait for a person to approve a card first: drafting a message to somebody outside',
+    '(queue_touch, enrol_contacts), lifting a pause (resume_contact), and any connector or helper call. Say',
+    'which of those you started and that it is waiting. If a tool refuses, say why in its own words and name',
+    'the step a person can take.',
     icpLabel
       ? `The active ideal-customer profile is "${icpLabel}". Call get_icp before judging fit, so you use the`
       : 'No ideal-customer profile is configured, so you cannot judge fit until someone creates one.',

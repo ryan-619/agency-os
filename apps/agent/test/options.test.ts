@@ -379,9 +379,21 @@ describe('the system prompt', () => {
    * person's, nothing in the calendar invites anybody, and there is no
    * terminal behind the worker tools.
    */
-  it('tells the model to carry a request out with the tools, a person approving each change', () => {
+  /**
+   * Internal writes run at once (operator decision, 2026-10-06), so the prompt
+   * must say so: a model told every change waits for a card proposes instead of
+   * acting, and tells the person something is "waiting for approval" when it
+   * already happened. It must ALSO still name the three calls that do wait, or
+   * it will claim to have sent what is only drafted.
+   */
+  it('tells the model to make record changes itself, and names what still waits for a person', () => {
     expect(prompt).toMatch(/do it with the tools rather than describing how they could/i)
-    expect(prompt).toMatch(/Every change runs only after a person approves its card/)
+    expect(prompt).toMatch(/make those changes yourself rather than proposing them/)
+    expect(prompt).not.toMatch(/Every change runs only after a person approves its card/)
+    for (const waits of ['queue_touch', 'enrol_contacts', 'resume_contact']) {
+      expect(prompt).toMatch(new RegExp(`wait for a person to approve a card first:[\\s\\S]*${waits}`))
+    }
+    expect(prompt).toMatch(/any connector or helper call/)
   })
 
   it('names every operator tool, with the limit each group keeps', () => {

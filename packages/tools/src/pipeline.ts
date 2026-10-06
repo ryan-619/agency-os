@@ -8,8 +8,9 @@
  *
  * Risk, from `AGENCY_TOOL_RISK`: `get_pipeline` is low (a read); the other
  * two are medium — they change internal state, nothing leaves the building —
- * so the gate raises a card and a person decides, without the turn parking
- * for long. `book_meeting` RECORDS a meeting and moves the deal. It does not
+ * and run at once: `runsWithoutApproval` in packages/core lets internal
+ * writes through without a card (operator decision, 2026-10-06), granted
+ * single-use and audited like a read. `book_meeting` RECORDS a meeting and moves the deal. It does not
  * send an invitation and it does not touch a calendar: the calendar is a
  * connector (§8.6), reached like any other connector, through the gate.
  */

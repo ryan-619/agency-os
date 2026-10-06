@@ -8,8 +8,8 @@
  * sends nothing. `enrol_contacts` is `high` — `leaves_the_building`, as
  * `queue_touch` is — because it drafts openers to people outside the
  * company, though every draft still waits on /approvals for a person. The
- * gate asks a person before every medium and high call; nothing here
- * relaxes that.
+ * internal writes here run at once (`runsWithoutApproval`); `enrol_contacts`,
+ * being `high`, still raises a card, and nothing here relaxes that.
  *
  * Every write goes through the function the web route calls —
  * `createCampaign`, `updateCampaign`, `enrolCampaign` — after the checks the
