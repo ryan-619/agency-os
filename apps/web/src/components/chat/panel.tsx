@@ -292,8 +292,9 @@ export function ChatPanel({
         {state.blocks.length === 0 ? (
           <p className="muted" style={{ fontSize: 13.5 }}>
             Ask about the companies in the CRM — what is worth working, what a company&apos;s
-            posture looks like, what to say to them. The agent can read the CRM and scan public
-            pages. It cannot send anything.
+            posture looks like, what to say to them — or ask it to make a change. The agent can
+            read the CRM, scan public pages and update the team&apos;s records. It cannot send
+            anything.
           </p>
         ) : null}
         {state.blocks.map((b) => (

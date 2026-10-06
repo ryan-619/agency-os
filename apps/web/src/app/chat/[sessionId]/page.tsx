@@ -86,8 +86,11 @@ export default async function ChatThreadPage({ params }: { params: Promise<{ ses
     <Shell user={user} current="chat" signOut={signOutAction}>
       <h1>Chat</h1>
       <p className="lede">
-        The agent reads the CRM and can scan a company&apos;s public pages. It cannot send
-        anything: a draft goes to the approval queue and waits for a person.
+        The agent works the CRM for you: it reads it, scans companies&apos; public pages,
+        and changes the team&apos;s own records — companies, people, deals, meetings, notes,
+        tasks and campaigns — as you ask. It cannot send anything: a message to somebody
+        outside is a draft that waits on Approvals, and lifting a pause or a connector call
+        asks a person first.
       </p>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 20, alignItems: 'flex-start' }}>
         <div style={{ flex: '0 0 220px', minWidth: 0 }}>
