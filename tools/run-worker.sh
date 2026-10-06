@@ -26,6 +26,9 @@
 #   ./tools/run-worker.sh --reconfigure   ask every question again
 #   ./tools/run-worker.sh --imap          ask only reply detection's questions
 #                                         again (a new app password), then run
+#   ./tools/run-worker.sh --secrets-key   ask only for SECRETS_KEY — the key
+#                                         connector credentials are encrypted
+#                                         with, Vercel's value — then run
 #   ./tools/run-worker.sh --forget        delete the saved answers and stop
 #
 # Every credential is read at a HIDDEN prompt into this process's environment
@@ -51,8 +54,9 @@ case "${1:-}" in
   '') ;;
   --reconfigure) MODE=reconfigure ;;
   --imap) MODE=imap ;;
+  --secrets-key) MODE=secrets-key ;;
   --forget) MODE=forget ;;
-  *) echo "usage: $0 [--reconfigure | --imap | --forget]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--reconfigure | --imap | --secrets-key | --forget]" >&2; exit 2 ;;
 esac
 
 # ── The Keychain (macOS only) ──────────────────────────────────────────────
@@ -65,7 +69,7 @@ SERVICE="agency-os-worker"
 SAVED_NAMES=(DATABASE_URL SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASSWORD MAIL_FROM
   DOVESOFT_API_KEY DOVESOFT_ENTITY_ID IMAP_HOST IMAP_USER IMAP_PASSWORD
   WEB_PUBLIC_URL UNSUBSCRIBE_SECRET SLACK_WEBHOOK_URL
-  CHAT_URL ANTHROPIC_API_KEY AGENT_INTERNAL_TOKEN)
+  CHAT_URL ANTHROPIC_API_KEY AGENT_INTERNAL_TOKEN SECRETS_KEY)
 
 have_keychain() { [ "$(uname -s)" = Darwin ] && command -v security >/dev/null 2>&1; }
 
@@ -163,8 +167,8 @@ node_modules/.bin/tsc --build
 
 # ── Read what was saved, or ask ──────────────────────────────────────────────
 LOADED="no"
-# --imap reads them too: it asks reply detection's questions over them.
-if { [ "$MODE" = run ] || [ "$MODE" = imap ]; } && have_keychain && kc_get DATABASE_URL >/dev/null; then
+# --imap and --secrets-key read them too: each asks its own question over them.
+if { [ "$MODE" = run ] || [ "$MODE" = imap ] || [ "$MODE" = secrets-key ]; } && have_keychain && kc_get DATABASE_URL >/dev/null; then
   for n in "${SAVED_NAMES[@]}"; do
     if v=$(kc_get "$n"); then export "$n=$v"; fi
   done
@@ -517,6 +521,14 @@ if [ "$LOADED" = no ]; then
     [ -n "$SAVED_CHAT_KEY" ] && export ANTHROPIC_API_KEY="$SAVED_CHAT_KEY"
   fi
 
+  # SECRETS_KEY is asked only by --secrets-key, so a saved one is carried
+  # over: the save below deletes every saved name before it writes, and
+  # Vercel shows the value back to nobody.
+  if have_keychain; then
+    SAVED_SECRETS_KEY=$(kc_get SECRETS_KEY) || SAVED_SECRETS_KEY=""
+    [ -n "$SAVED_SECRETS_KEY" ] && export SECRETS_KEY="$SAVED_SECRETS_KEY"
+    unset SAVED_SECRETS_KEY
+  fi
   if have_keychain; then
     printf 'Remember these answers in your Keychain, so the next run asks nothing? [Y/n]: ' >&3
     read -r ANSWER <&3
@@ -568,6 +580,45 @@ if [ "$MODE" = imap ] && [ "$LOADED" = yes ]; then
     fi
   done
   [ "$IMAP_SAVED" = yes ] && printf '  Saved in your Keychain; the next run uses them too.\n' >&3
+  exec 3>&-
+fi
+
+# ── --secrets-key: the key connector credentials are encrypted with ─────────
+# The web app encrypts a connector's credential with SECRETS_KEY when an owner
+# stores it, and the worker decrypts it at the start of each message, so the
+# two must hold the SAME value: without it here, every connector that needs a
+# key is skipped with "SECRETS_KEY is not set". Set it in Vercel first, then
+# paste the same value here. Asked alone, over the saved answers; with
+# nothing saved, every question above was asked first.
+if [ "$MODE" = secrets-key ]; then
+  ask_open
+  while :; do
+    if [ -n "${SECRETS_KEY:-}" ]; then
+      printf 'SECRETS_KEY — paste the value Vercel holds (hidden; Enter keeps the saved one): ' >&3
+    else
+      printf 'SECRETS_KEY — paste the value Vercel holds (hidden; Enter leaves it unset): ' >&3
+    fi
+    read -r -s V <&3; printf '\n' >&3
+    V="${V//[[:space:]]/}"
+    [ -n "$V" ] || break
+    # Exactly what the worker's masterKey() accepts: base64 of 32 bytes.
+    # printf is a builtin, so the value reaches openssl on its stdin only.
+    if [ "$(printf '%s' "$V" | openssl base64 -d -A 2>/dev/null | wc -c | tr -d ' ')" = 32 ]; then
+      export SECRETS_KEY="$V"
+      break
+    fi
+    printf '  That is not a key: it must be base64 of 32 bytes, as `openssl rand -base64 32` makes. Try again.\n' >&3
+  done
+  V=""
+  if [ -n "${SECRETS_KEY:-}" ] && have_keychain; then
+    kc_put SECRETS_KEY "$SECRETS_KEY" || true
+    # `security -i` can answer 0 for a write it refused: read it back.
+    if [ "$(kc_get SECRETS_KEY || true)" = "$SECRETS_KEY" ]; then
+      printf '  Saved in your Keychain; the next run uses it too.\n' >&3
+    else
+      echo "  Could not save SECRETS_KEY in the Keychain: this run uses it, the next one does not." >&2
+    fi
+  fi
   exec 3>&-
 fi
 
@@ -692,6 +743,13 @@ else
 fi
 if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
   echo "  alarm:    ON  — an opt-out that cannot be recorded is posted to Slack"
+fi
+if [ -n "${SECRETS_KEY:-}" ]; then
+  echo "  keys:     ON  — connectors that need a key can decrypt it (SECRETS_KEY;"
+  echo "            Vercel must hold the same value)"
+else
+  echo "  keys:     OFF — only connectors that need no key work; '$0 --secrets-key'"
+  echo "            takes the SECRETS_KEY Vercel holds"
 fi
 if [ "$CHAT" = yes ]; then
   echo "  chat:     ON  — the live site reaches this Mac at $CHAT_URL (ngrok),"

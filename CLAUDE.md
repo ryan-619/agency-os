@@ -4190,6 +4190,7 @@ npm run smoke:agent -- --connector deepwiki   # the Phase 3 gate (§6's "no rest
                               # with chat off the worker is handed no Anthropic key
 ./tools/run-worker.sh --reconfigure   # ask every question again
 ./tools/run-worker.sh --imap          # only reply detection's questions (a new Google app password), then run
+./tools/run-worker.sh --secrets-key   # only SECRETS_KEY — Vercel's value, so a connector's encrypted key can be read
 ./tools/run-worker.sh --forget        # delete the saved answers
 ./tools/add-teammate.sh       # grant somebody access — or Settings → Team, in the browser
 ./tools/spend.sh              # what the API has actually cost: per day, per person, run rate

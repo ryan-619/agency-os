@@ -48,6 +48,9 @@
  *  - a run refuses, before it builds, asks or stops any tunnel, while either
  *    of the worker's ports already answers — a second run typed beside a
  *    live worker stopped its tunnel and then died on its ports;
+ *  - a saved SECRETS_KEY reaches the worker, so a connector's encrypted key
+ *    can be read; `--secrets-key` asks for it alone, refuses anything that is
+ *    not base64 of 32 bytes, and a `--reconfigure` keeps a saved one;
  *  - `--imap` asks reply detection's three questions alone, over the saved
  *    answers — a new Google app password, saved without the spaces Google
  *    shows it with — and keeps every other saved answer as it was;
@@ -75,6 +78,8 @@ const FROM = 'Agency <hello@myagencyos.in>'
 const ANTHROPIC_KEY = 'sk-ant-api03-key-never-in-argv-or-ngrok'
 const CHAT_TOKEN = 't'.repeat(64)
 const CHAT_DOMAIN = 'calm-otter-42.ngrok-free.app'
+/** What `openssl rand -base64 32` makes: base64 of 32 bytes, as the worker's masterKey() requires. */
+const SECRETS_KEY = Buffer.alloc(32, 7).toString('base64')
 /**
  * The script stops any ngrok tunnel on the worker's API port before it opens
  * its own, and every test here runs the real script — on the operator's own
@@ -87,7 +92,7 @@ const API_PORT = '39402'
 /** What the worker's build and run must never be handed before the operator has answered anything. */
 const CREDENTIALS = [
   'DATABASE_URL', 'SMTP_PASSWORD', 'IMAP_PASSWORD', 'UNSUBSCRIBE_SECRET', 'SLACK_WEBHOOK_URL', 'DOVESOFT_API_KEY',
-  'ANTHROPIC_API_KEY', 'AGENT_INTERNAL_TOKEN',
+  'ANTHROPIC_API_KEY', 'AGENT_INTERNAL_TOKEN', 'SECRETS_KEY',
 ]
 
 let dir: string
@@ -627,6 +632,35 @@ describe('tools/run-worker.sh', () => {
     expect(calls()).toEqual([])
   })
 
+  /**
+   * The web app encrypts a connector's key with SECRETS_KEY and the worker
+   * decrypts it, so the worker needs the same value; the script never passed
+   * one, and every keyed connector was skipped on the laptop worker.
+   */
+  it('hands a saved SECRETS_KEY to the worker, on no argument list and not on the screen', () => {
+    const repo = layout()
+    save('DATABASE_URL', DB)
+    save('SECRETS_KEY', SECRETS_KEY)
+    const r = run(repo)
+    expect(r.status, r.stderr).toBe(0)
+    expect(r.stdout).toContain('keys:     ON')
+    const c = calls()
+    expect(c[0]!.env.SECRETS_KEY).toBeUndefined()
+    expect(c[1]!.env.SECRETS_KEY).toBe(SECRETS_KEY)
+    const argvs = [...c.map((x) => x.argv), readFileSync(join(logs, 'security-argv'), 'utf8')].join('\n')
+    expect(argvs).not.toContain(SECRETS_KEY)
+    expect(r.stdout + r.stderr).not.toContain(SECRETS_KEY)
+  })
+
+  it('says only keyless connectors work without a SECRETS_KEY, and names the option that takes one', () => {
+    save('DATABASE_URL', DB)
+    const r = run(layout())
+    expect(r.status, r.stderr).toBe(0)
+    expect(r.stdout).toContain('keys:     OFF')
+    expect(r.stdout).toContain('--secrets-key')
+    expect(calls()[1]!.env.SECRETS_KEY).toBeUndefined()
+  })
+
   it('refuses an argument it does not know', () => {
     const r = run(layout(), ['--save-everything'])
     expect(r.status).toBe(2)
@@ -1026,6 +1060,38 @@ describe.runIf(PTY)('tools/run-worker.sh, answered at its prompts', () => {
     expect(r.worker.IMAP_PASSWORD).toBe(IMAP_PASSWORD)
     expect(saved('IMAP_PASSWORD')).toBe(IMAP_PASSWORD)
     expect(saved('DATABASE_URL')).toBe(DB)
+  })
+
+  it('--secrets-key asks for the key alone, refuses one that is not 32 bytes, and saves it', async () => {
+    save('DATABASE_URL', DB)
+    save('SMTP_PASSWORD', SMTP_PASSWORD)
+    const r = await converse(layout(), ['--secrets-key'], [
+      ['SECRETS_KEY — paste the value Vercel holds', Buffer.alloc(16, 7).toString('base64')],
+      ['SECRETS_KEY — paste the value Vercel holds', SECRETS_KEY],
+    ])
+    expect(r.unanswered, r.transcript).toEqual([])
+    expect(r.status, r.transcript).toBe(0)
+    expect(r.transcript).toContain('That is not a key: it must be base64 of 32 bytes')
+    expect(r.transcript).toContain('Saved in your Keychain; the next run uses it too.')
+    expect(r.transcript).toContain('keys:     ON')
+    expect(r.transcript).not.toContain('Production DATABASE_URL')
+    expect(r.transcript).not.toContain(SECRETS_KEY)
+    const c = calls()
+    expect(c.map((x) => x.argv)).toEqual(['tsc --build', 'tsx apps/agent/src/index.ts'])
+    expect(c[1]!.env.SECRETS_KEY).toBe(SECRETS_KEY)
+    expect(c[1]!.env.SMTP_PASSWORD).toBe(SMTP_PASSWORD)
+    expect(saved('SECRETS_KEY')).toBe(SECRETS_KEY)
+    expect(saved('SMTP_PASSWORD')).toBe(SMTP_PASSWORD)
+    expect(readFileSync(join(logs, 'security-argv'), 'utf8')).not.toContain(SECRETS_KEY)
+  })
+
+  it('--reconfigure keeps a saved SECRETS_KEY, which it does not ask for', async () => {
+    save('DATABASE_URL', DB)
+    save('SECRETS_KEY', SECRETS_KEY)
+    const r = await answered(layout(), ['--reconfigure'], { smtp: false, remember: 'y' })
+    expect(r.worker.SECRETS_KEY).toBe(SECRETS_KEY)
+    expect(saved('SECRETS_KEY')).toBe(SECRETS_KEY)
+    expect(r.transcript).not.toContain(SECRETS_KEY)
   })
 
   describe('off a Mac, where a secret could be neither copied nor saved', () => {
