@@ -33,6 +33,12 @@ describe('imapFailure', () => {
     expect(timedOut.hint).not.toContain('IMAP_HOST')
   })
 
+  it("says a socket that went quiet is the machine sleeping, not a fault to fix", () => {
+    const out = imapFailure(Object.assign(new Error('Socket timeout'), { code: 'ETIMEOUT' }))
+    expect(out).toEqual({ reason: 'ETIMEOUT', hint: expect.stringContaining('slept') })
+    expect(out.hint).not.toContain('IMAP_')
+  })
+
   it("passes imapflow's own codes, and the server's bracketed code, through bare", () => {
     expect(imapFailure(Object.assign(new Error('x'), { code: 'NoConnection' }))).toEqual({ reason: 'NoConnection' })
     expect(imapFailure(Object.assign(new Error('x'), { serverResponseCode: 'UNAVAILABLE' }))).toEqual({ reason: 'UNAVAILABLE' })

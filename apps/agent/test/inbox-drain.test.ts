@@ -57,15 +57,23 @@ function captureLog(): { log: Logger; lines: string[] } {
 class FakeMailbox implements InboxClient {
   readonly messages = new Map<number, { source: Buffer | null; seen: boolean }>()
   private readonly listeners = new Set<() => void>()
+  private readonly errorListeners = new Set<(err: Error) => void>()
   private endIdle: (() => void) | null = null
+  /** Set by `drop`: every command after it is refused, as imapflow refuses one on a closed connection. */
+  private closed = false
   searches = 0
   idles = 0
+
+  private live(): void {
+    if (this.closed) throw Object.assign(new Error('Connection not available'), { code: 'NoConnection' })
+  }
 
   async connect(): Promise<void> {}
   async getMailboxLock(): Promise<{ release(): void }> {
     return { release: () => {} }
   }
   idle(): Promise<boolean> {
+    if (this.closed) return Promise.reject(Object.assign(new Error('Connection not available'), { code: 'NoConnection' }))
     this.idles++
     return new Promise((resolve) => {
       this.endIdle = () => {
@@ -78,28 +86,35 @@ class FakeMailbox implements InboxClient {
     return this.endIdle !== null
   }
   async noop(): Promise<void> {
+    this.live()
     this.endIdle?.()
   }
   async logout(): Promise<void> {
     this.endIdle?.()
   }
   async search(): Promise<number[] | false> {
+    this.live()
     this.searches++
     const unseen = [...this.messages].filter(([, m]) => !m.seen).map(([uid]) => uid)
     return unseen.length ? unseen : false
   }
   async fetchOne(uid: string): Promise<{ source?: Buffer } | false> {
+    this.live()
     const m = this.messages.get(Number(uid))
     if (!m) return false
     return m.source ? { source: m.source } : {}
   }
   async messageFlagsAdd(uid: string, flags: string[]): Promise<boolean> {
+    this.live()
     const m = this.messages.get(Number(uid))
     if (m && flags.includes('\\Seen')) m.seen = true
     return true
   }
-  on(_event: 'exists', listener: () => void): this {
-    this.listeners.add(listener)
+  on(event: 'exists', listener: () => void): this
+  on(event: 'error', listener: (err: Error) => void): this
+  on(event: 'exists' | 'error', listener: (() => void) | ((err: Error) => void)): this {
+    if (event === 'error') this.errorListeners.add(listener as (err: Error) => void)
+    else this.listeners.add(listener as () => void)
     return this
   }
   off(_event: 'exists', listener: () => void): this {
@@ -109,6 +124,20 @@ class FakeMailbox implements InboxClient {
 
   put(uid: number, source: string | null): void {
     this.messages.set(uid, { source: source === null ? null : Buffer.from(source), seen: false })
+  }
+  /**
+   * The connection lost, as imapflow's `emitError` loses it: the close is put
+   * off to the next tick — it ends the IDLE in flight, and every command after
+   * it is refused — and the 'error' event is emitted now, which, with nobody
+   * listening, an EventEmitter throws out of the process.
+   */
+  drop(err: Error): void {
+    setImmediate(() => {
+      this.closed = true
+      this.endIdle?.()
+    })
+    if (this.errorListeners.size === 0) throw err
+    for (const l of this.errorListeners) l(err)
   }
   /** New mail: the server's untagged EXISTS, which imapflow turns into an event and nothing more. */
   deliver(uid: number, source: string): void {
@@ -400,6 +429,45 @@ In-Reply-To: <sent-1@agency.test>`,
     expect(await notRecordedRows()).toHaveLength(1)
     expect(pauseReasonClass((await contactRow()).pausedReason)).toBe('opt_out_not_recorded')
   })
+
+  /**
+   * The crash this fixes: imapflow reports a connection it lost as an
+   * 'error' EVENT, and an EventEmitter throws one nobody listens for out of
+   * the process — so the Mac's network going quiet across a sleep stopped
+   * the whole worker ("Socket timeout", ETIMEOUT), the sender and chat with
+   * it. The session hears it now: it ends, the reconnect line names the
+   * cause rather than the "Connection not available" the close turns it
+   * into, and a new connection reads the mailbox again.
+   */
+  it('survives a connection imapflow reports lost, and reads the mailbox again on a new one', async () => {
+    const first = new FakeMailbox()
+    const second = new FakeMailbox()
+    second.put(5, reply('Thanks, tell me more.', '<more-5@rentman.io>'))
+    const boxes = [first, second]
+    let connects = 0
+    const { log, lines } = captureLog()
+    stop = startInbox({
+      db,
+      log,
+      config: { host: 'imap.test', port: 993, secure: true, user: 'outreach', password: 'x', mailbox: 'INBOX' },
+      optOutAlarm: null,
+      now: () => NOON,
+      connect: () => boxes[Math.min(connects++, boxes.length - 1)]!,
+      timing: { retryMs: 20, refreshMs: 60_000 },
+    })
+    await vi.waitFor(() => expect(first.idling).toBe(true))
+
+    // With nobody listening, this throws — out of the worker, in production.
+    expect(() => first.drop(Object.assign(new Error('Socket timeout'), { code: 'ETIMEOUT' }))).not.toThrow()
+
+    const reconnecting = () => said(lines).filter((l) => l.msg === 'inbox connection dropped; reconnecting')
+    await vi.waitFor(() => expect(reconnecting()).toHaveLength(1))
+    expect(reconnecting()[0]).toMatchObject({ level: 'warn', reason: 'ETIMEOUT', hint: expect.stringContaining('slept') })
+    // The back-off is five seconds; then the new connection drains what came in meanwhile.
+    await vi.waitFor(() => expect(second.seen(5)).toBe(true), { timeout: 12_000 })
+    expect(connects).toBe(2)
+    expect(first.searches).toBe(1)
+  }, 30_000)
 
   /**
    * The probe (review round 6): a "stop" that never records. It used to be

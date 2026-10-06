@@ -140,6 +140,7 @@ export interface InboxClient {
   fetchOne(uid: string, query: { source: true }, options: { uid: true }): Promise<{ source?: Buffer } | false>
   messageFlagsAdd(uid: string, flags: string[], options: { uid: true }): Promise<unknown>
   on(event: 'exists', listener: () => void): unknown
+  on(event: 'error', listener: (err: Error) => void): unknown
   off(event: 'exists', listener: () => void): unknown
 }
 
@@ -671,6 +672,11 @@ export function imapFailure(err: unknown): { reason?: string; hint?: string } {
   if (reason === 'EAI_AGAIN') {
     return { reason, hint: 'a DNS lookup timed out — this machine may be offline; it is retried' }
   }
+  // imapflow's own code for a socket that went quiet: what a laptop's
+  // connection does across a sleep. Nothing to fix.
+  if (reason === 'ETIMEOUT') {
+    return { reason, hint: 'the connection went quiet — this machine may have slept or lost its network; it is retried' }
+  }
   return { reason }
 }
 
@@ -730,6 +736,27 @@ export function startInbox(deps: InboxDeps): () => Promise<void> {
   const session = async (): Promise<void> => {
     const c = connect(deps.config)
     client = c
+    // imapflow reports a connection it lost — a socket that went quiet while
+    // the machine slept, a reset — as an 'error' EVENT, and closes itself on
+    // the next tick. Node throws an 'error' event nobody listens for out of
+    // the process, so a minute without a network stopped the worker
+    // (ETIMEOUT), and with it the sender and chat. Heard, the close ends the
+    // command in flight, the session ends, and the loop reconnects with
+    // back-off — naming what dropped the connection, not the "Connection not
+    // available" the close turns it into. Never taken off: an event from a
+    // client this session has finished with must not stop the process either.
+    let dropped: Error | null = null
+    c.on('error', (err) => {
+      dropped ??= err
+    })
+    try {
+      await serve(c)
+    } catch (err) {
+      throw dropped ?? err
+    }
+  }
+
+  const serve = async (c: InboxClient): Promise<void> => {
     // `idle()` resolves only when IDLE ends, and imapflow ends it only to
     // run another command — an EXISTS for new mail is an event, not an end.
     // So a wake is a NOOP, which breaks the IDLE, and `woken` remembers one

@@ -83,7 +83,17 @@ it is a whole address, because a mistyped host reconnected every five
 minutes for ever; and the worker's reconnect line now carries `reason` (the
 error's code or the server's, e.g. `ENOTFOUND`, `authentication_failed`)
 and a `hint`, never the message (`imapFailure` in
-`apps/agent/src/outreach/inbox.ts`), where it said only `Error`. **Fly.io is the path once it rents a machine**
+`apps/agent/src/outreach/inbox.ts`), where it said only `Error`. **And a
+lost IMAP connection no longer stops the worker.** imapflow reports one — a
+socket gone quiet while the Mac slept — as an `'error'` EVENT, and Node
+throws an `'error'` event nobody listens for out of the process, so a minute
+without a network killed the worker (`Socket timeout`, `ETIMEOUT`), the
+sender and chat with it. `startInbox` listens on every client it makes and
+never takes the listener off; the close ends the session, the reconnect line
+names `ETIMEOUT` with a "may have slept" hint rather than the `NoConnection`
+the close turns it into, and a new connection drains what arrived
+(`apps/agent/test/inbox-drain.test.ts`, against a fake that throws an
+unheard event as an EventEmitter does). **Fly.io is the path once it rents a machine**
 (`fly.toml` at the repo root), and its
 defaults are the dangerous part: Fly scales a machine to zero between
 requests, which is Vercel's problem wearing a different hat — the advisory
