@@ -99,7 +99,14 @@ never takes the listener off; the close ends the session, the reconnect line
 names `ETIMEOUT` with a "may have slept" hint rather than the `NoConnection`
 the close turns it into, and a new connection drains what arrived
 (`apps/agent/test/inbox-drain.test.ts`, against a fake that throws an
-unheard event as an EventEmitter does). **The script's own tests run
+unheard event as an EventEmitter does). **Nor does a dropped idle
+database connection**: the same day the worker died with `read
+EADDRNOTAVAIL`, "Emitted 'error' event on BoundPool instance" — the Mac's
+network changed under a client idle in the pool, and pg-pool's 'error'
+event had no listener. `watchIdleConnections` (`apps/agent/src/boot/
+pool-errors.ts`) hears it, logs its class and code, and the pool opens a
+new connection when next asked, as the web app's and the voice service's
+pools always did (`apps/agent/test/pool-errors.test.ts`). **The script's own tests run
 it on ports nothing real uses** (`AGENT_PORT=39401`): it stops any ngrok
 on the worker's API port before opening its own, and one run of
 `run-worker-script.test.ts` on the operator's Mac killed the live

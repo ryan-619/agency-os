@@ -16,6 +16,7 @@ import { answerHealth, startHealthServer, type HealthInputs } from './health.js'
 import { acquireWorkerLock, type WorkerLock } from './boot/singleton.js'
 import { reconcileAfterRestart, recoverStuckSends, sweepExpired } from './boot/reconcile.js'
 import { lastHeartbeatAt, startHeartbeat, workerVersion } from './boot/heartbeat.js'
+import { watchIdleConnections } from './boot/pool-errors.js'
 import { createRecentLog, recordingLogger } from './ops/recent-log.js'
 import { opsContextFrom } from './ops/context.js'
 import { startSender, WORKER_SEND_CHANNELS } from './outreach/sender.js'
@@ -156,6 +157,7 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
   const health = await startHealthServer(env.AGENT_PORT, healthInputs, log)
 
   pool = new Pool({ connectionString: env.DATABASE_URL, max: env.DATABASE_POOL_MAX })
+  watchIdleConnections(pool, log)
   const db = drizzle(pool, { schema }) as unknown as AgencyDb
 
   try {
