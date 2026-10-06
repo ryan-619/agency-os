@@ -24,6 +24,8 @@
 #
 #   ./tools/run-worker.sh                 run (asks, or reads what you saved)
 #   ./tools/run-worker.sh --reconfigure   ask every question again
+#   ./tools/run-worker.sh --imap          ask only reply detection's questions
+#                                         again (a new app password), then run
 #   ./tools/run-worker.sh --forget        delete the saved answers and stop
 #
 # Every credential is read at a HIDDEN prompt into this process's environment
@@ -48,8 +50,9 @@ MODE=run
 case "${1:-}" in
   '') ;;
   --reconfigure) MODE=reconfigure ;;
+  --imap) MODE=imap ;;
   --forget) MODE=forget ;;
-  *) echo "usage: $0 [--reconfigure | --forget]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--reconfigure | --imap | --forget]" >&2; exit 2 ;;
 esac
 
 # ── The Keychain (macOS only) ──────────────────────────────────────────────
@@ -142,7 +145,8 @@ node_modules/.bin/tsc --build
 
 # ── Read what was saved, or ask ──────────────────────────────────────────────
 LOADED="no"
-if [ "$MODE" = run ] && have_keychain && kc_get DATABASE_URL >/dev/null; then
+# --imap reads them too: it asks reply detection's questions over them.
+if { [ "$MODE" = run ] || [ "$MODE" = imap ]; } && have_keychain && kc_get DATABASE_URL >/dev/null; then
   for n in "${SAVED_NAMES[@]}"; do
     if v=$(kc_get "$n"); then export "$n=$v"; fi
   done
@@ -177,6 +181,42 @@ ask_host() {
     fi
     printf '    That is not a server name (it should look like %s). Try again.\n' "$default" >&3
   done
+}
+
+# Reply detection's three answers. Enter keeps what is already set — a saved
+# answer, under --imap; asked from scratch nothing is, and the prompts read as
+# they always did. Gmail and Google Workspace sign in with the WHOLE address:
+# a bare name is refused by the server on every reconnect.
+ask_imap() {
+  local v
+  IMAP_HOST=$(ask_host 'IMAP host' "${IMAP_HOST:-imap.gmail.com}"); export IMAP_HOST
+  while :; do
+    if [ -n "${IMAP_USER:-}" ]; then
+      printf '  IMAP username [%s]: ' "$IMAP_USER" >&3
+    else
+      printf '  IMAP username (the whole mailbox address, e.g. hello@myagencyos.in): ' >&3
+    fi
+    read -r v <&3
+    v="${v:-${IMAP_USER:-}}"
+    case "$IMAP_HOST:$v" in
+      imap.gmail.com:*@*.* | imap.gmail.com: ) break ;;
+      imap.gmail.com:*) printf '    Google needs the whole address, e.g. %s@yourdomain. Try again.\n' "$v" >&3 ;;
+      *) break ;;
+    esac
+  done
+  [ -n "$v" ] && export IMAP_USER="$v"
+  if [ -n "${IMAP_PASSWORD:-}" ]; then
+    printf '  IMAP password (hidden — a Google APP password; Enter keeps the saved one): ' >&3
+  else
+    printf '  IMAP password (hidden — a Google APP password, not the account one): ' >&3
+  fi
+  read -r -s v <&3; printf '\n' >&3
+  # Google shows an app password as four groups of four letters, and a copy
+  # of it carries the spaces; the password itself has none. Any other server
+  # gets exactly what was typed.
+  if [ "$IMAP_HOST" = imap.gmail.com ]; then v="${v// /}"; fi
+  [ -n "$v" ] && export IMAP_PASSWORD="$v"
+  v=""
 }
 
 if [ "$LOADED" = no ]; then
@@ -225,22 +265,7 @@ if [ "$LOADED" = no ]; then
   read -r ANSWER <&3
   case "$ANSWER" in
     [yY]*)
-      IMAP_HOST=$(ask_host 'IMAP host' imap.gmail.com); export IMAP_HOST
-      # Gmail and Google Workspace sign in with the WHOLE address; a bare
-      # name is refused by the server on every reconnect.
-      while :; do
-        printf '  IMAP username (the whole mailbox address, e.g. hello@myagencyos.in): ' >&3; read -r V <&3
-        case "$IMAP_HOST:${V:-}" in
-          imap.gmail.com:*@*.* | imap.gmail.com: ) break ;;
-          imap.gmail.com:*) printf '    Google needs the whole address, e.g. %s@yourdomain. Try again.\n' "$V" >&3 ;;
-          *) break ;;
-        esac
-      done
-      [ -n "${V:-}" ] && export IMAP_USER="$V"
-      printf '  IMAP password (hidden — a Google APP password, not the account one): ' >&3
-      read -r -s V <&3; printf '\n' >&3
-      [ -n "${V:-}" ] && export IMAP_PASSWORD="$V"
-      unset V
+      ask_imap
       ;;
   esac
 
@@ -502,6 +527,29 @@ if [ "$LOADED" = no ]; then
         ;;
     esac
   fi
+  exec 3>&-
+fi
+
+# ── --imap: reply detection's questions alone, over the saved answers ────────
+# A new Google app password should not mean typing every other answer again —
+# the database string and the SMTP key included. Only the three IMAP answers
+# are asked, and only they are saved; with nothing saved yet, every question
+# above was asked instead.
+if [ "$MODE" = imap ] && [ "$LOADED" = yes ]; then
+  ask_open
+  printf 'Reply detection only — every other saved answer is kept.\n' >&3
+  ask_imap
+  IMAP_SAVED=yes
+  for n in IMAP_HOST IMAP_USER IMAP_PASSWORD; do
+    [ -n "${!n:-}" ] || continue
+    kc_put "$n" "${!n}" || true
+    # `security -i` can answer 0 for a write it refused: read it back.
+    if [ "$(kc_get "$n" || true)" != "${!n}" ]; then
+      IMAP_SAVED=no
+      echo "  Could not save $n in the Keychain: this run uses what you typed, the next one what was saved before." >&2
+    fi
+  done
+  [ "$IMAP_SAVED" = yes ] && printf '  Saved in your Keychain; the next run uses them too.\n' >&3
   exec 3>&-
 fi
 

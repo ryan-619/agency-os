@@ -479,9 +479,16 @@ offers to keep them in the login Keychain (service `agency-os-worker`, one
 item per variable), and every later run starts with no questions. Each value
 reaches `security` base64-encoded on its STDIN, never on its command line,
 where `ps` would show it to every user on the machine (§2.3).
-`./tools/run-worker.sh --reconfigure` asks again; `--forget` deletes them. It
-also keeps the Mac from idling to sleep while it runs (`caffeinate -is`; the
-display may sleep, and closing the lid on battery still sleeps it).
+`./tools/run-worker.sh --reconfigure` asks again; `--forget` deletes them.
+`./tools/run-worker.sh --imap` asks only reply detection's three questions —
+the IMAP host and username (Enter keeps the saved ones) and the app password,
+at a hidden prompt — saves those three, keeps every other saved answer, and
+runs: the way to put in a new Google app password once the worker logs
+`reason: authentication_failed`, without typing the database string and the
+SMTP key again. For `imap.gmail.com` the spaces Google shows an app password
+with are dropped; the password itself has none. It also keeps the Mac from
+idling to sleep while it runs (`caffeinate -is`; the display may sleep, and
+closing the lid on battery still sleeps it).
 
 Besides the mailbox and SMS, it asks for the web app's public address
 (default `https://myagencyos.in`), the `UNSUBSCRIBE_SECRET` Vercel holds —

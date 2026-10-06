@@ -45,6 +45,9 @@
  *    copied again or replaced;
  *  - a server name is asked until it is one, and Google's IMAP username until
  *    it is a whole address;
+ *  - `--imap` asks reply detection's three questions alone, over the saved
+ *    answers — a new Google app password, saved without the spaces Google
+ *    shows it with — and keeps every other saved answer as it was;
  *  - Neon's pooled endpoint is refused, saved or not;
  *  - `--forget` removes every saved answer.
  */
@@ -67,6 +70,15 @@ const FROM = 'Agency <hello@myagencyos.in>'
 const ANTHROPIC_KEY = 'sk-ant-api03-key-never-in-argv-or-ngrok'
 const CHAT_TOKEN = 't'.repeat(64)
 const CHAT_DOMAIN = 'calm-otter-42.ngrok-free.app'
+/**
+ * The script stops any ngrok tunnel on the worker's API port before it opens
+ * its own, and every test here runs the real script — on the operator's own
+ * machine as well, where the live worker's tunnel sits on the default port,
+ * 3002. One local run of this file killed it, and chat on the live site with
+ * it. So every run here puts the worker on ports nothing real uses.
+ */
+const AGENT_PORT = '39401'
+const API_PORT = '39402'
 /** What the worker's build and run must never be handed before the operator has answered anything. */
 const CREDENTIALS = [
   'DATABASE_URL', 'SMTP_PASSWORD', 'IMAP_PASSWORD', 'UNSUBSCRIBE_SECRET', 'SLACK_WEBHOOK_URL', 'DOVESOFT_API_KEY',
@@ -126,7 +138,7 @@ const npxRan = () => existsSync(join(logs, 'npx'))
 function run(repo: string, args: string[] = [], extra: Record<string, string> = {}) {
   return spawnSync('bash', [join(repo, 'tools/run-worker.sh'), ...args], {
     cwd: repo,
-    env: { PATH: `${bin}:${process.env.PATH}`, HOME: dir, KEYCHAIN: keychain, LOGS: logs, ...extra },
+    env: { PATH: `${bin}:${process.env.PATH}`, HOME: dir, KEYCHAIN: keychain, LOGS: logs, AGENT_PORT, ...extra },
     encoding: 'utf8',
     timeout: 30_000,
   })
@@ -139,7 +151,7 @@ function run(repo: string, args: string[] = [], extra: Record<string, string> = 
  * retries for ever, say). The log path is written in, because ngrok is
  * started from an empty environment and $LOGS does not reach it.
  */
-function ngrokStub(line = `t=2026-10-06T00:00:00+0000 lvl=info msg="started tunnel" obj=tunnels name=command_line addr=http://127.0.0.1:3002 url=https://${CHAT_DOMAIN}`): void {
+function ngrokStub(line = `t=2026-10-06T00:00:00+0000 lvl=info msg="started tunnel" obj=tunnels name=command_line addr=http://127.0.0.1:${API_PORT} url=https://${CHAT_DOMAIN}`): void {
   stub('ngrok', [
     `printf "%s\\n" "$*" >> "${logs}/ngrok-argv"`,
     `env > "${logs}/ngrok-env"`,
@@ -387,7 +399,7 @@ describe('tools/run-worker.sh', () => {
       // keeps every forwarded request — the bearer included — on an
       // unauthenticated local page (review round 15).
       expect(ngrokArgv()).toBe(
-        `http 127.0.0.1:3002 --url=https://${CHAT_DOMAIN} --inspect=false --log=stdout --log-format=logfmt --log-level=info\n`,
+        `http 127.0.0.1:${API_PORT} --url=https://${CHAT_DOMAIN} --inspect=false --log=stdout --log-format=logfmt --log-level=info\n`,
       )
       // ngrok's environment holds no credential this script was handed.
       const env = ngrokEnv()
@@ -414,7 +426,11 @@ describe('tools/run-worker.sh', () => {
       expect(goneWithin(ngrokPid(), 6_000)).toBe(true)
     })
 
-    it('leaves chat off, says why, and hands the worker no key when ngrok is not installed', () => {
+    // The script appends Homebrew's two prefixes to PATH, so where ngrok is
+    // installed there — the operator's own Mac — it cannot be made to look
+    // absent, and the run would start the real binary.
+    const ngrokInstalled = ['/usr/local/bin/ngrok', '/opt/homebrew/bin/ngrok'].some((p) => existsSync(p))
+    it.skipIf(ngrokInstalled)('leaves chat off, says why, and hands the worker no key when ngrok is not installed', () => {
       saveChat()
       const r = run(layout())
       expect(r.status, r.stderr).toBe(0)
@@ -470,14 +486,14 @@ describe('tools/run-worker.sh', () => {
     /** With chat off it would publish a port whose token nobody holds (review round 15). */
     it('stops a tunnel an earlier run left on the worker’s port', async () => {
       save('DATABASE_URL', DB)
-      const left = spawn('bash', ['-c', 'exec -a "ngrok http 127.0.0.1:3002 --url=https://old.ngrok-free.app" sleep 30'], {
+      const left = spawn('bash', ['-c', `exec -a "ngrok http 127.0.0.1:${API_PORT} --url=https://old.ngrok-free.app" sleep 30`], {
         stdio: 'ignore',
         detached: true,
       })
       // A shell whose command line merely MENTIONS the tunnel: the first
       // version's unanchored pattern killed exactly this — the shell running
       // the test suite.
-      const bystander = spawn('bash', ['-c', 'sleep 30; : ngrok http 127.0.0.1:3002 --url=x'], { stdio: 'ignore', detached: true })
+      const bystander = spawn('bash', ['-c', `sleep 30; : ngrok http 127.0.0.1:${API_PORT} --url=x`], { stdio: 'ignore', detached: true })
       try {
         spawnSync('sleep', ['0.3'])
         const r = run(layout())
@@ -494,6 +510,32 @@ describe('tools/run-worker.sh', () => {
           } catch {
             // already gone
           }
+        }
+      }
+    })
+
+    /**
+     * The harness's own guard: a tunnel on the DEFAULT port — the live
+     * worker's, when this file runs on the machine that worker runs on —
+     * outlives every run here.
+     */
+    it('leaves a tunnel on the default port alone — the live one, on the operator’s machine', async () => {
+      save('DATABASE_URL', DB)
+      const live = spawn('bash', ['-c', 'exec -a "ngrok http 127.0.0.1:3002 --url=https://live.ngrok-free.app" sleep 30'], {
+        stdio: 'ignore',
+        detached: true,
+      })
+      try {
+        spawnSync('sleep', ['0.3'])
+        const r = run(layout())
+        expect(r.status, r.stderr).toBe(0)
+        expect(r.stdout).not.toContain('Stopped an ngrok tunnel')
+        expect(await exitedWithin(live, 500)).toBe(false)
+      } finally {
+        try {
+          process.kill(live.pid!)
+        } catch {
+          // already gone
         }
       }
     })
@@ -535,7 +577,33 @@ describe('tools/run-worker.sh', () => {
     const r = run(layout(), ['--save-everything'])
     expect(r.status).toBe(2)
     expect(r.stderr).toContain('usage')
+    expect(r.stderr).toContain('--imap')
   })
+
+  // setsid (util-linux) starts the script in a session of its own, with no
+  // controlling terminal, so /dev/tty cannot open; a run started anywhere
+  // else would open the terminal vitest itself runs in, and wait at it.
+  it.runIf(spawnSync('setsid', ['--wait', 'true']).status === 0)(
+    '--imap without a terminal asks nothing, starts no worker and changes nothing saved',
+    () => {
+      const repo = layout()
+      save('DATABASE_URL', DB)
+      save('IMAP_HOST', 'imap.gmail.com')
+      save('IMAP_USER', 'ryan@myagencyos.in')
+      save('IMAP_PASSWORD', IMAP_PASSWORD)
+      const r = spawnSync('setsid', ['--wait', 'bash', join(repo, 'tools/run-worker.sh'), '--imap'], {
+        cwd: repo,
+        env: { PATH: `${bin}:${process.env.PATH}`, HOME: dir, KEYCHAIN: keychain, LOGS: logs, AGENT_PORT },
+        encoding: 'utf8',
+        timeout: 30_000,
+      })
+      expect(r.status, r.stderr).toBe(1)
+      expect(r.stderr).toContain('This script needs a terminal')
+      expect(calls().map((x) => x.argv)).toEqual(['tsc --build'])
+      expect(saved('IMAP_PASSWORD')).toBe(IMAP_PASSWORD)
+      expect(saved('DATABASE_URL')).toBe(DB)
+    },
+  )
 })
 
 // ---------------------------------------------------------------------------
@@ -567,7 +635,7 @@ function converse(repo: string, args: string[], turns: readonly Turn[]): Promise
   const command = ['bash', join(repo, 'tools/run-worker.sh'), ...args].map((a) => `'${a}'`).join(' ')
   const child = spawn('script', ['-q', '-f', '-e', '--echo', 'never', '-c', command, '/dev/null'], {
     cwd: repo,
-    env: { PATH: `${bin}:${process.env.PATH}`, HOME: dir, KEYCHAIN: keychain, LOGS: logs, SHELL: '/bin/sh', TERM: 'dumb' },
+    env: { PATH: `${bin}:${process.env.PATH}`, HOME: dir, KEYCHAIN: keychain, LOGS: logs, AGENT_PORT, SHELL: '/bin/sh', TERM: 'dumb' },
     stdio: ['pipe', 'pipe', 'pipe'],
   })
   let transcript = ''
@@ -843,6 +911,67 @@ describe.runIf(PTY)('tools/run-worker.sh, answered at its prompts', () => {
     expect(r.worker.IMAP_USER).toBe('ryan@myagencyos.in')
     expect(r.worker.IMAP_PASSWORD).toBe(IMAP_PASSWORD)
     expect(r.transcript).not.toContain(IMAP_PASSWORD)
+  })
+
+  /**
+   * The reason --imap exists: Google refused the saved app password, and
+   * the only way to type a new one was --reconfigure — the database string,
+   * the SMTP key and every other answer again.
+   */
+  it('--imap asks reply detection alone over the saved answers, and saves the new app password without its spaces', async () => {
+    save('DATABASE_URL', DB)
+    save('SMTP_HOST', 'smtp.resend.com')
+    save('SMTP_PORT', '465')
+    save('SMTP_USER', 'resend')
+    save('SMTP_PASSWORD', SMTP_PASSWORD)
+    save('MAIL_FROM', FROM)
+    save('IMAP_HOST', 'imap.gmail.com')
+    save('IMAP_USER', 'ryan@myagencyos.in')
+    save('IMAP_PASSWORD', 'the-old-refused-one')
+    save('WEB_PUBLIC_URL', 'https://myagencyos.in')
+    save('UNSUBSCRIBE_SECRET', UNSUB)
+    const r = await converse(layout(), ['--imap'], [
+      ['IMAP host [imap.gmail.com]', ''],
+      ['IMAP username [ryan@myagencyos.in]', ''],
+      ['Enter keeps the saved one', 'abcd efgh ijkl mnop'],
+    ])
+    expect(r.unanswered, r.transcript).toEqual([])
+    expect(r.status, r.transcript).toBe(0)
+    expect(r.transcript).toContain('Reply detection only')
+    expect(r.transcript).not.toContain('Production DATABASE_URL')
+    expect(r.transcript).not.toContain('Configure SENDING')
+    expect(r.transcript).not.toContain('Remember these answers')
+    expect(r.transcript).toContain('replies:  ON')
+    for (const secret of ['abcd efgh', 'abcdefghijklmnop', 'db-password-never-in-argv-77', SMTP_PASSWORD, UNSUB]) {
+      expect(r.transcript).not.toContain(secret)
+    }
+
+    const c = calls()
+    expect(c.map((x) => x.argv)).toEqual(['tsc --build', 'tsx apps/agent/src/index.ts'])
+    const worker = c[1]!.env
+    expect(worker.IMAP_PASSWORD).toBe('abcdefghijklmnop')
+    expect(worker.IMAP_USER).toBe('ryan@myagencyos.in')
+    expect(worker.DATABASE_URL).toBe(DB)
+    expect(worker.SMTP_PASSWORD).toBe(SMTP_PASSWORD)
+    expect(worker.UNSUBSCRIBE_SECRET).toBe(UNSUB)
+
+    expect(saved('IMAP_PASSWORD')).toBe('abcdefghijklmnop')
+    expect(saved('IMAP_USER')).toBe('ryan@myagencyos.in')
+    expect(saved('DATABASE_URL')).toBe(DB)
+    expect(saved('SMTP_PASSWORD')).toBe(SMTP_PASSWORD)
+    expect(saved('UNSUBSCRIBE_SECRET')).toBe(UNSUB)
+    expect(readFileSync(join(logs, 'security-argv'), 'utf8')).not.toContain('abcdefghijklmnop')
+  })
+
+  it('--imap with nothing saved asks every question, as a first run does', async () => {
+    const r = await answered(layout(), ['--imap'], {
+      smtp: false,
+      imap: { hosts: [''], users: ['ryan@myagencyos.in'] }, remember: 'y',
+    })
+    expect(r.transcript).not.toContain('Reply detection only')
+    expect(r.worker.IMAP_PASSWORD).toBe(IMAP_PASSWORD)
+    expect(saved('IMAP_PASSWORD')).toBe(IMAP_PASSWORD)
+    expect(saved('DATABASE_URL')).toBe(DB)
   })
 
   describe('off a Mac, where a secret could be neither copied nor saved', () => {
