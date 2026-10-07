@@ -83,6 +83,15 @@ introduces the agency as a security consultancy: it finds businesses of every
 kind that need help and offers whatever the team sells — security is one
 service among several. The `agency` server has fifty-four tools.
 
+**Then the opportunity finder (2026-10-08), on migration 0022** (§2, "The
+opportunity finder"): chat finds businesses of every kind — on Google Maps,
+with or without a website — and reads what each NEEDS from evidence (no
+website, a Facebook page for one, not mobile-friendly, slow, weak search
+basics, no WhatsApp, hard to contact, few or poor reviews, security gaps),
+matched to the agency's own services catalogue with prices; scans record
+twelve website-presence signals; PageSpeed audits; call and visit tasks a
+person carries out. The `agency` server has fifty-nine tools.
+
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
 machine"), which needs no public address, because everything but chat is
@@ -856,7 +865,8 @@ recorded-session mode, so anything needing the SDK to be *defined* is also
 untestable — and a package that CANNOT import the SDK cannot drag it into the
 Next module graph, which CI builds with no secrets on purpose.
 
-Fifty-four tools ship (`AGENCY_TOOL_NAMES`) — `get_draft` (low) and `edit_draft` (high,
+Fifty-nine tools ship (`AGENCY_TOOL_NAMES`) — the opportunity finder's five since 2026-10-08
+(`find_businesses`, `add_businesses`, `audit_website`, `get_opportunities`, `list_services`), `get_draft` (low) and `edit_draft` (high,
 `leaves_the_building`, carded) since 2026-10-08, and before them the forty-nine below, and since
 0021 `list_icps` (low), `create_icp` (medium, an internal write) and
 `activate_icp` (medium, `changes_scoring`, which keeps its card: §2,
@@ -1123,6 +1133,78 @@ bounce still records `contact.bounce_cleared` as System (`contactsUpdate`'s
 default actor). And `recent_errors` does not see a line written straight to
 stderr — the entry point's "failed to start", or the recorder lines the
 inbox forwards.
+
+### The opportunity finder (0022, 2026-10-08)
+
+**A need is named only from evidence, and dated.** `needsOf`
+(`packages/core/src/opportunity.ts`, pure) reads one business's facts — its
+Google listing, its latest scan's website-presence and security gaps, its
+latest PageSpeed audit — into `NEED_KEYS` (`no_website`,
+`website_is_a_profile`, `free_builder_site`, `site_down`,
+`not_mobile_friendly`, `slow_site`, `poor_accessibility`, `neglected_site`,
+`weak_search_basics`, `no_link_previews`, `hard_to_contact`, `no_whatsapp`,
+`no_online_booking`, `not_measuring`, `no_social_links`, `low_rating`,
+`few_reviews`, `security_gaps`), each with the dated lines that show it.
+What is stale (a scan or audit past the profile's deadline, a listing older
+than 90 days) or never checked goes under `notAssessed`, never a need; a
+failed scan is "did not load for our scan", a failed audit not a slow site;
+`no_online_booking` only for a listing category customers book from. The
+ICP's score stays the measure of SECURITY fit — its scan disqualifiers
+(`no_public_product` among them) would disqualify every brochure site — so
+needs are read beside it, never through it. `classifyWebsite` tells a site
+of their own from a Facebook page, a directory entry, a link page, a
+marketplace or a free builder (`FREE_BUILDER_HOSTS`, shared with the
+scanner). `servicesFor` matches the catalogue, most needs answered first;
+`SUGGESTED_SERVICES` stands in, labelled, until there is one.
+
+**Migration 0022.** `companies` gains what a listing says — E.164 `phone`,
+`address`, `google_place_id` (one company per place per org),
+`google_maps_url`, `google_rating`, `google_review_count`,
+`google_category`, `listing_website` — and `listing_checked_at`, which no
+listing fact may exist without (`companies_listing_has_its_time`); source
+`google_maps`; and `companies_id_org_key`. A business with no website keeps
+a placeholder domain, `<slug>-<tag>.nosite.invalid` (`noSiteDomain`,
+`isNoSiteDomain`): `.invalid` can never resolve (RFC 6761) and the scanner
+refuses it, and `domain` stays how every page and tool names a company.
+`services` is the catalogue (a name unique per org case-insensitively, the
+needs each answers, a price range in whole currency units, a unit).
+`site_audits` holds what PageSpeed measured, same-org by composite FK; a
+failure keeps its reason and NO score (`site_audits_failure_has_no_scores`).
+`tasks.kind` gains `call` and `visit`.
+
+**Google, from the worker.** `GOOGLE_API_KEY` (one key, the Places API (New)
+and PageSpeed Insights API enabled; `./tools/run-worker.sh --google`) builds
+`placesClient` and `pageSpeedClient` (`apps/agent/src/google/`) once at boot,
+handed to every turn's tool context like `ops`. Places Text Search with a
+field mask in the Enterprise tier (phone, website, rating) costs about $35
+per 1,000 searches past 1,000 free a month, so `find_businesses` is capped
+per org per UTC day (`PLACES_DAILY_SEARCHES`, 30, counted from its own audit
+rows). The key is in one header (Places) or the query string (PageSpeed),
+never in a message or a log, with `redirect: 'error'`; an error says
+Google's status word and what to do. PageSpeed runs keyless at Google's
+small shared quota. A page Lighthouse could not load is a RESULT (`ok:
+false`, stored); a quota, a refused key or a timeout throws and records
+nothing.
+
+**Tools.** `find_businesses` (low, read) reads up to 20 listings a call —
+category, area, the website it names (or none, or a Facebook page), rating,
+reviews, whether a phone is listed — marks those already here, and keeps
+them two hours for `add_businesses` (medium, internal), which files the
+chosen ones by place id: by domain when the listing names a scannable site
+of their own, under the placeholder otherwise; one already here (by place
+or domain) has its listing refreshed. `audit_website` (low, derived like a
+scan) measures from Google's side within the call's budget and records
+itself when it finishes later. `get_opportunities` (low) reads one
+business's needs, evidence, services and what is not assessed, or ranks the
+CRM (`opportunitiesAcross`, three queries). `list_services` (low) reads the
+catalogue. `create_task` takes `kind: call | visit`: a call needs a phone on
+record not on the suppression list and opens with what to check first (the
+DND registry) — §2.1's "structurally impossible" still holds, because the
+SYSTEM places no call; a call task is a teammate's act from their own phone,
+the operator's decision on 2026-10-08. The prompt's FINDING AND QUALIFYING
+section walks it, and says to reach a business by email through the send
+path, by a person's call or visit, and never through apollo's own sequences
+or emails, which would go around the suppression list.
 
 ### Editing a draft's words (2026-10-08)
 

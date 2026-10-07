@@ -441,6 +441,21 @@ describe('the system prompt', () => {
     expect(prompt).toMatch(/Never state a finding about a business that you have not read from a tool result/)
   })
 
+  /**
+   * Finding businesses that need anything the agency sells (2026-10-08): the
+   * Maps search, the audit, the needs read, and the four ways to reach them —
+   * never apollo's own mail, which would go around the suppression list.
+   */
+  it('finds businesses of every kind, reads what they need, and reaches them only through the send path or a person', () => {
+    expect(prompt).toMatch(/Read list_services for what the agency sells and at what price/)
+    expect(prompt).toMatch(/search Google Maps with\s+find_businesses/)
+    expect(prompt).toMatch(/then get_opportunities/)
+    expect(prompt).toMatch(/never use apollo to send mail or\s+enrol a sequence, which would go around the suppression list/)
+    expect(prompt).toMatch(/create_task\s+with kind call/)
+    expect(prompt).toMatch(/the system places no call/)
+    expect(prompt).toMatch(/say "Google Maps lists",\s+never "they have"/)
+  })
+
   it('rewrites a draft through get_draft and edit_draft, email only', () => {
     expect(prompt).toMatch(/read its whole text with get_draft, and rewrite it with edit_draft/)
     expect(prompt).toMatch(/Only email is rewritten this way/)

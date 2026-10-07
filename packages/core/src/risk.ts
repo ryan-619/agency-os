@@ -173,6 +173,13 @@ export const AGENCY_TOOL_RISK = {
   update_campaign: ['medium', 'writes_internal_state', 'Renames, re-caps, pauses or reactivates a supervised campaign. It never turns auto-send on.'],
   enrol_contacts: ['high', 'leaves_the_building', 'Drafts openers to people outside the company into a supervised campaign; each still waits on /approvals before anything is sent.'],
   list_drafts: ['low', 'read_only', 'Reads the messages waiting for approval, with what the send rules would say of each.'],
+  // Finding businesses and what they need (2026-10-08). The Maps search costs money per
+  // call and is capped per day, but it only reads; the audit is a derived write like a scan.
+  find_businesses: ['low', 'read_only', 'Searches Google Maps for businesses and reads what each listing shows; it adds nothing.'],
+  add_businesses: ['medium', 'writes_internal_state', 'Files businesses found on Google Maps in the CRM with their listing details. Nobody is contacted.'],
+  audit_website: ['low', 'derived_write', 'Asks Google PageSpeed to measure a company homepage from Google’s side and records what it measured.'],
+  get_opportunities: ['low', 'read_only', 'Reads what a business needs, with dated evidence, and the services that answer it.'],
+  list_services: ['low', 'read_only', 'Reads the agency’s services catalogue with prices and the needs each answers.'],
   // Editing a draft's words (2026-10-08). The read shows an EMAIL draft whole; the edit
   // rewrites one and keeps its card: a queued auto-send email goes out with the new
   // words unread by anybody, and every other draft still waits on /approvals.

@@ -1167,6 +1167,23 @@ describe.runIf(PTY)('tools/run-worker.sh, answered at its prompts', () => {
     expect(readFileSync(join(logs, 'security-argv'), 'utf8')).not.toContain(HOOK)
   })
 
+  it('--google asks only for the key, refuses another shape, saves it, and keeps it through --reconfigure', async () => {
+    save('DATABASE_URL', DB)
+    const KEY = 'AIzaSyTESTKEY-0123456789abcdefghijklmn'
+    const r = await converse(layout(), ['--google'], [
+      ['Google API key', 'not-a-key'],
+      ['Google API key', KEY],
+    ])
+    expect(r.unanswered, r.transcript).toEqual([])
+    expect(r.status, r.transcript).toBe(0)
+    expect(r.transcript).toContain('That is not a Google API key')
+    expect(r.transcript).toContain('google:   ON')
+    expect(r.transcript).not.toContain(KEY)
+    expect(saved('GOOGLE_API_KEY')).toBe(KEY)
+    expect(calls()[1]!.env.GOOGLE_API_KEY).toBe(KEY)
+    expect(readFileSync(join(logs, 'security-argv'), 'utf8')).not.toContain(KEY)
+  })
+
   it('--slack answered none removes a saved webhook', async () => {
     save('DATABASE_URL', DB)
     save('SLACK_WEBHOOK_URL', 'https://hooks.slack.com/services/T000/B000/old')

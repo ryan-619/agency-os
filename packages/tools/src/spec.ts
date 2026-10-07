@@ -33,7 +33,7 @@
  */
 import type { ZodObject, ZodRawShape, infer as ZodInfer } from 'zod'
 import type { AgencyToolName, Draft, IcpDefinition, Principal, SiteProfile } from '@agency/core'
-import type { AgencyDb } from '@agency/db'
+import type { AgencyDb, SiteAuditResult } from '@agency/db'
 
 /** What a tool is allowed to know. Assembled by the worker, per turn. */
 export interface ToolContext {
@@ -60,7 +60,57 @@ export interface ToolContext {
    * budget runs out.
    */
   readonly refineOpener?: (draft: Draft, signal: AbortSignal) => Promise<Draft>
+  /**
+   * Google Maps search (2026-10-08), built once at boot when the worker holds
+   * GOOGLE_API_KEY. Absent, `find_businesses` says how to switch it on.
+   */
+  readonly places?: PlacesClient
+  /** Google PageSpeed Insights, built once at boot; works keyless at a low quota. */
+  readonly pagespeed?: PageSpeedClient
 }
+
+// ---------------------------------------------------------------------------
+// Google, as the opportunity tools see it (2026-10-08)
+// ---------------------------------------------------------------------------
+
+/** One business as its Google Maps listing describes it. */
+export interface PlaceListing {
+  readonly placeId: string
+  readonly name: string
+  readonly address: string | null
+  /** As Google gives it, e.g. "+91 80 4123 4567". */
+  readonly phone: string | null
+  /** The website the listing names — maybe a Facebook page or a directory entry. */
+  readonly website: string | null
+  readonly rating: number | null
+  readonly reviews: number | null
+  /** The primary type, e.g. `dentist`. */
+  readonly category: string | null
+  readonly mapsUrl: string | null
+  readonly status: 'operational' | 'closed_temporarily' | 'closed_permanently' | null
+}
+
+export interface PlacesClient {
+  /** Searches allowed per org per UTC day — each costs the agency money past Google's free tier. */
+  readonly dailyLimit: number
+  search(
+    args: { readonly query: string; readonly pageToken?: string; readonly regionCode?: string },
+    signal?: AbortSignal,
+  ): Promise<{ readonly places: readonly PlaceListing[]; readonly nextPageToken: string | null }>
+}
+
+export interface PageSpeedClient {
+  /**
+   * Measure one page from Google's side. A page Lighthouse could not load is
+   * an `ok: false` result with its reason — never a throw, never a score. A
+   * throw is the SERVICE failing (quota, key, network), and records nothing.
+   */
+  run(
+    args: { readonly url: string; readonly strategy: 'mobile' | 'desktop' },
+    signal?: AbortSignal,
+  ): Promise<SiteAuditResult>
+}
+
 
 // ---------------------------------------------------------------------------
 // The worker, as the ops tools see it (2026-10-06)

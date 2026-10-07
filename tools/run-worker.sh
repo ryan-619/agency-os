@@ -33,6 +33,9 @@
 #                                         and polishes openers, then run
 #   ./tools/run-worker.sh --slack         ask only for the Slack webhook URL the
 #                                         opt-out alarm posts to, then run
+#   ./tools/run-worker.sh --google        ask only for the Google API key that
+#                                         finds businesses on Google Maps and
+#                                         measures sites with PageSpeed, then run
 #   ./tools/run-worker.sh --forget        delete the saved answers and stop
 #
 # Every credential is read at a HIDDEN prompt into this process's environment
@@ -61,8 +64,9 @@ case "${1:-}" in
   --secrets-key) MODE=secrets-key ;;
   --ai) MODE=ai ;;
   --slack) MODE=slack ;;
+  --google) MODE=google ;;
   --forget) MODE=forget ;;
-  *) echo "usage: $0 [--reconfigure | --imap | --secrets-key | --ai | --slack | --forget]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--reconfigure | --imap | --secrets-key | --ai | --slack | --google | --forget]" >&2; exit 2 ;;
 esac
 
 # ── The Keychain (macOS only) ──────────────────────────────────────────────
@@ -76,7 +80,7 @@ SAVED_NAMES=(DATABASE_URL SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASSWORD MAIL_FROM
   DOVESOFT_API_KEY DOVESOFT_ENTITY_ID IMAP_HOST IMAP_USER IMAP_PASSWORD
   WEB_PUBLIC_URL UNSUBSCRIBE_SECRET SLACK_WEBHOOK_URL
   CHAT_URL ANTHROPIC_API_KEY AGENT_INTERNAL_TOKEN SECRETS_KEY
-  LLM_PROVIDER LLM_MODEL LLM_ALLOW_REMOTE_LEAD_DATA)
+  LLM_PROVIDER LLM_MODEL LLM_ALLOW_REMOTE_LEAD_DATA GOOGLE_API_KEY)
 
 have_keychain() { [ "$(uname -s)" = Darwin ] && command -v security >/dev/null 2>&1; }
 
@@ -174,9 +178,9 @@ node_modules/.bin/tsc --build
 
 # ── Read what was saved, or ask ──────────────────────────────────────────────
 LOADED="no"
-# --imap, --secrets-key, --ai and --slack read them too: each asks its own question over them.
+# --imap, --secrets-key, --ai, --slack and --google read them too: each asks its own question over them.
 if { [ "$MODE" = run ] || [ "$MODE" = imap ] || [ "$MODE" = secrets-key ] || [ "$MODE" = ai ] \
-  || [ "$MODE" = slack ]; } \
+  || [ "$MODE" = slack ] || [ "$MODE" = google ]; } \
   && have_keychain && kc_get DATABASE_URL >/dev/null; then
   for n in "${SAVED_NAMES[@]}"; do
     if v=$(kc_get "$n"); then export "$n=$v"; fi
@@ -537,8 +541,8 @@ if [ "$LOADED" = no ]; then
     SAVED_SECRETS_KEY=$(kc_get SECRETS_KEY) || SAVED_SECRETS_KEY=""
     [ -n "$SAVED_SECRETS_KEY" ] && export SECRETS_KEY="$SAVED_SECRETS_KEY"
     unset SAVED_SECRETS_KEY
-    # The model choice --ai made, for the same reason.
-    for n in LLM_PROVIDER LLM_MODEL LLM_ALLOW_REMOTE_LEAD_DATA; do
+    # The model choice --ai made, and the Google key --google took, for the same reason.
+    for n in LLM_PROVIDER LLM_MODEL LLM_ALLOW_REMOTE_LEAD_DATA GOOGLE_API_KEY; do
       if v=$(kc_get "$n"); then export "$n=$v"; fi
     done
     unset v
@@ -633,6 +637,42 @@ if [ "$MODE" = secrets-key ]; then
       echo "  Could not save SECRETS_KEY in the Keychain: this run uses it, the next one does not." >&2
     fi
   fi
+  exec 3>&-
+fi
+
+# ── --google: the key for finding businesses and measuring their sites ─────
+# One Google API key with the Places API (New) and the PageSpeed Insights API
+# enabled. Maps searches cost money past Google's free tier, and the worker
+# caps them per day (PLACES_DAILY_SEARCHES). Asked hidden, checked for the
+# shape of a Google key, kept in the Keychain; "none" removes a saved one.
+if [ "$MODE" = google ]; then
+  ask_open
+  while :; do
+    printf 'Google API key (hidden; Enter keeps the saved one, "none" removes it): ' >&3
+    read -r -s V <&3; printf '\n' >&3
+    V="${V//[[:space:]]/}"
+    [ -n "$V" ] || break
+    if [ "$V" = none ]; then
+      unset GOOGLE_API_KEY
+      have_keychain && kc_del GOOGLE_API_KEY
+      printf '  Removed: no Google Maps search, and PageSpeed runs keyless at a small quota.\n' >&3
+      break
+    fi
+    if [[ "$V" =~ ^AIza[0-9A-Za-z_-]{35}$ ]]; then
+      export GOOGLE_API_KEY="$V"
+      if have_keychain; then
+        kc_put GOOGLE_API_KEY "$V" || true
+        if [ "$(kc_get GOOGLE_API_KEY || true)" = "$V" ]; then
+          printf '  Saved in your Keychain; the next run uses it too.\n' >&3
+        else
+          echo "  Could not save the Google key in the Keychain: this run uses it, the next one does not." >&2
+        fi
+      fi
+      break
+    fi
+    printf '  That is not a Google API key: it starts AIza and is 39 characters. Try again.\n' >&3
+  done
+  V=""
   exec 3>&-
 fi
 
@@ -834,6 +874,13 @@ else
 fi
 if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
   echo "  alarm:    ON  — an opt-out that cannot be recorded is posted to Slack"
+fi
+if [ -n "${GOOGLE_API_KEY:-}" ]; then
+  echo "  google:   ON  — finds businesses on Google Maps (up to ${PLACES_DAILY_SEARCHES:-30} searches a day)"
+  echo "            and measures sites with PageSpeed"
+else
+  echo "  google:   OFF — no Google Maps search; PageSpeed runs keyless at a small quota."
+  echo "            '$0 --google' adds a key"
 fi
 if [ -n "${SECRETS_KEY:-}" ]; then
   echo "  keys:     ON  — connectors that need a key can decrypt it (SECRETS_KEY;"

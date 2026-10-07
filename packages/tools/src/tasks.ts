@@ -173,14 +173,22 @@ const createTaskShape = {
   detail: z.string().max(2000).optional().describe('Anything the person doing it needs to know.'),
   dueAt: z.iso.datetime().optional().describe('When it is due, as an ISO 8601 instant.'),
   assigneeEmail: z.email().optional().describe('The teammate to assign it to, by their sign-in address.'),
+  kind: z
+    .enum(['todo', 'call', 'visit'])
+    .optional()
+    .describe(
+      'todo (default); call — a teammate phones the company from their own phone (needs a phone on record, not ' +
+        'on the suppression list); visit — a teammate goes there in person.',
+    ),
 }
 
 export const createTask: AgencyToolSpec<typeof createTaskShape> = {
   name: 'create_task',
   description:
-    'Create a task for a teammate — optionally about a company, with a due date and an assignee. It ' +
-    'appears on their task list and nowhere else: no email, no message, no calendar event. Nothing is ' +
-    'sent to anyone inside or outside the company.',
+    'Create a task for a teammate — a to-do, a call for them to make from their own phone, or a visit — ' +
+    'optionally about a company, with a due date and an assignee. It appears on their task list and nowhere ' +
+    'else: no email, no message, no calendar event, and the system places no call. Nothing is sent to anyone ' +
+    'inside or outside the company.',
   shape: createTaskShape,
   async handler(input, ctx): Promise<ToolOutcome<unknown>> {
     // The tasks route's own gate.
@@ -204,9 +212,10 @@ export const createTask: AgencyToolSpec<typeof createTaskShape> = {
     }
 
     const dueAt = input.dueAt ? new Date(input.dueAt) : null
+    const kind = input.kind ?? 'todo'
     const r = await tasksCreate(ctx.db, {
       orgId: ctx.orgId,
-      kind: 'todo',
+      kind,
       title: input.title,
       detail: input.detail ?? null,
       companyId: company?.id ?? null,
@@ -221,6 +230,7 @@ export const createTask: AgencyToolSpec<typeof createTaskShape> = {
       return fail(code, `${r.message} Nothing was written.`)
     }
 
+    // Ids only; the kind is on the task's own `task.created` row.
     await ctx.audit('agent.create_task', {
       taskId: r.task.id, companyId: r.task.companyId, assigneeUserId: r.task.assigneeUserId,
     })
@@ -237,8 +247,9 @@ export const createTask: AgencyToolSpec<typeof createTaskShape> = {
         assigneeUserId: r.task.assigneeUserId,
         dueAt: r.task.dueAt?.toISOString() ?? null,
       },
-      `Created task ${r.task.id}, “${r.task.title}”${parts}. It is on the task list and nowhere else — no email, ` +
-        `message or calendar event. ${NOTHING_SENT}`,
+      `Created ${kind === 'call' ? 'a call task' : kind === 'visit' ? 'a visit task' : 'task'} ${r.task.id}, “${r.task.title}”${parts}. ` +
+        `It is on the task list and nowhere else — no email, message or calendar event` +
+        `${kind === 'call' ? ', and the system places no call: a teammate calls from their own phone, after the checks the task lists' : ''}. ${NOTHING_SENT}`,
     )
   },
 }

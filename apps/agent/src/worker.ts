@@ -8,7 +8,7 @@ import {
   sessionCostUsd, setSdkSessionId, usd, type AgencyDb, type MessageProvider,
 } from '@agency/db'
 import type { Channel, Draft } from '@agency/core'
-import type { OpsContext } from '@agency/tools'
+import type { OpsContext, PageSpeedClient, PlacesClient } from '@agency/tools'
 import type { AgentCredential } from './runtime/options.js'
 import type { Env } from './env.js'
 import type { Logger } from './logger.js'
@@ -32,6 +32,8 @@ import { buildTurnRuntime, createHalt, resolvePrincipal, type RuntimeHalt } from
 import { probeConnector } from './runtime/probe.js'
 import { inspectSkillsRoot } from './runtime/skills.js'
 import { agencyToolsToOmit } from './mcp/agency.js'
+import { placesClient } from './google/places.js'
+import { pageSpeedClient } from './google/pagespeed.js'
 
 export interface WorkerDeps {
   /** Already validated — `loadEnv()` in `index.ts`, or a test's own. */
@@ -154,6 +156,20 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
     ? (draft: Draft, signal: AbortSignal): Promise<Draft> =>
         refineDraft({ log, llm: triage, allowRemoteForLeadData: env.LLM_ALLOW_REMOTE_LEAD_DATA, draft, signal })
     : undefined
+
+  /**
+   * Google, for the opportunity tools (2026-10-08): Maps search only with a
+   * key, capped per org per day; PageSpeed always, keyless at Google's small
+   * shared quota until a key raises it. Said at boot by name, never the key.
+   */
+  const places = env.GOOGLE_API_KEY
+    ? placesClient({ apiKey: env.GOOGLE_API_KEY, dailyLimit: env.PLACES_DAILY_SEARCHES })
+    : undefined
+  const pagespeed = pageSpeedClient({ apiKey: env.GOOGLE_API_KEY ?? null })
+  log.info(
+    `google maps search: ${places ? 'on' : 'off'}`,
+    places ? { dailySearches: env.PLACES_DAILY_SEARCHES } : { missing: ['GOOGLE_API_KEY'] },
+  )
 
   const outreachMode = outreachModeFrom(env)
   // Decided once, and said once (`sms: dovesoft on|off`), before the sender
@@ -304,7 +320,7 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
       return true
     },
     startTurn: (req) =>
-      beginTurn({ req, db, env, log, halt, running, secretsKey, skills, credential, ops, refineOpener, omitTools }),
+      beginTurn({ req, db, env, log, halt, running, secretsKey, skills, credential, ops, refineOpener, omitTools, places, pagespeed }),
   })
 
   const apiPort = env.AGENT_PORT + 1
@@ -401,7 +417,7 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
       start: async (req) => {
         const begun = await beginTurn({
           req: { ...req, deep: false, unattended: true },
-          db, env, log, halt, running, secretsKey, skills, credential, ops, refineOpener, omitTools,
+          db, env, log, halt, running, secretsKey, skills, credential, ops, refineOpener, omitTools, places, pagespeed,
         })
         if (!begun.ok) return { ok: false, message: begun.message }
         // Nobody reads this stream: the turn writes its own messages as it
@@ -491,8 +507,12 @@ async function beginTurn(args: {
   refineOpener: ((draft: Draft, signal: AbortSignal) => Promise<Draft>) | undefined
   /** Agency tools the model cannot be shown, decided once at boot; empty when every one can. */
   omitTools: ReadonlySet<string>
+  /** Google Maps search, built once at boot with GOOGLE_API_KEY; undefined without one. */
+  places: PlacesClient | undefined
+  /** Google PageSpeed, built once at boot. */
+  pagespeed: PageSpeedClient | undefined
 }): Promise<{ ok: true; turn: TurnHandle } | { ok: false; status: number; message: string }> {
-  const { req, db, env, log, halt, running, secretsKey, skills, credential, ops, refineOpener, omitTools } = args
+  const { req, db, env, log, halt, running, secretsKey, skills, credential, ops, refineOpener, omitTools, places, pagespeed } = args
 
   if (!credential) return { ok: false, status: 503, message: 'chat_disabled' }
   if (halt.halted()) return { ok: false, status: 503, message: 'runtime_halted' }
@@ -525,6 +545,8 @@ async function beginTurn(args: {
       ops,
       refineOpener,
       omitTools,
+      places,
+      pagespeed,
     },
     {
       orgId: who.orgId,

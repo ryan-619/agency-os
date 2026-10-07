@@ -21,7 +21,7 @@ import {
   activeIcpProfile, appendAudit, enabledAgentDefs, ensureApproval, expireApproval, readApproval,
   readPlaybook, schema, type AgencyDb, type ApprovalRow,
 } from '@agency/db'
-import type { OpsContext, ToolContext } from '@agency/tools'
+import type { OpsContext, PageSpeedClient, PlacesClient, ToolContext } from '@agency/tools'
 import { makeCanUseTool } from '../gate/can-use-tool.js'
 import { createLedger } from '../gate/ledger.js'
 import { makePostToolUse, makePreToolUse, HOOK_TIMEOUT_SECONDS } from '../gate/pre-tool-use.js'
@@ -106,6 +106,10 @@ export interface SessionDeps {
    * such tool in the server takes every other tool's listing down with it.
    */
   readonly omitTools?: ReadonlySet<string> | undefined
+  /** Google Maps search for `find_businesses`, built once at boot; absent without a key. */
+  readonly places?: PlacesClient | undefined
+  /** Google PageSpeed for `audit_website`, built once at boot. */
+  readonly pagespeed?: PageSpeedClient | undefined
 }
 
 export interface TurnRuntime {
@@ -263,6 +267,9 @@ export async function buildTurnRuntime(
     ...(deps.ops ? { ops: deps.ops } : {}),
     // The worker's model for openers, when one is configured; the template stands otherwise.
     ...(deps.refineOpener ? { refineOpener: deps.refineOpener } : {}),
+    // Google, the same clients for every turn; never the model's to supply.
+    ...(deps.places ? { places: deps.places } : {}),
+    ...(deps.pagespeed ? { pagespeed: deps.pagespeed } : {}),
   })
 
   const mcpServer = createAgencyMcpServer({

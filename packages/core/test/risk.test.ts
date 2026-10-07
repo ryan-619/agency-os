@@ -248,11 +248,18 @@ describe('the registry cannot drift from what is reachable', () => {
     // Editing a draft (2026-10-08): a read and a carded rewrite.
     expect(AGENCY_TOOL_RISK.get_draft.slice(0, 2)).toEqual(['low', 'read_only'])
     expect(AGENCY_TOOL_RISK.edit_draft.slice(0, 2)).toEqual(['high', 'leaves_the_building'])
-    expect(AGENCY_TOOL_NAMES).toHaveLength(23 + 26 + 3 + 2)
+    // Finding businesses and what they need (2026-10-08): four reads and one internal write.
+    for (const read of ['find_businesses', 'get_opportunities', 'list_services'] as const) {
+      expect(AGENCY_TOOL_RISK[read].slice(0, 2), read).toEqual(['low', 'read_only'])
+    }
+    expect(AGENCY_TOOL_RISK.audit_website.slice(0, 2)).toEqual(['low', 'derived_write'])
+    expect(AGENCY_TOOL_RISK.add_businesses.slice(0, 2)).toEqual(['medium', 'writes_internal_state'])
+    expect(AGENCY_TOOL_NAMES).toHaveLength(23 + 26 + 3 + 2 + 5)
   })
 
   it('never lets a write run without a person: every non-read tool but the scans is medium or high', () => {
-    const scans = new Set(['scan_company', 'score_company', 'rescan_stale'])
+    // audit_website (2026-10-08) records what Google's PageSpeed measured, as a scan records what it read.
+    const scans = new Set(['scan_company', 'score_company', 'rescan_stale', 'audit_website'])
     for (const name of AGENCY_TOOL_NAMES) {
       const [risk, rule] = AGENCY_TOOL_RISK[name]
       if (rule === 'read_only' || scans.has(name)) continue

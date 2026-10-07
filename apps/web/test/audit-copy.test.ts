@@ -325,6 +325,11 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   },
   'agent.list_drafts': { total: 4, returned: 4, checked: 3, turnId: SUBJECT },
   'agent.get_draft': { draftId: SUBJECT, status: 'awaiting_approval', turnId: SUBJECT },
+  'agent.find_businesses': { returned: 20, withoutWebsite: 7, more: true, failed: true, turnId: SUBJECT },
+  'agent.add_businesses': { asked: 5, added: 4, refreshed: 1, missing: 0, turnId: SUBJECT },
+  'agent.audit_website': { domain: 'rentman.io', strategy: 'mobile', outcome: 'measured', turnId: SUBJECT },
+  'agent.get_opportunities': { companies: 40, needs: 3, matched: 12, returned: 10, turnId: SUBJECT },
+  'agent.list_services': { services: 6, turnId: SUBJECT },
   'agent.edit_draft': { draftId: SUBJECT, edited: true, reapprove: false, reason: 'changed_meanwhile', turnId: SUBJECT },
   // --- end campaigns.ts ---
 
