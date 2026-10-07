@@ -31,6 +31,8 @@
 #                                         with, Vercel's value — then run
 #   ./tools/run-worker.sh --ai            ask only whether a model sorts replies
 #                                         and polishes openers, then run
+#   ./tools/run-worker.sh --slack         ask only for the Slack webhook URL the
+#                                         opt-out alarm posts to, then run
 #   ./tools/run-worker.sh --forget        delete the saved answers and stop
 #
 # Every credential is read at a HIDDEN prompt into this process's environment
@@ -58,8 +60,9 @@ case "${1:-}" in
   --imap) MODE=imap ;;
   --secrets-key) MODE=secrets-key ;;
   --ai) MODE=ai ;;
+  --slack) MODE=slack ;;
   --forget) MODE=forget ;;
-  *) echo "usage: $0 [--reconfigure | --imap | --secrets-key | --ai | --forget]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--reconfigure | --imap | --secrets-key | --ai | --slack | --forget]" >&2; exit 2 ;;
 esac
 
 # ── The Keychain (macOS only) ──────────────────────────────────────────────
@@ -171,8 +174,9 @@ node_modules/.bin/tsc --build
 
 # ── Read what was saved, or ask ──────────────────────────────────────────────
 LOADED="no"
-# --imap, --secrets-key and --ai read them too: each asks its own question over them.
-if { [ "$MODE" = run ] || [ "$MODE" = imap ] || [ "$MODE" = secrets-key ] || [ "$MODE" = ai ]; } \
+# --imap, --secrets-key, --ai and --slack read them too: each asks its own question over them.
+if { [ "$MODE" = run ] || [ "$MODE" = imap ] || [ "$MODE" = secrets-key ] || [ "$MODE" = ai ] \
+  || [ "$MODE" = slack ]; } \
   && have_keychain && kc_get DATABASE_URL >/dev/null; then
   for n in "${SAVED_NAMES[@]}"; do
     if v=$(kc_get "$n"); then export "$n=$v"; fi
@@ -629,6 +633,44 @@ if [ "$MODE" = secrets-key ]; then
       echo "  Could not save SECRETS_KEY in the Keychain: this run uses it, the next one does not." >&2
     fi
   fi
+  exec 3>&-
+fi
+
+# ── --slack: where the opt-out alarm is posted ─────────────────────────────
+# The worker's one Slack message is the alarm for an opt-out it could not
+# record (apps/agent/src/notify.ts). The URL IS the credential, so it is asked
+# hidden, checked for the one shape the worker accepts (https on
+# hooks.slack.com), and kept in the Keychain. "none" removes a saved one.
+if [ "$MODE" = slack ]; then
+  ask_open
+  while :; do
+    printf 'Slack webhook URL (hidden; Enter keeps the saved one, "none" removes it): ' >&3
+    read -r -s V <&3; printf '\n' >&3
+    V="${V//[[:space:]]/}"
+    [ -n "$V" ] || break
+    if [ "$V" = none ]; then
+      unset SLACK_WEBHOOK_URL
+      have_keychain && kc_del SLACK_WEBHOOK_URL
+      printf '  Removed: the opt-out alarm is off.\n' >&3
+      break
+    fi
+    case "$V" in
+      https://hooks.slack.com/*)
+        export SLACK_WEBHOOK_URL="$V"
+        if have_keychain; then
+          kc_put SLACK_WEBHOOK_URL "$V" || true
+          if [ "$(kc_get SLACK_WEBHOOK_URL || true)" = "$V" ]; then
+            printf '  Saved in your Keychain; the next run uses it too.\n' >&3
+          else
+            echo "  Could not save the Slack URL in the Keychain: this run uses it, the next one does not." >&2
+          fi
+        fi
+        break
+        ;;
+      *) printf '  That is not a Slack incoming webhook: it starts https://hooks.slack.com/. Try again.\n' >&3 ;;
+    esac
+  done
+  V=""
   exec 3>&-
 fi
 

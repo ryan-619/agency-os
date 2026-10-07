@@ -1148,6 +1148,35 @@ describe.runIf(PTY)('tools/run-worker.sh, answered at its prompts', () => {
     expect(calls()[1]!.env.LLM_PROVIDER).toBeUndefined()
   })
 
+  it('--slack asks only for the webhook, refuses another host, and saves it', async () => {
+    save('DATABASE_URL', DB)
+    const HOOK = 'https://hooks.slack.com/services/T000/B000/abcdefghijklmnop'
+    const r = await converse(layout(), ['--slack'], [
+      ['Slack webhook URL', 'https://example.com/hook'],
+      ['Slack webhook URL', HOOK],
+    ])
+    expect(r.unanswered, r.transcript).toEqual([])
+    expect(r.status, r.transcript).toBe(0)
+    expect(r.transcript).toContain('That is not a Slack incoming webhook')
+    expect(r.transcript).toContain('Saved in your Keychain; the next run uses it too.')
+    expect(r.transcript).toContain('alarm:    ON')
+    expect(r.transcript).not.toContain('Production DATABASE_URL')
+    expect(r.transcript).not.toContain(HOOK)
+    expect(saved('SLACK_WEBHOOK_URL')).toBe(HOOK)
+    expect(calls()[1]!.env.SLACK_WEBHOOK_URL).toBe(HOOK)
+    expect(readFileSync(join(logs, 'security-argv'), 'utf8')).not.toContain(HOOK)
+  })
+
+  it('--slack answered none removes a saved webhook', async () => {
+    save('DATABASE_URL', DB)
+    save('SLACK_WEBHOOK_URL', 'https://hooks.slack.com/services/T000/B000/old')
+    const r = await converse(layout(), ['--slack'], [['Slack webhook URL', 'none']])
+    expect(r.status, r.transcript).toBe(0)
+    expect(r.transcript).toContain('Removed: the opt-out alarm is off.')
+    expect(saved('SLACK_WEBHOOK_URL')).toBeUndefined()
+    expect(calls()[1]!.env.SLACK_WEBHOOK_URL).toBeUndefined()
+  })
+
   it('--ai answered no removes a saved model choice', async () => {
     save('DATABASE_URL', DB)
     save('LLM_PROVIDER', 'anthropic')

@@ -4452,6 +4452,7 @@ npm run smoke:agent -- --connector deepwiki   # the Phase 3 gate (§6's "no rest
 ./tools/run-worker.sh --imap          # only reply detection's questions (a new Google app password), then run
 ./tools/run-worker.sh --secrets-key   # only SECRETS_KEY — Vercel's value, so a connector's encrypted key can be read
 ./tools/run-worker.sh --ai            # whether a model sorts replies and polishes openers (sends them to Anthropic)
+./tools/run-worker.sh --slack         # only the Slack webhook the opt-out alarm posts to (hidden; "none" removes it)
 ./tools/run-worker.sh --forget        # delete the saved answers
 ./tools/add-teammate.sh       # grant somebody access — or Settings → Team, in the browser
 ./tools/spend.sh              # what the API has actually cost: per day, per person, run rate
