@@ -466,7 +466,7 @@ async function beginTurn(args: {
       halt,
       credential,
       ...(env.CLAUDE_CODE_PATH ? { claudeCodePath: env.CLAUDE_CODE_PATH } : {}),
-      model: env.AGENT_MODEL,
+      model: modelForTurn(env, req.deep),
       maxTurns: env.AGENT_MAX_TURNS,
       maxBudgetUsd: env.AGENT_MAX_BUDGET_USD,
       approvalTtlMs: env.APPROVAL_TTL_MINUTES * 60_000,
@@ -659,6 +659,15 @@ export function senderProvidersFrom(
 }
 
 /** What the mailbox configuration adds up to, for the boot log and /readyz. */
+/**
+ * The model a turn runs on: AGENT_MODEL, or AGENT_DEEP_MODEL for a turn the
+ * person asked to "think harder" — that one turn only, since the stronger
+ * model costs several times as much.
+ */
+export function modelForTurn(env: Pick<Env, 'AGENT_MODEL' | 'AGENT_DEEP_MODEL'>, deep: boolean): string | undefined {
+  return deep ? env.AGENT_DEEP_MODEL : env.AGENT_MODEL
+}
+
 function outreachModeFrom(env: Env): HealthInputs['outreach'] {
   const send = Boolean(env.SMTP_HOST && env.MAIL_FROM)
   const receive = Boolean(env.IMAP_HOST && env.IMAP_USER && env.IMAP_PASSWORD)

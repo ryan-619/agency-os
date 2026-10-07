@@ -150,6 +150,7 @@ services:
       # Blank is the SDK's default model; .env.example names Haiku, at a
       # fraction of the cost (CLAUDE.md §8).
       AGENT_MODEL: ${AGENT_MODEL:-}
+      AGENT_DEEP_MODEL: ${AGENT_DEEP_MODEL:-}
       # §2.3 — third-party credentials are encrypted at rest with this key.
       # Optional until a connector is configured (Phase 3).
       SECRETS_KEY: ${SECRETS_KEY:-}

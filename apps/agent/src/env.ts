@@ -158,6 +158,13 @@ const schema = z.object({
 
   /** Overrides the SDK's default model per §5.5's "pick a model per task". */
   AGENT_MODEL: z.preprocess(blankIsUnset, z.string().optional()),
+  /**
+   * The model a turn runs on when the person ticks "Think harder" in chat —
+   * one turn at a time, never the default. An alias the CLI resolves
+   * (`sonnet`, `opus`) or a full model id; Sonnet reasons far better than
+   * Haiku at several times the price, and Opus better again at more.
+   */
+  AGENT_DEEP_MODEL: z.preprocess(blankIsUnset, z.string().default('sonnet')),
 
   /**
    * §5.5's single-shot seam, used here for reply triage (`classify_reply`).

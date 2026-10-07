@@ -65,6 +65,9 @@ export function ChatPanel({
 }) {
   const [state, setState] = useState<ChatState>(() => ({ ...emptyChat, blocks: initialBlocks }))
   const [draft, setDraft] = useState('')
+  // "Think harder": the next message only. It runs on a stronger, dearer
+  // model, so it never stays on by itself.
+  const [deep, setDeep] = useState(false)
   const [stopping, setStopping] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
   const endRef = useRef<HTMLDivElement | null>(null)
@@ -76,7 +79,9 @@ export function ChatPanel({
   const send = useCallback(async () => {
     const text = draft.trim()
     if (!text || state.running) return
+    const thinkHarder = deep
     setDraft('')
+    setDeep(false)
     setStopping(false)
     setState((s) => withUserMessage({ ...s, running: true, endedBecause: null }, text))
 
@@ -88,7 +93,7 @@ export function ChatPanel({
       res = await fetch('/api/chat/turns', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ chatSessionId: sessionId, text }),
+        body: JSON.stringify({ chatSessionId: sessionId, text, ...(thinkHarder ? { deep: true } : {}) }),
         signal: ac.signal,
       })
     } catch {
@@ -143,7 +148,7 @@ export function ChatPanel({
       setStopping(false)
       abortRef.current = null
     }
-  }, [draft, sessionId, state.running])
+  }, [deep, draft, sessionId, state.running])
 
   /**
    * Stop the TURN, not just this browser's view of it.
@@ -326,6 +331,17 @@ export function ChatPanel({
           <button type="button" onClick={() => void send()} disabled={!draft.trim()}>Send</button>
         )}
       </div>
+
+      <label className="chat-deep" htmlFor="chat-think-harder">
+        <input
+          id="chat-think-harder"
+          type="checkbox"
+          checked={deep}
+          disabled={state.running}
+          onChange={(e) => setDeep(e.target.checked)}
+        />
+        Think harder on this message — a stronger model, several times the cost
+      </label>
 
       {/* §8.1: "A team that cannot see cost will not trust the tool." */}
       <div className="chat-cost">

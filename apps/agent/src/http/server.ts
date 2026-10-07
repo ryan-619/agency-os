@@ -32,6 +32,12 @@ export interface StartTurnRequest {
   readonly chatSessionId: string
   readonly userId: string
   readonly text: string
+  /**
+   * "Think harder": this one turn runs on AGENT_DEEP_MODEL rather than
+   * AGENT_MODEL. Only an exact `true` asks for it — anything else is an
+   * ordinary turn — because the stronger model costs several times as much.
+   */
+  readonly deep: boolean
 }
 
 export interface AgentHttpDeps {
@@ -111,7 +117,7 @@ function parseStartTurn(body: unknown): StartTurnRequest | null {
   if (typeof chatSessionId !== 'string' || !chatSessionId) return null
   if (typeof userId !== 'string' || !userId) return null
   if (typeof text !== 'string' || text.trim().length === 0 || text.length > 32_000) return null
-  return { chatSessionId, userId, text }
+  return { chatSessionId, userId, text, deep: o['deep'] === true }
 }
 
 export function createAgentHttpServer(deps: AgentHttpDeps): Server {

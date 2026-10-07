@@ -46,7 +46,7 @@ export async function POST(request: Request): Promise<Response> {
   } catch {
     return NextResponse.json({ error: 'invalid_json' }, { status: 400 })
   }
-  const { chatSessionId, text } = (body ?? {}) as { chatSessionId?: unknown; text?: unknown }
+  const { chatSessionId, text, deep } = (body ?? {}) as { chatSessionId?: unknown; text?: unknown; deep?: unknown }
   if (typeof chatSessionId !== 'string' || !chatSessionId) {
     return NextResponse.json({ error: 'chatSessionId is required' }, { status: 400 })
   }
@@ -57,7 +57,8 @@ export async function POST(request: Request): Promise<Response> {
     return NextResponse.json({ error: 'text is too long' }, { status: 413 })
   }
 
-  const upstream = await startTurn({ chatSessionId, userId: user.id, text })
+  // "Think harder" is only an exact `true`: the stronger model costs several times as much.
+  const upstream = await startTurn({ chatSessionId, userId: user.id, text, deep: deep === true })
   if (!(upstream instanceof Response)) {
     return NextResponse.json({ error: `agent_${upstream.reason}` }, { status: 503 })
   }

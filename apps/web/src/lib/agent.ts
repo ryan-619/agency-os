@@ -42,6 +42,8 @@ export async function startTurn(body: {
   chatSessionId: string
   userId: string
   text: string
+  /** "Think harder": the worker runs this one turn on its stronger model. */
+  deep: boolean
 }): Promise<Response | AgentUnavailable> {
   const c = agentConfig()
   if (c.state !== 'configured') return { ok: false, reason: c.state }

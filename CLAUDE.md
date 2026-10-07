@@ -5239,6 +5239,15 @@ reports what has actually been spent — per day, per person, and a run rate —
 from `chat_messages.cost_usd`, which is the SDK's own figure rather than an
 estimate.
 
+**A person can ask for more, one message at a time (2026-10-07).** "Think
+harder" under the chat box sends `deep: true` with that message — the route
+and the worker's `parseStartTurn` both take only an exact `true` — and that
+turn runs on `AGENT_DEEP_MODEL` (default `sonnet`; `opus` is stronger and
+dearer) through `modelForTurn` in `worker.ts`; every other turn stays on
+`AGENT_MODEL`. The box clears after each message, so the dearer model is
+never left on by accident. Compose passes the variable and `.env.example`
+documents it.
+
 **`tokens_in` counted only the UNCACHED input, which is not a small number but
 a wrong one.** `usage.input_tokens` excludes what the cache served, and this
 product caches hard on purpose (a frozen system prompt, a deterministic tool
