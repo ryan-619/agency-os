@@ -86,6 +86,20 @@ const CREDENTIAL_SHAPED_VALUE =
   /^(bearer|basic|token|sentry-bearer)\s+\S|^(sk|pk|rk|ghp|gho|ghu|ghs|ghr|github_pat|xox[abpe]|hf|tvly|fc|whsec|re|sntrys|glpat|cal_(live|test)|akia|asia)[-_]/i
 
 /**
+ * How many tool names one server's disabled list may hold.
+ *
+ * It was 64, and Apollo's MCP server offers 98 tools, every one off by the
+ * catalog's default: an owner who wanted five of them on could not save the
+ * other ninety-three off, so at least thirty-four stayed on — each one
+ * described to the model in every message, and each a card. 256 holds the
+ * largest catalog server with room to spare; at 120 characters a name, the
+ * list stays a few kilobytes of `config`. Raising a maximum refuses nothing
+ * that was stored. The settings panel holds a copy (`MAX_DISABLED`), which a
+ * test keeps equal to this.
+ */
+export const CONNECTOR_DISABLED_TOOLS_MAX = 256
+
+/**
  * A bare tool name, as `mcp__<server>__<tool>` carries it after the server.
  * No double underscore: `disabledToolNames` prefixes `mcp__<name>__`, so a
  * stored value already carrying that prefix would never match anything and
@@ -159,7 +173,7 @@ const stdioConfig = z
      * every caller that builds a config literal — keeps its shape; absent
      * reads as nothing turned off, in `disabledToolNames`.
      */
-    disabledTools: z.array(toolName).max(64).optional(),
+    disabledTools: z.array(toolName).max(CONNECTOR_DISABLED_TOOLS_MAX).optional(),
   })
   .superRefine(refuseCredentialShapedKeys('env', (c) => c.secretEnv ?? 'MCP_SECRET'))
 
@@ -184,7 +198,7 @@ const httpConfig = z
      */
     secretPrefix: z.string().max(16).optional(),
     /** As on the stdio config. */
-    disabledTools: z.array(toolName).max(64).optional(),
+    disabledTools: z.array(toolName).max(CONNECTOR_DISABLED_TOOLS_MAX).optional(),
   })
   .superRefine(refuseCredentialShapedKeys('headers', (c) => c.secretHeader ?? 'authorization'))
 
@@ -213,7 +227,7 @@ export function disabledToolNames(row: { readonly name: string; readonly config:
   // Read loosely rather than by transport: `disabledTools` has the same
   // shape on both configs, and this is called from places that hold a row
   // and not its parsed kind.
-  const parsed = z.object({ disabledTools: z.array(toolName).max(64).optional() }).safeParse(row.config ?? {})
+  const parsed = z.object({ disabledTools: z.array(toolName).max(CONNECTOR_DISABLED_TOOLS_MAX).optional() }).safeParse(row.config ?? {})
   if (!parsed.success) return new Set()
   return new Set((parsed.data.disabledTools ?? []).map((tool) => `mcp__${row.name}__${tool}`))
 }

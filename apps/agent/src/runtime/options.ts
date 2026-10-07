@@ -113,6 +113,12 @@ export interface BuildOptionsInput {
   readonly abortController: AbortController
   readonly maxTurns: number
   readonly maxBudgetUsd: number
+  /**
+   * The connector tools this turn's gate refuses (`BuildResult.disabledTools`):
+   * `mcp__<name>__<tool>`, and `mcp__<name>__*` where every tool is off. Also
+   * taken out of what the model is told it has (`connectorToolsHidden`).
+   */
+  readonly disabledConnectorTools?: Iterable<string> | undefined
   /** The SDK session to continue, if this thread has one (§5.3). */
   readonly resume?: string | undefined
   readonly model?: string | undefined
@@ -129,6 +135,39 @@ export interface BuildOptionsInput {
   readonly env: Record<string, string | undefined>
 }
 
+/**
+ * The connector tools to take out of the model's context: every entry the
+ * gate refuses, as long as it names a connector's tool.
+ *
+ * A tool the gate refuses can never run, and describing it to the model
+ * anyway costs every message its whole schema. On 2026-10-07 that cost was
+ * the chat: Apollo's MCP server offers 98 tools, all off until an owner
+ * reviews them, and their descriptions alone took a request past Haiku's
+ * 200k-token context — every turn on the live site answered "Prompt is too
+ * long", and so did the CLI's own retry after it had compacted the thread to
+ * a summary. Measured against CLI 2.1.269 through `setMcpServers`, as a turn
+ * hands connectors over: `disallowedTools` naming `mcp__<name>__<tool>`
+ * leaves that one tool out of the request's `tools`, and `mcp__<name>__*`
+ * leaves out every tool of that server.
+ *
+ * It only ever removes. Both gate rings still refuse the same names, so a
+ * CLI that ignored the list would change what the model is shown and nothing
+ * it may do. Never the agency's own server: a connector cannot be named
+ * `agency` (`buildMcpServers` skips such a row's list), and a name of that
+ * shape is dropped here as well.
+ */
+export function connectorToolsHidden(disabled: Iterable<string> | undefined): string[] {
+  const out: string[] = []
+  for (const name of disabled ?? []) {
+    if (typeof name !== 'string' || !name.startsWith('mcp__')) continue
+    if (name.startsWith('mcp__agency__')) continue
+    const rest = name.slice('mcp__'.length)
+    if (rest.indexOf('__') <= 0) continue
+    out.push(name)
+  }
+  return [...new Set(out)].sort()
+}
+
 export function buildQueryOptions(input: BuildOptionsInput): Options {
   const options: Options = {
     // --- what the agent may do -------------------------------------------
@@ -138,7 +177,7 @@ export function buildQueryOptions(input: BuildOptionsInput): Options {
     // a Bash tool"). This also settles a question the SDK's types cannot
     // answer — what IS in the default tool set — by making it irrelevant.
     tools: [],
-    disallowedTools: [...FORBIDDEN_TOOLS],
+    disallowedTools: [...FORBIDDEN_TOOLS, ...connectorToolsHidden(input.disabledConnectorTools)],
     mcpServers: { ...input.mcpServers },
     // Only servers this process names — here, or handed over the control
     // channel. Without it, an `.mcp.json` on disk would add servers nobody

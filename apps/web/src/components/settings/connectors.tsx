@@ -89,8 +89,12 @@ function storableToolName(name: string): boolean {
   return name.length <= 120 && /^(?!.*__)[A-Za-z0-9][A-Za-z0-9_-]*$/.test(name)
 }
 
-/** The schema's `.max(64)`: how many names one server's list may hold. */
-const MAX_DISABLED = 64
+/**
+ * `CONNECTOR_DISABLED_TOOLS_MAX` in `@agency/db`: how many names one server's
+ * list may hold. A copy, because this is a client module and the db package
+ * is not; `connector-tools-cap.test.ts` keeps the two equal.
+ */
+const MAX_DISABLED = 256
 
 type Probe = { tools: readonly { name: string; description: string }[]; message: string; ok: boolean }
 
@@ -568,8 +572,10 @@ function ToolChecks({
         </div>
       ) : null}
       <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-        Disabled tools are refused before anyone is asked. Every other tool on this server still asks a
-        person every time.
+        Disabled tools are refused before anyone is asked, and are not described to the assistant at all.
+        Every other tool on this server still asks a person every time — and is described to the assistant
+        in every message, so leave on only the ones you use: a server with dozens of tools on can fill what
+        the model reads at once, and chat then stops answering.
       </div>
       {ticked.size > MAX_DISABLED ? (
         <div className="err-line">

@@ -330,6 +330,9 @@ export async function buildTurnRuntime(
     abortController: abort,
     maxTurns: deps.maxTurns,
     maxBudgetUsd: deps.maxBudgetUsd,
+    // The tools the gate refuses are not described to the model either: a
+    // server with dozens of tools turned off filled the context (2026-10-07).
+    disabledConnectorTools: connectors.disabledTools,
     env: childEnv(deps.credential),
     ...(args.resume ? { resume: args.resume } : {}),
     ...(deps.model ? { model: deps.model } : {}),

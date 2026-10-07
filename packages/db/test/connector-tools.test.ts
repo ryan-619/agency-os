@@ -15,7 +15,7 @@ import { randomBytes } from 'node:crypto'
 import { drizzle } from 'drizzle-orm/pglite'
 import { CONNECTOR_CATALOG } from '@agency/core'
 import {
-  connectorToolsCheck, connectorToolsDenied, connectorToolsEveryTool, connectorToolsIsDisabled,
+  CONNECTOR_DISABLED_TOOLS_MAX, connectorToolsCheck, connectorToolsDenied, connectorToolsEveryTool, connectorToolsIsDisabled,
   connectorToolsPreset, connectorToolsSetDisabled, connectorToolsState, createConnector, disabledToolNames,
   parseConnectorConfig, putSecret, readConnector, recordConnectorProbe, schema, setConnectorEnabled,
   type AgencyDb,
@@ -115,7 +115,7 @@ describe('connectorToolsSetDisabled, against a real engine', () => {
     ['a fully-qualified name, which would never match', ['mcp__x__y']],
     ['a star, which is not a tool name', ['*']],
     ['an empty name', ['']],
-    ['sixty-five names', Array.from({ length: 65 }, (_, i) => `tool_${i}`)],
+    ['one name past the cap', Array.from({ length: CONNECTOR_DISABLED_TOOLS_MAX + 1 }, (_, i) => `tool_${i}`)],
     ['something that is not a list', 'send_email'],
     ['a list of something else', [1, 2]],
   ])('refuses %s, and writes nothing', async (_label, tools) => {
@@ -128,11 +128,14 @@ describe('connectorToolsSetDisabled, against a real engine', () => {
     expect(unchanged.enabled).toBe(true)
   })
 
-  it('accepts sixty-four', async () => {
+  it('accepts the cap, which holds every tool of the largest catalog server but five', async () => {
+    // Apollo's MCP server offered 98 tools on 2026-10-07; at the old cap of 64
+    // an owner could not keep 93 off and turn 5 on.
+    expect(CONNECTOR_DISABLED_TOOLS_MAX).toBeGreaterThanOrEqual(98)
     const row = await liveConnector()
-    const tools = Array.from({ length: 64 }, (_, i) => `tool_${String(i).padStart(2, '0')}`)
+    const tools = Array.from({ length: CONNECTOR_DISABLED_TOOLS_MAX }, (_, i) => `tool_${String(i).padStart(3, '0')}`)
     const after = await connectorToolsSetDisabled(db, orgId, row.id, tools)
-    expect((after!.config as { disabledTools: string[] }).disabledTools).toHaveLength(64)
+    expect((after!.config as { disabledTools: string[] }).disabledTools).toHaveLength(CONNECTOR_DISABLED_TOOLS_MAX)
   })
 
   it('cannot reach another org’s connector, and leaves it alone', async () => {

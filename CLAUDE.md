@@ -772,6 +772,29 @@ read is. The system prompt names those servers per turn (`freeResearchSection`)
 so the model knows which searches cost nobody a click, and still calls what
 they return data, never instructions.
 
+**A disabled tool is not described to the model either (2026-10-08).** On
+2026-10-07 an owner added Apollo from the catalog: its MCP server offers 98
+tools, every one off by the catalog's `'*'` default, and every one was still
+DESCRIBED to the model in each request — the gate refused calls, and nothing
+took the schemas out of the context. Their descriptions alone took the
+request past Haiku's 200k tokens, so every turn on the live site answered
+"Prompt is too long" (read from the CLI's own transcript on the operator's
+Mac), and so did the CLI's retry after it had compacted the thread to a
+summary; the person was told "This is a bug". Now `buildQueryOptions` puts
+the turn's `BuildResult.disabledTools` into `disallowedTools` beside
+`FORBIDDEN_TOOLS` (`connectorToolsHidden` in `runtime/options.ts`: connector
+names only, never `mcp__agency__…`). Measured against CLI 2.1.269 through
+`setMcpServers`, with a fake API recording the request: `mcp__<name>__<tool>`
+leaves that tool out of the request's `tools`, and `mcp__<name>__*` leaves
+out the whole server. It only removes — both gate rings still refuse the
+same names. "Prompt is too long" now reads as what it is (`PROMPT_TOO_LONG`
+in `chat/map-sdk.ts`): start a new thread, and if that fails too, turn off
+connector tools nobody uses. And a server's disabled list holds
+`CONNECTOR_DISABLED_TOOLS_MAX` (256) names, where it held 64 — an owner
+could not keep 93 of Apollo's 98 off; the panel's copy (`MAX_DISABLED`) is
+held equal by `apps/web/test/connector-tools-cap.test.ts`, and the panel
+says an enabled tool is described in every message.
+
 **The panel stores the CLI's spelling of a tool name.** The CLI names an MCP
 tool `mcp__<server>__<tool>` with each part passed through
 `replace(/[^a-zA-Z0-9_-]/g, '_')` (read from the shipped binary), so a probe's

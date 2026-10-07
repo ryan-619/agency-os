@@ -11,7 +11,8 @@
 import { afterEach, describe, it, expect, vi } from 'vitest'
 import { AGENCY_TOOL_NAMES } from '@agency/core'
 import {
-  ALLOWED_OPTION_KEYS, FORBIDDEN_TOOLS, PLAYBOOK_HEADER, buildQueryOptions, childEnv, freeResearchSection,
+  ALLOWED_OPTION_KEYS, FORBIDDEN_TOOLS, PLAYBOOK_HEADER, buildQueryOptions, childEnv, connectorToolsHidden,
+  freeResearchSection,
   playbookSection, systemPrompt,
 } from '../src/runtime/options.js'
 
@@ -159,6 +160,43 @@ describe('the agent has no shell, no filesystem and no web', () => {
       expect(denied, t).toContain(t)
     }
     expect(denied).toEqual([...FORBIDDEN_TOOLS])
+  })
+
+  /**
+   * Found on the live site on 2026-10-07: a connector offering 98 tools, all
+   * of them off until an owner reviewed them, was still DESCRIBED to the model
+   * in every message, and the descriptions alone took the request past the
+   * model's context — every turn answered "Prompt is too long". Measured
+   * against CLI 2.1.269 through `setMcpServers`: a name in `disallowedTools`
+   * is left out of the request's tools, and `mcp__<name>__*` leaves out the
+   * whole server.
+   */
+  it('takes the tools the gate refuses out of what the model is told it has', () => {
+    const options = buildQueryOptions({
+      canUseTool: async () => ({ behavior: 'allow' }),
+      mcpServers: {},
+      agents: {},
+      skills: { settingSources: [] },
+      hooks: {},
+      systemPrompt: 's',
+      cwd: '/tmp',
+      abortController: new AbortController(),
+      maxTurns: 1,
+      maxBudgetUsd: 1,
+      env: {},
+      disabledConnectorTools: new Set(['mcp__apollo__*', 'mcp__hunter__send_email']),
+    })
+    expect(options.disallowedTools).toEqual([...FORBIDDEN_TOOLS, 'mcp__apollo__*', 'mcp__hunter__send_email'])
+  })
+
+  it('never hides the agency’s own tools, and drops anything that is not a connector tool', () => {
+    expect(
+      connectorToolsHidden([
+        'mcp__agency__*', 'mcp__agency__get_company', 'Bash', 'mcp__', 'mcp____x', 'mcp__solo',
+        'mcp__exa__web_search', 'mcp__exa__web_search', 'mcp__apollo__*',
+      ]),
+    ).toEqual(['mcp__apollo__*', 'mcp__exa__web_search'])
+    expect(connectorToolsHidden(undefined)).toEqual([])
   })
 
   it('accepts only the MCP servers it was handed', () => {
