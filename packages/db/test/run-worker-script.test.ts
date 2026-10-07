@@ -51,6 +51,9 @@
  *  - a saved SECRETS_KEY reaches the worker, so a connector's encrypted key
  *    can be read; `--secrets-key` asks for it alone, refuses anything that is
  *    not base64 of 32 bytes, and a `--reconfigure` keeps a saved one;
+ *  - `--ai` asks whether a model sorts replies and polishes openers, saves
+ *    the choice, and the worker gets it only on a chat-on run, which is the
+ *    one that hands it the Anthropic key; a `--reconfigure` keeps it;
  *  - `--imap` asks reply detection's three questions alone, over the saved
  *    answers — a new Google app password, saved without the spaces Google
  *    shows it with — and keeps every other saved answer as it was;
@@ -393,6 +396,51 @@ describe('tools/run-worker.sh', () => {
       expect(worker.AGENT_INTERNAL_TOKEN).not.toBe(CHAT_TOKEN)
       expect(worker.AGENT_INTERNAL_TOKEN?.length).toBeGreaterThanOrEqual(32)
     }
+
+    /**
+     * `--ai` (2026-10-07): a model sorts replies and polishes openers. It runs
+     * on the Anthropic key, which only a chat-on run hands the worker, so the
+     * saved choice reaches the worker with chat and is withheld without it.
+     */
+    const saveAi = () => {
+      save('LLM_PROVIDER', 'anthropic')
+      save('LLM_MODEL', 'claude-haiku-4-5')
+      save('LLM_ALLOW_REMOTE_LEAD_DATA', 'true')
+    }
+
+    it('hands a saved model choice to the worker with chat on, and says so', () => {
+      ngrokStub()
+      saveChat()
+      saveAi()
+      const r = run(layout())
+      expect(r.status, r.stderr).toBe(0)
+      expect(r.stdout).toContain('ai:       ON  — a model sorts replies and polishes openers (claude-haiku-4-5)')
+      const worker = calls()[1]!.env
+      expect(worker.LLM_PROVIDER).toBe('anthropic')
+      expect(worker.LLM_MODEL).toBe('claude-haiku-4-5')
+      expect(worker.LLM_ALLOW_REMOTE_LEAD_DATA).toBe('true')
+      expect(worker.ANTHROPIC_API_KEY).toBe(ANTHROPIC_KEY)
+    })
+
+    it('withholds the model choice without chat, which hands the worker no key, and says why', () => {
+      save('DATABASE_URL', DB)
+      saveAi()
+      const r = run(layout())
+      expect(r.status, r.stderr).toBe(0)
+      expect(r.stdout).toContain('ai:       OFF — it uses the Anthropic key, which only a run with chat on hands the worker')
+      const worker = calls()[1]!.env
+      expect(worker.LLM_PROVIDER).toBeUndefined()
+      expect(worker.LLM_ALLOW_REMOTE_LEAD_DATA).toBeUndefined()
+      expect(worker.ANTHROPIC_API_KEY).toBeUndefined()
+    })
+
+    it('names --ai when no model is chosen', () => {
+      save('DATABASE_URL', DB)
+      const r = run(layout())
+      expect(r.status, r.stderr).toBe(0)
+      expect(r.stdout).toContain('ai:       OFF — replies are read by keyword and openers keep the template')
+      expect(r.stdout).toContain('--ai')
+    })
 
     it('runs the tunnel and hands the worker the key and the saved token — none of them on any argv, nothing to ngrok', () => {
       ngrokStub()
@@ -1083,6 +1131,43 @@ describe.runIf(PTY)('tools/run-worker.sh, answered at its prompts', () => {
     expect(saved('SECRETS_KEY')).toBe(SECRETS_KEY)
     expect(saved('SMTP_PASSWORD')).toBe(SMTP_PASSWORD)
     expect(readFileSync(join(logs, 'security-argv'), 'utf8')).not.toContain(SECRETS_KEY)
+  })
+
+  it('--ai asks one question, and a yes saves the model choice', async () => {
+    save('DATABASE_URL', DB)
+    const r = await converse(layout(), ['--ai'], [['Let a model sort replies and polish openers?', 'y']])
+    expect(r.unanswered, r.transcript).toEqual([])
+    expect(r.status, r.transcript).toBe(0)
+    expect(r.transcript).toContain('Saved; the next run uses it too.')
+    expect(r.transcript).not.toContain('Production DATABASE_URL')
+    expect(saved('LLM_PROVIDER')).toBe('anthropic')
+    expect(saved('LLM_MODEL')).toBe('claude-haiku-4-5')
+    expect(saved('LLM_ALLOW_REMOTE_LEAD_DATA')).toBe('true')
+    // No chat here, so no key: the choice is kept and the worker told nothing.
+    expect(r.transcript).toContain('ai:       OFF — it uses the Anthropic key')
+    expect(calls()[1]!.env.LLM_PROVIDER).toBeUndefined()
+  })
+
+  it('--ai answered no removes a saved model choice', async () => {
+    save('DATABASE_URL', DB)
+    save('LLM_PROVIDER', 'anthropic')
+    save('LLM_MODEL', 'claude-haiku-4-5')
+    save('LLM_ALLOW_REMOTE_LEAD_DATA', 'true')
+    const r = await converse(layout(), ['--ai'], [['Let a model sort replies and polish openers?', 'n']])
+    expect(r.status, r.transcript).toBe(0)
+    expect(r.transcript).toContain('Off: replies keep the keyword reading and openers the template.')
+    expect(saved('LLM_PROVIDER')).toBeUndefined()
+    expect(saved('LLM_ALLOW_REMOTE_LEAD_DATA')).toBeUndefined()
+  })
+
+  it('--reconfigure keeps a saved model choice, which it does not ask for', async () => {
+    save('DATABASE_URL', DB)
+    save('LLM_PROVIDER', 'anthropic')
+    save('LLM_MODEL', 'claude-haiku-4-5')
+    save('LLM_ALLOW_REMOTE_LEAD_DATA', 'true')
+    await answered(layout(), ['--reconfigure'], { smtp: false, remember: 'y' })
+    expect(saved('LLM_PROVIDER')).toBe('anthropic')
+    expect(saved('LLM_ALLOW_REMOTE_LEAD_DATA')).toBe('true')
   })
 
   it('--reconfigure keeps a saved SECRETS_KEY, which it does not ask for', async () => {

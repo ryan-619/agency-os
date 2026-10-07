@@ -49,7 +49,7 @@ import { z } from 'zod'
 import { and, eq } from 'drizzle-orm'
 import {
   ENROL_LIMIT_DEFAULT, REFUSALS_THE_CLOCK_RESOLVES, TEMPLATE_CHANNELS, can, enrolSkipCounts,
-  type Channel, type EnrolSkip, type SendDecision, type SendRefusalCode,
+  type Channel, type Draft, type EnrolSkip, type SendDecision, type SendRefusalCode,
 } from '@agency/core'
 import {
   appendAudit, campaignActivity, campaignAutoPauses, campaignInput, enrolCampaign, evidenceAsOfFor, isUniqueViolation,
@@ -779,19 +779,31 @@ export const enrolContacts: AgencyToolSpec<typeof enrolContactsShape> = {
     const dryRun = input.dryRun === true
     const startedAt = Date.now()
     const senderName = await senderNameOf(ctx)
-    const r = await enrolCampaign(ctx.db, {
-      // Answer inside the MCP call: past it the model is told the call
-      // failed while drafts would go on landing (review round 16).
-      stopWhen: () => Date.now() - startedAt >= ENROL_DRAFT_BUDGET_MS,
-      orgId: ctx.orgId,
-      campaignId: campaign.id,
-      // The route's own row (`campaign.enrolled`) names the agent.
-      actor: 'agent',
-      senderName,
-      dryRun,
-      now: ctx.now(),
-      ...(input.limit !== undefined ? { limit: input.limit } : {}),
-    })
+    // A model polishing an opener answers inside the same budget: at the
+    // deadline its call is ended and the template stands, so a slow model
+    // can never carry the tool past the MCP call's 30 s.
+    const budget = new AbortController()
+    const deadline = setTimeout(() => budget.abort(), ENROL_DRAFT_BUDGET_MS)
+    const refineOpener = ctx.refineOpener
+    let r: Awaited<ReturnType<typeof enrolCampaign>>
+    try {
+      r = await enrolCampaign(ctx.db, {
+        // Answer inside the MCP call: past it the model is told the call
+        // failed while drafts would go on landing (review round 16).
+        stopWhen: () => Date.now() - startedAt >= ENROL_DRAFT_BUDGET_MS,
+        orgId: ctx.orgId,
+        campaignId: campaign.id,
+        // The route's own row (`campaign.enrolled`) names the agent.
+        actor: 'agent',
+        senderName,
+        dryRun,
+        now: ctx.now(),
+        ...(input.limit !== undefined ? { limit: input.limit } : {}),
+        ...(refineOpener ? { refine: (d: Draft) => refineOpener(d, budget.signal) } : {}),
+      })
+    } finally {
+      clearTimeout(deadline)
+    }
     if (!r.ok) {
       const code = ENROL_REFUSAL_CODE[r.reason]
       return fail(code, code === 'not_found' ? r.message : `${r.message} ${NOTHING_WRITTEN}`)

@@ -32,7 +32,7 @@
  *    window full of one table.
  */
 import type { ZodObject, ZodRawShape, infer as ZodInfer } from 'zod'
-import type { AgencyToolName, IcpDefinition, Principal, SiteProfile } from '@agency/core'
+import type { AgencyToolName, Draft, IcpDefinition, Principal, SiteProfile } from '@agency/core'
 import type { AgencyDb } from '@agency/db'
 
 /** What a tool is allowed to know. Assembled by the worker, per turn. */
@@ -52,6 +52,14 @@ export interface ToolContext {
    * can from the database and says the worker's own view is not available.
    */
   readonly ops?: OpsContext
+  /**
+   * Polishes an opener before it is drafted — the worker's model when one is
+   * configured (§5.5's `draft_outreach`, through `refineDraft`, which keeps
+   * every observed claim or hands the words back unchanged). Absent, the
+   * template stands. The signal ends the model call when the tool's time
+   * budget runs out.
+   */
+  readonly refineOpener?: (draft: Draft, signal: AbortSignal) => Promise<Draft>
 }
 
 // ---------------------------------------------------------------------------

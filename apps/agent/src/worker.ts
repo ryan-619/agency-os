@@ -7,7 +7,7 @@ import {
   createSmtpProvider, ensureChatSessionTitle, markTurnRunning, masterKey, readConnector, schema,
   sessionCostUsd, setSdkSessionId, usd, type AgencyDb, type MessageProvider,
 } from '@agency/db'
-import type { Channel } from '@agency/core'
+import type { Channel, Draft } from '@agency/core'
 import type { OpsContext } from '@agency/tools'
 import type { AgentCredential } from './runtime/options.js'
 import type { Env } from './env.js'
@@ -24,6 +24,7 @@ import { createDoveSoftProvider, doveSoftConfigFrom } from './outreach/dovesoft.
 import { outreachOptions } from './outreach/options.js'
 import { providerFrom } from '@agency/llm'
 import { startInbox } from './outreach/inbox.js'
+import { refineDraft } from './outreach/draft.js'
 import { createAgentHttpServer, type StartTurnRequest, type TurnHandle } from './http/server.js'
 import { createDeferredEmitter, startTurn } from './chat/turn.js'
 import { buildTurnRuntime, createHalt, resolvePrincipal, type RuntimeHalt } from './runtime/session.js'
@@ -141,6 +142,16 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
     },
     (provider) => log.warn('a triage model is named but its credential is missing', { provider }),
   )
+
+  /**
+   * The same model polishing the openers chat drafts (`enrol_contacts`),
+   * through `refineDraft`, which keeps every observed claim or hands the
+   * template back. Undefined without a model: the template stands.
+   */
+  const refineOpener = triage
+    ? (draft: Draft, signal: AbortSignal): Promise<Draft> =>
+        refineDraft({ log, llm: triage, allowRemoteForLeadData: env.LLM_ALLOW_REMOTE_LEAD_DATA, draft, signal })
+    : undefined
 
   const outreachMode = outreachModeFrom(env)
   // Decided once, and said once (`sms: dovesoft on|off`), before the sender
@@ -282,7 +293,7 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
       return true
     },
     startTurn: (req) =>
-      beginTurn({ req, db, env, log, halt, running, secretsKey, skills, credential, ops }),
+      beginTurn({ req, db, env, log, halt, running, secretsKey, skills, credential, ops, refineOpener }),
   })
 
   const apiPort = env.AGENT_PORT + 1
@@ -432,8 +443,10 @@ async function beginTurn(args: {
   credential: AgentCredential | null
   /** The worker's view of itself, for the ops tools — the same object every turn. */
   ops: OpsContext
+  /** The worker's model polishing openers, built once at boot; undefined without one. */
+  refineOpener: ((draft: Draft, signal: AbortSignal) => Promise<Draft>) | undefined
 }): Promise<{ ok: true; turn: TurnHandle } | { ok: false; status: number; message: string }> {
-  const { req, db, env, log, halt, running, secretsKey, skills, credential, ops } = args
+  const { req, db, env, log, halt, running, secretsKey, skills, credential, ops, refineOpener } = args
 
   if (!credential) return { ok: false, status: 503, message: 'chat_disabled' }
   if (halt.halted()) return { ok: false, status: 503, message: 'runtime_halted' }
@@ -464,6 +477,7 @@ async function beginTurn(args: {
       cwd: process.cwd(),
       now: () => new Date(),
       ops,
+      refineOpener,
     },
     {
       orgId: who.orgId,

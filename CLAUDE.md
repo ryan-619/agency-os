@@ -3645,7 +3645,22 @@ turns are sent — not the system events. The worker calls `classify_reply`
 answer; the model's reply kind is then WRITTEN through the inbox's
 reclassify path (`replyReclassifyIfStill`), so every guard a person meets
 applies to it and a kind a person set meanwhile stands (§2, "The opt-out
-reader runs first"). `summarise_findings` has its task key and no caller yet; wiring it is
+reader runs first"). **`draft_outreach` had no caller until 2026-10-07**:
+`refineDraft` existed, with its check that the rewrite keeps every observed
+claim, and nothing called it, so every opener was the template. Now
+`enrolCampaign` takes an optional `refine`, asked once per company (the
+opener depends on the company alone), outside any transaction, only when a
+draft is about to be stored and never on a dry run, with a refiner that
+throws or answers blank leaving the template; the worker builds it from its
+model (`refineOpener` in `worker.ts`, through `SessionDeps` to
+`ToolContext.refineOpener`), and `enrol_contacts` hands it a signal that
+aborts at the tool's drafting deadline, so a slow model ends with the
+template stored rather than carrying the call past 30 s. The web's Enrol
+button passes none. The model is switched on by `./tools/run-worker.sh
+--ai` (`LLM_PROVIDER=anthropic`, `LLM_MODEL`, `LLM_ALLOW_REMOTE_LEAD_DATA=true`,
+saved like the other answers and handed to the worker only on a chat-on
+run, which is the one that hands it the Anthropic key), and it also powers
+reply triage. `summarise_findings` has its task key and no caller yet; wiring it is
 adding an `attemptText` call beside the deterministic answer that already
 exists, never in place of it. (The agent TOOL named `classify_reply` is a
 different thing: it records a kind a model or a person chose, and calls no
@@ -4191,6 +4206,7 @@ npm run smoke:agent -- --connector deepwiki   # the Phase 3 gate (§6's "no rest
 ./tools/run-worker.sh --reconfigure   # ask every question again
 ./tools/run-worker.sh --imap          # only reply detection's questions (a new Google app password), then run
 ./tools/run-worker.sh --secrets-key   # only SECRETS_KEY — Vercel's value, so a connector's encrypted key can be read
+./tools/run-worker.sh --ai            # whether a model sorts replies and polishes openers (sends them to Anthropic)
 ./tools/run-worker.sh --forget        # delete the saved answers
 ./tools/add-teammate.sh       # grant somebody access — or Settings → Team, in the browser
 ./tools/spend.sh              # what the API has actually cost: per day, per person, run rate

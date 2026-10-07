@@ -635,6 +635,28 @@ describe('the campaign tools', () => {
 
   // -------------------------------------------------------------------------
   describe('enrol_contacts', () => {
+    /**
+     * The worker's model polishes the opener when one is configured
+     * (`ctx.refineOpener`), inside the tool's time budget: it is handed a
+     * signal that is still live, and its words are what is stored.
+     */
+    it('stores the opener the worker’s model polished, handing it a live signal', async () => {
+      const id = await campaign({ name: 'Q4 security gaps' })
+      await scan()
+      await contact()
+      const signals: AbortSignal[] = []
+      const refineOpener = async (d: { subject: string; body: string; quoted: readonly string[] }, signal: AbortSignal) => {
+        signals.push(signal)
+        return { ...d, body: `${d.body}\n\nPolished by the model.` }
+      }
+      await run(enrolContacts, { campaignId: id }, { refineOpener })
+      const rows = await outbound()
+      expect(rows).toHaveLength(1)
+      expect(rows[0]!.body).toMatch(/Polished by the model\.$/)
+      expect(signals).toHaveLength(1)
+      expect(signals[0]!.aborted).toBe(false)
+    })
+
     it('writes awaiting_approval drafts into a supervised campaign — the rows the Enrol button writes', async () => {
       const id = await campaign({ name: 'Q4 security gaps' })
       await scan()

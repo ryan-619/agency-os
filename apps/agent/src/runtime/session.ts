@@ -16,7 +16,7 @@
 import { randomUUID } from 'node:crypto'
 import { and, eq, isNull } from 'drizzle-orm'
 import type { McpServerConfig, Options } from '@anthropic-ai/claude-agent-sdk'
-import { parseIcpDefinition, type ChatEventBody, type Principal } from '@agency/core'
+import { parseIcpDefinition, type ChatEventBody, type Draft, type Principal } from '@agency/core'
 import {
   activeIcpProfile, appendAudit, enabledAgentDefs, ensureApproval, expireApproval, readApproval,
   schema, type AgencyDb, type ApprovalRow,
@@ -94,6 +94,12 @@ export interface SessionDeps {
    * and the ops tools say the worker's own view is not available.
    */
   readonly ops?: OpsContext | undefined
+  /**
+   * The worker's model polishing an opener (`refineDraft`), handed to every
+   * turn's tool context when a model is configured (LLM_PROVIDER). Absent,
+   * enrolment drafts keep the template.
+   */
+  readonly refineOpener?: ((draft: Draft, signal: AbortSignal) => Promise<Draft>) | undefined
 }
 
 export interface TurnRuntime {
@@ -233,6 +239,8 @@ export async function buildTurnRuntime(
     audit,
     // The worker's own view, the same object for every turn; never the model's to supply.
     ...(deps.ops ? { ops: deps.ops } : {}),
+    // The worker's model for openers, when one is configured; the template stands otherwise.
+    ...(deps.refineOpener ? { refineOpener: deps.refineOpener } : {}),
   })
 
   const mcpServer = createAgencyMcpServer({

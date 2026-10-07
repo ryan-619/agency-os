@@ -32,7 +32,8 @@ import { and, eq, inArray, or, sql } from 'drizzle-orm'
 import {
   ENROL_IGNORED_REFUSALS, ENROL_LIMIT_DEFAULT, ENROL_LIMIT_MAX, enrolCompanyGate,
   enrolIgnoredStatuses, enrolPriorScope, enrolPriorSkip, enrolSkipCounts, enrollableContact, enrolmentDraft, isStale,
-  parseIcpDefinition, staleAfterDaysOf, type EnrolChannel, type EnrolPriorRow, type EnrolSkip, type IcpDefinition,
+  parseIcpDefinition, staleAfterDaysOf, type Draft, type EnrolChannel, type EnrolPriorRow, type EnrolSkip,
+  type IcpDefinition,
 } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
@@ -121,6 +122,15 @@ export async function enrolCampaign(
      * been told the call failed. The web route passes none.
      */
     readonly stopWhen?: () => boolean
+    /**
+     * Polishes a company's opener before it is written: once per company,
+     * outside any transaction, and only when a draft is about to be stored.
+     * The agent's tool passes the worker's model (`refineDraft`, which keeps
+     * every observed claim or hands the words back unchanged); the web route
+     * passes none, and the template stands. A refiner that throws leaves the
+     * template too — a model is an improvement, never a requirement.
+     */
+    readonly refine?: (draft: Draft) => Promise<Draft>
   },
 ): Promise<EnrolOutcome> {
   const now = args.now ?? new Date()
@@ -256,6 +266,9 @@ export async function enrolCampaign(
     }
 
     const earlierRows = await priorRows(db, prior, people.map((p) => p.id))
+    // The opener depends on the company alone, so it is polished once, for
+    // the first person a draft is stored for, and reused for the rest.
+    let opener: Draft | null = null
 
     for (const p of people) {
       const who = enrollableContact(p, companyZone.get(c.companyId) ?? null, channel)
@@ -281,12 +294,13 @@ export async function enrolCampaign(
         continue
       }
 
+      if (opener === null) opener = await polished(verdict.draft, args.refine)
       const touchId = await insertDraft(db, prior, {
         contactId: p.id,
         companyId: c.companyId,
         status,
-        subject: verdict.draft.subject,
-        body: verdict.draft.body,
+        subject: opener.subject,
+        body: opener.body,
       })
       if (touchId) {
         queued.push({ touchId, contactId: p.id, companyId: c.companyId })
@@ -378,6 +392,17 @@ async function priorRows(
           : thisCampaign,
       ),
     )
+}
+
+/** The refiner's words, or the template's when there is none or it fails. */
+async function polished(draft: Draft, refine: ((d: Draft) => Promise<Draft>) | undefined): Promise<Draft> {
+  if (!refine) return draft
+  try {
+    const out = await refine(draft)
+    return out.subject.trim() && out.body.trim() ? out : draft
+  } catch {
+    return draft
+  }
 }
 
 /**

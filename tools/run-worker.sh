@@ -29,6 +29,8 @@
 #   ./tools/run-worker.sh --secrets-key   ask only for SECRETS_KEY — the key
 #                                         connector credentials are encrypted
 #                                         with, Vercel's value — then run
+#   ./tools/run-worker.sh --ai            ask only whether a model sorts replies
+#                                         and polishes openers, then run
 #   ./tools/run-worker.sh --forget        delete the saved answers and stop
 #
 # Every credential is read at a HIDDEN prompt into this process's environment
@@ -55,8 +57,9 @@ case "${1:-}" in
   --reconfigure) MODE=reconfigure ;;
   --imap) MODE=imap ;;
   --secrets-key) MODE=secrets-key ;;
+  --ai) MODE=ai ;;
   --forget) MODE=forget ;;
-  *) echo "usage: $0 [--reconfigure | --imap | --secrets-key | --forget]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--reconfigure | --imap | --secrets-key | --ai | --forget]" >&2; exit 2 ;;
 esac
 
 # ── The Keychain (macOS only) ──────────────────────────────────────────────
@@ -69,7 +72,8 @@ SERVICE="agency-os-worker"
 SAVED_NAMES=(DATABASE_URL SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASSWORD MAIL_FROM
   DOVESOFT_API_KEY DOVESOFT_ENTITY_ID IMAP_HOST IMAP_USER IMAP_PASSWORD
   WEB_PUBLIC_URL UNSUBSCRIBE_SECRET SLACK_WEBHOOK_URL
-  CHAT_URL ANTHROPIC_API_KEY AGENT_INTERNAL_TOKEN SECRETS_KEY)
+  CHAT_URL ANTHROPIC_API_KEY AGENT_INTERNAL_TOKEN SECRETS_KEY
+  LLM_PROVIDER LLM_MODEL LLM_ALLOW_REMOTE_LEAD_DATA)
 
 have_keychain() { [ "$(uname -s)" = Darwin ] && command -v security >/dev/null 2>&1; }
 
@@ -167,8 +171,9 @@ node_modules/.bin/tsc --build
 
 # ── Read what was saved, or ask ──────────────────────────────────────────────
 LOADED="no"
-# --imap and --secrets-key read them too: each asks its own question over them.
-if { [ "$MODE" = run ] || [ "$MODE" = imap ] || [ "$MODE" = secrets-key ]; } && have_keychain && kc_get DATABASE_URL >/dev/null; then
+# --imap, --secrets-key and --ai read them too: each asks its own question over them.
+if { [ "$MODE" = run ] || [ "$MODE" = imap ] || [ "$MODE" = secrets-key ] || [ "$MODE" = ai ]; } \
+  && have_keychain && kc_get DATABASE_URL >/dev/null; then
   for n in "${SAVED_NAMES[@]}"; do
     if v=$(kc_get "$n"); then export "$n=$v"; fi
   done
@@ -528,6 +533,11 @@ if [ "$LOADED" = no ]; then
     SAVED_SECRETS_KEY=$(kc_get SECRETS_KEY) || SAVED_SECRETS_KEY=""
     [ -n "$SAVED_SECRETS_KEY" ] && export SECRETS_KEY="$SAVED_SECRETS_KEY"
     unset SAVED_SECRETS_KEY
+    # The model choice --ai made, for the same reason.
+    for n in LLM_PROVIDER LLM_MODEL LLM_ALLOW_REMOTE_LEAD_DATA; do
+      if v=$(kc_get "$n"); then export "$n=$v"; fi
+    done
+    unset v
   fi
   if have_keychain; then
     printf 'Remember these answers in your Keychain, so the next run asks nothing? [Y/n]: ' >&3
@@ -619,6 +629,45 @@ if [ "$MODE" = secrets-key ]; then
       echo "  Could not save SECRETS_KEY in the Keychain: this run uses it, the next one does not." >&2
     fi
   fi
+  exec 3>&-
+fi
+
+# ── --ai: a model sorting replies and polishing openers ───────────────────────
+# §5.5's single-shot model, for the two jobs the worker can hand it: reading a
+# reply's kind (interested, not now, wrong person, out of office) and
+# tightening an opener chat drafts — keeping every observed claim, or the
+# template stands. Both send a named person's words or a company's findings to
+# Anthropic, which is why it is a question and never a default: yes saves
+# LLM_PROVIDER=anthropic with LLM_ALLOW_REMOTE_LEAD_DATA=true, no removes them.
+# It uses the Anthropic key, which only a run with chat on hands the worker.
+if [ "$MODE" = ai ]; then
+  ask_open
+  printf 'Let a model sort replies and polish openers? A reply'"'"'s text and a company'"'"'s findings go to\n' >&3
+  printf 'Anthropic on your API key, as chat already sends your CRM. [y/N]: ' >&3
+  read -r ANSWER <&3
+  case "$ANSWER" in
+    [yY]*)
+      export LLM_PROVIDER=anthropic LLM_MODEL="${LLM_MODEL:-claude-haiku-4-5}" LLM_ALLOW_REMOTE_LEAD_DATA=true
+      AI_SAVED=yes
+      if have_keychain; then
+        for n in LLM_PROVIDER LLM_MODEL LLM_ALLOW_REMOTE_LEAD_DATA; do
+          kc_put "$n" "${!n}" || true
+          if [ "$(kc_get "$n" || true)" != "${!n}" ]; then
+            AI_SAVED=no
+            echo "  Could not save $n in the Keychain: this run uses it, the next one does not." >&2
+          fi
+        done
+      fi
+      [ "$AI_SAVED" = yes ] && printf '  Saved; the next run uses it too.\n' >&3
+      ;;
+    *)
+      unset LLM_PROVIDER LLM_MODEL LLM_ALLOW_REMOTE_LEAD_DATA
+      if have_keychain; then
+        for n in LLM_PROVIDER LLM_MODEL LLM_ALLOW_REMOTE_LEAD_DATA; do kc_del "$n"; done
+      fi
+      printf '  Off: replies keep the keyword reading and openers the template.\n' >&3
+      ;;
+  esac
   exec 3>&-
 fi
 
@@ -751,6 +800,13 @@ else
   echo "  keys:     OFF — only connectors that need no key work; '$0 --secrets-key'"
   echo "            takes the SECRETS_KEY Vercel holds"
 fi
+if [ "${LLM_PROVIDER:-}" = anthropic ] && [ "$CHAT" = yes ]; then
+  echo "  ai:       ON  — a model sorts replies and polishes openers (${LLM_MODEL:-default model})"
+elif [ "${LLM_PROVIDER:-}" = anthropic ]; then
+  echo "  ai:       OFF — it uses the Anthropic key, which only a run with chat on hands the worker"
+else
+  echo "  ai:       OFF — replies are read by keyword and openers keep the template; '$0 --ai'"
+fi
 if [ "$CHAT" = yes ]; then
   echo "  chat:     ON  — the live site reaches this Mac at $CHAT_URL (ngrok),"
   echo "            and every turn is billed to your Anthropic API key. Vercel needs"
@@ -782,6 +838,8 @@ if [ "$CHAT" = yes ]; then
 else
   WORKER_TOKEN="$(openssl rand -base64 32)"
   unset ANTHROPIC_API_KEY
+  # Without the key an Anthropic model is named and unreachable; say nothing to the worker.
+  [ "${LLM_PROVIDER:-}" = anthropic ] && unset LLM_PROVIDER LLM_MODEL LLM_ALLOW_REMOTE_LEAD_DATA
 fi
 # ngrok must not outlive the worker, and the exec below leaves nothing here to
 # stop it: a worker that refuses to boot or crashes left the tunnel holding

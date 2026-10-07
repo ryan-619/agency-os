@@ -229,6 +229,46 @@ describe('enrolling a campaign', () => {
     expect(pending.map((p) => p.contact?.id).sort()).toEqual([a, b].sort())
   })
 
+  /**
+   * The worker's model polishes an opener (`refine`, from the agent's tool):
+   * once per company, its words stored for every person there, and never on
+   * a dry run. A refiner that throws or answers blank leaves the template.
+   */
+  it('stores the refined opener, asking the refiner once per company and never on a dry run', async () => {
+    await scan()
+    await contact()
+    await contact({ email: 'sam@rentman.io' })
+    const asked: string[] = []
+    const refine = async (d: { subject: string; body: string; quoted: readonly string[] }) => {
+      asked.push(d.body)
+      return { ...d, subject: `Polished: ${d.subject}`, body: `${d.body}\n\nPolished.` }
+    }
+
+    ok(await enrol({ dryRun: true, refine }))
+    expect(asked).toEqual([])
+
+    const r = ok(await enrol({ refine }))
+    expect(r.queued).toHaveLength(2)
+    expect(asked).toHaveLength(1)
+    const rows = await outbound()
+    expect(rows.map((t) => t.subject)).toEqual([expect.stringMatching(/^Polished: /), expect.stringMatching(/^Polished: /)])
+    for (const row of rows) expect(row.body).toBe(`${asked[0]}\n\nPolished.`)
+  })
+
+  it('keeps the template when the refiner throws or answers blank', async () => {
+    await scan()
+    await contact()
+    ok(await enrol({ refine: async () => { throw new Error('the model is down') } }))
+    const [thrown] = await outbound()
+    expect(thrown!.subject).toContain('Rentman')
+    expect(thrown!.body).toContain('Northwind Security')
+
+    await db.delete(schema.touches)
+    ok(await enrol({ refine: async (d) => ({ ...d, body: '   ' }) }))
+    const [blank] = await outbound()
+    expect(blank!.body).toBe(thrown!.body)
+  })
+
   it('queues under auto-send, and never writes approved', async () => {
     const auto = await campaign({ name: 'Auto', autoSend: true })
     await scan()

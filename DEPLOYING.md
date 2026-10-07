@@ -480,6 +480,11 @@ item per variable), and every later run starts with no questions. Each value
 reaches `security` base64-encoded on its STDIN, never on its command line,
 where `ps` would show it to every user on the machine (§2.3).
 `./tools/run-worker.sh --reconfigure` asks again; `--forget` deletes them.
+`./tools/run-worker.sh --ai` asks one question — may a model sort replies and
+polish the openers chat drafts? — and a yes saves `LLM_PROVIDER=anthropic`,
+`LLM_MODEL` and `LLM_ALLOW_REMOTE_LEAD_DATA=true` (a reply's text and a
+company's findings go to Anthropic); the worker gets them only on a run with
+chat on, the one that hands it the Anthropic key.
 `./tools/run-worker.sh --imap` asks only reply detection's three questions —
 the IMAP host and username (Enter keeps the saved ones) and the app password,
 at a hidden prompt — saves those three, keeps every other saved answer, and

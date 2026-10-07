@@ -47,12 +47,15 @@ export async function refineDraft(args: {
   readonly llm: LlmProvider | null
   readonly allowRemoteForLeadData: boolean
   readonly draft: Draft
+  /** Ends the model call early — a caller with a time budget passes one; the written draft then stands. */
+  readonly signal?: AbortSignal
 }): Promise<Draft> {
   if (!args.llm) return args.draft
 
   const out = await attemptText({
     provider: args.llm,
     allowRemoteForLeadData: args.allowRemoteForLeadData,
+    ...(args.signal ? { signal: args.signal } : {}),
     request: {
       task: 'draft_outreach',
       system: SYSTEM,
