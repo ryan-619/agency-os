@@ -1169,7 +1169,11 @@ describe.runIf(PTY)('tools/run-worker.sh, answered at its prompts', () => {
 
   it('--google asks only for the key, refuses another shape, saves it, and keeps it through --reconfigure', async () => {
     save('DATABASE_URL', DB)
-    const KEY = 'AIzaSyTESTKEY-0123456789abcdefghijklmn'
+    // A Google API key is AIza and 35 more characters, 39 in all — the shape
+    // the script and the worker's env schema both hold it to. This fixture was
+    // one short, so the script refused it as it should and the test timed out.
+    const KEY = 'AIzaSyTESTKEY-0123456789abcdefghijklmno'
+    expect(KEY).toHaveLength(39)
     const r = await converse(layout(), ['--google'], [
       ['Google API key', 'not-a-key'],
       ['Google API key', KEY],
