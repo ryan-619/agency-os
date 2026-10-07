@@ -43,6 +43,9 @@ const KIND_LABEL: Readonly<Record<string, string>> = {
   kickoff: 'kickoff',
   renewal: 'renewal',
   linkedin_send: 'LinkedIn step',
+  // 0022: a person's acts — a call from their own phone, a visit on foot.
+  call: 'call',
+  visit: 'visit',
 }
 
 /** The end of a picked day, in the browser's zone, as an instant. */
@@ -214,6 +217,7 @@ export function NewTaskForm({
   const [detail, setDetail] = useState('')
   const [assignee, setAssignee] = useState(team.some((m) => m.id === currentUserId) ? currentUserId : '')
   const [day, setDay] = useState('')
+  const [kind, setKind] = useState<'todo' | 'call' | 'visit'>('todo')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -243,6 +247,7 @@ export function NewTaskForm({
       companyId: companyId ?? null,
       assigneeUserId: assignee || null,
       dueAt,
+      kind,
     })
     setBusy(false)
     if (!r.ok) {
@@ -264,6 +269,17 @@ export function NewTaskForm({
         <textarea value={detail} rows={2} onChange={(e) => setDetail(e.target.value)} />
       </label>
       <div className="two-up">
+        <label>
+          Kind
+          <select value={kind} onChange={(e) => setKind(e.target.value as 'todo' | 'call' | 'visit')}>
+            <option value="todo">To-do</option>
+            {companyId ? <option value="call">Call — from your own phone</option> : null}
+            {companyId ? <option value="visit">Visit — in person</option> : null}
+          </select>
+          {kind === 'call' ? (
+            <span className="hint">The system places no call. Check the number is not on the DND registry before calling.</span>
+          ) : null}
+        </label>
         <label>
           Assigned to
           <select value={assignee} onChange={(e) => setAssignee(e.target.value)}>

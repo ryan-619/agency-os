@@ -4,7 +4,7 @@ import {
 } from '@agency/core'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
-import { can } from '@agency/core'
+import { can, isNoSiteDomain } from '@agency/core'
 import {
   companyThread, linkedinThreadWithheld, listContactsForCompany, meetingsForCompany, openDealFor, proposalsForCompany,
   type AgencyDb, type LinkedinThreadWithheld,
@@ -13,6 +13,7 @@ import { CompanyEditSlot } from '@/components/company/edit'
 import { EvidencePanelsSlot } from '@/components/company/evidence'
 import { InformationalSlot } from '@/components/company/informational'
 import { NotesSlot } from '@/components/company/notes'
+import { OpportunitiesSlot } from '@/components/company/opportunities'
 import type { CompanySlotProps } from '@/components/company/slot'
 import { ContactsPanel } from '@/components/outreach/contacts'
 import { CompanyActions } from '@/components/pipeline/company-actions'
@@ -157,8 +158,8 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
       <p className="crumb"><a href="/companies">← Companies</a></p>
       <h1>{company.name ?? company.domain}</h1>
       <p className="lede">
-        <span className="mono">{company.domain}</span>
-        {score ? (
+        {isNoSiteDomain(company.domain) ? <span>no website of its own</span> : <span className="mono">{company.domain}</span>}
+        {isNoSiteDomain(company.domain) ? null : score ? (
           <>
             {' · '}
             {score.disqualifiedReason
@@ -170,8 +171,14 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
         )}
       </p>
       <CompanyEditSlot {...slot} />
+      <OpportunitiesSlot {...slot} />
 
-      {!found ? (
+      {isNoSiteDomain(company.domain) ? (
+        <div className="note" style={{ marginTop: 18 }}>
+          This business has no website of its own on record, so there is nothing to scan. What it needs is read from its
+          listing, above.
+        </div>
+      ) : !found ? (
         <div className="note">
           <strong>This company has never been scanned.</strong> There are no findings, and none are
           invented to fill the space. Run <code>npm run scan -- {company.domain}</code>.
