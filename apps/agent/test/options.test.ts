@@ -215,6 +215,23 @@ describe('the child environment', () => {
     expect(env['CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH']).toBeDefined()
   })
 
+  /**
+   * Measured on 2026-10-07: run from the repository on the operator's Mac,
+   * the CLI read the operator's own Claude Code memory
+   * (~/.claude/projects/<repo>/memory/MEMORY.md) into every turn as
+   * instructions, though `settingSources` is empty. And with tool search
+   * left to the CLI's default, every agency tool would sit behind a search
+   * tool `tools: []` does not give the model. Both paths, both switches.
+   */
+  it('keeps the operator’s memory and any CLAUDE.md out, and every tool in the prompt', () => {
+    for (const credential of [{ kind: 'api_key', apiKey: 'k' }, { kind: 'local_login' }] as const) {
+      const env = childEnv(credential)
+      expect(env['CLAUDE_CODE_DISABLE_AUTO_MEMORY'], credential.kind).toBe('1')
+      expect(env['CLAUDE_CODE_DISABLE_CLAUDE_MDS'], credential.kind).toBe('1')
+      expect(env['ENABLE_TOOL_SEARCH'], credential.kind).toBe('false')
+    }
+  })
+
   it('is passed to the query, so the subprocess inherits nothing by default', () => {
     expect(fixture().env).toEqual({ ANTHROPIC_API_KEY: 'k' })  // the fixture passes this env verbatim
   })

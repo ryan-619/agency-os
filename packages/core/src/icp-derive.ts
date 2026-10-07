@@ -129,7 +129,10 @@ export function deriveIcp(base: IcpDefinition, changes: IcpChanges): DeriveIcpRe
   const signals: Record<string, { weight: number; why: string; order?: number }> = {}
   for (const [key, sig] of Object.entries(base.signals)) signals[key] = { ...sig }
   for (const [key, weight] of Object.entries(changes.weights ?? {})) {
-    const sig = signals[key]
+    // An OWN signal only: `signals["__proto__"]` is Object.prototype and
+    // `signals["constructor"]` is Object, both truthy, and a weight written
+    // to either reached every object in the process.
+    const sig = Object.hasOwn(signals, key) ? signals[key] : undefined
     if (!sig) {
       return { ok: false, message: `"${key.slice(0, 40)}" is not a signal this profile scores; a new signal is a new scanner check, not a weight.` }
     }

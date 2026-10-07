@@ -31,6 +31,7 @@ import { createDeferredEmitter, startTurn } from './chat/turn.js'
 import { buildTurnRuntime, createHalt, resolvePrincipal, type RuntimeHalt } from './runtime/session.js'
 import { probeConnector } from './runtime/probe.js'
 import { inspectSkillsRoot } from './runtime/skills.js'
+import { agencyToolsToOmit } from './mcp/agency.js'
 
 export interface WorkerDeps {
   /** Already validated — `loadEnv()` in `index.ts`, or a test's own. */
@@ -236,6 +237,15 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
     ...(skills.names.length > 0 ? { names: skills.names } : {}),
   })
 
+  /**
+   * Whether the model can be shown every agency tool, asked once the way the
+   * CLI asks (mcp/agency.ts). A tool it cannot be shown is left out of every
+   * turn, loudly — left in, it empties the whole agency server, and chat
+   * carries on with the connectors alone and no error anywhere (2026-10-07).
+   * Only a worker that runs turns needs to know.
+   */
+  const omitTools: ReadonlySet<string> = credential ? await agencyToolsToOmit(log) : new Set()
+
   let secretsKey: Buffer | null = null
   if (env.SECRETS_KEY) {
     try {
@@ -294,7 +304,7 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
       return true
     },
     startTurn: (req) =>
-      beginTurn({ req, db, env, log, halt, running, secretsKey, skills, credential, ops, refineOpener }),
+      beginTurn({ req, db, env, log, halt, running, secretsKey, skills, credential, ops, refineOpener, omitTools }),
   })
 
   const apiPort = env.AGENT_PORT + 1
@@ -391,7 +401,7 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
       start: async (req) => {
         const begun = await beginTurn({
           req: { ...req, deep: false, unattended: true },
-          db, env, log, halt, running, secretsKey, skills, credential, ops, refineOpener,
+          db, env, log, halt, running, secretsKey, skills, credential, ops, refineOpener, omitTools,
         })
         if (!begun.ok) return { ok: false, message: begun.message }
         // Nobody reads this stream: the turn writes its own messages as it
@@ -479,8 +489,10 @@ async function beginTurn(args: {
   ops: OpsContext
   /** The worker's model polishing openers, built once at boot; undefined without one. */
   refineOpener: ((draft: Draft, signal: AbortSignal) => Promise<Draft>) | undefined
+  /** Agency tools the model cannot be shown, decided once at boot; empty when every one can. */
+  omitTools: ReadonlySet<string>
 }): Promise<{ ok: true; turn: TurnHandle } | { ok: false; status: number; message: string }> {
-  const { req, db, env, log, halt, running, secretsKey, skills, credential, ops, refineOpener } = args
+  const { req, db, env, log, halt, running, secretsKey, skills, credential, ops, refineOpener, omitTools } = args
 
   if (!credential) return { ok: false, status: 503, message: 'chat_disabled' }
   if (halt.halted()) return { ok: false, status: 503, message: 'runtime_halted' }
@@ -512,6 +524,7 @@ async function beginTurn(args: {
       now: () => new Date(),
       ops,
       refineOpener,
+      omitTools,
     },
     {
       orgId: who.orgId,

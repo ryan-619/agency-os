@@ -248,8 +248,13 @@ describe('the campaign tools', () => {
   // -------------------------------------------------------------------------
   describe('list_campaigns', () => {
     it('lists this org’s campaigns with their id, mode, cap, quiet hours and what each holds — never another org’s', async () => {
-      const q4 = await campaign({ name: 'Q4 security gaps' })
-      const li = await campaign({ name: 'LinkedIn pilot', channel: 'linkedin', status: 'draft', dailyCap: 10, quietStart: '20:00', quietEnd: '09:00' })
+      // Each its own moment: PGlite's clock is millisecond-grained, and two
+      // inserts in one millisecond have no "newest" to list first.
+      const q4 = await campaign({ name: 'Q4 security gaps', createdAt: new Date(NOW.getTime() - 120_000) })
+      const li = await campaign({
+        name: 'LinkedIn pilot', channel: 'linkedin', status: 'draft', dailyCap: 10, quietStart: '20:00', quietEnd: '09:00',
+        createdAt: new Date(NOW.getTime() - 60_000),
+      })
       await campaign({ name: 'RIVAL CAMPAIGN' }, otherOrgId)
       const jo = await contact()
       const base = { orgId, campaignId: q4, contactId: jo, companyId, channel: 'email', direction: 'out' } as const

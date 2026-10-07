@@ -100,6 +100,34 @@ describe('the profile tools, and a company’s market and size', () => {
       expect(refusalOf(await run(createIcp, { label: 'Elsewhere', geos: ['Atlantis'] })).message).toMatch(/not a country/)
     })
 
+    /**
+     * Weights are a list of pairs — a record cannot be described to the model,
+     * and one field that cannot empties the whole agency server
+     * (apps/agent/test/agency-tool-list.test.ts).
+     */
+    it('takes new weights as signal and weight pairs, refusing a signal named twice or unknown', async () => {
+      summaryOf(await run(createIcp, { label: 'Compliance-led', weights: [{ signal: 'compliance_claim', weight: 20 }] }))
+      const [row] = await db
+        .select()
+        .from(schema.icpProfiles)
+        .where(and(eq(schema.icpProfiles.orgId, orgId), eq(schema.icpProfiles.name, 'Compliance-led')))
+      expect((row?.definition as { signals: Record<string, { weight: number }> }).signals['compliance_claim']?.weight).toBe(20)
+
+      const twice = refusalOf(
+        await run(createIcp, {
+          label: 'Twice over',
+          weights: [{ signal: 'csp', weight: 5 }, { signal: 'csp', weight: 9 }],
+        }),
+      )
+      expect(twice.message).toMatch(/"csp" is given two weights/)
+      expect(refusalOf(await run(createIcp, { label: 'Made up', weights: [{ signal: '__proto__', weight: 5 }] })).code).toBe(
+        'invalid_state',
+      )
+      const names = (await db.select().from(schema.icpProfiles).where(eq(schema.icpProfiles.orgId, orgId))).map((r) => r.name)
+      expect(names).not.toContain('Twice over')
+      expect(names).not.toContain('Made up')
+    })
+
     it('switches the active profile, as an owner only, and says what follows', async () => {
       await run(createIcp, { label: 'Security-gap SaaS (India)', geos: ['IN'] })
       expect(refusalOf(await run(activateIcp, { name: 'Security-gap SaaS (India)' }, member())).code).toBe('not_permitted')

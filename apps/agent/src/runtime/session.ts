@@ -100,6 +100,12 @@ export interface SessionDeps {
    * enrolment drafts keep the template.
    */
   readonly refineOpener?: ((draft: Draft, signal: AbortSignal) => Promise<Draft>) | undefined
+  /**
+   * Agency tools the SDK cannot describe to the model, decided once at boot
+   * (`agencyToolsToOmit`) and left out of every turn's server — because one
+   * such tool in the server takes every other tool's listing down with it.
+   */
+  readonly omitTools?: ReadonlySet<string> | undefined
 }
 
 export interface TurnRuntime {
@@ -275,6 +281,7 @@ export async function buildTurnRuntime(
       })
     },
     log: deps.log,
+    omit: deps.omitTools,
   })
 
   // The same set both rings refuse: the hook denies first, and canUseTool

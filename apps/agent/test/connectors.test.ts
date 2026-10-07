@@ -414,6 +414,10 @@ describe('a stdio child launched the way the CLI launches it', () => {
       'CLAUDE_CONFIG_DIR',
       'CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS',
       'CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH',
+      // Switches, not credentials: what the CLI leaves out of the agent's context.
+      'CLAUDE_CODE_DISABLE_AUTO_MEMORY',
+      'CLAUDE_CODE_DISABLE_CLAUDE_MDS',
+      'ENABLE_TOOL_SEARCH',
     ]
     const emitted = [
       ...Object.keys(childEnv({ kind: 'api_key', apiKey: CANARY, workspaceId: 'ws' })),

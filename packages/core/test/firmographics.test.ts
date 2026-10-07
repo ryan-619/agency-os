@@ -163,6 +163,16 @@ describe('deriveIcp', () => {
     expect(deriveIcp(SEED, { label: 'X profile', weights: { csp: 51 } })).toMatchObject({ ok: false })
   })
 
+  it('refuses a weight named after an object’s own machinery, and touches no prototype', () => {
+    for (const key of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) {
+      const r = deriveIcp(SEED, { label: 'X profile', weights: Object.fromEntries([[key, 5]]) })
+      expect(r.ok, key).toBe(false)
+      if (!r.ok) expect(r.message).toMatch(/is not a signal this profile scores/)
+    }
+    expect(({} as { weight?: unknown }).weight).toBeUndefined()
+    expect((Object as unknown as { weight?: unknown }).weight).toBeUndefined()
+  })
+
   it('refuses, with a sentence, what it cannot store', () => {
     const refusals: [Parameters<typeof deriveIcp>[1], RegExp][] = [
       [{ label: 'ab' }, /3 to 80 characters/],

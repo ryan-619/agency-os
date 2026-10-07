@@ -820,7 +820,28 @@ on PATH and could test a different CLI from the one chat used.
 ### packages/tools
 The tools as PLAIN DATA, with **no import of the Agent SDK anywhere in the
 package**. `apps/agent/src/mcp/agency.ts` is the only file that adapts them to
-`createSdkMcpServer`, and it is about thirty lines.
+`createSdkMcpServer` — a thin adapter, plus the one question below that the
+CLI would otherwise answer in silence.
+
+**Every tool must be one the model can be shown (2026-10-07).** The CLI asks
+the in-process server for its tools, and the SDK converts every tool's zod
+shape to JSON Schema in that ONE answer. A shape it cannot convert — any
+`z.record`, measured against 0.3.269 — makes the whole answer an error, and
+the CLI is left with no agency tool at all. That is what 0021's `create_icp`
+did with `weights` (a record): in chat every `mcp__agency__*` call was "No
+such tool available", the model carried on with the connectors alone and
+told the operator it could not create a profile, and no log line said why.
+`weights` is a list of `{ signal, weight }` pairs now, and the worker asks
+once at boot, the way the CLI asks (`agencyToolsToOmit` → `listServerTools`,
+over MCP's own transport contract): a tool that cannot be listed is LEFT OUT
+of every turn and named at error (`AGENCY TOOLS LEFT OUT`), so a bad shape
+costs that tool, never the other fifty-one.
+`apps/agent/test/agency-tool-list.test.ts` lists the real server that way,
+with a control showing one record-shaped field empties the whole list. The
+server's own instructions, which reach the model every turn, said "every
+change asks a person" after the operator's 2026-10-06 decision that the
+team's own records change at once; they say what the gate does now
+(`AGENCY_SERVER_INSTRUCTIONS`).
 
 That split is not style. The SDK ships no mock transport and no
 recorded-session mode, so anything needing the SDK to be *defined* is also
@@ -1224,7 +1245,11 @@ the score at the next scan, and the tools say so.
 label, markets, headcount band, stages, must-haves, positioning, new weights
 for signals the base already scores — and validates it through
 `parseIcpDefinition`; a moved maximum rewrites `enterprise_scale`'s reason to
-the new number. `createIcpProfile` stores it INACTIVE under its label with an
+the new number. A weight names an OWN signal of the base (`Object.hasOwn`):
+looked up on the plain object, `__proto__` found `Object.prototype` and
+`constructor` found `Object`, and the weight was written onto them, for
+every object in the worker (fixed 2026-10-07, with `packages/core/test/
+firmographics.test.ts` checking no prototype moves). `createIcpProfile` stores it INACTIVE under its label with an
 `icp.created` row; `activateIcpProfile` switches the active profile in one
 transaction (the others off FIRST) with an `icp.activated` row; and 0021's
 `icp_profiles_one_active_per_org` makes a second active row unstorable — it
@@ -5449,6 +5474,21 @@ it to check a credential instead of an environment. Measured rather than
 reasoned: `auth status` answers `loggedIn: false` under `env -i PATH HOME` and
 `true` the moment `USER` is added back, and it is `USER` specifically —
 `LOGNAME`, `SHELL` and `TMPDIR` all leave it logged out.
+
+**`childEnv` also switches three things off, each measured on 2026-10-07.**
+Run from the repository on the operator's Mac, the CLI read the operator's
+own Claude Code memory (`~/.claude/projects/<the repo>/memory/MEMORY.md`)
+into every turn as instructions — `settingSources: []` does not stop auto
+memory — so a note written for a coding assistant, or anything somebody able
+to write that home directory put there, became an instruction to the agent:
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` keeps
+out every CLAUDE.md and rules file, which skills' `settingSources:
+['project']` would otherwise read from the worker's cwd (this repository, on
+the Mac). And `ENABLE_TOOL_SEARCH=false`: unset, CLI 2.1.269 chooses tool
+search, which only the absence of its search tool from `tools: []` keeps
+off; a CLI that kept it would hide every agency tool behind a search the
+model cannot run. All three are switches, not credentials, and
+`connectors.test.ts` lists them as things a stdio connector may see.
 
 **`pathToClaudeCodeExecutable` is in `ALLOWED_OPTION_KEYS` deliberately.** The
 SDK ships no CLI — it drives one — and resolves `claude` from PATH. A machine

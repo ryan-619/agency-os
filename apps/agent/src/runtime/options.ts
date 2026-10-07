@@ -314,6 +314,22 @@ export function childEnv(credential: AgentCredential): Record<string, string | u
     // Bound a subagent fan-out (§7).
     CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: process.env['CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS'] ?? '3',
     CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: process.env['CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH'] ?? '2',
+    // The operator's own Claude Code memory is not the agent's. Measured on
+    // 2026-10-07: run from the repository on the operator's Mac, the CLI read
+    // ~/.claude/projects/<the repo>/memory/MEMORY.md into every turn as
+    // instructions — notes written for a coding assistant, and a file that
+    // anyone able to write the operator's home directory could turn into
+    // instructions to this agent. `settingSources: []` does not stop it.
+    CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
+    // Nor any CLAUDE.md or rules file: with skills on, `settingSources:
+    // ['project']` would read one from the worker's cwd, which on the Mac is
+    // this repository. The agent's instructions are the system prompt.
+    CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1',
+    // Every agency tool in the prompt, never deferred behind a search tool.
+    // Unset, CLI 2.1.269 chooses tool search, and only ToolSearch's absence
+    // (`tools: []`) keeps it off; a CLI that kept it would hide every tool
+    // the system prompt names behind a search the model cannot run.
+    ENABLE_TOOL_SEARCH: 'false',
   }
 }
 

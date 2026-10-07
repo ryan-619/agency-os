@@ -140,10 +140,22 @@ const createIcpShape = {
   stages: z.array(z.enum(COMPANY_STAGES)).max(COMPANY_STAGES.length).optional().describe('The funding stages it targets.'),
   mustHave: z.array(z.string().max(160)).max(10).optional().describe('What a target must have, in a line each.'),
   positioning: z.string().max(1000).optional().describe('Who it is for and the wedge, in a paragraph.'),
+  // A list of pairs, never a `z.record`: the SDK cannot describe a record to
+  // the model, and one field it cannot describe makes the whole agency
+  // server's tool list fail — every tool, not only this one (2026-10-07;
+  // apps/agent/test/agency-tool-list.test.ts).
   weights: z
-    .record(z.string().max(60), z.number().int().min(1).max(50))
+    .array(
+      z.object({
+        signal: z.string().max(60).describe('A signal the base profile already scores, e.g. "compliance_claim".'),
+        weight: z.number().int().min(1).max(50).describe('Its new weight, 1 to 50.'),
+      }),
+    )
+    .max(40)
     .optional()
-    .describe('New weights for signals the base already scores, e.g. {"compliance_claim": 15}. Never a new signal.'),
+    .describe(
+      'New weights for signals the base already scores, e.g. [{"signal": "compliance_claim", "weight": 15}]. Never a new signal.',
+    ),
   disqualifyOutsideGeos: z.boolean().optional().describe('Disqualify a company whose recorded country is outside its markets.'),
   disqualifyTooSmall: z.boolean().optional().describe('Disqualify a company whose recorded headcount is under the minimum.'),
 }
@@ -160,6 +172,19 @@ export const createIcp: AgencyToolSpec<typeof createIcpShape> = {
     if (!can(ctx.principal, 'agents:write')) {
       return fail('not_permitted', `Only an owner can create a profile — it is the agent’s scoring brief. ${NOTHING_SENT}`)
     }
+    let weights: Record<string, number> | undefined
+    if (input.weights !== undefined) {
+      const bySignal = new Map<string, number>()
+      for (const { signal, weight } of input.weights) {
+        if (bySignal.has(signal)) {
+          return fail('invalid_state', `"${signal}" is given two weights; give each signal one. Nothing was created.`)
+        }
+        bySignal.set(signal, weight)
+      }
+      // fromEntries defines own keys, so a name like "__proto__" reaches the
+      // signal check as itself and is refused there as no signal.
+      weights = Object.fromEntries(bySignal)
+    }
     const headcount =
       input.headcountMin !== undefined || input.headcountMax !== undefined
         ? {
@@ -174,7 +199,7 @@ export const createIcp: AgencyToolSpec<typeof createIcpShape> = {
       ...(headcount ? { headcount } : {}),
       ...(input.stages !== undefined ? { stages: input.stages } : {}),
       ...(input.mustHave !== undefined ? { mustHave: input.mustHave } : {}),
-      ...(input.weights !== undefined ? { weights: input.weights } : {}),
+      ...(weights !== undefined ? { weights } : {}),
       ...(input.disqualifyOutsideGeos !== undefined ? { disqualifyOutsideGeos: input.disqualifyOutsideGeos } : {}),
       ...(input.disqualifyTooSmall !== undefined ? { disqualifyTooSmall: input.disqualifyTooSmall } : {}),
     }
