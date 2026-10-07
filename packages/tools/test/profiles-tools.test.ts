@@ -132,16 +132,24 @@ describe('the profile tools, and a company’s market and size', () => {
     it('imports a list with each company’s details, refusing a line whose details would not store', async () => {
       const out = await run(importCompanies, {
         companies: [
-          { domain: 'one.in', name: 'One', country: 'India', headcount: 40, headcountSource: 'tracxn', industry: 'healthtech' },
+          {
+            domain: 'one.in', name: 'One', country: 'India', timeZone: 'Asia/Kolkata', headcount: 40, headcountSource: 'tracxn',
+            industry: 'healthtech',
+          },
           { domain: 'two.in', name: 'Two', headcountSource: 'no count' },
           { domain: 'three.in', name: 'Three' },
+          { domain: 'four.in', name: 'Four', timeZone: 'Mars/Olympus' },
         ],
       })
       const summary = summaryOf(out)
       expect(summary).toMatch(/2 companies added/)
       expect(summary).toMatch(/Refused, line 2 \("two\.in"\): A headcount source needs the headcount it is for/)
-      expect(await companyRow('one.in')).toMatchObject({ headcount: 40, headcountSource: 'tracxn', industry: 'healthtech' })
+      expect(summary).toMatch(/Refused, line 4 \("four\.in"\)/)
+      expect(await companyRow('one.in')).toMatchObject({
+        headcount: 40, headcountSource: 'tracxn', industry: 'healthtech', timeZone: 'Asia/Kolkata',
+      })
       expect(await companyRow('two.in')).toBeUndefined()
+      expect(await companyRow('four.in')).toBeUndefined()
     })
 
     it('says a headcount changes the score at the next scan', async () => {

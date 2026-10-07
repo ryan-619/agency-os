@@ -761,6 +761,9 @@ const importCompaniesShape = {
         domain: z.string().min(1).max(253).describe('The company’s own public website domain.'),
         name: companyNameField.optional().describe('Its name, if known.'),
         country: companyCountryField.optional().describe('Its country, if known.'),
+        timeZone: companyZoneField
+          .optional()
+          .describe('Its IANA time zone, e.g. Asia/Kolkata — quiet hours fall back to it for people there with none.'),
         industry: firmographicFields.industry.optional(),
         city: firmographicFields.city.optional(),
         headcount: firmographicFields.headcount.optional(),
@@ -773,7 +776,7 @@ const importCompaniesShape = {
     .max(50)
     .describe(
       'Up to 50 companies, each by the domain of its own public website, with its name and what you know of it ' +
-        '(country, industry, city, headcount with its source, stage, description).',
+        '(country, time zone, industry, city, headcount with its source, stage, description).',
     ),
 }
 
@@ -790,7 +793,8 @@ export const importCompanies: AgencyToolSpec<typeof importCompaniesShape> = {
   name: 'import_companies',
   description:
     'Add a list of up to 50 companies to the CRM by the domains of their own public websites, each with its ' +
-    'name and what you know of it — country, industry, city, headcount with its source, stage, description. ' +
+    'name and what you know of it — country, time zone, industry, city, headcount with its source, stage, ' +
+    'description. ' +
     'Companies already there are left exactly as they are, and each line is reported as added, already present ' +
     'or refused with why. Nothing is scanned (scan_company does that when asked), and nothing is sent.',
   shape: importCompaniesShape,
@@ -817,10 +821,18 @@ export const importCompanies: AgencyToolSpec<typeof importCompaniesShape> = {
         checked.push({ line: i + 1, domain: addable.domain, refused: null, duplicate: true })
         return
       }
-      const patch = { ...(row.country !== undefined ? { country: row.country } : {}), ...firmographicPatch(row) }
+      const patch = {
+        ...(row.country !== undefined ? { country: row.country } : {}),
+        ...(row.timeZone !== undefined ? { timeZone: row.timeZone } : {}),
+        ...firmographicPatch(row),
+      }
       const parsed = companyPatchInput.safeParse(patch)
       if (!parsed.success) {
         checked.push({ line: i + 1, domain: addable.domain, refused: issueWords(parsed.error), duplicate: false })
+        return
+      }
+      if (parsed.data.timeZone && !isKnownTimeZone(parsed.data.timeZone)) {
+        checked.push({ line: i + 1, domain: addable.domain, refused: unknownZone(parsed.data.timeZone), duplicate: false })
         return
       }
       if (parsed.data.headcountSource && parsed.data.headcount === undefined) {
