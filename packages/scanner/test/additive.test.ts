@@ -43,9 +43,9 @@ function one(key: AdditiveKey, home: Partial<Home> = {}) {
 }
 
 describe('the key set', () => {
-  it('is thirteen keys, none of them in the ICP the goldens were computed against', () => {
-    expect(ADDITIVE_SIGNAL_KEYS).toHaveLength(13)
-    expect(new Set(ADDITIVE_SIGNAL_KEYS).size).toBe(13)
+  it('is twenty-five keys — thirteen security, twelve website presence — none in the ICP the goldens were computed against', () => {
+    expect(ADDITIVE_SIGNAL_KEYS).toHaveLength(25)
+    expect(new Set(ADDITIVE_SIGNAL_KEYS).size).toBe(25)
     const icp = JSON.parse(readFileSync(new URL('./icp-parity.json', import.meta.url), 'utf8')) as {
       signals: Record<string, unknown>
     }

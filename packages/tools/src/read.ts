@@ -9,7 +9,7 @@
  */
 import { z } from 'zod'
 import {
-  INFORMATIONAL_SIGNALS, countryCode, countryName, icpTargeting, informationalStatus, isStale, orderedSignals,
+  INFORMATIONAL_SIGNALS, countryCode, countryName, icpTargeting, informationalStatus, isPresenceSignal, isStale, orderedSignals,
   parseIcpDefinition, staleAfterDaysOf, type IcpDefinition,
 } from '@agency/core'
 import {
@@ -303,6 +303,9 @@ export const getCompany: AgencyToolSpec<typeof getCompanyShape> = {
         detail: f.detail,
       }))
 
+    const presence = informational.filter((i) => isPresenceSignal(i.key))
+    const securityContext = informational.filter((i) => !isPresenceSignal(i.key))
+
     const payload = {
       domain,
       name: company.name,
@@ -346,11 +349,22 @@ export const getCompany: AgencyToolSpec<typeof getCompanyShape> = {
         ...gaps.map((f) => `  ${String(f.weight).padStart(2)}  ${f.signalKey} — ${f.detail || 'absent'}`),
         'Already in place:',
         `  ${inPlace.map((f) => f.signalKey).join(', ') || 'none'}`,
-        ...(informational.length > 0
+        // Website presence (2026-10-08): what a visitor, a phone and a search
+        // engine find on the homepage. Observations of THIS scan, so quotable
+        // when pitching a website service — never as a security finding, and
+        // only while this evidence is current.
+        ...(presence.length > 0
           ? [
-              `Also observed, not scored (${informational.length}) — context only; not part of the score, ` +
+              `Website presence (${presence.length}) — observed on the homepage in this scan; may be quoted when ` +
+                'pitching a website, search or online-growth service, dated by this scan, and only while it is current:',
+              ...presence.map((i) => `  ${i.key} [${i.status}] — ${i.detail || i.label}`),
+            ]
+          : []),
+        ...(securityContext.length > 0
+          ? [
+              `Also observed, not scored (${securityContext.length}) — context only; not part of the score, ` +
                 'and never to be presented as a finding or quoted in outreach:',
-              ...informational.map((i) => `  ${i.key} [${i.status}] — ${i.detail || i.label}`),
+              ...securityContext.map((i) => `  ${i.key} [${i.status}] — ${i.detail || i.label}`),
             ]
           : []),
       ]),

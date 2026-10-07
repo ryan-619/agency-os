@@ -1335,6 +1335,28 @@ check and should be added if the scanner is ever aimed at untrusted input.
 
 ### Informational signals
 
+**Twelve website-presence keys joined them (2026-10-08)**, the questions an
+agency that builds, fixes and promotes websites asks of a homepage —
+`mobile_viewport`, `page_title`, `meta_description`, `social_preview`,
+`structured_data`, `contact_options`, `whatsapp_chat`, `analytics_tags`,
+`social_profiles`, `site_platform`, `copyright_year`, `booking_or_store`
+(`PRESENCE_SIGNAL_KEYS` in `packages/scanner/src/presence.ts`, spread into
+`ADDITIVE_SIGNAL_KEYS`, 25 in all). Still no new request: the HTML walk
+(`extractHtmlFacts`) gained a parallel `page` read — meta tags, link KINDS,
+forms, inline-script markers, the first title outside an SVG, footer years —
+beside the port's three fields, which html-parity still compares byte for
+byte. Three rules beyond the thirteen's. An ABSENCE ("no viewport tag", "no
+WhatsApp link") is claimed only off a page the walk read to its end
+(`PageFacts.complete`, `</body>` or `</html>` seen) and not cut at the read
+cap; anything less is unobserved. A contact link is COUNTED and never kept —
+a `tel:` or `mailto:` value is a person's number or address, and findings
+are shown and exported. And `booking_or_store` is never a gap: plenty of
+businesses take no bookings online. In core they carry `group: 'presence'`
+(`isPresenceSignal`), and `get_company` prints them apart from the security
+context: observations of that scan, quotable when pitching a website,
+search or online-growth service while the scan is current — where the
+security context stays "never quoted in outreach".
+
 **Thirteen additive keys, read from bytes already captured** — no new request
 class (`ADDITIVE_SIGNAL_KEYS`): `csp_report_only`, `csp_quality`,
 `cookie_flags`, `referrer_policy_quality`, `permissions_policy_quality`,
