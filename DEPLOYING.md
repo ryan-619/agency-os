@@ -1126,6 +1126,19 @@ table: assistant_settings   <- 0020 is applied`. Then **restart the worker**
 Settings → Assistant says so from its heartbeat. Reverting 0020 loses the
 playbook and the brief's schedule, and nothing else.
 
+**0021 adds four columns to `companies` and one index** — `industry`,
+`city`, `description`, `headcount_source`, and
+`icp_profiles_one_active_per_org`. It sets no variable either. Code deployed
+ahead of it fails on every page that lists companies (the list reads the new
+columns), so `release` applies it first as always, and
+`./tools/remote-status.sh` prints `companies.headcount_source:   <- 0021 is
+applied`. If a database somehow holds two active ICP profiles, 0021 keeps
+the newest active and switches the other off before it adds the index.
+Restart the worker afterwards: scoring reads a company's recorded headcount
+from then on, and the agent's profile and research tools exist only in the
+new code. Reverting 0021 drops the four columns, and with them every
+company's industry, city, description and headcount source.
+
 That probe was added with a fix: the script hands node its program as one
 single-quoted bash string, and the 0019 probe's quoted SQL literal ended the
 string early, so node was sent `to_regclass(message_templates)` and the

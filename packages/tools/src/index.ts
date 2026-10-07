@@ -17,6 +17,7 @@ export { listContacts, addCompany, updateCompany, importCompanies, addContact, u
 export { listCampaigns, createCampaign, updateCampaign, enrolContacts, listDrafts } from './campaigns.js'
 export { generateProposalTool, getProposal, listMeetings, rescheduleMeetingTool, cancelMeetingTool, recordMeetingOutcome, setDealOwnerTool, completeTask } from './proposals.js'
 export { workerStatus, recentErrors, queueStatus, rescanStale } from './ops.js'
+export { listIcps, createIcp, activateIcp } from './profiles.js'
 
 import { AGENCY_TOOL_NAMES } from '@agency/core'
 import type { AgencyToolSpec } from './spec.js'
@@ -32,6 +33,7 @@ import { listContacts, addCompany, updateCompany, importCompanies, addContact, u
 import { listCampaigns, createCampaign, updateCampaign, enrolContacts, listDrafts } from './campaigns.js'
 import { generateProposalTool, getProposal, listMeetings, rescheduleMeetingTool, cancelMeetingTool, recordMeetingOutcome, setDealOwnerTool, completeTask } from './proposals.js'
 import { workerStatus, recentErrors, queueStatus, rescanStale } from './ops.js'
+import { listIcps, createIcp, activateIcp } from './profiles.js'
 
 /**
  * Every tool the `agency` MCP server exposes.
@@ -96,6 +98,9 @@ export const AGENCY_TOOLS: readonly AgencyToolSpec[] = [
   recentErrors,
   queueStatus,
   rescanStale,
+  listIcps,
+  createIcp,
+  activateIcp,
 ] as unknown as readonly AgencyToolSpec[]
 
 export { AGENCY_TOOL_NAMES }

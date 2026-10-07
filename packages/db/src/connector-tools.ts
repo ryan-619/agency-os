@@ -155,13 +155,23 @@ export function connectorToolsDenied(row: ConnectorToolsRow): ReadonlySet<string
  * is disabled. Pure and total: any string in, a boolean out, nothing thrown.
  */
 export function connectorToolsIsDisabled(disabled: ReadonlySet<string>, toolName: string): boolean {
-  if (disabled.size === 0 || typeof toolName !== 'string') return false
-  if (disabled.has(toolName)) return true
+  return connectorToolsMatch(disabled, toolName)
+}
+
+/**
+ * Does a set of gate entries name this call? Exact name, or its server's `*`.
+ * The one matcher for both of the gate's per-connector sets — the tools an
+ * owner turned off, and a read-only research server an owner let run without
+ * a card (`connectorReadsAllowed`) — so the two cannot read a name differently.
+ */
+export function connectorToolsMatch(entries: ReadonlySet<string>, toolName: string): boolean {
+  if (entries.size === 0 || typeof toolName !== 'string') return false
+  if (entries.has(toolName)) return true
   if (!toolName.startsWith('mcp__')) return false
   const rest = toolName.slice('mcp__'.length)
   const cut = rest.indexOf('__')
   if (cut <= 0) return false
-  return disabled.has(connectorToolsEveryTool(rest.slice(0, cut)))
+  return entries.has(connectorToolsEveryTool(rest.slice(0, cut)))
 }
 
 /**

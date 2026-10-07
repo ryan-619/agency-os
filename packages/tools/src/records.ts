@@ -45,7 +45,7 @@
 import { z } from 'zod'
 import { and, eq, inArray, sql, type SQL } from 'drizzle-orm'
 import {
-  can, normaliseEmail, normaliseLinkedIn, normalisePhone, pauseReasonClass,
+  COMPANY_STAGES, can, normaliseEmail, normaliseLinkedIn, normalisePhone, pauseReasonClass,
   type PauseReasonClass, type SuppressionKind,
 } from '@agency/core'
 import {
@@ -463,6 +463,48 @@ const companyNameField = z.string().max(160)
 const companyCountryField = z.string().max(80)
 const companyZoneField = z.string().max(64)
 
+/**
+ * What a company is, from research (0021): the fields add_company,
+ * update_company and import_companies take beside the name, country and zone.
+ * A headcount is a claim, never an observation, so it is given with where it
+ * came from; a recorded headcount above the active profile's maximum makes
+ * the next scan's score `enterprise_scale`.
+ */
+const firmographicFields = {
+  industry: z.string().max(80).describe('Its sector, briefly, e.g. "fintech — payments" or "B2B SaaS — HR".'),
+  city: z.string().max(80).describe('The city of its main office, e.g. "Bengaluru".'),
+  headcount: z
+    .number()
+    .int()
+    .min(1)
+    .max(10_000_000)
+    .describe('Roughly how many people work there, as a whole number — the middle of a range like "51-200" is fine.'),
+  headcountSource: z
+    .string()
+    .max(300)
+    .describe('Where the headcount came from: a URL (its LinkedIn page, a directory) or a short note. Give one with every headcount.'),
+  stage: z.enum(COMPANY_STAGES).describe(`Its funding stage: ${COMPANY_STAGES.join(', ')}.`),
+  description: z.string().max(600).describe('One or two sentences on what it sells and to whom, from its own site.'),
+}
+
+type FirmographicInput = {
+  industry?: string | undefined
+  city?: string | undefined
+  headcount?: number | null | undefined
+  headcountSource?: string | undefined
+  stage?: (typeof COMPANY_STAGES)[number] | null | undefined
+  description?: string | undefined
+}
+
+/** The firmographic keys of an input that were given, for `companiesUpdate`. */
+function firmographicPatch(input: FirmographicInput): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const key of ['industry', 'city', 'headcount', 'headcountSource', 'stage', 'description'] as const) {
+    if (input[key] !== undefined) out[key] = input[key]
+  }
+  return out
+}
+
 const addCompanyShape = {
   domain: z
     .string()
@@ -476,25 +518,50 @@ const addCompanyShape = {
     .describe(
       'Its IANA time zone, e.g. Europe/Amsterdam. Quiet hours fall back to it for people here who have none of their own.',
     ),
+  industry: firmographicFields.industry.optional(),
+  city: firmographicFields.city.optional(),
+  headcount: firmographicFields.headcount.optional(),
+  headcountSource: firmographicFields.headcountSource.optional(),
+  stage: firmographicFields.stage.optional(),
+  description: firmographicFields.description.optional(),
 }
 
-const COMPANY_FIELD_WORDS: Record<string, string> = { name: 'name', country: 'country', timeZone: 'time zone' }
+const COMPANY_FIELD_WORDS: Record<string, string> = {
+  name: 'name',
+  country: 'country',
+  timeZone: 'time zone',
+  industry: 'industry',
+  city: 'city',
+  stage: 'stage',
+  headcount: 'headcount',
+  headcountSource: 'headcount source',
+  description: 'description',
+}
 
-/** "named Rentman, in the Netherlands, time zone Europe/Amsterdam" — what the row says now. */
+/** "named Rentman, in the Netherlands, time zone Europe/Amsterdam, …" — what the row says now. */
 function companyFacts(c: Company): string {
   return [
     c.name ? `named ${oneLine(c.name, 80)}` : 'no name recorded',
     c.country ? `country ${oneLine(c.country, 60)}` : 'no country recorded',
     c.timeZone ? `time zone ${oneLine(c.timeZone, 64)}` : 'no time zone',
+    ...(c.industry ? [`industry ${oneLine(c.industry, 80)}`] : []),
+    ...(c.city ? [`city ${oneLine(c.city, 80)}`] : []),
+    ...(c.stage ? [`stage ${c.stage}`] : []),
+    ...(c.headcount !== null
+      ? [`~${c.headcount.toLocaleString('en')} staff${c.headcountSource ? ` (per ${oneLine(c.headcountSource, 120)})` : ''}`]
+      : []),
   ].join(', ')
 }
+
 
 export const addCompany: AgencyToolSpec<typeof addCompanyShape> = {
   name: 'add_company',
   description:
-    'Add one company to the CRM by the domain of its own public website, with a name, country and IANA time ' +
-    'zone if known. A company already there is left exactly as it is. It records only that the team intends to ' +
-    'look at the company: nothing is scanned (scan_company does that when asked), and nothing is sent.',
+    'Add one company to the CRM by the domain of its own public website, with what you know of it: name, ' +
+    'country, IANA time zone, industry, city, headcount (with where that number came from), funding stage and a ' +
+    'one-line description. A company already there is left exactly as it is — update_company changes it. It ' +
+    'records only that the team intends to look at the company: nothing is scanned (scan_company does that), ' +
+    'and nothing is sent.',
   shape: addCompanyShape,
   async handler(input, ctx): Promise<ToolOutcome<unknown>> {
     // The import page's own gate.
@@ -510,10 +577,14 @@ export const addCompany: AgencyToolSpec<typeof addCompanyShape> = {
     const extras = companyPatchInput.safeParse({
       ...(input.country !== undefined ? { country: input.country } : {}),
       ...(input.timeZone !== undefined ? { timeZone: input.timeZone } : {}),
+      ...firmographicPatch(input),
     })
     if (!extras.success) return fail('invalid_state', `${issueWords(extras.error)} Nothing was added.`)
     if (extras.data.timeZone && !isKnownTimeZone(extras.data.timeZone)) {
       return fail('invalid_state', `${unknownZone(extras.data.timeZone)} Nothing was added.`)
+    }
+    if (extras.data.headcountSource && extras.data.headcount === undefined) {
+      return fail('invalid_state', 'A headcount source needs the headcount it is for. Nothing was added.')
     }
 
     const existing = await findCompanyByDomain(ctx.db, ctx.orgId, domain)
@@ -522,7 +593,7 @@ export const addCompany: AgencyToolSpec<typeof addCompanyShape> = {
       return ok(
         { companyId: existing.id, domain, created: false },
         `${domain} is already in the CRM (${companyFacts(existing)}); nothing was changed. update_company changes ` +
-          `its name, country or time zone. ${NOTHING_SENT}`,
+          `what is recorded about it. ${NOTHING_SENT}`,
       )
     }
 
@@ -540,7 +611,7 @@ export const addCompany: AgencyToolSpec<typeof addCompanyShape> = {
       if (!updated.ok) {
         return fail(
           updated.reason === 'not_found' ? 'not_found' : 'invalid_state',
-          `${domain} was added, but its country and time zone were not set: ${updated.message}`,
+          `${domain} was added, but the details given with it were not set: ${updated.message}`,
         )
       }
       company = updated.company
@@ -561,7 +632,7 @@ export const addCompany: AgencyToolSpec<typeof addCompanyShape> = {
       return ok(
         { companyId: company.id, domain, created: false },
         `${domain} was added by somebody else a moment ago (${companyFacts(company)}); nothing was changed. ` +
-          `update_company changes its name, country or time zone. ${NOTHING_SENT}`,
+          `update_company changes what is recorded about it. ${NOTHING_SENT}`,
       )
     }
     return ok(
@@ -590,6 +661,15 @@ const updateCompanyShape = {
       'Its IANA time zone, e.g. Europe/Amsterdam. An empty string clears it — then nothing can be sent to people ' +
         'here who have no zone of their own.',
     ),
+  industry: firmographicFields.industry.optional().describe('Its sector. An empty string clears it.'),
+  city: firmographicFields.city.optional().describe('The city of its main office. An empty string clears it.'),
+  headcount: firmographicFields.headcount
+    .nullable()
+    .optional()
+    .describe('Roughly how many people work there. null clears it, and its source with it.'),
+  headcountSource: firmographicFields.headcountSource.optional(),
+  stage: firmographicFields.stage.nullable().optional().describe('Its funding stage. null clears it.'),
+  description: firmographicFields.description.optional().describe('What it sells and to whom. An empty string clears it.'),
 }
 
 const COMPANY_REFUSAL: Record<Extract<Awaited<ReturnType<typeof companiesUpdate>>, { ok: false }>['reason'], ToolErrorCode> = {
@@ -600,9 +680,11 @@ const COMPANY_REFUSAL: Record<Extract<Awaited<ReturnType<typeof companiesUpdate>
 export const updateCompany: AgencyToolSpec<typeof updateCompanyShape> = {
   name: 'update_company',
   description:
-    'Change a company’s name, country or IANA time zone in the CRM — the zone is the one quiet hours fall back ' +
-    'to for people there with none of their own, and it is never guessed from the country. The domain cannot ' +
-    'be changed. This changes the CRM only; nothing is sent.',
+    'Change what the CRM records about a company: its name, country, IANA time zone, industry, city, ' +
+    'headcount (with where that number came from), funding stage or description. The zone is the one quiet ' +
+    'hours fall back to for people there with none of their own, and it is never guessed from the country. A ' +
+    'headcount or country changes the score only at the next scan (scan_company). The domain cannot be ' +
+    'changed. This changes the CRM only; nothing is sent.',
   shape: updateCompanyShape,
   async handler(input, ctx): Promise<ToolOutcome<unknown>> {
     // PATCH /api/companies/[id]'s own gate.
@@ -617,9 +699,13 @@ export const updateCompany: AgencyToolSpec<typeof updateCompanyShape> = {
       ...(input.name !== undefined ? { name: input.name } : {}),
       ...(input.country !== undefined ? { country: input.country } : {}),
       ...(input.timeZone !== undefined ? { timeZone: input.timeZone } : {}),
+      ...firmographicPatch(input),
     }
     if (Object.keys(patch).length === 0) {
-      return fail('invalid_state', `Say what to change: a name, a country or a time zone. ${UNCHANGED}`)
+      return fail(
+        'invalid_state',
+        `Say what to change: a name, country, time zone, industry, city, headcount, stage or description. ${UNCHANGED}`,
+      )
     }
     // The route's parse, with its words; `companiesUpdate` parses again.
     const parsed = companyPatchInput.safeParse(patch)
@@ -648,12 +734,16 @@ export const updateCompany: AgencyToolSpec<typeof updateCompanyShape> = {
       )
     }
     const zoneGone = r.changed.includes('timeZone') && !now.timeZone
+    const rescores = r.changed.some((f) => f === 'headcount' || f === 'country')
     return ok(
       { companyId: now.id, domain: now.domain, changed: r.changed },
       `${now.domain}: changed its ${r.changed.map((f) => COMPANY_FIELD_WORDS[f] ?? f).join(', ')} — now ` +
         `${companyFacts(now)}.` +
         (zoneGone
           ? ' With no time zone here, nothing can be sent to people at this company who have none of their own.'
+          : '') +
+        (rescores
+          ? ' Its size or country is judged against the active profile at its next scan; scan_company re-scores it now.'
           : '') +
         ` ${NOTHING_SENT}`,
     )
@@ -670,11 +760,21 @@ const importCompaniesShape = {
       z.object({
         domain: z.string().min(1).max(253).describe('The company’s own public website domain.'),
         name: companyNameField.optional().describe('Its name, if known.'),
+        country: companyCountryField.optional().describe('Its country, if known.'),
+        industry: firmographicFields.industry.optional(),
+        city: firmographicFields.city.optional(),
+        headcount: firmographicFields.headcount.optional(),
+        headcountSource: firmographicFields.headcountSource.optional(),
+        stage: firmographicFields.stage.optional(),
+        description: firmographicFields.description.optional(),
       }),
     )
     .min(1)
     .max(50)
-    .describe('Up to 50 companies, each by the domain of its own public website, with a name if known.'),
+    .describe(
+      'Up to 50 companies, each by the domain of its own public website, with its name and what you know of it ' +
+        '(country, industry, city, headcount with its source, stage, description).',
+    ),
 }
 
 type ImportOutcome = 'added' | 'already_present' | 'refused' | 'duplicate'
@@ -689,9 +789,10 @@ interface ImportLine {
 export const importCompanies: AgencyToolSpec<typeof importCompaniesShape> = {
   name: 'import_companies',
   description:
-    'Add a list of up to 50 companies to the CRM by the domains of their own public websites, with names if ' +
-    'known. Companies already there are left exactly as they are, and each line is reported as added, already ' +
-    'present or refused with why. Nothing is scanned (scan_company does that when asked), and nothing is sent.',
+    'Add a list of up to 50 companies to the CRM by the domains of their own public websites, each with its ' +
+    'name and what you know of it — country, industry, city, headcount with its source, stage, description. ' +
+    'Companies already there are left exactly as they are, and each line is reported as added, already present ' +
+    'or refused with why. Nothing is scanned (scan_company does that when asked), and nothing is sent.',
   shape: importCompaniesShape,
   async handler(input, ctx): Promise<ToolOutcome<unknown>> {
     // The import page's own gate.
@@ -701,6 +802,10 @@ export const importCompanies: AgencyToolSpec<typeof importCompaniesShape> = {
 
     const checked: Array<{ line: number; domain: string; refused: string | null; duplicate: boolean }> = []
     const rows: Array<{ domain: string; name?: string }> = []
+    // What each new company is recorded as, checked BEFORE anything is
+    // written, as add_company checks it: a line whose details would be
+    // refused is refused whole rather than half-added.
+    const details = new Map<string, Record<string, unknown>>()
     const seen = new Set<string>()
     input.companies.forEach((row, i) => {
       const addable = addableDomain(row.domain)
@@ -712,7 +817,20 @@ export const importCompanies: AgencyToolSpec<typeof importCompaniesShape> = {
         checked.push({ line: i + 1, domain: addable.domain, refused: null, duplicate: true })
         return
       }
+      const patch = { ...(row.country !== undefined ? { country: row.country } : {}), ...firmographicPatch(row) }
+      const parsed = companyPatchInput.safeParse(patch)
+      if (!parsed.success) {
+        checked.push({ line: i + 1, domain: addable.domain, refused: issueWords(parsed.error), duplicate: false })
+        return
+      }
+      if (parsed.data.headcountSource && parsed.data.headcount === undefined) {
+        checked.push({
+          line: i + 1, domain: addable.domain, refused: 'A headcount source needs the headcount it is for.', duplicate: false,
+        })
+        return
+      }
       seen.add(addable.domain)
+      if (Object.keys(parsed.data).length > 0) details.set(addable.domain, parsed.data)
       const name = row.name?.trim()
       rows.push({ domain: addable.domain, ...(name ? { name } : {}) })
       checked.push({ line: i + 1, domain: addable.domain, refused: null, duplicate: false })
@@ -721,6 +839,31 @@ export const importCompanies: AgencyToolSpec<typeof importCompaniesShape> = {
     // Source 'agent'. `ON CONFLICT DO NOTHING`: a company already here keeps its row as it is.
     const result = rows.length > 0 ? await importCompanyRows(ctx.db, ctx.orgId, rows, 'agent') : null
     const inserted = new Set(result?.domains ?? [])
+
+    // Only a row this call created gets its details — one already here is as
+    // whoever recorded it left it (update_company changes it).
+    const detailsNotSet: string[] = []
+    for (const domain of inserted) {
+      const patch = details.get(domain)
+      if (!patch) continue
+      const company = await findCompanyByDomain(ctx.db, ctx.orgId, domain)
+      if (!company) continue
+      const updated = await companiesUpdate(ctx.db, ctx.orgId, company.id, patch)
+      if (!updated.ok) {
+        detailsNotSet.push(`${domain}: ${updated.message}`)
+        continue
+      }
+      if (updated.changed.length > 0) {
+        await appendAudit(ctx.db, {
+          orgId: ctx.orgId,
+          actor: 'agent',
+          action: 'company.updated',
+          subjectType: 'company',
+          subjectId: company.id,
+          detail: { fields: updated.changed },
+        }).catch(() => {})
+      }
+    }
     const lines: ImportLine[] = checked.map((c) => ({
       line: c.line,
       domain: c.domain,
@@ -743,6 +886,7 @@ export const importCompanies: AgencyToolSpec<typeof importCompaniesShape> = {
       ...(added.length ? [`Added: ${added.join(', ')}`] : []),
       ...(present.length ? [`Already in the CRM, left as they were: ${present.join(', ')}`] : []),
       ...refused.map((l) => `Refused, line ${l.line} ("${l.domain}"): ${l.why}`),
+      ...detailsNotSet.map((d) => `Added, but its details were not set — ${d}`),
     ]
     return ok(
       { lines, added: added.length, alreadyPresent: present.length, refused: refused.length, duplicates: count('duplicate') },

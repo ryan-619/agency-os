@@ -209,6 +209,7 @@ export async function buildTurnRuntime(
       ...(connectors.skipped.length > 0 ? { skippedConnectors: connectors.skipped } : {}),
       // Tool NAMES — what the gate will refuse this turn, and nothing else.
       ...(connectors.disabledTools.size > 0 ? { disabledTools: [...connectors.disabledTools] } : {}),
+      ...(connectors.readsWithoutCard.size > 0 ? { readsWithoutCard: [...connectors.readsWithoutCard] } : {}),
       ...(subagents.skipped.length > 0 ? { skippedSubagents: subagents.skipped } : {}),
     })
   }
@@ -234,6 +235,7 @@ export async function buildTurnRuntime(
     // refused from the very next message, the same promise §6 makes for a
     // server that is turned on.
     disabledTools: connectors.disabledTools,
+    readsWithoutCard: connectors.readsWithoutCard,
     audit,
     emit: args.emit,
     markGated: () => {},
@@ -302,7 +304,14 @@ export async function buildTurnRuntime(
       PreToolUse: [{ hooks: [makePreToolUse(hookDeps)], timeout: HOOK_TIMEOUT_SECONDS }],
       PostToolUse: [{ hooks: [makePostToolUse(hookDeps)], timeout: HOOK_TIMEOUT_SECONDS }],
     },
-    systemPrompt: systemPrompt(args.orgName, icpLabel, playbook),
+    systemPrompt: systemPrompt(
+      args.orgName,
+      icpLabel,
+      playbook,
+      // The research servers an owner let run without a card, by name, so the
+      // model knows which searches cost nobody a click (2026-10-07).
+      [...connectors.readsWithoutCard].map((entry) => entry.slice('mcp__'.length, -'__*'.length)),
+    ),
     cwd: deps.cwd,
     abortController: abort,
     maxTurns: deps.maxTurns,

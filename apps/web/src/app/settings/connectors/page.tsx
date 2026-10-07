@@ -1,7 +1,8 @@
 import { redirect } from 'next/navigation'
 import { can, CONNECTOR_CATALOG } from '@agency/core'
 import {
-  connectorToolsState, listConnectors, parseConnectorConfig, secretsKeyFromEnv, type AgencyDb, type ConnectorRow,
+  connectorReadsState, connectorToolsState, listConnectors, parseConnectorConfig, secretsKeyFromEnv,
+  type AgencyDb, type ConnectorRow,
 } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
@@ -53,7 +54,8 @@ export default async function ConnectorsPage() {
         start of every message, so a server added here is usable immediately — no restart. Its tools
         are not pre-approved: a third-party tool nobody here has reviewed asks a person every time
         the agent calls it. An owner can also turn a tool off, and then it is refused without asking
-        anyone.
+        anyone — and can let a server that only searches and reads (Exa, Firecrawl, Tavily, Jina, the
+        documentation servers) run without asking, so research does not need a click per search.
       </p>
       <ConnectorsPanel
         connectors={rows.map(toView)}
@@ -87,6 +89,9 @@ function toView(row: ConnectorRow): ConnectorView {
     // function the worker's gate uses, so this page cannot show a list the
     // gate is not enforcing. The config it reads never crosses.
     disabledTools: connectorToolsState(row),
+    // The same derivation the worker's gate reads: eligible only for a server
+    // the catalog marks read-only, on only while an owner's switch is.
+    reads: (({ eligible, on }) => ({ eligible, on }))(connectorReadsState(row)),
   }
 }
 

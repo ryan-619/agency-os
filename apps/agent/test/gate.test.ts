@@ -911,6 +911,47 @@ describe('internal writes run without a card; what reaches a person keeps one', 
     expect(await canUseTool('mcp__agency__rescan_stale', {}, options())).toEqual({ behavior: 'allow' })
   })
 
+  /**
+   * A research server an owner let run without a card (connector-reads,
+   * 2026-10-07): the one allow a connector can have. Only for the entries the
+   * worker hands over (`mcp__<server>__*` for an eligible, switched-on row),
+   * never past a tool an owner turned off, and never in a turn nobody watches.
+   */
+  it('runs a research connector an owner switched on without a card, and audits it as connector_read', async () => {
+    const ensureApproval = vi.fn(async () => approvalRow())
+    const { deps, audited, ledger } = makeDeps({ ensureApproval, readsWithoutCard: new Set(['mcp__tavily__*']) })
+    const canUseTool = makeCanUseTool(deps)
+    expect(await canUseTool('mcp__tavily__tavily_search', { query: 'fintech saas india' }, options())).toEqual({
+      behavior: 'allow',
+    })
+    expect(ensureApproval).not.toHaveBeenCalled()
+    expect(audited).toContain('agent.tool_allow')
+    // Single-use in the ledger, like any read.
+    expect(ledger.outstanding).toBe(1)
+    // Another server still asks.
+    await canUseTool('mcp__zapier__send_email', { to: 'a@b.co' }, options({ toolUseID: 'toolu_2' }))
+    expect(ensureApproval).toHaveBeenCalledTimes(1)
+  })
+
+  it('still asks when the switch is off, refuses a disabled tool first, and declines in an unattended turn', async () => {
+    const off = vi.fn(async () => approvalRow())
+    await makeCanUseTool(makeDeps({ ensureApproval: off }).deps)('mcp__tavily__tavily_search', { query: 'x' }, options())
+    expect(off).toHaveBeenCalledTimes(1)
+
+    const disabled = makeDeps({
+      readsWithoutCard: new Set(['mcp__tavily__*']),
+      disabledTools: new Set(['mcp__tavily__tavily_crawl']),
+    })
+    const refused = await makeCanUseTool(disabled.deps)('mcp__tavily__tavily_crawl', { url: 'https://acme.in' }, options())
+    expect(refused).toMatchObject({ behavior: 'deny' })
+    expect(disabled.audited).toEqual(['agent.tool_disabled'])
+
+    const unattended = makeDeps({ readsWithoutCard: new Set(['mcp__tavily__*']), unattended: true })
+    const declined = await makeCanUseTool(unattended.deps)('mcp__tavily__tavily_search', { query: 'x' }, options())
+    expect(declined).toMatchObject({ behavior: 'deny', message: expect.stringContaining('may only read and scan') })
+    expect(unattended.audited).toEqual(['agent.tool_unattended'])
+  })
+
   it('runs an internal write at once when somebody IS watching', async () => {
     const { deps } = makeDeps({})
     expect(await makeCanUseTool(deps)('mcp__agency__add_note', { companyId: 'c-1', body: 'x' }, options())).toEqual({

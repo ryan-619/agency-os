@@ -518,6 +518,7 @@ describe('a connector it refuses to build', () => {
       servers: {},
       skipped: [],
       disabledTools: new Set(),
+      readsWithoutCard: new Set(),
     })
   })
 })
@@ -527,6 +528,46 @@ describe('a connector it refuses to build', () => {
  * form the gate sees them, from the servers this turn will actually have —
  * and never an allow of any kind: nothing here reaches `allowedTools`.
  */
+/**
+ * What the gate lets run without a card (connector-reads, 2026-10-07): a
+ * read-only research server an owner switched on, as `mcp__<name>__*` — and
+ * nothing for a server the catalog does not mark read-only, whatever its row
+ * stores, or for one nobody switched on.
+ */
+describe('the research a turn runs without a card', () => {
+  it('is mcp__<name>__* for an enabled read-only research server whose switch is on, and nothing else', async () => {
+    const { readsWithoutCard } = await buildMcpServers(
+      fakeDb([
+        row({ name: 'tavily', config: { url: 'https://mcp.tavily.com/mcp/', headers: {}, readsWithoutCard: true } }),
+        row({
+          id: '55555555-5555-4555-8555-555555555555',
+          name: 'exa',
+          config: { url: 'https://mcp.exa.ai/mcp', headers: {} },
+        }),
+        row({
+          id: '66666666-6666-4666-8666-666666666666',
+          name: 'zaps',
+          config: { url: 'https://mcp.zapier.com/api/v1/connect', headers: {}, readsWithoutCard: true },
+        }),
+      ]),
+      'org-1',
+      KEY,
+      silent,
+    )
+    expect([...readsWithoutCard]).toEqual(['mcp__tavily__*'])
+  })
+
+  it('takes nothing from a disabled row', async () => {
+    const { readsWithoutCard } = await buildMcpServers(
+      fakeDb([row({ enabled: false, name: 'tavily', config: { url: 'https://mcp.tavily.com/mcp/', headers: {}, readsWithoutCard: true } })]),
+      'org-1',
+      KEY,
+      silent,
+    )
+    expect(readsWithoutCard.size).toBe(0)
+  })
+})
+
 describe('the tools a turn refuses', () => {
   const second = '44444444-4444-4444-8444-444444444444'
 

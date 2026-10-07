@@ -134,7 +134,11 @@ export const icpProfiles = pgTable(
     active: boolean('active').notNull().default(true),
     ...timestamps,
   },
-  (t) => [uniqueIndex('icp_profiles_org_name_key').on(t.orgId, t.name)],
+  (t) => [
+    uniqueIndex('icp_profiles_org_name_key').on(t.orgId, t.name),
+    // 0021: one active profile per org; `activate_icp` swaps it in one transaction.
+    uniqueIndex('icp_profiles_one_active_per_org').on(t.orgId).where(sql`active`),
+  ],
 )
 
 export const companies = pgTable(
@@ -148,9 +152,17 @@ export const companies = pgTable(
     /** IANA zone for the company's main office. A FALLBACK for a contact who
      *  has none — never derived from `country`, which is not a timezone (0010). */
     timeZone: text('time_zone'),
+    /** Funding stage, one of `COMPANY_STAGES` (application-checked; 0021 explains why not a CHECK). */
     stage: text('stage'),
+    /** A claim from research, never a scan observation: shown with `headcountSource` (0021). */
     headcount: integer('headcount'),
     title: text('title'),
+    /** What the company is, from research (0021): bounded, and never a finding. */
+    industry: text('industry'),
+    city: text('city'),
+    description: text('description'),
+    /** Where the headcount came from — a URL or a short note. Never without a headcount (0021). */
+    headcountSource: text('headcount_source'),
     /** 'apollo' | 'manual' | 'import' | 'agent' */
     source: text('source').notNull().default('manual'),
     firstSeenAt: timestamp('first_seen_at', { withTimezone: true }).notNull().defaultNow(),

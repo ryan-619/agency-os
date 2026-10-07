@@ -28,7 +28,7 @@
  */
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 import { type ChatEventBody, classifyRisk, runsWithoutApproval } from '@agency/core'
-import { canonicalJson, connectorToolsIsDisabled, type ApprovalRow } from '@agency/db'
+import { canonicalJson, connectorToolsIsDisabled, connectorToolsMatch, type ApprovalRow } from '@agency/db'
 import { fingerprint, type AuthorisationLedger } from './ledger.js'
 import type { ApprovalWaiter } from './waiter.js'
 
@@ -98,6 +98,13 @@ export interface GateDeps {
    * read fresh with the rest of the runtime. Checked before classification.
    */
   readonly disabledTools: ReadonlySet<string>
+  /**
+   * Read-only research servers an owner let run without a card
+   * (`BuildResult.readsWithoutCard`, 2026-10-07): `mcp__<name>__*` entries.
+   * Asked AFTER `disabledTools` and after the unattended check, so neither a
+   * tool an owner turned off nor a turn nobody is watching ever reaches it.
+   */
+  readonly readsWithoutCard?: ReadonlySet<string>
   readonly audit: (action: string, detail: Record<string, unknown>) => Promise<void>
   readonly emit: (event: ChatEventBody) => void
   /** Marks a tool_use_id as having passed the gate, so a bypass is detectable. */
@@ -189,6 +196,24 @@ export function makeCanUseTool(deps: GateDeps): CanUseTool {
             'that may only read and scan. Do not try it another way: list it in your summary as a next step ' +
             'for a person.',
         )
+      }
+
+      // --- a read-only research server an owner let run without a card -------
+      // Only a connector the catalog marks read-only (Exa, Firecrawl, Tavily,
+      // Jina, the documentation servers), only while an owner's switch is on,
+      // and never past `disabledTools` or in an unattended turn — both asked
+      // above. Granted and audited exactly as an agency read is.
+      if (
+        verdict.rule === 'connector_unreviewed' &&
+        deps.readsWithoutCard !== undefined &&
+        connectorToolsMatch(deps.readsWithoutCard, toolName)
+      ) {
+        deps.ledger.grant(fp)
+        deps.markGated(options.toolUseID)
+        await deps.audit('agent.tool_allow', {
+          toolName, toolUseId: options.toolUseID, risk: verdict.risk, rule: 'connector_read',
+        })
+        return allow()
       }
 
       // --- runs at once: reads, derived writes, and internal writes ----------

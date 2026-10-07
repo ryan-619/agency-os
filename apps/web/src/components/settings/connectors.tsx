@@ -56,6 +56,12 @@ export interface ConnectorView {
   readonly summary: string
   /** Tool names only. */
   readonly disabledTools: DisabledToolsView
+  /**
+   * The owner's "runs without asking" switch for a read-only research server
+   * (connector-reads, 2026-10-07): whether this server may have it at all,
+   * and whether it is on. Derived from the row as the worker's gate derives it.
+   */
+  readonly reads: { readonly eligible: boolean; readonly on: boolean }
 }
 
 /**
@@ -263,6 +269,7 @@ export function ConnectorsPanel({
               {c.lastError ? <div className="err-line">{c.lastError}</div> : null}
               {error ? <div className="err-line">{error}</div> : null}
               <DisabledLine off={off} canWrite={canWrite} />
+              {c.reads.eligible ? <ReadsSwitch connector={c} canWrite={canWrite} /> : null}
 
               {probe ? (
                 <div className={probe.ok ? 'probe ok' : 'probe'}>
@@ -349,6 +356,66 @@ export function ConnectorsPanel({
  * What is refused on this server, said on the card whether or not anyone has
  * run Test connection in this visit — the gate enforces it either way.
  */
+/**
+ * "Runs without asking" — an owner's switch on a server the catalog marks
+ * read-only (Exa, Firecrawl, Tavily, Jina and the documentation servers).
+ * Off by default: every call asks a person. On: the agent may search and read
+ * with it at once, and every call is still recorded in /audit. The route
+ * refuses it for any other server; this only offers it where it can be saved.
+ */
+function ReadsSwitch({ connector, canWrite }: { connector: ConnectorView; canWrite: boolean }) {
+  const [on, setOn] = useState(connector.reads.on)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const save = async (next: boolean): Promise<void> => {
+    setBusy(true)
+    setError('')
+    try {
+      const res = await fetch(`/api/connectors/${connector.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ readsWithoutCard: next }),
+      })
+      const body = (await res.json().catch(() => ({}))) as { error?: string; readsWithoutCard?: boolean }
+      if (!res.ok) {
+        setError(body.error ?? 'That did not work.')
+        return
+      }
+      setOn(body.readsWithoutCard === true)
+    } catch {
+      setError('The request did not complete. Try again.')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div style={{ fontSize: 12.5, marginTop: 6 }}>
+      {canWrite ? (
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input
+            type="checkbox"
+            checked={on}
+            disabled={busy}
+            onChange={(e) => void save(e.target.checked)}
+            style={{ width: 'auto' }}
+          />
+          <span>
+            <strong>Runs without asking</strong> — this server only searches and reads public pages, so the AI may
+            use it without an approval card. Every call is still recorded in /audit.
+          </span>
+        </label>
+      ) : (
+        <span className="muted">
+          {on
+            ? 'Runs without asking: it only searches and reads public pages, and every call is recorded in /audit.'
+            : 'Asks a person on every call. An owner can let it run without asking — it only searches and reads.'}
+        </span>
+      )}
+      {error ? <div className="err-line">{error}</div> : null}
+    </div>
+  )
+}
+
 function DisabledLine({ off, canWrite }: { off: DisabledToolsView; canWrite: boolean }) {
   const names = (tools: readonly string[]) =>
     tools.map((t, i) => (

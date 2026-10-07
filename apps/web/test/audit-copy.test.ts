@@ -238,6 +238,13 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'send.template_mismatch': { campaignId: SUBJECT, channel: 'sms', code: 'template_mismatch' },
   // Review round 5: a promotional SMS whose band never opens, stored as unknown_timezone before.
   'send.band_never_opens': { campaignId: SUBJECT, channel: 'sms', code: 'band_never_opens' },
+  // ICP profiles (0021), and the research connectors an owner lets run without asking.
+  'icp.created': { name: 'Security-gap SaaS (India)', basedOn: 'Security-gap SaaS (US/EU)', geos: ['IN'], headcountMin: 10, headcountMax: 500 },
+  'icp.activated': { name: 'Security-gap SaaS (India)', previous: 'Security-gap SaaS (US/EU)' },
+  'agent.list_icps': { profiles: 2, turnId: SUBJECT },
+  'agent.create_icp': { created: true, profileId: SUBJECT, turnId: SUBJECT },
+  'agent.activate_icp': { changed: true, turnId: SUBJECT },
+  'connector.reads_without_card': { name: 'tavily', on: true },
   // Settings → Assistant (0020): the playbook and the morning brief.
   'assistant.playbook_updated': { chars: 38, before: 0 },
   'assistant.brief_updated': { enabled: true, at: '08:30', timeZone: 'Asia/Kolkata' },
@@ -529,6 +536,25 @@ describe('sentenceFor', () => {
     )
     // A playbook's words never reach the log, so nothing here can quote them.
     expect(JSON.stringify(WRITTEN['assistant.playbook_updated'])).not.toMatch(/[a-z]{4,}\s/i)
+  })
+
+  it('says what a profile and a research connector’s switch did (0021)', () => {
+    const say = (a: string, d: unknown = WRITTEN[a], actor = 'agent') => sentenceFor(line(a, d, { actor }), lookups)
+    expect(say('icp.created')).toBe(
+      'created the ICP profile “Security-gap SaaS (India)” from “Security-gap SaaS (US/EU)”: markets IN; 10–500 staff; it is inactive until somebody activates it',
+    )
+    expect(say('icp.activated')).toBe(
+      'made the ICP profile “Security-gap SaaS (India)” the active one (it was “Security-gap SaaS (US/EU)”); every later scan is scored under it',
+    )
+    expect(say('connector.reads_without_card', WRITTEN['connector.reads_without_card'], ORG_USER)).toBe(
+      'let the connector “tavily” run without asking — it only searches and reads, and every call is still recorded here',
+    )
+    expect(say('connector.reads_without_card', { name: 'tavily', on: false }, ORG_USER)).toBe(
+      'set the connector “tavily” to ask a person on every call again',
+    )
+    expect(say('agent.tool_allow', { toolName: 'mcp__tavily__tavily_search', toolUseId: 't1', risk: 'high', rule: 'connector_read' })).toBe(
+      'ran mcp__tavily__tavily_search without asking — a research connector that only searches and reads, which an owner set to run without asking',
+    )
   })
 
   it('says an internal write ran at once because it changes only the agency’s records, not that it is low risk', () => {

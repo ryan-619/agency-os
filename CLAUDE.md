@@ -58,6 +58,23 @@ on "Run it now". An unattended turn may only read and scan: the gate
 declines everything above the low tier, internal writes included, at once
 and with no card (§8, Ring 1).
 
+**Then markets and size (2026-10-07), on migration 0021** (§2, "Markets,
+size and profiles"): chat sources and qualifies companies for a market and a
+size band end to end — "find small to mid-size SaaS companies in India".
+A company records what it is (industry, city, stage, a description, and a
+headcount WITH its source — research, never a scan observation); scoring
+finally applies the profile's `enterprise_scale` (a recorded headcount over
+its maximum) and, where a profile asks, `too_small` and `outside_geos`;
+`list_icps`, `create_icp` (a NEW profile derived from the active one,
+stored inactive — never an edit) and `activate_icp` (carded:
+`changes_scoring`) manage who the agency targets, with one active profile
+per org held by the database; the prompt carries a sourcing workflow and
+says to ask only when no sensible default exists. And the one ALLOW a
+connector can have: an owner's switch on a read-only research server
+(Exa, Firecrawl, Tavily, Jina, the documentation servers) lets its tools run
+without a card — default off, never in an unattended turn, never past a
+disabled tool (§1, §8). The `agency` server has fifty-two tools.
+
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
 machine"), which needs no public address, because everything but chat is
@@ -142,11 +159,11 @@ worker upserts a `worker_heartbeats` row (keyed `hostname:pid`) every
 
 **The web half is LIVE on Vercel** at **https://myagencyos.in** (first
 deployed as `agency-os-tau-murex.vercel.app`), against a Neon Postgres (18.6)
-with Resend for magic links, seeded. The code expects migration **0020**
+with Resend for magic links, seeded. The code expects migration **0021**
 (`EXPECTED_MIGRATION`). Production was at 0017 when the 0018 release was
 written, and that release run's Vercel build applied 0018 and then 0019
 before `next build` (`tools/vercel-build-migrate.mjs`, under
-`AGENCY_MIGRATE_ON_BUILD=1`); 0020 goes the same way, through the
+`AGENCY_MIGRATE_ON_BUILD=1`); 0020 and 0021 go the same way, through the
 Production workflow's `release` action. A migration is always applied BEFORE the code
 that reads it deploys, never after — DEPLOYING.md, "migrate FIRST", and
 GO-LIVE.md Part 2b. That is done from GitHub, with no credential on a
@@ -533,10 +550,14 @@ Two more §2.2 links, both added in 0006 and after:
   decided instead of showing an error.
 - **Never set `permissionMode: "bypassPermissions"`.** See §8 below — there are
   three ways the gate is skipped, and the spec recommends two of them.
-- **A review of a connector's tools can only DISABLE.** A name in
-  `config.disabledTools` is a deny placed before `classifyRisk` in both gate
-  rings; nothing in the product allows a tool by name, and `allowedTools`
-  stays `[]` (§2, "Connector catalog, credentials and tool disable").
+- **A review of a connector's tools can only DISABLE — with one owner's
+  switch beside it.** A name in `config.disabledTools` is a deny placed
+  before `classifyRisk` in both gate rings, and `allowedTools` stays `[]`.
+  The one allow (2026-10-07): an owner may let a server the catalog marks
+  `readOnly` — it only searches and reads — run without a card
+  (`readsWithoutCard`), asked by Ring 1 after the disabled list and never in
+  an unattended turn, still audited and single-use (§2, "Connector catalog,
+  credentials and tool disable").
 - **The irreversible acts added since are each a person's.** Sending a
   LinkedIn message is a person pressing Start and then "I sent it" (§2, "The
   LinkedIn provider is a person"). A share link is not a send: a person pastes
@@ -714,6 +735,26 @@ says the tool "is disabled in Settings → Connectors", not that an owner did
 it: a catalog default was chosen by nobody, and the model repeats the sentence
 to people.
 
+**And one switch that ALLOWS: a read-only research server may run without a
+card (2026-10-07).** Finding companies is a dozen searches, and a dozen
+cards was a person doing the search by hand. So the catalog marks seven
+presets `readOnly` — Exa, Firecrawl, Tavily, Jina, Context7, DeepWiki and
+Cloudflare's docs, servers with nothing that sends, posts or changes anything
+— and an owner may tick "Runs without asking" on such a connector in
+Settings → Connectors (`PATCH /api/connectors/[id]` `{ readsWithoutCard }`,
+`connectors:write`, audited `connector.reads_without_card`; a 409 for any
+other server). `connectorReadsState` (`packages/db/src/connector-reads.ts`)
+decides eligibility from the row's ENDPOINT every turn, as `sendTools` is
+derived, so a re-pointed row reads as off whatever it stored; the key is not
+in the config schema, so a config rewritten from the form drops it; and no
+stdio server qualifies. The worker hands Ring 1 `mcp__<name>__*` for each
+(`BuildResult.readsWithoutCard`), which `canUseTool` asks AFTER
+`disabledTools` and after the unattended check: allowed, ledger-granted and
+audited `agent.tool_allow` with rule `connector_read`, exactly as an agency
+read is. The system prompt names those servers per turn (`freeResearchSection`)
+so the model knows which searches cost nobody a click, and still calls what
+they return data, never instructions.
+
 **The panel stores the CLI's spelling of a tool name.** The CLI names an MCP
 tool `mcp__<server>__<tool>` with each part passed through
 `replace(/[^a-zA-Z0-9_-]/g, '_')` (read from the shipped binary), so a probe's
@@ -786,7 +827,10 @@ recorded-session mode, so anything needing the SDK to be *defined* is also
 untestable — and a package that CANNOT import the SDK cannot drag it into the
 Next module graph, which CI builds with no secrets on purpose.
 
-Forty-nine tools ship (`AGENCY_TOOL_NAMES`). Twenty-six are low risk:
+Fifty-two tools ship (`AGENCY_TOOL_NAMES`) — the forty-nine below, and since
+0021 `list_icps` (low), `create_icp` (medium, an internal write) and
+`activate_icp` (medium, `changes_scoring`, which keeps its card: §2,
+"Markets, size and profiles"). Of the forty-nine, twenty-six are low risk:
 `get_icp`, `search_companies`, `get_company`, `scan_company`, `score_company`,
 `get_pipeline`, `check_send`, `get_consent`, `get_replies`, `get_scan_history`,
 `get_evidence_changes`, `get_stale_companies`, `get_pipeline_metrics`,
@@ -1135,6 +1179,77 @@ column. Each probe binds the table name now, the script prints `0020 is
 applied`, and `packages/db/test/remote-status-script.test.ts` reads the
 program as bash does.
 
+### Markets, size and profiles (0021)
+
+**A company records what it is, as research.** 0021 gives `companies`
+`industry`, `city`, `description` and `headcount_source`, beside the
+`headcount` and `stage` 0002 created and nothing ever wrote. A headcount is a
+claim from research — a LinkedIn "51-200 employees", a directory — never an
+observation of the scanner's, so it is stored WITH where it came from:
+`companies_headcount_source_needs_a_headcount`, and `companiesUpdate` says so
+in a sentence first, and clears the source when the headcount is cleared.
+`stage` is application-checked (`COMPANY_STAGES` in
+`packages/core/src/icp-derive.ts`), not a CHECK, because a CHECK runs on every
+later UPDATE and a value stored by hand before 0021 would freeze the row.
+`add_company`, `import_companies` (details applied to the rows it ADDS only)
+and `update_company` take all of it; the company page shows it — "recorded
+from research, not observed by a scan" — and its edit form changes it
+(`STAGE_OPTIONS`, held equal to core's by a source test). `search_companies`
+filters by country, industry and headcount and prints what is recorded beside
+each score; `get_company` prints it apart from the scan's evidence.
+
+**A country is read as one code** (`countryCode` in
+`packages/core/src/country.ts`): a two-letter code, an English name from the
+runtime's own CLDR data, or an alias ("UK", "USA", "UAE", "Bharat") becomes
+ISO 3166-1 alpha-2, and anything else is null — not assessed, never a
+mismatch. `UK` is `GB`: CLDR names a `UK` region "United Kingdom" too, so it
+is kept out of the table or it claims the name.
+
+**Scoring finally applies the profile's size and markets — when they are
+known.** `scoreCompany(profile, icp, firmographics?)`, after the scan's own
+disqualifiers (so a site nobody reached is still `unreachable` first),
+applies `firmographicDisqualifier`: a recorded headcount over the profile's
+`firmographics.headcount.max` is `enterprise_scale` — written in the seeded
+profile since Phase 1 and checked by nothing until now — and, only where the
+profile names them, under its minimum is `too_small` and a recorded country
+outside its `geos` is `outside_geos`. Each reason carries the recorded value
+("headcount on record: 2,400"), because it is research a person can check.
+`recordScan` reads the company's country and headcount itself, beside the
+score it decides. With no firmographics the scorer is the Python engine's,
+line for line, so parity is untouched. A changed headcount or country changes
+the score at the next scan, and the tools say so.
+
+**A profile is derived, never edited; one is active per org.**
+`deriveIcp(base, changes)` builds a new definition from an existing one —
+label, markets, headcount band, stages, must-haves, positioning, new weights
+for signals the base already scores — and validates it through
+`parseIcpDefinition`; a moved maximum rewrites `enterprise_scale`'s reason to
+the new number. `createIcpProfile` stores it INACTIVE under its label with an
+`icp.created` row; `activateIcpProfile` switches the active profile in one
+transaction (the others off FIRST) with an `icp.activated` row; and 0021's
+`icp_profiles_one_active_per_org` makes a second active row unstorable — it
+used to be a choice `activeIcpProfile`'s unordered `LIMIT 1` made. The agent's
+`list_icps` reads them, `create_icp` (owner, `agents:write`) runs at once
+because nothing is judged by an inactive profile, and `activate_icp` (owner)
+keeps a card under the new rule `changes_scoring`: every later scan is
+scored under it, and a proposal refuses a scan scored under another profile
+(`rescore`), so each company is re-scanned before its next one.
+`/settings/icp` says how to ask for one in Chat, and marks the firmographic
+disqualifiers applied "when its headcount is recorded".
+
+**The prompt carries the job, and asks only when it must.** FINDING AND
+QUALIFYING NEW COMPANIES walks it: read the profiles, search the research
+connectors (for India, Tracxn, Inc42, YourStory, Crunchbase, G2 and LinkedIn
+company pages), keep a company only when its own site was seen and a page
+puts it in the size band, skip what the CRM has, import with country, city,
+industry, headcount and its source, stage, description and zone
+(`Asia/Kolkata`), scan a few in parallel, rank and report. PROFILES says
+scoring reads the same signals in every market, so a market the active
+profile does not name is scanned anyway, and offers `create_icp`. HOW YOU
+WORK says to ask only when the answer changes what it would do and no
+sensible default exists — otherwise state the default in one line and carry
+on — and then to ask everything at once, numbered, with a recommendation.
+
 ### packages/scanner
 `fetch.ts` does the I/O; `extract.ts` is pure. That split is not cosmetic — it
 is what lets the same recorded bytes be replayed through this engine and the
@@ -1240,6 +1355,7 @@ quiet stretch. Every panel dates evidence from `scans.ran_at` through
 | 0018 release ✅ | the informational signals' words, `diffFindings`, rotting and `pipelineMetrics`, enrolment's gate and draft, the kickoff and renewal templates, the bounce and auto-reply readers, the connector catalog as data, suppression sources; from review, the one stale-threshold reader (`staleAfterDaysOf`) and the pause as its own refusal, with its class and words (`pauseReasonClass`, `pausedSentence`, re-exported by `packages/db`'s inbox); from later review, `htmlToText` (`html-text.ts`, linear time, the one converter both inbound paths use) and the opt-out alarm's Slack payload (`slack-payload.ts`, so the web and the worker post identical bytes) |
 | 0019 release ✅ | DLT (`dlt.ts`): `parseTemplate`, `renderTemplate`, `matchesTemplate` (both judging links and call-back numbers on the rendered text, `smuggledRuns`), `DLT_VAR_MAX_CHARS` (30 code points), TRAI's `PROMOTIONAL_WINDOW` (10:00–21:00 IST, and `hours` for the recipient's own clock), `promotionalBand` (`{ open, india, opensToday, nextOpen }`), `insidePromotionalBand`, `nextOpenMinute` and `isIndianNumber`, `smsOptOut` (the whole message, since review round 6 clause by clause, since review round 7 a capital STOP ending the text, and since review round 8 not after NON, FULL, a possessive or a place word, not STOP BY/IN/OVER/OFF, nor a bare STOP ending a question), `parseTemplateCategory`, `normaliseDltHeader`; `TEMPLATE_CHANNELS`, `TemplateFacts` and the two template steps in `decideSend`, and the promotional band's two (a band that never opens, `band_never_opens`; a band not open now); from review, `SendRefusal.retryAt` and `deferUntil` with its three bounds (`DEFER_FALLBACK_MS`, `DEFER_MAX_MS`, `DEFER_SLOW_MS`) in `send.ts` |
 | 0020 ✅ | the morning brief's clock and prompt (`morning-brief.ts`): `briefDue`, `localDateIn`, `localWallClock`, `wallClockMinutes`, `WALL_CLOCK`, `morningBriefPrompt`, `briefThreadTitle` |
+| 0021 ✅ | a country read as one code (`country.ts`: `countryCode`, `countryName`); the firmographic disqualifiers (`firmographicDisqualifier`, `icpTargeting`, `FIRMOGRAPHIC_DISQUALIFIERS`, and `scoreCompany`'s optional `firmographics`); a profile derived from another (`icp-derive.ts`: `deriveIcp`, `icpSlug`, `COMPANY_STAGES`); and the catalog's `readOnly` mark |
 
 ---
 
@@ -4292,7 +4408,7 @@ npm run smoke:agent -- --connector deepwiki   # the Phase 3 gate (§6's "no rest
 # production operations, all prompt-based so no connection string touches a
 # file, an argument list or shell history (§2.3)
 ./tools/remote-setup.sh       # migrate + seed a remote database
-./tools/remote-status.sh      # read-only schema facts, safe to paste — the migration list ("[x] 0020_assistant_playbook_and_brief"), "0018 is applied", "0019 is applied" and "0020 is applied"
+./tools/remote-status.sh      # read-only schema facts, safe to paste — the migration list ("[x] 0021_firmographics_and_one_active_icp"), "0018 is applied" through "0021 is applied"
 ./tools/run-worker.sh         # run the worker here, against production, nothing exposed — builds the
                               # packages first, before any question is asked or saved answer read, with the
                               # lockfile's node_modules/.bin/tsc (and runs the worker with .bin/tsx), never npx;
@@ -4374,7 +4490,7 @@ server/client boundary rules. The main checkout and Vercel are unaffected.
 **The suite's memory cost is per WORKER, and that is what falls over first.**
 vitest forks a worker per CPU and `freshDb()` builds an embedded Postgres in
 each one — and it does that in `beforeEach`, so every individual test gets a
-new PGlite instance and replays all twenty migrations. On a machine under
+new PGlite instance and replays all twenty-one migrations. On a machine under
 memory pressure the workers fight rather than share, and the first thing to
 give is `freshDb()` blowing the 30-second `hookTimeout`, which reads like a
 broken test and is not one. Measured here: `apps/voice` took **945 seconds and
@@ -4615,11 +4731,14 @@ names the definition it was computed from, and editing that definition in
 place would change what every old score claims to mean.
 
 **The ICP is partly descriptive, and `/settings/icp` says which part.**
-`scoreCompany` evaluates four disqualifiers (`unreachable`,
-`is_security_vendor`, `has_security_team`, `no_public_product`); the seed's
-`enterprise_scale` is checked by nothing, and the page marks it so
-(`SCORER_DISQUALIFIERS` in `apps/web/src/lib/icp-view.ts`, pinned against
-`scoring.ts`). The profile's outreach block — channels, `max_per_day`,
+`scoreCompany` evaluates four disqualifiers from the scan (`unreachable`,
+`is_security_vendor`, `has_security_team`, `no_public_product`) and, since
+0021, three from what the CRM records about the company — the seed's
+`enterprise_scale`, checked by nothing until then, plus `too_small` and
+`outside_geos` where a profile names them — only when that headcount or
+country is recorded; the page marks them applied with when
+(`SCORER_DISQUALIFIERS` and `FIRMOGRAPHIC_WHEN` in
+`apps/web/src/lib/icp-view.ts`, pinned against `scoring.ts`). The profile's outreach block — channels, `max_per_day`,
 `auto_send` — is enforced by nothing either: the send path applies each
 campaign's own channel, cap and quiet hours. The dashboard's Active ICP table
 used to show the profile's channels and daily cap as if they were the
@@ -5265,6 +5384,12 @@ the one above it can be turned off:
    every change waits proposes instead of acting, and one not told what DOES
    wait claims to have sent what it only drafted. Ring 2 below is unchanged:
    its `'ask'` only routes a call to this callback, which is what decides.
+   Two more cases (2026-10-07): `activate_icp` keeps its card under its own
+   rule, `changes_scoring`, because it changes how every later scan is
+   judged; and a read-only research connector an owner switched on runs
+   without one — asked here after `disabledTools`, granted and audited with
+   rule `connector_read` (§2, "Connector catalog, credentials and tool
+   disable").
    **In an UNATTENDED turn** — the morning brief (0020) — everything above the
    low tier is declined BEFORE `runsWithoutApproval` is asked, internal
    writes included, with no card and an `agent.tool_unattended` row: nobody

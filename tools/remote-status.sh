@@ -143,6 +143,14 @@ const { Client } = require("pg");
   console.log("  0020 table: assistant_settings" +
     (t20.rows[0].present ? "   <- 0020 is applied" : " MISSING   <- 0020 is NOT applied, do not deploy"));
 
+  // 0021: what a company is recorded as (industry, city, the source of its
+  // headcount) and one active ICP per org.
+  const c21 = await c.query(`
+    select 1 from information_schema.columns
+     where table_schema = current_schema() and table_name = $1 and column_name = $2`, ["companies", "headcount_source"]);
+  console.log("  companies.headcount_source:" +
+    (c21.rows.length ? "   <- 0021 is applied" : " MISSING   <- 0021 is NOT applied, do not deploy"));
+
   // A count and an age, like the users count below: never a row. /api/health
   // already publishes the same age as worker.ageSeconds.
   if (t18.rows.find(r => r.t === "worker_heartbeats" && r.present)) {

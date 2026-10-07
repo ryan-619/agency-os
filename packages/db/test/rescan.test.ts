@@ -104,8 +104,8 @@ describe('selectRescanTargets', () => {
   const now = new Date('2026-09-30T03:17:00Z')
   const ago = (ms: number) => new Date(now.getTime() - ms)
   const row = (domain: string, lastScanAt: Date | null, lastScanOk: boolean | null = lastScanAt ? true : null): CompanyListRow => ({
-    companyId: domain, domain, name: null, score: null, tier: null, qualified: false,
-    disqualifiedReason: null, lastScanAt, lastScanOk,
+    companyId: domain, domain, name: null, country: null, headcount: null, industry: null, city: null,
+    score: null, tier: null, qualified: false, disqualifiedReason: null, lastScanAt, lastScanOk,
   })
   const opts = { staleDays: 14, now, batch: 10, minAgeHours: RESCAN_MIN_AGE_HOURS }
   const domains = (rows: readonly CompanyListRow[]) => rows.map((r) => r.domain)

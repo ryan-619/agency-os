@@ -777,6 +777,10 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   // row carries their real tier: "it is low risk" would be false of them.
   'agent.tool_allow': (c) => {
     const risk = word(c.d, 'risk')
+    // A read-only research server an owner set to run without asking (connector-reads, 2026-10-07).
+    if (word(c.d, 'rule') === 'connector_read') {
+      return `ran ${tool(c.d)} without asking — a research connector that only searches and reads, which an owner set to run without asking`
+    }
     if (risk === null || risk === 'low') return `ran ${tool(c.d)} without asking — it is low risk`
     if (word(c.d, 'rule') === 'writes_internal_state') {
       return `ran ${tool(c.d)} without asking — it changes only the agency's own records, and sends nothing`
@@ -829,6 +833,10 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     return `tested ${theNamed(c.d, 'connector')}: it answered${tools ? ` and offered ${plural(tools.length, 'tool')}` : ''}`
   },
   'connector.probe_failed': (c) => `tested ${theNamed(c.d, 'connector')}: it could not be reached`,
+  'connector.reads_without_card': (c) =>
+    flag(c.d, 'on') === true
+      ? `let ${theNamed(c.d, 'connector')} run without asking — it only searches and reads, and every call is still recorded here`
+      : `set ${theNamed(c.d, 'connector')} to ask a person on every call again`,
   'connector.tools_disabled': (c) => {
     const tools = words(c.d, 'tools')
     return `changed which tools of ${theNamed(c.d, 'connector')} the agent may use${tools ? ` (${plural(tools.length, 'tool')} off)` : ''}`
@@ -958,6 +966,24 @@ const SENTENCES: Readonly<Record<string, Template>> = {
             } — /campaigns lists them`
     }
     return join([digest, alert, unannounced])
+  },
+
+  // --- ICP profiles (0021): derived, never edited; one active per org ------
+  'icp.created': (c) => {
+    const basedOn = text(c.d, 'basedOn', 80)
+    const geos = words(c.d, 'geos')
+    const min = num(c.d, 'headcountMin')
+    const max = num(c.d, 'headcountMax')
+    const size =
+      min !== null && max !== null ? `${min}–${max} staff` : max !== null ? `up to ${max} staff` : min !== null ? `${min}+ staff` : null
+    return `created ${theNamed(c.d, 'ICP profile')}${basedOn ? ` from “${basedOn}”` : ''}${tail([
+      geos && geos.length > 0 && `markets ${geos.join(', ')}`,
+      size,
+    ])}; it is inactive until somebody activates it`
+  },
+  'icp.activated': (c) => {
+    const previous = text(c.d, 'previous', 80)
+    return `made ${theNamed(c.d, 'ICP profile')} the active one${previous ? ` (it was “${previous}”)` : ''}; every later scan is scored under it`
   },
 
   // --- Settings → Assistant (0020): the playbook and the morning brief -----
@@ -1360,6 +1386,8 @@ export function subjectHref(row: AuditLine, company: AuditCompanyRef | null): st
       return '/settings/credentials'
     case 'assistant':
       return '/settings/assistant'
+    case 'icp_profile':
+      return '/settings/icp'
     default:
       return companyPage
   }
@@ -1373,7 +1401,7 @@ const FAMILY_LABEL: Readonly<Record<string, string>> = {
   approval: 'Approvals', turn: 'Chat turns', connector: 'Connectors', credential: 'Credentials', user: 'Team',
   company: 'Companies', note: 'Notes', task: 'Tasks', call: 'Calls', notification: 'Notifications',
   scan: 'Scheduled rescans', cron: 'Scheduled jobs', export: 'Exports', linkedin: 'LinkedIn steps',
-  template: 'Message templates', sms: 'SMS', assistant: 'Assistant',
+  template: 'Message templates', sms: 'SMS', assistant: 'Assistant', icp: 'ICP profiles',
 }
 export const AUDIT_FAMILIES: readonly { readonly value: string; readonly label: string }[] = Object.freeze(
   [...new Set(AUDIT_ACTIONS.map((a) => a.split('.')[0] ?? a))].map((value) => ({
@@ -1402,6 +1430,7 @@ export const AUDIT_SUBJECT_TYPES: readonly { readonly value: string; readonly la
   { value: 'secret', label: 'A stored credential' },
   { value: 'message_template', label: 'A message template' },
   { value: 'assistant', label: 'The assistant settings' },
+  { value: 'icp_profile', label: 'An ICP profile' },
 ])
 
 /**

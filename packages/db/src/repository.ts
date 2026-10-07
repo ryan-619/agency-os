@@ -153,7 +153,17 @@ export interface RecordScanOutput {
 export async function recordScan(db: AgencyDb, input: RecordScanInput): Promise<RecordScanOutput> {
   const { orgId, companyId, icpProfile, raw, profile } = input
   const icp = icpProfile.definition
-  const result = scoreCompany(profile, icp)
+  // What the CRM records about the company — its country and headcount — is
+  // judged against the profile's targeting too (0021): a recorded headcount
+  // over the profile's maximum is its `enterprise_scale` disqualifier. Read
+  // here, beside the score it decides, so no caller can score against one
+  // record and stamp another.
+  const [company] = await db
+    .select({ country: schema.companies.country, headcount: schema.companies.headcount })
+    .from(schema.companies)
+    .where(and(eq(schema.companies.orgId, orgId), eq(schema.companies.id, companyId)))
+    .limit(1)
+  const result = scoreCompany(profile, icp, company ?? undefined)
 
   return db.transaction(async (tx) => {
     const [scan] = await tx
@@ -286,6 +296,11 @@ export interface CompanyListRow {
   readonly companyId: string
   readonly domain: string
   readonly name: string | null
+  /** As recorded (0021): research, not observations. */
+  readonly country: string | null
+  readonly headcount: number | null
+  readonly industry: string | null
+  readonly city: string | null
   readonly score: number | null
   readonly tier: string | null
   readonly qualified: boolean
@@ -314,6 +329,10 @@ export async function companyList(db: AgencyDb, orgId: string): Promise<CompanyL
       id: schema.companies.id,
       domain: schema.companies.domain,
       name: schema.companies.name,
+      country: schema.companies.country,
+      headcount: schema.companies.headcount,
+      industry: schema.companies.industry,
+      city: schema.companies.city,
     })
     .from(schema.companies)
     .where(eq(schema.companies.orgId, orgId))
@@ -366,6 +385,10 @@ export async function companyList(db: AgencyDb, orgId: string): Promise<CompanyL
       companyId: c.id,
       domain: c.domain,
       name: c.name,
+      country: c.country,
+      headcount: c.headcount,
+      industry: c.industry,
+      city: c.city,
       score: s?.score ?? null,
       tier: s?.tier ?? null,
       qualified: s?.qualified ?? false,

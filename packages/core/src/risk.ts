@@ -37,6 +37,7 @@ export type RiskRule =
   | 'writes_internal_state'
   | 'leaves_the_building'
   | 'reopens_outreach'
+  | 'changes_scoring'
   | 'delegation'
   | 'connector_unreviewed'
 
@@ -186,6 +187,12 @@ export const AGENCY_TOOL_RISK = {
   recent_errors: ['low', 'read_only', 'Reads the worker’s recent warnings and errors by kind, with no values in them.'],
   queue_status: ['low', 'read_only', 'Reads what is waiting to go out and why: approvals, deferrals, refusals and channels nothing carries.'],
   rescan_stale: ['low', 'derived_write', 'Re-scans a few companies whose evidence is stale or missing, from their own public pages.'],
+  // profiles.ts — the ideal-customer profiles (0021). Creating one stores it
+  // INACTIVE and changes nothing anybody is judged by; activating it changes
+  // how every later scan is scored, which a person decides (`changes_scoring`).
+  list_icps: ['low', 'read_only', 'Reads every ideal-customer profile: which is active, and the markets and size band each targets.'],
+  create_icp: ['medium', 'writes_internal_state', 'Creates a new, inactive ideal-customer profile for a market or size band. Nothing is scored under it until it is activated.'],
+  activate_icp: ['medium', 'changes_scoring', 'Switches the active ideal-customer profile, so every later scan is scored under it — a person decides that.'],
 } as const satisfies Readonly<Record<string, readonly [Risk, RiskRule, string]>>
 
 export type AgencyToolName = keyof typeof AGENCY_TOOL_RISK
@@ -403,6 +410,10 @@ export function classifyRisk(call: ToolCall): RiskVerdict {
  *  - `delegation` keeps its card. It writes nothing itself (every tool a
  *    subagent uses is classified on its own), but it is the one place a
  *    budget runs away, and the API balance is prepaid and small.
+ *  - `changes_scoring` (`activate_icp`, 0021) keeps its card. It writes only
+ *    the agency's own records, but it changes how every LATER scan is judged
+ *    — and every company then needs a re-scan before its next proposal — so
+ *    the switch is a person's, like a campaign set active.
  *
  * Keyed on the rule rather than `risk !== 'high'` because the tier is a
  * statement about danger and the rule is a statement about WHO is affected —

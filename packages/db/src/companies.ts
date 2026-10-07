@@ -17,6 +17,7 @@
  */
 import { and, count, eq, isNull } from 'drizzle-orm'
 import { z } from 'zod'
+import { COMPANY_STAGES } from '@agency/core'
 import * as schema from './schema.js'
 import type { Company } from './schema.js'
 import { isKnownTimeZone } from './contacts.js'
@@ -35,13 +36,30 @@ export const companyPatchInput = z
     name: z.string().trim().max(160).nullable().optional(),
     country: z.string().trim().max(80).nullable().optional(),
     timeZone: z.string().trim().max(64).nullable().optional(),
+    // 0021: what the company is, from research. A headcount is a claim, so it
+    // is stored with where it came from (`headcountSource`), and a source
+    // never stands without a headcount.
+    headcount: z
+      .number('A headcount is a whole number of people.')
+      .int('A headcount is a whole number of people.')
+      .min(1, 'A headcount is at least 1.')
+      .max(10_000_000, 'A headcount is at most 10,000,000.')
+      .nullable()
+      .optional(),
+    headcountSource: z.string().trim().max(300, 'Where the headcount came from is at most 300 characters.').nullable().optional(),
+    industry: z.string().trim().max(80, 'An industry is at most 80 characters.').nullable().optional(),
+    city: z.string().trim().max(80, 'A city is at most 80 characters.').nullable().optional(),
+    stage: z.enum(COMPANY_STAGES, `A stage is one of: ${COMPANY_STAGES.join(', ')}.`).nullable().optional(),
+    description: z.string().trim().max(600, 'A description is at most 600 characters.').nullable().optional(),
   })
   .strict()
 
 export type CompanyPatchInput = z.infer<typeof companyPatchInput>
 
 /** The fields an edit may touch, in the order `changed` lists them. */
-export const COMPANY_EDITABLE_FIELDS = ['name', 'country', 'timeZone'] as const
+export const COMPANY_EDITABLE_FIELDS = [
+  'name', 'country', 'timeZone', 'industry', 'city', 'stage', 'headcount', 'headcountSource', 'description',
+] as const
 
 export type CompanyEditableField = (typeof COMPANY_EDITABLE_FIELDS)[number]
 
@@ -82,10 +100,16 @@ export async function companiesUpdate(
   }
   const blankIsNull = (v: string | null | undefined): string | null | undefined =>
     v === undefined ? undefined : v === null || v === '' ? null : v
-  const next = {
+  const next: { [K in CompanyEditableField]: Company[K] | undefined } = {
     name: blankIsNull(parsed.data.name),
     country: blankIsNull(parsed.data.country),
     timeZone: blankIsNull(parsed.data.timeZone),
+    industry: blankIsNull(parsed.data.industry),
+    city: blankIsNull(parsed.data.city),
+    stage: parsed.data.stage,
+    headcount: parsed.data.headcount,
+    headcountSource: blankIsNull(parsed.data.headcountSource),
+    description: blankIsNull(parsed.data.description),
   }
 
   if (next.timeZone && !isKnownTimeZone(next.timeZone)) {
@@ -104,11 +128,27 @@ export async function companiesUpdate(
   const current = rows[0]
   if (!current) return notFound
 
+  // A headcount cleared takes its source with it; a source with no headcount
+  // is refused, because it would be a citation for nothing (0021's CHECK says
+  // so too — this says it in a sentence first).
+  if (next.headcount === null && next.headcountSource === undefined && current.headcountSource !== null) {
+    next.headcountSource = null
+  }
+  const headcountAfter = next.headcount !== undefined ? next.headcount : current.headcount
+  const sourceAfter = next.headcountSource !== undefined ? next.headcountSource : current.headcountSource
+  if (sourceAfter !== null && headcountAfter === null) {
+    return {
+      ok: false,
+      message: 'headcountSource: a source needs the headcount it is for. Give the headcount as well, or no source.',
+      reason: 'invalid',
+    }
+  }
+
   const changed = COMPANY_EDITABLE_FIELDS.filter((f) => next[f] !== undefined && next[f] !== current[f])
   if (changed.length === 0) return { ok: true, company: current, changed: [] }
 
-  const set: Partial<Record<CompanyEditableField, string | null>> = {}
-  for (const f of changed) set[f] = next[f] ?? null
+  const set: Partial<{ [K in CompanyEditableField]: Company[K] }> = {}
+  for (const f of changed) (set as Record<string, unknown>)[f] = next[f] ?? null
   const updated = await db
     .update(schema.companies)
     .set(set)

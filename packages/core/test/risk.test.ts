@@ -238,7 +238,12 @@ describe('the registry cannot drift from what is reachable', () => {
     expect(AGENCY_TOOL_RISK.enrol_contacts.slice(0, 2)).toEqual(['high', 'leaves_the_building'])
     expect(AGENCY_TOOL_RISK.resume_contact.slice(0, 2)).toEqual(['high', 'reopens_outreach'])
     expect(reads.length + writes.length + 3).toBe(26)
-    expect(AGENCY_TOOL_NAMES).toHaveLength(23 + 26)
+    // The profiles (0021): a read, an internal write that stores an inactive
+    // profile, and the switch, which changes how every later scan is scored.
+    expect(AGENCY_TOOL_RISK.list_icps.slice(0, 2)).toEqual(['low', 'read_only'])
+    expect(AGENCY_TOOL_RISK.create_icp.slice(0, 2)).toEqual(['medium', 'writes_internal_state'])
+    expect(AGENCY_TOOL_RISK.activate_icp.slice(0, 2)).toEqual(['medium', 'changes_scoring'])
+    expect(AGENCY_TOOL_NAMES).toHaveLength(23 + 26 + 3)
   })
 
   it('never lets a write run without a person: every non-read tool but the scans is medium or high', () => {
@@ -282,9 +287,9 @@ describe('runsWithoutApproval', () => {
    * changes this list, and this test then fails until somebody decides on
    * purpose which side of the line it belongs on.
    */
-  it('keeps a card on exactly the agency tools that reach a person or lift a pause', () => {
+  it('keeps a card on exactly the agency tools that reach a person, lift a pause or change how scans are scored', () => {
     const carded = AGENCY_TOOL_NAMES.filter((name) => !runsWithoutApproval(verdictFor(name))).sort()
-    expect(carded).toEqual(['enrol_contacts', 'queue_touch', 'resume_contact'])
+    expect(carded).toEqual(['activate_icp', 'enrol_contacts', 'queue_touch', 'resume_contact'])
   })
 
   /**
