@@ -1209,6 +1209,47 @@ describe.runIf(PTY)('tools/run-worker.sh, answered at its prompts', () => {
     expect(readFileSync(join(logs, 'security-argv'), 'utf8')).not.toContain('abcdefghijklmnop')
   })
 
+  it('--smtp will not keep a password saved for another server', async () => {
+    save('DATABASE_URL', DB)
+    save('IMAP_HOST', 'imap.gmail.com')
+    save('IMAP_USER', 'ryan@myagencyos.in')
+    save('SMTP_HOST', 'smtp.resend.com')
+    save('SMTP_USER', 'resend')
+    save('SMTP_PASSWORD', SMTP_PASSWORD)
+    save('MAIL_FROM', 'Ryan <ryan@myagencyos.in>')
+    const r = await converse(layout(), ['--smtp'], [
+      ['SMTP host', 'smtp.gmail.com'],
+      ['SMTP port', ''],
+      ['SMTP username [ryan@myagencyos.in]', ''],
+      ['SMTP password', ''],
+      ['The saved password is for smtp.resend.com, not smtp.gmail.com', 'abcd efgh ijkl mnop'],
+      ['From address', ''],
+    ])
+    expect(r.unanswered, r.transcript).toEqual([])
+    expect(r.status, r.transcript).toBe(0)
+    expect(saved('SMTP_PASSWORD')).toBe('abcdefghijklmnop')
+    expect(r.transcript).not.toContain(SMTP_PASSWORD)
+  })
+
+  it('--smtp keeps the saved password on Enter when the server is the same', async () => {
+    save('DATABASE_URL', DB)
+    save('SMTP_HOST', 'smtp.gmail.com')
+    save('SMTP_USER', 'ryan@myagencyos.in')
+    save('SMTP_PASSWORD', 'abcdefghijklmnop')
+    save('MAIL_FROM', 'Ryan <ryan@myagencyos.in>')
+    const r = await converse(layout(), ['--smtp'], [
+      ['SMTP host', ''],
+      ['SMTP port', ''],
+      ['SMTP username [ryan@myagencyos.in]', ''],
+      ['SMTP password', ''],
+      ['From address', ''],
+    ])
+    expect(r.unanswered, r.transcript).toEqual([])
+    expect(r.status, r.transcript).toBe(0)
+    expect(r.transcript).not.toContain('The saved password is for')
+    expect(saved('SMTP_PASSWORD')).toBe('abcdefghijklmnop')
+  })
+
   it('--slack answered none removes a saved webhook', async () => {
     save('DATABASE_URL', DB)
     save('SLACK_WEBHOOK_URL', 'https://hooks.slack.com/services/T000/B000/old')

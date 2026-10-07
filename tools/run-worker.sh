@@ -615,6 +615,7 @@ fi
 if [ "$MODE" = smtp ] && [ "$LOADED" = yes ]; then
   ask_open
   printf 'Sending only — every other saved answer is kept.\n' >&3
+  SMTP_HOST_WAS="${SMTP_HOST:-}"
   SMTP_HOST=$(ask_host 'SMTP host' "${SMTP_HOST:-smtp.gmail.com}"); export SMTP_HOST
   printf '  SMTP port [%s]: ' "${SMTP_PORT:-465}" >&3; read -r V <&3; export SMTP_PORT="${V:-${SMTP_PORT:-465}}"
   SMTP_USER_DEFAULT="${SMTP_USER:-${IMAP_USER:-}}"
@@ -622,13 +623,24 @@ if [ "$MODE" = smtp ] && [ "$LOADED" = yes ]; then
   printf '  SMTP username [%s]: ' "$SMTP_USER_DEFAULT" >&3; read -r V <&3; export SMTP_USER="${V:-$SMTP_USER_DEFAULT}"
   printf '  SMTP password (hidden — for Google an APP password; Enter keeps the saved one): ' >&3
   read -r -s V <&3; printf '\n' >&3
+  # Enter keeps a saved password only for the server it was saved for: the
+  # Resend key kept for smtp.gmail.com fails every send at the first login,
+  # and nothing at all leaves the worker with a mailbox it cannot open.
+  while [ -z "${V:-}" ] && { [ -z "${SMTP_PASSWORD:-}" ] || { [ -n "$SMTP_HOST_WAS" ] && [ "$SMTP_HOST_WAS" != "$SMTP_HOST" ]; }; }; do
+    if [ -n "${SMTP_PASSWORD:-}" ]; then
+      printf '  The saved password is for %s, not %s. SMTP password (hidden): ' "$SMTP_HOST_WAS" "$SMTP_HOST" >&3
+    else
+      printf '  No password is saved. SMTP password (hidden): ' >&3
+    fi
+    read -r -s V <&3; printf '\n' >&3
+  done
   # Google shows an app password in four groups of four; the password has no spaces.
   [ "$SMTP_HOST" = smtp.gmail.com ] && V="${V//[[:space:]]/}"
   [ -n "${V:-}" ] && export SMTP_PASSWORD="$V"
   printf '  From address [%s]: ' "${MAIL_FROM:-}" >&3; read -r V <&3
   [ -n "${V:-}" ] && export MAIL_FROM="$V"
   V=""
-  unset SMTP_USER_DEFAULT
+  unset SMTP_USER_DEFAULT SMTP_HOST_WAS
   SMTP_SAVED=yes
   for n in SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASSWORD MAIL_FROM; do
     [ -n "${!n:-}" ] || continue

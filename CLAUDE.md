@@ -4637,7 +4637,8 @@ npm run smoke:agent -- --connector deepwiki   # the Phase 3 gate (§6's "no rest
 ./tools/run-worker.sh --ai            # whether a model sorts replies and polishes openers (sends them to Anthropic)
 ./tools/run-worker.sh --slack         # only the Slack webhook the opt-out alarm posts to (hidden; "none" removes it)
 ./tools/run-worker.sh --smtp          # only the outgoing mailbox — e.g. Google Workspace (smtp.gmail.com, an app password) instead of
-                              # Resend, whose acceptable-use policy forbids cold outreach and which carries the sign-in links
+                              # Resend, whose acceptable-use policy forbids cold outreach and which carries the sign-in links;
+                              # Enter keeps a saved password only for the server it was saved for
 ./tools/run-worker.sh --google        # only the Google API key (Places API (New) + PageSpeed Insights) for the opportunity finder
 ./tools/run-worker.sh --forget        # delete the saved answers
 ./tools/add-teammate.sh       # grant somebody access — or Settings → Team, in the browser
