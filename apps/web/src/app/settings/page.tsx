@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation'
-import { parseIcpDefinition } from '@agency/core'
+import { can, parseIcpDefinition } from '@agency/core'
 import { secretsKeyFromEnv, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
@@ -13,14 +13,16 @@ import { orgIdentity } from '@/lib/org-identity'
 import { icpForOrg } from '@/lib/queries'
 import { workerStatus, type WorkerStatus } from '@/lib/worker-status'
 import { deploymentFacts, workerLine } from './facts'
+import { OrgName } from './org-name'
 
 /**
  * Settings: the landing page for everything that configures the product.
  *
  * Three things, in the order somebody arriving here needs them: who this
  * organisation is (its name and public booking page), what THIS deployment
- * can and cannot do, and where each setting lives. Read only — every
- * control is on the page a card links to, behind that page's own
+ * can and cannot do, and where each setting lives. Read only but for the
+ * organisation's name, which an owner renames in place (`OrgName`); every
+ * other control is on the page a card links to, behind that page's own
  * capability.
  *
  * "What this deployment can do" states configuration by variable NAME and
@@ -100,7 +102,7 @@ export default async function SettingsPage() {
       <h1>Settings</h1>
       <p className="lede">
         Who this organisation is, what this deployment can and cannot do, and where each setting lives.
-        Nothing on this page changes anything.
+        Only the organisation's name changes here; every other control is on the page a card links to.
       </p>
 
       <h2>Organisation</h2>
@@ -108,7 +110,9 @@ export default async function SettingsPage() {
         <tbody>
           <tr>
             <th style={{ width: 200 }}>Name</th>
-            <td>{org.name}</td>
+            <td>
+              <OrgName name={org.name} canWrite={can({ id: user.id, orgId: user.orgId, role: user.role }, 'users:write')} />
+            </td>
           </tr>
           <tr>
             <th>Public booking page</th>

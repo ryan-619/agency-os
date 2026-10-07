@@ -4486,6 +4486,23 @@ waits with no reason on it until SMS is switched on where the worker runs
 sends, and an agency that never switched SMS on has nothing waiting. With
 `sms: 'on'` the old sentence stands.
 
+**An owner renames the organisation on `/settings` (2026-10-08).** `orgs.name`
+is what the product calls the agency to everyone — the sidebar, "Prepared by"
+on proposals and the buyer page, the booking page, the opener's sign-off
+(`draftOpener`'s `agencyName`) and the assistant's instructions, read fresh
+each turn — and the seed wrote it once ("Agency" unless `SEED_ORG_NAME` was
+set), so an agency trading as Accemy signed its mail "Agency". `renameOrg`
+(`packages/db/src/org.ts`) changes it and writes `org.renamed { from, to }`
+in one transaction — the agency's name, never a person's, so the row
+carries it; the same name writes nothing; a name another org holds is a
+sentence (`orgs_name_key`); blank, control characters or more than 80 code
+points are refused first. `PATCH /api/settings/org` is owners only
+(`users:write`), beside the name on `/settings` (`OrgName`). The seed finds
+an org by name, so after a rename `SEED_ORG_NAME` must name the new one
+before `remote-setup.sh` runs again — it refuses loudly, rolled back,
+rather than create a second org, and its sentence now says the org may have
+been renamed. No release path runs the seed.
+
 **The sidebar names the organisation, on every page, from one place.** The
 subtitle under "Agency OS" is `orgs.name`, read by `Shell`
 (`apps/web/src/components/shell.tsx`) itself: it is an async server

@@ -243,6 +243,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'icp.created': { name: 'Security-gap SaaS (India)', basedOn: 'Security-gap SaaS (US/EU)', geos: ['IN'], headcountMin: 10, headcountMax: 500 },
   'icp.activated': { name: 'Security-gap SaaS (India)', previous: 'Security-gap SaaS (US/EU)' },
   'company.listings_added': { added: 12, refreshed: 3 },
+  'org.renamed': { from: 'Agency', to: 'Accemy' },
   'service.created': { needs: 4, priced: true },
   'service.updated': { fields: ['name', 'priceFrom'] },
   'service.deleted': {},

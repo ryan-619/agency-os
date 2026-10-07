@@ -153,7 +153,8 @@ async function seedInTransaction(
     throw new Error(
       `${email} already exists in a different organisation (${existing.org_id}), but the seed ` +
         `resolved "${opts.orgName}" to ${orgId}. Point SEED_ORG_NAME at the existing ` +
-        `organisation, or use a different owner address.`,
+        `organisation — it may have been renamed in Settings since it was seeded — or use a ` +
+        `different owner address.`,
     )
   }
   let ownerUserId = existing?.id

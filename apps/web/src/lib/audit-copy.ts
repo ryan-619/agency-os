@@ -998,6 +998,13 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     return `made ${theNamed(c.d, 'ICP profile')} the active one${previous ? ` (it was “${previous}”)` : ''}; every later scan is scored under it`
   },
 
+  // --- Settings → Organisation: the agency's own name --------------------
+  'org.renamed': (c) => {
+    const from = text(c.d, 'from', 80)
+    const to = text(c.d, 'to', 80)
+    return from && to ? `renamed the organisation from “${from}” to “${to}”` : 'renamed the organisation'
+  },
+
   // --- Listings and the services catalogue (0022) ---------------------------
   'company.listings_added': (c) => {
     const added = num(c.d, 'added') ?? 0
@@ -1424,6 +1431,8 @@ export function subjectHref(row: AuditLine, company: AuditCompanyRef | null): st
       return '/settings/icp'
     case 'service':
       return '/settings/services'
+    case 'org':
+      return '/settings'
     default:
       return companyPage
   }
@@ -1437,7 +1446,7 @@ const FAMILY_LABEL: Readonly<Record<string, string>> = {
   approval: 'Approvals', turn: 'Chat turns', connector: 'Connectors', credential: 'Credentials', user: 'Team',
   company: 'Companies', note: 'Notes', task: 'Tasks', call: 'Calls', notification: 'Notifications',
   scan: 'Scheduled rescans', cron: 'Scheduled jobs', export: 'Exports', linkedin: 'LinkedIn steps',
-  template: 'Message templates', sms: 'SMS', assistant: 'Assistant', icp: 'ICP profiles', service: 'Services',
+  template: 'Message templates', sms: 'SMS', assistant: 'Assistant', icp: 'ICP profiles', service: 'Services', org: 'Organisation',
 }
 export const AUDIT_FAMILIES: readonly { readonly value: string; readonly label: string }[] = Object.freeze(
   [...new Set(AUDIT_ACTIONS.map((a) => a.split('.')[0] ?? a))].map((value) => ({
