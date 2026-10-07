@@ -3,9 +3,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { When } from '@/components/when'
 import {
-  EVIDENCE_LINES_SHOWN, KEY_HELP, OTHER_CAMPAIGN_NOTE,
+  EDIT_BODY_MAX, EDIT_SUBJECT_MAX, EDITING_BLOCKS_APPROVAL, EVIDENCE_LINES_SHOWN, KEY_HELP, OTHER_CAMPAIGN_NOTE,
   addressedByLabel, approvability, approveBlock, approveFootnote, approvedMessage, candidateLine, checkedUnderLabel,
-  draftTitle, evidenceHeading, evidenceNote, keyAction, queueNoSenderNote, templateLine,
+  draftTitle, editNote, evidenceHeading, evidenceNote, keyAction, queueNoSenderNote, templateLine, wordsEditable,
   type AddressedBy, type Approvability, type CandidateDecision, type CheckedUnder, type DraftEvidence,
   type DraftTemplate,
 } from '@/lib/approval-view'
@@ -33,6 +33,12 @@ import {
  *
  * The body is shown whole and unformatted. Someone deciding whether this may
  * be sent has to see exactly what will be sent.
+ *
+ * The words of an email or LinkedIn draft can be EDITED here (2026-10-08),
+ * through `editDraft`: saved only over the words this page loaded, and while
+ * an edit is open the card cannot be approved — by button or by key — because
+ * approval is of the saved words. A text cannot be edited: it is a registered
+ * template filled for one person.
  */
 
 export interface DraftCandidate {
@@ -73,6 +79,8 @@ export interface CampaignChoice {
 
 type Settled = { outcome: 'approved' | 'refused' | 'taken'; message: string }
 type Choice = { contactId: string; campaignId: string; note: string }
+type Words = { subject: string | null; body: string | null }
+type Editor = { subject: string; body: string }
 
 const EMPTY: Choice = { contactId: '', campaignId: '', note: '' }
 
@@ -108,7 +116,53 @@ export function DraftQueue({
   const [armed, setArmed] = useState<string | null>(null)
   /** Why `a` did nothing, shown on the card that was asked. */
   const [explained, setExplained] = useState<Record<string, string>>({})
+  /** The words as last saved — the page's, until an edit is saved here. */
+  const [words, setWords] = useState<Record<string, Words>>(() =>
+    Object.fromEntries(drafts.map((d) => [d.id, { subject: d.subject, body: d.body }])),
+  )
+  /** An open, unsaved edit. While one is open the card cannot be approved. */
+  const [editing, setEditing] = useState<Record<string, Editor | undefined>>({})
+  const [saved, setSaved] = useState<Record<string, string>>({})
   const cards = useRef(new Map<string, HTMLDivElement>())
+
+  const wordsOf = (d: DraftView): Words => words[d.id] ?? { subject: d.subject, body: d.body }
+
+  const saveWords = async (draft: DraftView): Promise<void> => {
+    const edit = editing[draft.id]
+    if (!edit) return
+    const before = wordsOf(draft)
+    setBusy(draft.id)
+    setErrors((e) => ({ ...e, [draft.id]: '' }))
+    try {
+      const res = await fetch(`/api/touches/${draft.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          subject: before.subject === null && edit.subject.trim() === '' ? null : edit.subject,
+          body: edit.body,
+          expectedSubject: before.subject,
+          expectedBody: before.body,
+        }),
+      })
+      const answer = (await res.json().catch(() => ({}))) as {
+        error?: string
+        subject?: string | null
+        body?: string | null
+        changed?: boolean
+      }
+      if (res.ok) {
+        setWords((w) => ({ ...w, [draft.id]: { subject: answer.subject ?? null, body: answer.body ?? null } }))
+        setEditing((x) => ({ ...x, [draft.id]: undefined }))
+        setSaved((x) => ({ ...x, [draft.id]: answer.changed ? 'Saved. Approve the new words when they are right.' : 'Nothing had changed.' }))
+      } else {
+        setErrors((e) => ({ ...e, [draft.id]: answer.error ?? 'That did not save.' }))
+      }
+    } catch {
+      setErrors((e) => ({ ...e, [draft.id]: 'The request did not complete. Nothing was saved; try again.' }))
+    } finally {
+      setBusy(null)
+    }
+  }
 
   const pick = (id: string, patch: Partial<Choice>) => {
     setChoice((c) => ({ ...c, [id]: { ...EMPTY, ...c[id], ...patch } }))
@@ -162,6 +216,7 @@ export function DraftQueue({
       contactId: chosen.contactId,
       campaignId: chosen.campaignId,
       block: approveBlock(decisionFor(d, chosen.contactId), d.channel),
+      editing: editing[d.id] !== undefined,
     })
   }
 
@@ -303,7 +358,7 @@ export function DraftQueue({
               data-draft-card={d.id}
               tabIndex={0}
               role="group"
-              aria-label={`Draft: ${draftTitle(d.subject, d.template)}`}
+              aria-label={`Draft: ${draftTitle(wordsOf(d).subject, d.template)}`}
               onFocus={(e) => {
                 if (e.target === e.currentTarget) setFocused(d.id)
               }}
@@ -317,7 +372,7 @@ export function DraftQueue({
               style={{ outline: focused === d.id ? '2px solid var(--accent)' : 'none', outlineOffset: 2 }}
             >
               <div className="approval-head">
-                <strong>{draftTitle(d.subject, d.template)}</strong>
+                <strong>{draftTitle(wordsOf(d).subject, d.template)}</strong>
                 <span className="pill">{d.channel}</span>
                 {d.company && companyHref ? (
                   <a href={companyHref} className="muted" style={{ fontSize: 12.5 }}>
@@ -329,7 +384,72 @@ export function DraftQueue({
                 </span>
               </div>
 
-              <pre className="mono approval-payload">{d.body ?? ''}</pre>
+              {editing[d.id] ? (
+                <div className="draft-edit">
+                  <label>
+                    Subject
+                    <input
+                      value={editing[d.id]!.subject}
+                      maxLength={EDIT_SUBJECT_MAX}
+                      onChange={(e) => {
+                        const subject = e.target.value
+                        setEditing((x) => ({ ...x, [d.id]: { ...x[d.id]!, subject } }))
+                      }}
+                    />
+                  </label>
+                  <label>
+                    Message
+                    <textarea
+                      rows={Math.min(18, Math.max(6, (editing[d.id]!.body.match(/\n/g)?.length ?? 0) + 2))}
+                      value={editing[d.id]!.body}
+                      maxLength={EDIT_BODY_MAX}
+                      onChange={(e) => {
+                        const body = e.target.value
+                        setEditing((x) => ({ ...x, [d.id]: { ...x[d.id]!, body } }))
+                      }}
+                    />
+                    <span className="hint">
+                      {[...editing[d.id]!.body].length.toLocaleString('en')} / {EDIT_BODY_MAX.toLocaleString('en')} characters.{' '}
+                      {editNote(d.channel)}
+                    </span>
+                  </label>
+                  <div className="approval-actions">
+                    <button type="button" disabled={busy === d.id} onClick={() => void saveWords(d)}>
+                      Save words
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={busy === d.id}
+                      onClick={() => setEditing((x) => ({ ...x, [d.id]: undefined }))}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <pre className="mono approval-payload">{wordsOf(d).body ?? ''}</pre>
+                  {canDecide && !done && wordsEditable(d.channel) ? (
+                    <p style={{ margin: '-4px 0 10px' }}>
+                      <button
+                        type="button"
+                        className="linkish"
+                        disabled={busy === d.id}
+                        onClick={() => {
+                          const w = wordsOf(d)
+                          setSaved((x) => ({ ...x, [d.id]: '' }))
+                          setArmed((a) => (a === d.id ? null : a))
+                          setEditing((x) => ({ ...x, [d.id]: { subject: w.subject ?? '', body: w.body ?? '' } }))
+                        }}
+                      >
+                        Edit the words
+                      </button>
+                      {saved[d.id] ? <span className="muted" style={{ marginLeft: 8, fontSize: 12.5 }}>{saved[d.id]}</span> : null}
+                    </p>
+                  ) : null}
+                </>
+              )}
               {d.template ? (
                 <p className="hint" style={{ margin: '-4px 0 10px' }}>
                   {templateLine(d.template)}
@@ -467,7 +587,10 @@ export function DraftQueue({
                   <div className="approval-actions">
                     <button
                       type="button"
-                      disabled={busy === d.id || !chosen.contactId || !chosen.campaignId || block !== null}
+                      disabled={
+                        busy === d.id || !chosen.contactId || !chosen.campaignId || block !== null || editing[d.id] !== undefined
+                      }
+                      title={editing[d.id] !== undefined ? EDITING_BLOCKS_APPROVAL : undefined}
                       onClick={() => void decide(d, 'approved')}
                     >
                       Approve

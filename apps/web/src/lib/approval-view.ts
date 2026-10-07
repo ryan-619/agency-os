@@ -693,6 +693,29 @@ export function nextFocus(ids: readonly string[], current: string | null, key: s
   return ids[(at + step + ids.length) % ids.length]!
 }
 
+/**
+ * Editing a draft's words on /approvals (2026-10-08). The limits are
+ * `editDraft`'s (`DRAFT_SUBJECT_MAX`, `DRAFT_BODY_MAX` in @agency/db), restated
+ * for the browser and held equal by a test. SMS and WhatsApp are not
+ * editable: their words are a registered template filled for one person.
+ */
+export const EDIT_SUBJECT_MAX = 200
+export const EDIT_BODY_MAX = 4000
+export const EDITING_BLOCKS_APPROVAL = 'Save or cancel the edit first: approval is of the saved words.'
+
+/** Whether a draft on this channel may have its words edited here. */
+export function wordsEditable(channel: string): boolean {
+  return channel === 'email' || channel === 'linkedin'
+}
+
+/** The editor's line under the words: what saving does, and what it does not. */
+export function editNote(channel: string): string {
+  return channel === 'linkedin'
+    ? 'Saving changes the words a person will be handed on /tasks once this is approved. Nothing is sent by saving.'
+    : 'Saving changes the words; nothing is sent by saving. The send rules — and the evidence the words may quote, ' +
+        'dated from when the draft was first written — are checked again when it goes.'
+}
+
 export type Approvability = { readonly ok: true } | { readonly ok: false; readonly why: string }
 
 export type KeyAction =
@@ -769,10 +792,13 @@ export function approvability(card: {
   readonly contactId: string
   readonly campaignId: string
   readonly block: string | null
+  /** An edit of the words is open and unsaved: approval is of the SAVED words. */
+  readonly editing?: boolean
 }): Approvability {
   if (!card.canDecide) return { ok: false, why: 'Your role cannot decide approvals.' }
   if (card.settled) return { ok: false, why: 'This draft has already been decided.' }
   if (card.busy) return { ok: false, why: 'A decision on this draft is already on its way.' }
+  if (card.editing) return { ok: false, why: EDITING_BLOCKS_APPROVAL }
   if (!card.contactId || !card.campaignId) return { ok: false, why: 'Choose a person and a campaign first.' }
   if (card.block) return { ok: false, why: card.block }
   return { ok: true }

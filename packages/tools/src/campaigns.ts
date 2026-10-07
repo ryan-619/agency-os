@@ -52,7 +52,7 @@ import {
   type Channel, type Draft, type EnrolSkip, type SendDecision, type SendRefusalCode,
 } from '@agency/core'
 import {
-  appendAudit, campaignActivity, campaignAutoPauses, campaignInput, enrolCampaign, evidenceAsOfFor, isUniqueViolation,
+  appendAudit, campaignActivity, campaignAutoPauses, campaignInput, editDraft as editDraftRow, enrolCampaign, evidenceAsOfFor, isUniqueViolation,
   linkedinThreadWithheld, pendingDrafts, previewSend, readCampaign, templatesList,
   createCampaign as createCampaignRow, listCampaigns as listCampaignRows, updateCampaign as updateCampaignRow,
   type CampaignRow, type CampaignStatus, type CampaignUpdate, type EnrolOutcome, type LinkedinThreadWithheld,
@@ -1126,6 +1126,158 @@ export const listDrafts: AgencyToolSpec<typeof listDraftsShape> = {
         'Nothing was changed and nothing was sent.',
         ...entries,
       ]),
+    )
+  },
+}
+
+// ---------------------------------------------------------------------------
+// Editing a draft's words (2026-10-08)
+//
+// `get_draft` shows one EMAIL draft whole, so a rewrite starts from the real
+// words and not from list_drafts' first line. `edit_draft` rewrites it through
+// `editDraft` — the function /approvals' editor calls — and keeps its card: a
+// queued auto-send email would go with the new words unread by anybody.
+// Email only. A LinkedIn message's words are shown only where /tasks would show
+// them, and a text is a registered template filled in for one person; both
+// are edited, or drafted again, on /approvals.
+// ---------------------------------------------------------------------------
+
+/** The statuses a message may still be edited in, as `editDraft` holds them. */
+const EDITABLE_EMAIL = new Set(['awaiting_approval', 'approved', 'queued'])
+
+const STATUS_WORDS: Readonly<Record<string, string>> = {
+  awaiting_approval: 'waiting on /approvals',
+  approved: 'approved, waiting for a worker that sends email',
+  queued: 'queued under an auto-send campaign',
+}
+
+async function readEmailDraft(
+  ctx: ToolContext,
+  draftId: string,
+): Promise<
+  | { readonly ok: true; readonly touch: typeof schema.touches.$inferSelect; readonly domain: string | null; readonly email: string | null }
+  | { readonly ok: false; readonly outcome: ToolOutcome<unknown> }
+> {
+  const [row] = await ctx.db
+    .select({
+      touch: schema.touches,
+      domain: schema.companies.domain,
+      email: schema.contacts.email,
+    })
+    .from(schema.touches)
+    .leftJoin(schema.companies, eq(schema.companies.id, schema.touches.companyId))
+    .leftJoin(schema.contacts, eq(schema.contacts.id, schema.touches.contactId))
+    .where(and(eq(schema.touches.orgId, ctx.orgId), eq(schema.touches.id, draftId)))
+    .limit(1)
+  if (!row || row.touch.direction !== 'out') {
+    return { ok: false, outcome: fail('not_found', 'No draft with that id is in this CRM — list_drafts prints each one’s id.') }
+  }
+  if (row.touch.channel !== 'email') {
+    return {
+      ok: false,
+      outcome: fail(
+        'invalid_state',
+        row.touch.channel === 'linkedin'
+          ? 'Only an email draft is read or edited here. A LinkedIn message’s words are shown only where /tasks would show them; a person edits it on /approvals.'
+          : 'Only an email draft is read or edited here. A text is a registered template filled in for one person; it is drafted again with Draft SMS on /contacts.',
+      ),
+    }
+  }
+  if (!EDITABLE_EMAIL.has(row.touch.status)) {
+    return {
+      ok: false,
+      outcome: fail('invalid_state', `That email is ${row.touch.status} — it has gone, is going, or will not be sent — so its words can no longer change.`),
+    }
+  }
+  return { ok: true, touch: row.touch, domain: row.domain ?? null, email: row.email ?? null }
+}
+
+const getDraftShape = {
+  draftId: z.string().uuid().describe('The draft’s id, as list_drafts prints it.'),
+}
+
+export const getDraft: AgencyToolSpec<typeof getDraftShape> = {
+  name: 'get_draft',
+  description:
+    'Read the whole subject and body of one email draft that has not gone yet — waiting on /approvals, approved, ' +
+    'or queued under an auto-send campaign — so a rewrite starts from the real words. Email only. A read; it ' +
+    'changes and sends nothing.',
+  shape: getDraftShape,
+  async handler(input, ctx): Promise<ToolOutcome<unknown>> {
+    if (!can(ctx.principal, 'approvals:decide')) {
+      return fail('not_permitted', 'The person you are helping cannot read the drafts waiting on /approvals.')
+    }
+    const read = await readEmailDraft(ctx, input.draftId)
+    if (!read.ok) return read.outcome
+    const t = read.touch
+    await ctx.audit('agent.get_draft', { draftId: t.id, status: t.status })
+    return ok(
+      { draftId: t.id, status: t.status, domain: read.domain, subject: t.subject, body: t.body },
+      [
+        `Email draft ${t.id} about ${read.domain ?? 'no company'} · ${STATUS_WORDS[t.status] ?? t.status} · ` +
+          `${t.contactId ? `to ${maskAddress(read.email) ?? 'a contact with no readable address'}` : 'no recipient chosen yet'}`,
+        `Subject: ${t.subject ?? '(no subject)'}`,
+        '',
+        // At most 4,000 characters (DRAFT_BODY_MAX), inside the tool-text budget whole.
+        t.body ?? '(no text)',
+        '',
+        'Nothing was changed and nothing was sent.',
+      ].join('\n'),
+    )
+  },
+}
+
+const editDraftShape = {
+  draftId: z.string().uuid().describe('The draft’s id, as list_drafts prints it.'),
+  subject: z.string().min(1).max(200).optional().describe('The new subject. Omit to keep the current one.'),
+  body: z.string().min(1).max(4000).describe('The whole new body — the complete message, not a change to it.'),
+}
+
+export const editDraftTool: AgencyToolSpec<typeof editDraftShape> = {
+  name: 'edit_draft',
+  description:
+    'Rewrite the subject and body of an email that has not gone yet — read it first with get_draft. One that was ' +
+    'approved goes back to /approvals, because the approval was of the old words; one queued under an auto-send ' +
+    'campaign goes with the new words at the next send pass. Quote only findings get_company marks quotable. ' +
+    'Email only; a person approves this call first. Nothing is sent by it.',
+  shape: editDraftShape,
+  async handler(input, ctx): Promise<ToolOutcome<unknown>> {
+    if (!can(ctx.principal, 'approvals:decide')) {
+      return fail('not_permitted', 'The person you are helping cannot change the drafts waiting on /approvals.')
+    }
+    const read = await readEmailDraft(ctx, input.draftId)
+    if (!read.ok) return read.outcome
+    const t = read.touch
+    const r = await editDraftRow(ctx.db, {
+      orgId: ctx.orgId,
+      touchId: t.id,
+      editedBy: ctx.principal.id,
+      ...(input.subject !== undefined ? { subject: input.subject } : {}),
+      body: input.body,
+      // The words read a moment ago, inside this call: a person's edit since the
+      // approval card was raised is not overwritten unseen.
+      expected: { subject: t.subject, body: t.body },
+    })
+    await ctx.audit('agent.edit_draft', {
+      draftId: t.id,
+      edited: r.ok && r.changed,
+      reapprove: r.ok ? r.reapprove : false,
+      ...(r.ok ? {} : { reason: r.reason }),
+    })
+    if (!r.ok) {
+      return fail(r.reason === 'not_found' ? 'not_found' : 'invalid_state', `${r.message} Nothing was changed and nothing was sent.`)
+    }
+    if (!r.changed) return ok({ draftId: t.id, changed: false }, 'Those are already its words. Nothing was changed and nothing was sent.')
+    const where =
+      r.reapprove
+        ? 'It had been approved, so it is back on /approvals: a person approves the new words before anything goes.'
+        : r.touch.status === 'queued'
+          ? 'It is queued under an auto-send campaign, so it goes with these words at the next send pass, every send rule checked again then.'
+          : 'It is waiting on /approvals for a person to approve the new words.'
+    return ok(
+      { draftId: t.id, changed: true, reapprove: r.reapprove, status: r.touch.status },
+      `Rewrote email draft ${t.id} about ${read.domain ?? 'no company'}: ${[...(r.touch.body ?? '')].length} characters ` +
+        `(was ${[...(t.body ?? '')].length})${r.touch.subject !== t.subject ? ', with a new subject' : ''}. ${where} Nothing was sent.`,
     )
   },
 }

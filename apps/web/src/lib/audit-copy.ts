@@ -490,6 +490,12 @@ const SENTENCES: Readonly<Record<string, Template>> = {
       note ? `: ${quoted(note)}` : ''
     }`
   },
+  'draft.edited': (c) => {
+    // Counts and flags only; the words are never in the log (§2.3).
+    const subject = flag(c.d, 'subjectChanged') ? ' and its subject' : ''
+    const back = flag(c.d, 'reapprove') ? ' — it had been approved, so it waits for approval again' : ''
+    return `edited the words of a draft ${own(CHANNEL_NOUN, word(c.d, 'channel')) ?? 'message'}${subject} about ${c.co}${back}`
+  },
   'contact.replied': (c) => {
     const kind = word(c.d, 'replyKind')
     const channel = word(c.d, 'channel')
@@ -749,6 +755,12 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   'agent.book_meeting': (c) => {
     const at = when(c.d)
     return `recorded a meeting with ${domainLabel(c.d) ?? 'a company'}${at ? ` for ${at}` : ''}; no invitation was sent`
+  },
+  'agent.edit_draft': (c) => {
+    if (flag(c.d, 'edited') !== true) return 'tried to rewrite an email draft, and nothing was changed'
+    return flag(c.d, 'reapprove')
+      ? 'rewrote an approved email draft — it went back to /approvals for the new words'
+      : 'rewrote the words of an email draft; nothing was sent'
   },
   'agent.queue_touch': (c) =>
     `queued ${aMessage(word(c.d, 'channel'))} about ${domainLabel(c.d) ?? 'a company'}; nothing was sent by queueing it`,

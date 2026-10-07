@@ -312,7 +312,7 @@ describe('the system prompt', () => {
   })
 
   it('restates the rules the model can break in front of a customer', () => {
-    expect(prompt).toMatch(/never state a security finding you have not read/i)
+    expect(prompt).toMatch(/never state a finding about a business that you have not read/i)
     expect(prompt).toMatch(/absence means UNKNOWN/i)
     expect(prompt).toMatch(/stale/i)
     expect(prompt).toMatch(/email and LinkedIn only/i)
@@ -422,11 +422,28 @@ describe('the system prompt', () => {
     expect(prompt).toMatch(/do it with the tools rather than describing how they could/i)
     expect(prompt).toMatch(/make those changes yourself rather than proposing them/)
     expect(prompt).not.toMatch(/Every change runs only after a person approves its card/)
-    for (const waits of ['queue_touch', 'enrol_contacts', 'resume_contact', 'activate_icp']) {
+    for (const waits of ['queue_touch', 'enrol_contacts', 'edit_draft', 'resume_contact', 'activate_icp']) {
       expect(prompt).toMatch(new RegExp(`wait for a person to approve a card first:[\\s\\S]*${waits}`))
     }
     expect(prompt).toMatch(/a connector or helper call —\s+except the research connectors an owner set to run without asking/)
     expect(prompt).toMatch(/update_campaign setting a campaign\s+active/)
+  })
+
+  /**
+   * The agency sells whatever a business needs (2026-10-08), not security
+   * alone. A model told it works for a security consultancy turns down a
+   * request for website clients, and words every pitch as a security one.
+   */
+  it('introduces the agency as one that offers businesses whatever they need, security among it', () => {
+    expect(prompt).toMatch(/finds businesses of\s+every kind and size that need help/)
+    expect(prompt).toMatch(/Security is one service among several/)
+    expect(prompt).not.toMatch(/a small application-security\s+and DevSecOps consultancy/)
+    expect(prompt).toMatch(/Never state a finding about a business that you have not read from a tool result/)
+  })
+
+  it('rewrites a draft through get_draft and edit_draft, email only', () => {
+    expect(prompt).toMatch(/read its whole text with get_draft, and rewrite it with edit_draft/)
+    expect(prompt).toMatch(/Only email is rewritten this way/)
   })
 
   /**

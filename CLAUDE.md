@@ -75,6 +75,14 @@ connector can have: an owner's switch on a read-only research server
 without a card — default off, never in an unattended turn, never past a
 disabled tool (§1, §8). The `agency` server has fifty-two tools.
 
+**Then editing what is about to go out (2026-10-08), on no migration** (§2,
+"Editing a draft's words"): a person changes an email or LinkedIn draft's
+subject and words on /approvals, and the chat reads and rewrites an email
+draft (`get_draft`, `edit_draft`, carded). And the assistant no longer
+introduces the agency as a security consultancy: it finds businesses of every
+kind that need help and offers whatever the team sells — security is one
+service among several. The `agency` server has fifty-four tools.
+
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
 machine"), which needs no public address, because everything but chat is
@@ -848,7 +856,8 @@ recorded-session mode, so anything needing the SDK to be *defined* is also
 untestable — and a package that CANNOT import the SDK cannot drag it into the
 Next module graph, which CI builds with no secrets on purpose.
 
-Fifty-two tools ship (`AGENCY_TOOL_NAMES`) — the forty-nine below, and since
+Fifty-four tools ship (`AGENCY_TOOL_NAMES`) — `get_draft` (low) and `edit_draft` (high,
+`leaves_the_building`, carded) since 2026-10-08, and before them the forty-nine below, and since
 0021 `list_icps` (low), `create_icp` (medium, an internal write) and
 `activate_icp` (medium, `changes_scoring`, which keeps its card: §2,
 "Markets, size and profiles"). Of the forty-nine, twenty-six are low risk:
@@ -1114,6 +1123,36 @@ bounce still records `contact.bounce_cleared` as System (`contactsUpdate`'s
 default actor). And `recent_errors` does not see a line written straight to
 stderr — the entry point's "failed to start", or the recorder lines the
 inbox forwards.
+
+### Editing a draft's words (2026-10-08)
+
+**A person changes the words; the send path still judges them.** `editDraft`
+(`packages/db/src/outreach.ts`) changes an outbound message's subject and
+body — email while awaiting approval, approved or queued; LinkedIn only while
+awaiting, because an approved one is a step a person may be holding on
+/tasks. An APPROVED email goes back to awaiting approval with its approver
+and deferral cleared, its recipient and campaign kept as the preselection:
+the approval was of the old words. A queued auto-send message stays queued.
+SMS and WhatsApp are refused — their words are a registered template filled
+for one person — and so is anything sending, sent, refused or failed. The
+edit lands only over the words the editor LOADED (the old subject and body
+in the UPDATE's predicate, beside the status), so two editors cannot
+overwrite each other unseen and a row the worker claimed is not rewritten
+under it. `created_at` is never moved: the send path judges what the words
+may quote from when they were first written (`evidenceAsOfFor`), and an
+edit does not make an old scan current. Audited `draft.edited` with counts
+and flags (`bodyChars`, `subjectChanged`, `reapprove`), never the words.
+`PATCH /api/touches/[id]` (`approvals:decide`) takes the new words and the
+ones loaded (`expectedSubject`, `expectedBody`) and logs a fault by class
+only. On /approvals each email and LinkedIn card has "Edit the words"; while
+an edit is open the card cannot be approved by button or by key
+(`approvability`'s `editing`, `EDITING_BLOCKS_APPROVAL`), and the browser's
+limits (`EDIT_SUBJECT_MAX`, `EDIT_BODY_MAX`) are held equal to the
+database's by a test. From chat, `get_draft` reads one email draft whole and
+`edit_draft` rewrites it through the same function, carded like a draft
+(`leaves_the_building`, high): a queued auto-send email goes out with the new
+words unread by anybody. Neither touches a LinkedIn message, whose words are
+shown only where /tasks would show them.
 
 ### The assistant: the playbook and the morning brief (0020)
 

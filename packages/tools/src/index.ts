@@ -14,7 +14,7 @@ export { getReplies, classifyReply } from './replies.js'
 export { getPipelineMetrics, getCompanyTimeline, getComplianceSummary, searchCrm } from './reporting.js'
 export { addNote, createTask, listTasks } from './tasks.js'
 export { listContacts, addCompany, updateCompany, importCompanies, addContact, updateContact, pauseContact, resumeContact, addSuppression } from './records.js'
-export { listCampaigns, createCampaign, updateCampaign, enrolContacts, listDrafts } from './campaigns.js'
+export { listCampaigns, createCampaign, updateCampaign, enrolContacts, listDrafts, getDraft, editDraftTool } from './campaigns.js'
 export { generateProposalTool, getProposal, listMeetings, rescheduleMeetingTool, cancelMeetingTool, recordMeetingOutcome, setDealOwnerTool, completeTask } from './proposals.js'
 export { workerStatus, recentErrors, queueStatus, rescanStale } from './ops.js'
 export { listIcps, createIcp, activateIcp } from './profiles.js'
@@ -30,7 +30,7 @@ import { getReplies, classifyReply } from './replies.js'
 import { getPipelineMetrics, getCompanyTimeline, getComplianceSummary, searchCrm } from './reporting.js'
 import { addNote, createTask, listTasks } from './tasks.js'
 import { listContacts, addCompany, updateCompany, importCompanies, addContact, updateContact, pauseContact, resumeContact, addSuppression } from './records.js'
-import { listCampaigns, createCampaign, updateCampaign, enrolContacts, listDrafts } from './campaigns.js'
+import { listCampaigns, createCampaign, updateCampaign, enrolContacts, listDrafts, getDraft, editDraftTool } from './campaigns.js'
 import { generateProposalTool, getProposal, listMeetings, rescheduleMeetingTool, cancelMeetingTool, recordMeetingOutcome, setDealOwnerTool, completeTask } from './proposals.js'
 import { workerStatus, recentErrors, queueStatus, rescanStale } from './ops.js'
 import { listIcps, createIcp, activateIcp } from './profiles.js'
@@ -86,6 +86,8 @@ export const AGENCY_TOOLS: readonly AgencyToolSpec[] = [
   updateCampaign,
   enrolContacts,
   listDrafts,
+  getDraft,
+  editDraftTool,
   generateProposalTool,
   getProposal,
   listMeetings,

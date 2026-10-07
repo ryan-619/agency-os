@@ -178,9 +178,11 @@ describe('the registry cannot drift from what is reachable', () => {
    * so a person approves the call before any draft exists — and every draft
    * still waits on /approvals before anything is sent.
    */
-  it('has exactly two tools that leave the building, and both are high', () => {
+  it('has exactly three tools that leave the building, and all are high', () => {
     const leaving = AGENCY_TOOL_NAMES.filter((n) => AGENCY_TOOL_RISK[n][1] === 'leaves_the_building')
-    expect(leaving).toEqual(['queue_touch', 'enrol_contacts'])
+    // `edit_draft` (2026-10-08) rewrites words to somebody outside: a queued
+    // auto-send email would go with them unread, so it is carded like a draft.
+    expect(leaving).toEqual(['queue_touch', 'enrol_contacts', 'edit_draft'])
     for (const name of leaving) expect(AGENCY_TOOL_RISK[name][0], name).toBe('high')
   })
 
@@ -243,7 +245,10 @@ describe('the registry cannot drift from what is reachable', () => {
     expect(AGENCY_TOOL_RISK.list_icps.slice(0, 2)).toEqual(['low', 'read_only'])
     expect(AGENCY_TOOL_RISK.create_icp.slice(0, 2)).toEqual(['medium', 'writes_internal_state'])
     expect(AGENCY_TOOL_RISK.activate_icp.slice(0, 2)).toEqual(['medium', 'changes_scoring'])
-    expect(AGENCY_TOOL_NAMES).toHaveLength(23 + 26 + 3)
+    // Editing a draft (2026-10-08): a read and a carded rewrite.
+    expect(AGENCY_TOOL_RISK.get_draft.slice(0, 2)).toEqual(['low', 'read_only'])
+    expect(AGENCY_TOOL_RISK.edit_draft.slice(0, 2)).toEqual(['high', 'leaves_the_building'])
+    expect(AGENCY_TOOL_NAMES).toHaveLength(23 + 26 + 3 + 2)
   })
 
   it('never lets a write run without a person: every non-read tool but the scans is medium or high', () => {
@@ -289,7 +294,7 @@ describe('runsWithoutApproval', () => {
    */
   it('keeps a card on exactly the agency tools that reach a person, lift a pause or change how scans are scored', () => {
     const carded = AGENCY_TOOL_NAMES.filter((name) => !runsWithoutApproval(verdictFor(name))).sort()
-    expect(carded).toEqual(['activate_icp', 'enrol_contacts', 'queue_touch', 'resume_contact'])
+    expect(carded).toEqual(['activate_icp', 'edit_draft', 'enrol_contacts', 'queue_touch', 'resume_contact'])
   })
 
   /**

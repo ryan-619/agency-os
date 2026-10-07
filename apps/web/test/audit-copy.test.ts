@@ -112,6 +112,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'send.needs_approval': { campaignId: SUBJECT, channel: 'email', code: 'needs_approval' },
   'draft.approved': { contactId: SUBJECT, campaignId: SUBJECT, channel: 'email' },
   'draft.denied': { note: 'too pushy', refusalCode: 'needs_approval' },
+  'draft.edited': { channel: 'email', status: 'approved', subjectChanged: true, bodyChars: { before: 412, after: 380 }, reapprove: true },
   'contact.replied': { channel: 'email', paused: true, cancelledQueued: 2, suppressed: false, deal: 'advanced:replied' },
   // A colleague's stop filed under the contact (review round 7) adds
   // `fromIsContact: false` and `filedUnder` — the contact never as the
@@ -318,6 +319,8 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
     campaignId: SUBJECT, dryRun: false, queued: 14, skipped: 3, truncated: false, outOfTime: false, limit: 50, turnId: SUBJECT,
   },
   'agent.list_drafts': { total: 4, returned: 4, checked: 3, turnId: SUBJECT },
+  'agent.get_draft': { draftId: SUBJECT, status: 'awaiting_approval', turnId: SUBJECT },
+  'agent.edit_draft': { draftId: SUBJECT, edited: true, reapprove: false, reason: 'changed_meanwhile', turnId: SUBJECT },
   // --- end campaigns.ts ---
 
   // --- proposals.ts tools (2026-10-06): this file's actions go below ---
@@ -1165,6 +1168,12 @@ describe('credentials never reach a sentence', () => {
       'denied a draft about rentman.io (its evidence was stale — it can be drafted again from a current scan): “old scan”',
     )
     expect(sentenceFor(line('draft.denied', { refusalCode: 'needs_approval' }), lookups)).toBe('denied a draft about rentman.io')
+    expect(
+      sentenceFor(line('draft.edited', { channel: 'email', subjectChanged: true, reapprove: true }), lookups),
+    ).toBe('edited the words of a draft email and its subject about rentman.io — it had been approved, so it waits for approval again')
+    expect(sentenceFor(line('draft.edited', { channel: 'linkedin', subjectChanged: false, reapprove: false }), lookups)).toBe(
+      'edited the words of a draft LinkedIn message about rentman.io',
+    )
     expect(sentenceFor(line('campaign.created', { name: dsn }), lookups)).not.toContain('hunter2')
     expect(sentenceFor(line('contact.paused', { reason: dsn }), lookups)).not.toContain('hunter2')
   })

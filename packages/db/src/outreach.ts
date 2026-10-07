@@ -1788,6 +1788,178 @@ export async function denyDraft(
   return { ok: true, touch: row }
 }
 
+/** The longest subject and body a draft may be edited to — `queue_touch`'s own bounds. */
+export const DRAFT_SUBJECT_MAX = 200
+export const DRAFT_BODY_MAX = 4000
+
+/**
+ * The statuses whose words a person may still change, and what an edit does
+ * to each. Awaiting approval stays awaiting. An APPROVED email goes back to
+ * awaiting approval, because the approver approved the words and these are
+ * other words. A queued message (an auto-send campaign's) stays queued: nobody
+ * approves those one by one, and an edit is the only look a person gets.
+ * LinkedIn is editable only while awaiting: an approved LinkedIn message is a
+ * step on /tasks, which a person may already be holding.
+ */
+const EDITABLE: Readonly<Record<string, ReadonlySet<string>>> = {
+  email: new Set(['awaiting_approval', 'approved', 'queued']),
+  linkedin: new Set(['awaiting_approval']),
+}
+
+export type DraftEdit =
+  | { readonly ok: true; readonly touch: TouchRow; readonly changed: boolean; readonly reapprove: boolean }
+  | {
+      readonly ok: false
+      readonly reason: 'not_found' | 'not_editable' | 'changed_meanwhile' | 'invalid'
+      readonly message: string
+    }
+
+/**
+ * Change the words of a message that has not gone yet (2026-10-08).
+ *
+ * The edit lands only over the words the editor LOADED (`expected`, in the
+ * UPDATE's predicate): two people editing one draft cannot overwrite each
+ * other unseen, and a draft the worker claimed meanwhile is not rewritten
+ * under it — the status is in the predicate too.
+ *
+ * What is NOT changed is when the words were written (`created_at`). The send
+ * path judges the evidence a message may quote from that moment
+ * (`evidenceAsOfFor`), and an edit does not make an old scan current: a
+ * person who wants the newest evidence quoted drafts again.
+ *
+ * SMS and WhatsApp are refused: their words are a registered template filled
+ * for one person, and any other words are scrubbed by the operator
+ * (`template_mismatch`). A text is changed by drafting it again.
+ *
+ * Audited `draft.edited` with counts and flags, never the words (§2.3).
+ */
+export async function editDraft(
+  db: AgencyDb,
+  args: {
+    readonly orgId: string
+    readonly touchId: string
+    readonly editedBy: string
+    /** The new subject; omitted keeps the current one. Email needs one. */
+    readonly subject?: string | null | undefined
+    readonly body: string
+    /** The subject and body the editor loaded. */
+    readonly expected: { readonly subject: string | null; readonly body: string | null }
+  },
+): Promise<DraftEdit> {
+  const [touch] = await db
+    .select()
+    .from(schema.touches)
+    .where(and(eq(schema.touches.orgId, args.orgId), eq(schema.touches.id, args.touchId)))
+    .limit(1)
+  if (!touch || touch.direction !== 'out') return { ok: false, reason: 'not_found', message: 'No such draft.' }
+
+  if (TEMPLATE_CHANNELS.has(touch.channel as Channel)) {
+    return {
+      ok: false,
+      reason: 'not_editable',
+      message:
+        'A text is a registered template filled in for one person, and other words would be refused by the ' +
+        'operator. Deny it and draft it again with Draft SMS on /contacts.',
+    }
+  }
+  const editable = EDITABLE[touch.channel]
+  if (!editable?.has(touch.status)) return { ok: false, reason: 'not_editable', message: notEditableWords(touch) }
+
+  const body = args.body.replace(/\r\n?/g, '\n').trim()
+  const subject =
+    args.subject === undefined ? touch.subject : args.subject === null ? null : args.subject.replace(/\s+/g, ' ').trim() || null
+  const invalid = draftWordsProblem(touch.channel, subject, body)
+  if (invalid) return { ok: false, reason: 'invalid', message: invalid }
+
+  if (subject === touch.subject && body === touch.body) {
+    return { ok: true, touch, changed: false, reapprove: false }
+  }
+
+  const reapprove = touch.status === 'approved'
+  const [row] = await db
+    .update(schema.touches)
+    .set({
+      subject,
+      body,
+      // An approval was of the old words. Back to a person, with the
+      // recipient and campaign it carried kept as the preselection.
+      ...(reapprove
+        ? { status: 'awaiting_approval', approvedBy: null, approvedAt: null, decisionNote: null, scheduledFor: null }
+        : {}),
+    })
+    .where(
+      and(
+        eq(schema.touches.id, touch.id),
+        eq(schema.touches.orgId, args.orgId),
+        eq(schema.touches.status, touch.status),
+        sql`${schema.touches.subject} IS NOT DISTINCT FROM ${args.expected.subject}`,
+        sql`${schema.touches.body} IS NOT DISTINCT FROM ${args.expected.body}`,
+        sql`EXISTS (SELECT 1 FROM users u WHERE u.id = ${args.editedBy} AND u.org_id = ${args.orgId})`,
+      ),
+    )
+    .returning()
+  if (!row) {
+    const [now] = await db
+      .select({ status: schema.touches.status, subject: schema.touches.subject, body: schema.touches.body, channel: schema.touches.channel })
+      .from(schema.touches)
+      .where(and(eq(schema.touches.orgId, args.orgId), eq(schema.touches.id, touch.id)))
+      .limit(1)
+    if (!now) return { ok: false, reason: 'not_found', message: 'No such draft.' }
+    if (!EDITABLE[now.channel]?.has(now.status)) return { ok: false, reason: 'not_editable', message: notEditableWords(now) }
+    return {
+      ok: false,
+      reason: 'changed_meanwhile',
+      message: 'Somebody changed these words while you were editing. Reload the page to see them; nothing was saved.',
+    }
+  }
+
+  await appendAudit(db, {
+    orgId: args.orgId,
+    actor: args.editedBy,
+    action: 'draft.edited',
+    subjectType: 'touch',
+    subjectId: row.id,
+    detail: {
+      channel: row.channel,
+      status: touch.status,
+      subjectChanged: subject !== touch.subject,
+      bodyChars: { before: [...(touch.body ?? '')].length, after: [...body].length },
+      reapprove,
+    },
+  }).catch(() => {})
+  return { ok: true, touch: row, changed: true, reapprove }
+}
+
+/** Why words may not be stored, or null when they may. Code points, as Postgres counts. */
+export function draftWordsProblem(channel: string, subject: string | null, body: string): string | null {
+  if (!body) return 'The message needs some words.'
+  if ([...body].length > DRAFT_BODY_MAX) return `The message is longer than ${DRAFT_BODY_MAX.toLocaleString('en')} characters.`
+  if (channel === 'email' && !subject) return 'An email needs a subject.'
+  if (subject !== null && [...subject].length > DRAFT_SUBJECT_MAX) return `The subject is longer than ${DRAFT_SUBJECT_MAX} characters.`
+  // Postgres refuses U+0000 in text; say so rather than fail the UPDATE.
+  if (body.includes('\u0000') || subject?.includes('\u0000')) return 'The words contain a character that cannot be stored.'
+  return null
+}
+
+function notEditableWords(touch: { readonly status: string; readonly channel: string }): string {
+  switch (touch.status) {
+    case 'sending':
+      return 'It is being sent right now, so its words can no longer change.'
+    case 'sent':
+      return 'It has already gone, so its words can no longer change.'
+    case 'refused':
+    case 'failed':
+      return 'It will not be sent as it stands. Draft a new message instead.'
+    case 'approved':
+      return touch.channel === 'linkedin'
+        ? 'It is approved and waiting as a step on /tasks, where a person may already be sending it. ' +
+          'Mark it "I did not send it" there, then draft it again with the words you want.'
+        : 'It can no longer be edited.'
+    default:
+      return 'It can no longer be edited.'
+  }
+}
+
 /**
  * How an answer to a reply ended without going, in the words its re-pause
  * is recorded with. `denied` is a person's no on /approvals; `failed` the

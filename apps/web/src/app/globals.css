@@ -243,6 +243,15 @@ textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 }
 .approval-actions { display: flex; gap: 8px; align-items: center; font-size: 12.5px; }
 .approval-actions .deny { border-color: var(--warn); }
+/* Editing a draft's words on /approvals (2026-10-08). */
+.draft-edit { display: grid; gap: 8px; margin: 0 0 10px; }
+.draft-edit label { display: grid; gap: 4px; font-size: 12.5px; }
+.draft-edit input {
+  width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--bg); color: var(--ink); font-size: 13px;
+}
+.draft-edit textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; resize: vertical; }
+.approval-actions .secondary { background: var(--panel); color: var(--ink); border: 1px solid var(--line); }
 
 .chat-bar { display: flex; gap: 8px; align-items: flex-end; }
 .chat-input {

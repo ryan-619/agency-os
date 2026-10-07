@@ -173,6 +173,11 @@ export const AGENCY_TOOL_RISK = {
   update_campaign: ['medium', 'writes_internal_state', 'Renames, re-caps, pauses or reactivates a supervised campaign. It never turns auto-send on.'],
   enrol_contacts: ['high', 'leaves_the_building', 'Drafts openers to people outside the company into a supervised campaign; each still waits on /approvals before anything is sent.'],
   list_drafts: ['low', 'read_only', 'Reads the messages waiting for approval, with what the send rules would say of each.'],
+  // Editing a draft's words (2026-10-08). The read shows an EMAIL draft whole; the edit
+  // rewrites one and keeps its card: a queued auto-send email goes out with the new
+  // words unread by anybody, and every other draft still waits on /approvals.
+  get_draft: ['low', 'read_only', 'Reads the whole subject and body of one email draft that has not gone yet.'],
+  edit_draft: ['high', 'leaves_the_building', 'Rewrites the words of an email to someone outside the company that has not gone yet; an approved one goes back to /approvals.'],
   // proposals.ts — proposals, meetings, deals and tasks
   generate_proposal: ['medium', 'writes_internal_state', 'Writes a draft proposal from the company’s latest scan for the team. It refuses stale evidence, and nothing is sent.'],
   get_proposal: ['low', 'read_only', 'Reads a proposal’s scope, workstreams and price range, and whether its evidence is still current.'],

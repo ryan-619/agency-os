@@ -843,3 +843,39 @@ describe('what approving an SMS says', () => {
     expect(approvedMessage('linkedin', null)).toBe(LINKEDIN_APPROVED)
   })
 })
+
+/**
+ * Editing a draft's words (2026-10-08). The browser restates `editDraft`'s
+ * limits, the route is gated like a decision and sends the words the editor
+ * loaded, and an open edit blocks approval by button and by key.
+ */
+describe('editing a draft on /approvals', async () => {
+  const view = await import('../src/lib/approval-view')
+  const db = await import('@agency/db/queries')
+
+  it('holds the browser’s limits equal to the database’s', () => {
+    expect(view.EDIT_SUBJECT_MAX).toBe(db.DRAFT_SUBJECT_MAX)
+    expect(view.EDIT_BODY_MAX).toBe(db.DRAFT_BODY_MAX)
+  })
+
+  it('offers editing on email and LinkedIn only — a text is a registered template', () => {
+    expect(view.wordsEditable('email')).toBe(true)
+    expect(view.wordsEditable('linkedin')).toBe(true)
+    for (const channel of TEMPLATE_CHANNELS) expect(view.wordsEditable(channel)).toBe(false)
+  })
+
+  it('refuses approval while an edit is open, saying why', () => {
+    const base = { canDecide: true, settled: false, busy: false, contactId: 'c', campaignId: 'k', block: null }
+    expect(view.approvability(base)).toEqual({ ok: true })
+    expect(view.approvability({ ...base, editing: true })).toEqual({ ok: false, why: view.EDITING_BLOCKS_APPROVAL })
+  })
+
+  it('gates the route like a decision and sends the words the editor loaded', () => {
+    const route = readFileSync(fileURLToPath(new URL('../src/app/api/touches/[id]/route.ts', import.meta.url)), 'utf8')
+    expect(route).toMatch(/assertCan\([^)]*'approvals:decide'\)/)
+    expect(route).toMatch(/expected: \{ subject: expected\.subject, body: expected\.body \}/)
+    const card = readFileSync(fileURLToPath(new URL('../src/components/outreach/drafts.tsx', import.meta.url)), 'utf8')
+    expect(card).toMatch(/expectedSubject: before\.subject/)
+    expect(card).toMatch(/editing: editing\[d\.id\] !== undefined/)
+  })
+})
