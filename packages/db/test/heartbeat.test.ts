@@ -13,7 +13,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import {
   HEARTBEAT_RETIRED_AFTER_DAYS, HEARTBEAT_SILENT_AFTER_SECONDS,
-  heartbeatAge, heartbeatReport, heartbeatReportedStatus, heartbeatSilentAfter, heartbeatSms, heartbeatStatus,
+  heartbeatAge, heartbeatBrief, heartbeatReport, heartbeatReportedStatus, heartbeatSilentAfter, heartbeatSms, heartbeatStatus,
   isCheckViolation, readLatestHeartbeat, schema, writeHeartbeat,
   type AgencyDb, type HeartbeatWrite,
 } from '../src/index.js'
@@ -215,6 +215,15 @@ describe('the pure half', () => {
     expect(heartbeatSms({ detail: null })).toBeNull()
     // Not a value the worker writes: not guessed at.
     for (const sms of ['ON', 'yes', true, 1, '']) expect(heartbeatSms({ detail: { sms } }), String(sms)).toBeNull()
+  })
+
+  it('reads whether the worker writes the morning brief, and a worker from before 0020 as unknown', () => {
+    expect(heartbeatBrief({ detail: { brief: 'on', sms: 'off' } })).toBe('on')
+    expect(heartbeatBrief({ detail: { brief: 'off' } })).toBe('off')
+    // Started before 0020: it writes no brief, but the row never said "off".
+    expect(heartbeatBrief({ detail: { halted: false, lockHeld: true, sms: 'on' } })).toBeNull()
+    expect(heartbeatBrief(null)).toBeNull()
+    for (const brief of ['ON', 'yes', true, 1, '']) expect(heartbeatBrief({ detail: { brief } }), String(brief)).toBeNull()
   })
 
   describe('heartbeatReport', () => {

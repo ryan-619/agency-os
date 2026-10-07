@@ -33,6 +33,7 @@
  */
 import type { AgentDefRow } from '@agency/db'
 import type { Logger } from '../logger.js'
+import { playbookSection } from './options.js'
 
 /** Exactly what a database row may set. Frozen; see the test. */
 export const ALLOWED_AGENT_KEYS = Object.freeze([
@@ -70,7 +71,10 @@ export interface AgentsResult {
  * Like the connector builder: a row that cannot be used is skipped and logged,
  * never thrown on. One malformed subagent must not take the whole chat down.
  */
-export function buildAgents(rows: readonly AgentDefRow[], log: Logger): AgentsResult {
+export function buildAgents(rows: readonly AgentDefRow[], log: Logger, playbook = ''): AgentsResult {
+  // The agency's own description, under the same header the main agent reads
+  // it under: a helper drafting an opener should sound like the agency too.
+  const section = playbookSection(playbook)
   const agents: Record<string, BuiltAgent> = {}
   const skipped: { slug: string; why: string }[] = []
 
@@ -87,7 +91,7 @@ export function buildAgents(rows: readonly AgentDefRow[], log: Logger): AgentsRe
     // Built key by key. NOT a spread of the row, and not a spread of anything.
     const built: BuiltAgent = {
       description: row.description,
-      prompt: row.systemPrompt,
+      prompt: section ? `${row.systemPrompt}\n\n${section}` : row.systemPrompt,
       // Omitted entirely when empty: the SDK reads an absent `tools` as
       // "inherit the parent's", and an EMPTY ARRAY as "no tools at all" — a
       // subagent that can do nothing but talk. A row with no tools listed

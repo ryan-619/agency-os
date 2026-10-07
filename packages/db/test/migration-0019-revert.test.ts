@@ -50,8 +50,12 @@ describe('0019 down, then up, over a sent SMS', () => {
       [orgId, campaignId, contactId, companyId, tpl],
     )
 
-    const reverted = await migrateDown(db.driver, migrations(), 1)
-    expect(reverted).toEqual(['0019'])
+    // Down to and including 0019: the migrator reverts newest first, so any
+    // migration written after 0019 goes before it, and comes back with it.
+    const steps = migrations().filter((m) => m.version >= '0019').length
+    const reverted = await migrateDown(db.driver, migrations(), steps)
+    expect(reverted.at(-1)).toBe('0019')
+    expect(reverted).toHaveLength(steps)
     await migrateUp(db.driver, migrations())
   }, 120_000)
 

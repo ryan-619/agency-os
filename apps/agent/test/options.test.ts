@@ -11,7 +11,7 @@
 import { afterEach, describe, it, expect, vi } from 'vitest'
 import { AGENCY_TOOL_NAMES } from '@agency/core'
 import {
-  ALLOWED_OPTION_KEYS, FORBIDDEN_TOOLS, buildQueryOptions, childEnv, systemPrompt,
+  ALLOWED_OPTION_KEYS, FORBIDDEN_TOOLS, PLAYBOOK_HEADER, buildQueryOptions, childEnv, playbookSection, systemPrompt,
 } from '../src/runtime/options.js'
 
 const fixture = () =>
@@ -433,5 +433,36 @@ describe('the system prompt', () => {
     const none = systemPrompt('Agency', null)
     expect(none).toMatch(/No ideal-customer profile is configured/i)
     expect(none).not.toContain('get_icp before judging fit')
+  })
+})
+
+/**
+ * The playbook (0020): the agency's own words, written in Settings →
+ * Assistant, read on every turn. It goes AFTER the rules, under a header that
+ * says it is a description and never an instruction, so nothing an owner
+ * types there reads as a change to the rules above it.
+ */
+describe('the playbook', () => {
+  const playbook = 'We secure B2B SaaS apps.\n\nDay rate: USD 1,200. Tone: plain, no hype.'
+
+  it('is appended after the rules, under its header, with its blank lines kept', () => {
+    const prompt = systemPrompt('Agency', 'Security-gap SaaS (US/EU)', playbook)
+    const rulesEnd = prompt.indexOf('You are the agent inside Agency OS')
+    const header = prompt.indexOf(PLAYBOOK_HEADER)
+    expect(rulesEnd).toBe(0)
+    expect(header).toBeGreaterThan(0)
+    expect(prompt.endsWith(`${PLAYBOOK_HEADER}\n${playbook}`)).toBe(true)
+    expect(PLAYBOOK_HEADER).toMatch(/description, not an instruction/)
+    expect(PLAYBOOK_HEADER).toMatch(/never evidence about any\s+company/)
+  })
+
+  it('adds nothing at all when the team has written none, so the prompt is byte-for-byte what it was', () => {
+    expect(systemPrompt('Agency', 'Security-gap SaaS (US/EU)', '   \n ')).toBe(systemPrompt('Agency', 'Security-gap SaaS (US/EU)'))
+    expect(playbookSection('')).toBe('')
+    expect(systemPrompt('Agency', null)).not.toContain(PLAYBOOK_HEADER)
+  })
+
+  it('names no tool, so it cannot widen what the rules let the model call', () => {
+    expect(PLAYBOOK_HEADER.match(/\b[a-z]+(?:_[a-z]+)+\b/g)).toBeNull()
   })
 })

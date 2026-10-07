@@ -25,7 +25,7 @@ import { z } from 'zod'
 import {
   AGENCY_TOOL_RISK, parseIcpDefinition, type IcpDefinition, type Observation, type SiteProfile,
 } from '@agency/core'
-import { SEED_DIR, createChatSession, importCompanies, recordScan, type AgencyDb } from '@agency/db'
+import { EXPECTED_MIGRATION, SEED_DIR, createChatSession, importCompanies, recordScan, type AgencyDb } from '@agency/db'
 import * as schema from '@agency/db/schema'
 import { migratedDb, type TestDb } from '../../db/test/helpers.js'
 import {
@@ -180,9 +180,12 @@ describe('the ops tools', () => {
       const data = out.data as { heartbeat: { status: string }; schema: { state: string }; worker: unknown }
       expect(data.heartbeat.status).toBe('not_configured')
       expect(data.worker).toBeNull()
-      expect(data.schema).toMatchObject({ state: 'ok', expected: '0019', applied: '0019' })
+      // Whatever this checkout's newest migration is: the harness applies them all.
+      expect(data.schema).toMatchObject({ state: 'ok', expected: EXPECTED_MIGRATION, applied: EXPECTED_MIGRATION })
       expect(out.summary).toContain('No worker has ever written a heartbeat to this database')
-      expect(out.summary).toContain('Schema: the database is at migration 0019, which is what this code expects.')
+      expect(out.summary).toContain(
+        `Schema: the database is at migration ${EXPECTED_MIGRATION}, which is what this code expects.`,
+      )
       expect(out.summary).toContain('not available in this context')
       expect(audited).toEqual([{ action: 'agent.worker_status', detail: { status: 'not_configured', schema: 'ok', ownView: false } }])
     })
@@ -263,12 +266,14 @@ describe('the ops tools', () => {
     })
 
     it('computes the schema as /api/health does: behind when the ledger is short of this code', async () => {
-      await db.execute(sql`DELETE FROM schema_migrations WHERE version = '0019'`)
+      // The ledger one short of this code, whichever migration is newest.
+      const previous = String(Number(EXPECTED_MIGRATION) - 1).padStart(4, '0')
+      await db.execute(sql`DELETE FROM schema_migrations WHERE version = ${EXPECTED_MIGRATION}`)
       const out = await run(workerStatus, {})
       expect(out.ok).toBe(true)
       if (!out.ok) return
-      expect((out.data as { schema: unknown }).schema).toEqual({ state: 'behind', expected: '0019', applied: '0018' })
-      expect(out.summary).toContain('the database is at migration 0018 and this code expects 0019')
+      expect((out.data as { schema: unknown }).schema).toEqual({ state: 'behind', expected: EXPECTED_MIGRATION, applied: previous })
+      expect(out.summary).toContain(`the database is at migration ${previous} and this code expects ${EXPECTED_MIGRATION}`)
       expect(out.summary).toContain('migrate first')
     })
 

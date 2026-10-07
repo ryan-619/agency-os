@@ -19,7 +19,7 @@ import type { McpServerConfig, Options } from '@anthropic-ai/claude-agent-sdk'
 import { parseIcpDefinition, type ChatEventBody, type Draft, type Principal } from '@agency/core'
 import {
   activeIcpProfile, appendAudit, enabledAgentDefs, ensureApproval, expireApproval, readApproval,
-  schema, type AgencyDb, type ApprovalRow,
+  readPlaybook, schema, type AgencyDb, type ApprovalRow,
 } from '@agency/db'
 import type { OpsContext, ToolContext } from '@agency/tools'
 import { makeCanUseTool } from '../gate/can-use-tool.js'
@@ -134,6 +134,11 @@ export async function buildTurnRuntime(
     readonly principal: Principal
     readonly resume: string | null
     readonly emit: (event: ChatEventBody) => void
+    /**
+     * Nobody is watching this turn — the morning brief. The gate declines,
+     * at once and with no card, anything that would need a person.
+     */
+    readonly unattended?: boolean
   },
 ): Promise<TurnRuntime> {
   const turnId = randomUUID()
@@ -182,11 +187,19 @@ export async function buildTurnRuntime(
    * Both builders SKIP a row they cannot use rather than throwing: one broken
    * connector must not take the whole chat down.
    */
-  const [connectors, agentRows] = await Promise.all([
+  const [connectors, agentRows, playbook] = await Promise.all([
     buildMcpServers(deps.db, args.orgId, deps.secretsKey, deps.log),
     enabledAgentDefs(deps.db, args.orgId),
+    // The agency's own words (Settings → Assistant), read fresh like the
+    // rest. A read that fails costs the turn its playbook, never the turn.
+    readPlaybook(deps.db, args.orgId).catch((err: unknown) => {
+      deps.log.warn('could not read the playbook; this turn runs without it', {
+        error: err instanceof Error ? err.name : 'UnknownError',
+      })
+      return ''
+    }),
   ])
-  const subagents = buildAgents(agentRows, deps.log)
+  const subagents = buildAgents(agentRows, deps.log, playbook)
   if (Object.keys(connectors.servers).length > 0 || Object.keys(subagents.agents).length > 0) {
     deps.log.info('runtime assembled from the database', {
       // Names and transports only. A connector URL can carry a token in a
@@ -226,6 +239,7 @@ export async function buildTurnRuntime(
     markGated: () => {},
     halted: deps.halt.halted,
     log: deps.log,
+    unattended: args.unattended === true,
   })
 
   const toolContext = (): ToolContext => ({
@@ -288,7 +302,7 @@ export async function buildTurnRuntime(
       PreToolUse: [{ hooks: [makePreToolUse(hookDeps)], timeout: HOOK_TIMEOUT_SECONDS }],
       PostToolUse: [{ hooks: [makePostToolUse(hookDeps)], timeout: HOOK_TIMEOUT_SECONDS }],
     },
-    systemPrompt: systemPrompt(args.orgName, icpLabel),
+    systemPrompt: systemPrompt(args.orgName, icpLabel, playbook),
     cwd: deps.cwd,
     abortController: abort,
     maxTurns: deps.maxTurns,

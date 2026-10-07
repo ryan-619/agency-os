@@ -104,6 +104,13 @@ export interface GateDeps {
   readonly markGated: (toolUseId: string) => void
   /** True once the runtime has stopped trusting itself; see the bypass detector. */
   readonly halted: () => boolean
+  /**
+   * A turn nobody is watching — the morning brief. It may only read and scan:
+   * anything above the low tier, an internal write included, is declined at
+   * once with no card, because a card there waits for a person who is not
+   * coming and a write there has nobody to catch a mistake.
+   */
+  readonly unattended?: boolean
   readonly log: {
     warn: (msg: string, fields?: Record<string, unknown>) => void
     error: (msg: string, fields?: Record<string, unknown>) => void
@@ -164,6 +171,25 @@ export function makeCanUseTool(deps: GateDeps): CanUseTool {
         return deny(`${toolName} was called with invalid arguments: ${parsed.message ?? 'unknown problem'}`)
       }
       const fp = fingerprint(deps.turnId, toolName, canonicalJson(parsed.value))
+
+      // --- unattended: reads and scans only ----------------------------------
+      // The morning brief runs with nobody watching. A card there waits for a
+      // person who is not coming; and an internal write — a note, a pause, a
+      // suppression, which is never undone — would be made on the model's
+      // reading of what it read, which includes the words of inbound replies,
+      // with nobody to catch a mistake or a reply written to steer it. So it
+      // may only read and scan (the low tier), everything else is declined at
+      // once with no card, and the model is told to list it for a person.
+      if (deps.unattended && verdict.risk !== 'low') {
+        await deps.audit('agent.tool_unattended', {
+          toolName, toolUseId: options.toolUseID, risk: verdict.risk, rule: verdict.rule,
+        })
+        return deny(
+          `${toolName} would change the agency's records or needs a person, and this is an unattended run ` +
+            'that may only read and scan. Do not try it another way: list it in your summary as a next step ' +
+            'for a person.',
+        )
+      }
 
       // --- runs at once: reads, derived writes, and internal writes ----------
       // `runsWithoutApproval` in packages/core is the one place this line is

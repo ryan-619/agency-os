@@ -25,6 +25,7 @@ import { outreachOptions } from './outreach/options.js'
 import { providerFrom } from '@agency/llm'
 import { startInbox } from './outreach/inbox.js'
 import { refineDraft } from './outreach/draft.js'
+import { startMorningBriefs } from './brief/scheduler.js'
 import { createAgentHttpServer, type StartTurnRequest, type TurnHandle } from './http/server.js'
 import { createDeferredEmitter, startTurn } from './chat/turn.js'
 import { buildTurnRuntime, createHalt, resolvePrincipal, type RuntimeHalt } from './runtime/session.js'
@@ -368,11 +369,43 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
         return {
           outreach: now.outreach,
           chat: now.chatEnabled ? 'enabled' : 'disabled',
-          detail: { halted: now.halted, lockHeld: now.lockHeld, sms: senders.sms },
+          // `brief`: whether this worker writes the morning brief (0020) — it
+          // needs a model, as chat does — so the Assistant page can say so.
+          detail: { halted: now.halted, lockHeld: now.lockHeld, sms: senders.sms, brief: credential ? 'on' : 'off' },
         }
       },
     }),
   )
+
+  /**
+   * The morning brief (0020): one unattended turn a day per org that switched
+   * it on, through the same `beginTurn` as chat — with `unattended`, so the
+   * gate declines anything that would need a person. It needs a model, so a
+   * worker with chat off starts none.
+   */
+  if (credential) {
+    const stopBriefs = startMorningBriefs({
+      db,
+      log,
+      now: () => new Date(),
+      start: async (req) => {
+        const begun = await beginTurn({
+          req: { ...req, deep: false, unattended: true },
+          db, env, log, halt, running, secretsKey, skills, credential, ops, refineOpener,
+        })
+        if (!begun.ok) return { ok: false, message: begun.message }
+        // Nobody reads this stream: the turn writes its own messages as it
+        // goes, and draining it is what lets the turn's events be released.
+        const finished = (async () => {
+          for await (const _ of begun.turn.events()) {
+            // drained
+          }
+        })()
+        return { ok: true, finished }
+      },
+    })
+    stops.push(async () => stopBriefs())
+  }
 
   log.info('agent worker started', {
     nodeEnv: env.NODE_ENV,
@@ -384,6 +417,7 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
     outreach: outreachMode,
     sms: senders.sms,
     triage: triage ? `${triage.name} (${triage.local ? 'local' : 'REMOTE'})` : 'deterministic',
+    morningBrief: credential ? 'on' : 'off (no model)',
   })
 
   const heldLock = lock
@@ -486,6 +520,7 @@ async function beginTurn(args: {
       principal: who.principal,
       resume: who.sdkSessionId,
       emit: (body) => gateEmitter.emit(body),
+      unattended: req.unattended === true,
     },
   )
 

@@ -33,6 +33,7 @@ export const runtime = 'nodejs'
 
 const AREAS: readonly { readonly href: string; readonly title: string; readonly what: string }[] = [
   { href: '/settings/connectors', title: 'Connectors', what: 'MCP servers the agent can use, and which of their tools.' },
+  { href: '/settings/assistant', title: 'Assistant', what: 'The playbook the AI reads with every message, and its morning brief.' },
   { href: '/settings/agents', title: 'Agents', what: 'Subagent definitions: prompt, tools, model.' },
   { href: '/settings/team', title: 'Team', what: 'Who can sign in, and as what.' },
   { href: '/settings/credentials', title: 'Credentials', what: 'Encrypted connector credentials. Never shown.' },

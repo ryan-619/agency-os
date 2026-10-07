@@ -38,6 +38,11 @@ export interface StartTurnRequest {
    * ordinary turn — because the stronger model costs several times as much.
    */
   readonly deep: boolean
+  /**
+   * A turn nobody is watching — set only by the worker's own morning brief,
+   * never read from a request: the gate declines what would need a person.
+   */
+  readonly unattended?: boolean
 }
 
 export interface AgentHttpDeps {

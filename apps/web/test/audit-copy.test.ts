@@ -238,6 +238,13 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'send.template_mismatch': { campaignId: SUBJECT, channel: 'sms', code: 'template_mismatch' },
   // Review round 5: a promotional SMS whose band never opens, stored as unknown_timezone before.
   'send.band_never_opens': { campaignId: SUBJECT, channel: 'sms', code: 'band_never_opens' },
+  // Settings → Assistant (0020): the playbook and the morning brief.
+  'assistant.playbook_updated': { chars: 38, before: 0 },
+  'assistant.brief_updated': { enabled: true, at: '08:30', timeZone: 'Asia/Kolkata' },
+  'assistant.brief_requested': {},
+  'assistant.brief_started': { date: '2026-10-07', requested: false },
+  'assistant.brief_failed': { date: '2026-10-07', requested: false, why: 'chat_disabled' },
+  'agent.tool_unattended': { toolName: 'mcp__agency__add_note', toolUseId: 't1', risk: 'medium', rule: 'writes_internal_state' },
   'template.created': { channel: 'sms', category: 'service_explicit', externalId: '1107160000000012345' },
   'template.activated': { channel: 'sms', externalId: '1107160000000012345' },
   'template.deactivated': { channel: 'sms', externalId: '1107160000000012345' },
@@ -487,6 +494,48 @@ describe('sentenceFor', () => {
     )
     expect(sentenceFor(line('reply.reclassified', { from: 'other', to: 'not_now', paused: false, cancelledQueued: 0 }), lookups)).toBe(
       'reclassified a reply from a contact at rentman.io from other to not now',
+    )
+  })
+
+  it('says what the playbook and the morning brief did, by counts and settings alone (0020)', () => {
+    const say = (a: string, d: unknown = WRITTEN[a], actor = ORG_USER) => sentenceFor(line(a, d, { actor }), lookups)
+    expect(say('assistant.playbook_updated')).toBe(
+      'saved the agency playbook the AI reads with every message — 38 characters, its first version',
+    )
+    expect(say('assistant.playbook_updated', { chars: 1200, before: 38 })).toBe(
+      'saved the agency playbook the AI reads with every message — 1,200 characters, was 38',
+    )
+    expect(say('assistant.playbook_updated', { chars: 0, before: 1200 })).toBe(
+      'cleared the agency playbook the AI reads (it was 1,200 characters)',
+    )
+    expect(say('assistant.brief_updated')).toBe(
+      'switched the morning brief on, every day at 08:30 (Asia/Kolkata), running in their name',
+    )
+    expect(say('assistant.brief_updated', { enabled: false, at: '08:30', timeZone: 'Asia/Kolkata' })).toBe(
+      'switched the morning brief off',
+    )
+    expect(say('assistant.brief_requested')).toBe('asked for a morning brief now; the worker starts it at its next look')
+    expect(say('assistant.brief_started', WRITTEN['assistant.brief_started'], 'system')).toBe(
+      'started the morning brief for 2026-10-07; it only reads and scans',
+    )
+    expect(say('assistant.brief_started', { date: '2026-10-07', requested: true }, 'system')).toBe(
+      'started the morning brief for 2026-10-07, as asked; it only reads and scans',
+    )
+    expect(say('assistant.brief_failed', WRITTEN['assistant.brief_failed'], 'system')).toBe(
+      'could not start the morning brief for 2026-10-07 — the worker has chat off, and the brief needs its model; that day is spent, and it runs again the next',
+    )
+    expect(say('agent.tool_unattended', WRITTEN['agent.tool_unattended'], 'agent')).toBe(
+      'was declined mcp__agency__add_note in the morning brief: a run nobody is watching may only read and scan, so it was left as a next step for a person',
+    )
+    // A playbook's words never reach the log, so nothing here can quote them.
+    expect(JSON.stringify(WRITTEN['assistant.playbook_updated'])).not.toMatch(/[a-z]{4,}\s/i)
+  })
+
+  it('says an internal write ran at once because it changes only the agency’s records, not that it is low risk', () => {
+    const say = (d: unknown) => sentenceFor(line('agent.tool_allow', d, { actor: 'agent' }), lookups)
+    expect(say(WRITTEN['agent.tool_allow'])).toBe('ran get_icp without asking — it is low risk')
+    expect(say({ toolName: 'mcp__agency__add_note', toolUseId: 't1', risk: 'medium', rule: 'writes_internal_state' })).toBe(
+      "ran mcp__agency__add_note without asking — it changes only the agency's own records, and sends nothing",
     )
   })
 

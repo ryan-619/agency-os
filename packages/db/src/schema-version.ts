@@ -25,7 +25,7 @@
  *
  * Adding a migration? Bump this in the same commit.
  */
-export const EXPECTED_MIGRATION = '0019'
+export const EXPECTED_MIGRATION = '0020'
 
 /** The ledger table `migrateUp` writes to. */
 export const LEDGER_TABLE = 'schema_migrations'

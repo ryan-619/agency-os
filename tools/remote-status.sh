@@ -132,8 +132,16 @@ const { Client } = require("pg");
     tpl.rows.length
       ? tpl.rows[0].data_type + ", nullable=" + tpl.rows[0].is_nullable + "   <- 0019 is applied"
       : "MISSING   <- 0019 is NOT applied, do not deploy");
-  const t19 = await c.query(`select to_regclass('message_templates') is not null as present`);
+  // A parameter, never a quoted literal: this script is one single-quoted
+  // bash string, so a quote here ends it, and the SQL arrived unquoted.
+  const t19 = await c.query("select to_regclass($1) is not null as present", ["message_templates"]);
   console.log("  0019 table: message_templates" + (t19.rows[0].present ? "" : " MISSING"));
+
+  // 0020: Settings → Assistant reads assistant_settings, and so does the
+  // morning-brief check the worker runs every minute.
+  const t20 = await c.query("select to_regclass($1) is not null as present", ["assistant_settings"]);
+  console.log("  0020 table: assistant_settings" +
+    (t20.rows[0].present ? "   <- 0020 is applied" : " MISSING   <- 0020 is NOT applied, do not deploy"));
 
   // A count and an age, like the users count below: never a row. /api/health
   // already publishes the same age as worker.ageSeconds.

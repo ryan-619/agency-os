@@ -82,6 +82,9 @@ describe('the cookie gate', () => {
     '/api/proposals/x/share', '/api/contacts/x/erase', '/pipeline/analytics',
     // The DoveSoft screens and the routes behind them are a member's, not a provider's.
     '/settings/templates', '/api/templates', '/api/templates/import', '/api/templates/x', '/api/contacts/x/sms',
+    // Settings → Assistant (0020): the playbook and the morning brief.
+    '/settings/assistant', '/api/settings/assistant/playbook', '/api/settings/assistant/brief',
+    '/api/settings/assistant/brief/run',
   ])(
     'sends anonymous traffic on %s to /signin',
     (path) => {

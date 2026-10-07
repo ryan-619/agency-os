@@ -1066,8 +1066,10 @@ describe('the dashboard page', () => {
 describe('the worker writes what the dashboard reads about SMS', () => {
   const worker = code(read('../../agent/src/worker.ts'))
 
-  it('puts sms beside halted and lockHeld in the heartbeat’s detail', () => {
-    expect(worker).toContain('detail: { halted: now.halted, lockHeld: now.lockHeld, sms: senders.sms }')
+  it('puts sms beside halted and lockHeld in the heartbeat’s detail — and, since 0020, whether it writes the brief', () => {
+    expect(worker).toContain(
+      "detail: { halted: now.halted, lockHeld: now.lockHeld, sms: senders.sms, brief: credential ? 'on' : 'off' }",
+    )
     expect(worker).toContain("sms: dovesoft.on ? 'on' : 'off',")
   })
 })

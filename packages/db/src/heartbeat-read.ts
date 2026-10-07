@@ -142,6 +142,19 @@ export function heartbeatSms(row: { readonly detail: unknown } | null): Heartbea
   return sms === 'on' || sms === 'off' ? sms : null
 }
 
+/**
+ * Whether the worker writes the morning brief (0020), from `detail.brief` —
+ * `on` where it has a model, as chat needs. Null for no row, and for a row
+ * that does not say: a worker started before 0020 writes none, whatever its
+ * chat says, and the Assistant page says to restart it.
+ */
+export function heartbeatBrief(row: { readonly detail: unknown } | null): 'on' | 'off' | null {
+  const detail = row?.detail
+  const brief =
+    typeof detail === 'object' && detail !== null && 'brief' in detail ? (detail as { brief: unknown }).brief : null
+  return brief === 'on' || brief === 'off' ? brief : null
+}
+
 export interface HeartbeatReport {
   /** This web deployment is configured to reach a worker (`deployment().worker`). */
   readonly configured: boolean

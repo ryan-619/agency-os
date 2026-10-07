@@ -546,7 +546,11 @@ anything caught mid-send on the next boot.
 than a correctness one: quiet hours and the daily cap are evaluated at the
 moment of sending, so mail queued for 09:00 while the lid was shut goes out
 when the worker next runs and is re-checked against every §2.1 rule first.
-Nothing is sent that should not be; it is sent later than intended. On a
+Nothing is sent that should not be; it is sent later than intended. The
+same is true of the **morning brief** (Settings → Assistant): it is written
+by this worker, on a run with chat on, at its first look after the time set
+— so a laptop asleep at 08:30 writes it when it wakes, later that day, and
+never twice. On a
 Mac the script already runs under `caffeinate -is`, so idle sleep is not the
 risk; a lid closed on battery still is.
 
@@ -1107,6 +1111,28 @@ runbook:
 5. **Verify**: `curl -s https://<host>/api/health` reads `schema.state: "ok"`
    with `applied: "0019"`; open **Settings → Deployment**; and run a cron by
    hand with the bearer, then read its `/audit` row.
+
+**0020 adds one table, `assistant_settings`** — the playbook and the
+morning brief behind **Settings → Assistant**. It sets no new variable
+anywhere: the playbook is read by the worker on every turn, and the brief is
+written by the worker, with chat on, once a day. Code deployed ahead of it
+serves every page but Settings → Assistant, which answers 500; the worker
+runs its turns without a playbook (a read that fails costs a turn its
+playbook, never the turn) and logs once that its brief check failed. So, as
+always, the migration goes first: the Production workflow's `release` action
+applies 0020 and then deploys, and `./tools/remote-status.sh` prints `0020
+table: assistant_settings   <- 0020 is applied`. Then **restart the worker**
+(`./tools/run-worker.sh`): a worker started before 0020 writes no brief, and
+Settings → Assistant says so from its heartbeat. Reverting 0020 loses the
+playbook and the brief's schedule, and nothing else.
+
+That probe was added with a fix: the script hands node its program as one
+single-quoted bash string, and the 0019 probe's quoted SQL literal ended the
+string early, so node was sent `to_regclass(message_templates)` and the
+script stopped there, before the heartbeat and the user count, on every run
+since 0019. Each table name is a bind parameter now, and
+`packages/db/test/remote-status-script.test.ts` reads the program as bash
+does.
 
 **Rolling back is refused where it would let people back in.** 0018's down
 drops `users.revoked_at`, and code from before 0018 has no notion of

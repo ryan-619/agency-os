@@ -109,6 +109,12 @@ function status(d: unknown, key: string): string | null {
   return typeof v === 'string' && /^[245]\.\d{1,3}\.\d{1,3}$/.test(v) ? v : null
 }
 
+/** A string value in a known shape (a date, a clock time, a zone), or null. */
+function matching(d: unknown, key: string, shape: RegExp): string | null {
+  const v = detailValue(d, key)
+  return typeof v === 'string' && shape.test(v) ? v : null
+}
+
 function num(d: unknown, key: string): number | null {
   const v = detailValue(d, key)
   return typeof v === 'number' && Number.isFinite(v) ? v : null
@@ -767,7 +773,16 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   },
   'agent.tool_pre': (c) => `was about to call ${tool(c.d)}${riskNote(c.d)}`,
   'agent.tool_post': (c) => `finished ${tool(c.d)}`,
-  'agent.tool_allow': (c) => `ran ${tool(c.d)} without asking — it is low risk`,
+  // Since 2026-10-06 the agency's own internal writes run at once too, and the
+  // row carries their real tier: "it is low risk" would be false of them.
+  'agent.tool_allow': (c) => {
+    const risk = word(c.d, 'risk')
+    if (risk === null || risk === 'low') return `ran ${tool(c.d)} without asking — it is low risk`
+    if (word(c.d, 'rule') === 'writes_internal_state') {
+      return `ran ${tool(c.d)} without asking — it changes only the agency's own records, and sends nothing`
+    }
+    return `ran ${tool(c.d)} without asking${riskNote(c.d)}`
+  },
   'agent.tool_refused': (c) => {
     const rule = word(c.d, 'rule')
     return `was refused ${tool(c.d)}${riskNote(c.d)}${rule ? ` by the rule ${rule}` : ''}`
@@ -776,6 +791,9 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   // default until an owner saves a list, and nobody chose that for this row.
   'agent.tool_disabled': (c) =>
     `was refused ${tool(c.d)}: it is turned off in Settings → Connectors, so nobody was asked`,
+  // The morning brief (0020) may only read and scan.
+  'agent.tool_unattended': (c) =>
+    `was declined ${tool(c.d)} in the morning brief: a run nobody is watching may only read and scan, so it was left as a next step for a person`,
   'approval.requested': (c) => `asked a person to approve ${tool(c.d)}${riskNote(c.d)}`,
   'approval.approved': (c) => {
     if (c.row.actor !== 'agent') return `approved ${tool(c.d)}`
@@ -940,6 +958,45 @@ const SENTENCES: Readonly<Record<string, Template>> = {
             } — /campaigns lists them`
     }
     return join([digest, alert, unannounced])
+  },
+
+  // --- Settings → Assistant (0020): the playbook and the morning brief -----
+  // Counts and settings only: the playbook's words are never in the log.
+  'assistant.playbook_updated': (c) => {
+    const chars = num(c.d, 'chars')
+    const before = num(c.d, 'before')
+    if (chars === 0) {
+      return `cleared the agency playbook the AI reads${before ? ` (it was ${before.toLocaleString('en')} characters)` : ''}`
+    }
+    const size = chars === null ? '' : ` — ${chars.toLocaleString('en')} characters`
+    const was = before === null ? '' : before === 0 ? ', its first version' : `, was ${before.toLocaleString('en')}`
+    return `saved the agency playbook the AI reads with every message${size}${was}`
+  },
+  'assistant.brief_updated': (c) => {
+    if (flag(c.d, 'enabled') !== true) return 'switched the morning brief off'
+    const at = matching(c.d, 'at', /^([01][0-9]|2[0-3]):[0-5][0-9]$/)
+    const zone = matching(c.d, 'timeZone', /^[A-Za-z0-9_+/-]{1,64}$/)
+    return `switched the morning brief on${at ? `, every day at ${at}${zone ? ` (${zone})` : ''}` : ''}, running in their name`
+  },
+  'assistant.brief_requested': () => 'asked for a morning brief now; the worker starts it at its next look',
+  'assistant.brief_started': (c) => {
+    const date = matching(c.d, 'date', /^\d{4}-\d{2}-\d{2}$/)
+    return `started the morning brief${date ? ` for ${date}` : ''}${flag(c.d, 'requested') === true ? ', as asked' : ''}; it only reads and scans`
+  },
+  'assistant.brief_failed': (c) => {
+    const date = matching(c.d, 'date', /^\d{4}-\d{2}-\d{2}$/)
+    const why = word(c.d, 'why')
+    const because =
+      why === 'chat_disabled'
+        ? ' — the worker has chat off, and the brief needs its model'
+        : why === 'runtime_halted'
+          ? ' — the agent runtime had halted'
+          : why === 'no_such_conversation'
+            ? ' — its thread could not be found'
+            : why
+              ? ` (${why})`
+              : ''
+    return `could not start the morning brief${date ? ` for ${date}` : ''}${because}; that day is spent, and it runs again the next`
   },
 
   // --- DoveSoft (0019): registered templates and SMS -----------------------
@@ -1301,6 +1358,8 @@ export function subjectHref(row: AuditLine, company: AuditCompanyRef | null): st
       return '/settings/team'
     case 'secret':
       return '/settings/credentials'
+    case 'assistant':
+      return '/settings/assistant'
     default:
       return companyPage
   }
@@ -1314,7 +1373,7 @@ const FAMILY_LABEL: Readonly<Record<string, string>> = {
   approval: 'Approvals', turn: 'Chat turns', connector: 'Connectors', credential: 'Credentials', user: 'Team',
   company: 'Companies', note: 'Notes', task: 'Tasks', call: 'Calls', notification: 'Notifications',
   scan: 'Scheduled rescans', cron: 'Scheduled jobs', export: 'Exports', linkedin: 'LinkedIn steps',
-  template: 'Message templates', sms: 'SMS',
+  template: 'Message templates', sms: 'SMS', assistant: 'Assistant',
 }
 export const AUDIT_FAMILIES: readonly { readonly value: string; readonly label: string }[] = Object.freeze(
   [...new Set(AUDIT_ACTIONS.map((a) => a.split('.')[0] ?? a))].map((value) => ({
@@ -1342,6 +1401,7 @@ export const AUDIT_SUBJECT_TYPES: readonly { readonly value: string; readonly la
   { value: 'user', label: 'A teammate' },
   { value: 'secret', label: 'A stored credential' },
   { value: 'message_template', label: 'A message template' },
+  { value: 'assistant', label: 'The assistant settings' },
 ])
 
 /**

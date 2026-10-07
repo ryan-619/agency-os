@@ -143,6 +143,15 @@ describe('the agent HTTP surface', () => {
       expect(started.map((r) => r.deep)).toEqual([true, false, false, false, false])
     })
 
+    it('never takes an unattended turn from a request: only the worker’s own brief starts one', async () => {
+      started.length = 0
+      const res = await post('/internal/turns', { chatSessionId: 's', userId: 'u', text: 'hi', unattended: true })
+      expect(res.status).toBe(200)
+      await res.text()
+      expect(started).toHaveLength(1)
+      expect(started[0]!.unattended).toBeUndefined()
+    })
+
     it('rejects a body that is not the right shape', async () => {
       const res = await post('/internal/turns', { text: 'hello' })
       expect(res.status).toBe(400)

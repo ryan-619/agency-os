@@ -877,6 +877,47 @@ describe('internal writes run without a card; what reaches a person keeps one', 
     expect(pause).not.toHaveBeenCalled()
   })
 
+  /**
+   * The morning brief (0020) runs with nobody watching. It may only read and
+   * scan: a card there would wait for a person who is not coming, and an
+   * internal write — a pause, a suppression — would be made on the model's
+   * reading of inbound replies with nobody to catch a mistake or a reply
+   * written to steer it. Everything above the low tier is declined at once,
+   * no card and no approval row, and audited.
+   */
+  it('lets an unattended turn read and scan, and declines everything else at once with no card', async () => {
+    const ensureApproval = vi.fn(async () => approvalRow())
+    const { deps, emitted, audited } = makeDeps({ ensureApproval, unattended: true })
+    const canUseTool = makeCanUseTool(deps)
+    const declined = [
+      'mcp__agency__queue_touch', 'mcp__agency__enrol_contacts', 'mcp__agency__resume_contact',
+      'mcp__agency__add_note', 'mcp__agency__add_suppression', 'mcp__agency__pause_contact',
+      'mcp__agency__update_deal', 'mcp__exa__web_search_exa', 'Agent',
+    ]
+    for (const tool of declined) {
+      const result = await canUseTool(
+        tool,
+        { campaignId: 'c-1', contactId: 'k-1', companyId: 'c-1', body: 'x', query: 'x', description: 'd', prompt: 'p' },
+        options(),
+      )
+      expect(result, tool).toMatchObject({ behavior: 'deny', message: expect.stringContaining('may only read and scan') })
+    }
+    expect(ensureApproval).not.toHaveBeenCalled()
+    expect(emitted.some((e) => e.kind === 'approval_requested')).toBe(false)
+    expect(audited.filter((a) => a === 'agent.tool_unattended')).toHaveLength(declined.length)
+    expect(audited).not.toContain('agent.tool_allow')
+
+    expect(await canUseTool('mcp__agency__get_pipeline', {}, options())).toEqual({ behavior: 'allow' })
+    expect(await canUseTool('mcp__agency__rescan_stale', {}, options())).toEqual({ behavior: 'allow' })
+  })
+
+  it('runs an internal write at once when somebody IS watching', async () => {
+    const { deps } = makeDeps({})
+    expect(await makeCanUseTool(deps)('mcp__agency__add_note', { companyId: 'c-1', body: 'x' }, options())).toEqual({
+      behavior: 'allow',
+    })
+  })
+
   it('still parks a third-party connector tool on a person', async () => {
     const ensureApproval = vi.fn(async () => approvalRow())
     const { deps } = makeDeps({ ensureApproval })

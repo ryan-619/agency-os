@@ -34,6 +34,7 @@ export type ShellCurrent =
   | 'compliance'
   | 'audit'
   | 'settings'
+  | 'assistant'
   | 'connectors'
   | 'agents'
   | 'team'
@@ -98,6 +99,7 @@ export async function Shell({
           <a href="/compliance" className={on('compliance')}>Compliance</a>
           <a href="/audit" className={on('audit')}>Audit</a>
           <a href="/settings" className={SETTINGS_PAGES.has(current) ? 'on' : undefined}>Settings</a>
+          <a href="/settings/assistant" className={on('assistant')}>Assistant</a>
           <a href="/settings/connectors" className={on('connectors')}>Connectors</a>
           <a href="/settings/agents" className={on('agents')}>Agents</a>
         </nav>

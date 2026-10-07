@@ -14,7 +14,7 @@
  */
 import { relations, sql } from 'drizzle-orm'
 import {
-  boolean, index, integer, jsonb, numeric, pgTable, primaryKey, text,
+  boolean, date, index, integer, jsonb, numeric, pgTable, primaryKey, text,
   time, timestamp, uniqueIndex, uuid, bigint,
 } from 'drizzle-orm/pg-core'
 
@@ -847,6 +847,39 @@ export const proposalShares = pgTable(
  * scrubs it. A row is that registration, copied in by a person or from the
  * DLT portal's CSV export; `packages/core/src/dlt.ts` reads its body.
  */
+/**
+ * What the AI is told about the agency, and its morning brief (0020). One
+ * row per org, written from Settings → Assistant. The playbook is appended to
+ * the AI's instructions on every turn as a description, never a rule; the
+ * brief is one unattended turn a day at `briefAt` in `briefTimeZone`, in
+ * `briefUserId`'s name, claimed for the zone's own date (`briefLastRunOn`).
+ */
+export const assistantSettings = pgTable(
+  'assistant_settings',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    /** At most 20,000 characters, by CHECK. */
+    playbook: text('playbook').notNull().default(''),
+    /** SET NULL (playbook_updated_by); same-org composite FK, owned by the migration. */
+    playbookUpdatedBy: uuid('playbook_updated_by'),
+    /** When the playbook was last saved — `updated_at` moves on every write, the daily claim's included. */
+    playbookUpdatedAt: timestamp('playbook_updated_at', { withTimezone: true }),
+    briefEnabled: boolean('brief_enabled').notNull().default(false),
+    /** SET NULL (brief_user_id); same-org composite FK, owned by the migration. */
+    briefUserId: uuid('brief_user_id'),
+    /** HH:MM, by CHECK, read in `briefTimeZone`. */
+    briefAt: text('brief_at').notNull().default('08:30'),
+    briefTimeZone: text('brief_time_zone').notNull().default('Asia/Kolkata'),
+    /** The zone's own date of the last brief, as 'YYYY-MM-DD'. */
+    briefLastRunOn: date('brief_last_run_on', { mode: 'string' }),
+    /** "Run it now": started by the worker's next look whatever the clock says, cleared by its claim. */
+    briefRequestedAt: timestamp('brief_requested_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex('assistant_settings_one_per_org').on(t.orgId)],
+)
+
 export const messageTemplates = pgTable(
   'message_templates',
   {
