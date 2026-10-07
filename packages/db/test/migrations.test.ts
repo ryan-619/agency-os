@@ -8,7 +8,7 @@ const BUSINESS_TABLES = [
   'agent_defs', 'approvals', 'assistant_settings', 'audit_log', 'calls', 'campaigns', 'chat_messages',
   'chat_sessions', 'companies', 'connectors', 'consents', 'contacts', 'deals',
   'findings', 'icp_profiles', 'meetings', 'message_templates', 'notes', 'proposal_shares', 'proposals',
-  'scans', 'scores', 'secrets', 'suppressions', 'tasks', 'touches',
+  'scans', 'scores', 'secrets', 'services', 'site_audits', 'suppressions', 'tasks', 'touches',
 ]
 const AUTH_TABLES = ['accounts', 'sessions', 'users', 'verification_tokens']
 /**

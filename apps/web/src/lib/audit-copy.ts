@@ -998,6 +998,28 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     return `made ${theNamed(c.d, 'ICP profile')} the active one${previous ? ` (it was “${previous}”)` : ''}; every later scan is scored under it`
   },
 
+  // --- Listings and the services catalogue (0022) ---------------------------
+  'company.listings_added': (c) => {
+    const added = num(c.d, 'added') ?? 0
+    const refreshed = num(c.d, 'refreshed') ?? 0
+    return `added ${added} ${added === 1 ? 'business' : 'businesses'} from Google Maps listings${
+      refreshed > 0 ? ` and refreshed the listing of ${refreshed} already here` : ''
+    }`
+  },
+  'service.created': (c) => {
+    const needs = num(c.d, 'needs') ?? 0
+    return `added a service to the catalogue, answering ${needs} ${needs === 1 ? 'need' : 'needs'}${flag(c.d, 'priced') ? ', with a price' : ''}`
+  },
+  'service.updated': (c) => {
+    const fields = words(c.d, 'fields')
+    return `changed a service in the catalogue${fields && fields.length > 0 ? ` (${fields.join(', ')})` : ''}`
+  },
+  'service.deleted': () => 'removed a service from the catalogue',
+  'service.suggested_added': (c) => {
+    const added = num(c.d, 'added') ?? 0
+    return `added ${added} suggested ${added === 1 ? 'service' : 'services'} to the catalogue, with no prices yet`
+  },
+
   // --- Settings → Assistant (0020): the playbook and the morning brief -----
   // Counts and settings only: the playbook's words are never in the log.
   'assistant.playbook_updated': (c) => {
@@ -1400,6 +1422,8 @@ export function subjectHref(row: AuditLine, company: AuditCompanyRef | null): st
       return '/settings/assistant'
     case 'icp_profile':
       return '/settings/icp'
+    case 'service':
+      return '/settings/services'
     default:
       return companyPage
   }
@@ -1413,7 +1437,7 @@ const FAMILY_LABEL: Readonly<Record<string, string>> = {
   approval: 'Approvals', turn: 'Chat turns', connector: 'Connectors', credential: 'Credentials', user: 'Team',
   company: 'Companies', note: 'Notes', task: 'Tasks', call: 'Calls', notification: 'Notifications',
   scan: 'Scheduled rescans', cron: 'Scheduled jobs', export: 'Exports', linkedin: 'LinkedIn steps',
-  template: 'Message templates', sms: 'SMS', assistant: 'Assistant', icp: 'ICP profiles',
+  template: 'Message templates', sms: 'SMS', assistant: 'Assistant', icp: 'ICP profiles', service: 'Services',
 }
 export const AUDIT_FAMILIES: readonly { readonly value: string; readonly label: string }[] = Object.freeze(
   [...new Set(AUDIT_ACTIONS.map((a) => a.split('.')[0] ?? a))].map((value) => ({

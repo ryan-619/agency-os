@@ -36,6 +36,7 @@ export * from './suppression-source.js'
 export * from './connector-catalog.js'
 // Wave-1 stubs, each replaced wholesale by the feature named on its first line.
 export * from './informational.js'
+export * from './opportunity.js'
 export * from './diff.js'
 export * from './enrolment.js'
 export * from './rotting.js'

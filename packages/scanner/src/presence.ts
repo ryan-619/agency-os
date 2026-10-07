@@ -18,7 +18,7 @@
  *     unobserved one `gap: null` (`findings_unobserved_has_no_gap`).
  * Pure.
  */
-import type { Observation } from '@agency/core'
+import { FREE_BUILDER_HOSTS, type Observation } from '@agency/core'
 import type { HtmlFacts, PageFacts } from './html.js'
 import { pyHead } from './pystr.js'
 import type { RawCapture } from './types.js'
@@ -241,11 +241,8 @@ const PLATFORM_MARKERS: readonly (readonly [name: string, test: (host: string, u
   ['Blogger', (h) => hostIs(h, 'blogger.com') || hostIs(h, 'blogblog.com')],
 ]
 
-/** Free builder addresses: a business on one has no domain of its own. */
-const FREE_SUBDOMAINS = [
-  'wixsite.com', 'business.site', 'blogspot.com', 'wordpress.com', 'weebly.com', 'godaddysites.com',
-  'mystrikingly.com', 'webnode.page', 'zyrosite.com', 'myshopify.com', 'square.site', 'carrd.co', 'framer.website',
-] as const
+/** Free builder addresses: a business on one has no domain of its own. Core's list, shared with the needs read. */
+const FREE_SUBDOMAINS = FREE_BUILDER_HOSTS
 
 function sitePlatform(raw: RawCapture, facts: HtmlFacts, url: string): Observation {
   const hosts = loadedHosts(facts, url)

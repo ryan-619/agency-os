@@ -242,6 +242,11 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   // ICP profiles (0021), and the research connectors an owner lets run without asking.
   'icp.created': { name: 'Security-gap SaaS (India)', basedOn: 'Security-gap SaaS (US/EU)', geos: ['IN'], headcountMin: 10, headcountMax: 500 },
   'icp.activated': { name: 'Security-gap SaaS (India)', previous: 'Security-gap SaaS (US/EU)' },
+  'company.listings_added': { added: 12, refreshed: 3 },
+  'service.created': { needs: 4, priced: true },
+  'service.updated': { fields: ['name', 'priceFrom'] },
+  'service.deleted': {},
+  'service.suggested_added': { added: 10 },
   'agent.list_icps': { profiles: 2, turnId: SUBJECT },
   'agent.create_icp': { created: true, profileId: SUBJECT, turnId: SUBJECT },
   'agent.activate_icp': { changed: true, turnId: SUBJECT },

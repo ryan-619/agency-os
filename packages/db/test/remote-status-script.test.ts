@@ -55,5 +55,6 @@ describe('tools/remote-status.sh', () => {
     }
     expect(program).toContain('<- 0020 is applied')
     expect(program).toContain('<- 0021 is applied')
+    expect(program).toContain('<- 0022 is applied')
   })
 })

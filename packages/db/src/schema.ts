@@ -163,12 +163,31 @@ export const companies = pgTable(
     description: text('description'),
     /** Where the headcount came from — a URL or a short note. Never without a headcount (0021). */
     headcountSource: text('headcount_source'),
-    /** 'apollo' | 'manual' | 'import' | 'agent' */
+    /** The listing's main line, E.164 by CHECK (0022). A business's number, never a person's contact record. */
+    phone: text('phone'),
+    /** As the listing gives it (0022). */
+    address: text('address'),
+    /** Google Maps place id: one company per place in an org (0022). */
+    googlePlaceId: text('google_place_id'),
+    googleMapsUrl: text('google_maps_url'),
+    /** 0.0–5.0, as the listing showed it when read. */
+    googleRating: numeric('google_rating', { precision: 2, scale: 1 }),
+    googleReviewCount: integer('google_review_count'),
+    /** The listing's primary type, e.g. `dentist`. */
+    googleCategory: text('google_category'),
+    /** The website the LISTING names — maybe a Facebook page or a directory entry, never assumed to be theirs. */
+    listingWebsite: text('listing_website'),
+    /** When the listing facts were read; a listing fact is never stored without it (0022). */
+    listingCheckedAt: timestamp('listing_checked_at', { withTimezone: true }),
+    /** 'apollo' | 'manual' | 'import' | 'agent' | 'inbound' | 'google_maps' */
     source: text('source').notNull().default('manual'),
     firstSeenAt: timestamp('first_seen_at', { withTimezone: true }).notNull().defaultNow(),
     ...timestamps,
   },
-  (t) => [uniqueIndex('companies_org_domain_key').on(t.orgId, t.domain)],
+  (t) => [
+    uniqueIndex('companies_org_domain_key').on(t.orgId, t.domain),
+    uniqueIndex('companies_org_place_key').on(t.orgId, t.googlePlaceId).where(sql`google_place_id IS NOT NULL`),
+  ],
 )
 
 export const scans = pgTable(
@@ -890,6 +909,64 @@ export const assistantSettings = pgTable(
     ...timestamps,
   },
   (t) => [uniqueIndex('assistant_settings_one_per_org').on(t.orgId)],
+)
+
+/**
+ * What the agency sells (0022): a name, a price range and the NEEDS it answers
+ * (`NEED_KEYS` in packages/core). Prices are whole units of `currency`.
+ */
+export const services = pgTable(
+  'services',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    description: text('description'),
+    needs: text('needs').array().notNull().default(sql`'{}'::text[]`),
+    priceFrom: integer('price_from'),
+    priceTo: integer('price_to'),
+    currency: text('currency').notNull().default('INR'),
+    /** 'one_off' | 'monthly' | 'yearly' | 'hourly' | 'daily' */
+    priceUnit: text('price_unit').notNull().default('one_off'),
+    active: boolean('active').notNull().default(true),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex('services_org_name_key').on(t.orgId, sql`lower(btrim(${t.name}))`)],
+)
+
+/**
+ * What Google's PageSpeed Insights measured of a company's homepage (0022).
+ * A failed audit carries its reason and no score, by CHECK.
+ */
+export const siteAudits = pgTable(
+  'site_audits',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    /** CASCADE; same-org composite FK (company_id, org_id), owned by the migration. */
+    companyId: uuid('company_id').notNull(),
+    /** 'pagespeed' */
+    source: text('source').notNull().default('pagespeed'),
+    /** 'mobile' | 'desktop' */
+    strategy: text('strategy').notNull(),
+    url: text('url').notNull(),
+    ranAt: timestamp('ran_at', { withTimezone: true }).notNull().defaultNow(),
+    ok: boolean('ok').notNull(),
+    error: text('error'),
+    performance: integer('performance'),
+    accessibility: integer('accessibility'),
+    bestPractices: integer('best_practices'),
+    seo: integer('seo'),
+    lcpMs: integer('lcp_ms'),
+    cls: numeric('cls', { precision: 6, scale: 3 }),
+    tbtMs: integer('tbt_ms'),
+    fcpMs: integer('fcp_ms'),
+    /** The field data's overall category: 'FAST' | 'AVERAGE' | 'SLOW'; null when Google has none. */
+    fieldCategory: text('field_category'),
+    ...timestamps,
+  },
+  (t) => [index('site_audits_company_ran_idx').on(t.companyId, t.ranAt)],
 )
 
 export const messageTemplates = pgTable(

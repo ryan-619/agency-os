@@ -32,8 +32,18 @@ import { isCheckViolation, isForeignKeyViolation, isUniqueViolation } from './pg
 
 export type TaskRow = typeof schema.tasks.$inferSelect
 
-export type TaskKind = 'todo' | 'linkedin_send' | 'kickoff' | 'renewal'
-export const TASK_KINDS: readonly TaskKind[] = Object.freeze(['todo', 'linkedin_send', 'kickoff', 'renewal'] as const)
+export type TaskKind = 'todo' | 'linkedin_send' | 'kickoff' | 'renewal' | 'call' | 'visit'
+export const TASK_KINDS: readonly TaskKind[] = Object.freeze(['todo', 'linkedin_send', 'kickoff', 'renewal', 'call', 'visit'] as const)
+
+/**
+ * A call and a visit (0022) are a PERSON's acts — from their own phone, or
+ * on foot — recorded as tasks; the system places no call. A call task is for
+ * a company with a phone on record that is not on the suppression list, and
+ * says before anything else what the person calling checks first.
+ */
+export const CALL_TASK_NOTE =
+  'Before calling: check the number is not on the Do Not Disturb registry (TRAI) and call in business hours. ' +
+  'If they ask not to be called again, record the number on /suppressions.'
 
 /** 0018's `tasks_title_is_bounded`, counted in characters as Postgres counts them. */
 export const TASK_TITLE_MAX = 200
@@ -54,7 +64,9 @@ export type TasksCreateResult =
   | { ok: true; task: TaskRow }
   | {
       ok: false
-      reason: 'blank_title' | 'title_too_long' | 'invalid' | 'duplicate_open_for_touch' | 'assignee_not_in_org' | 'not_found'
+      reason:
+        | 'blank_title' | 'title_too_long' | 'invalid' | 'duplicate_open_for_touch' | 'assignee_not_in_org' | 'not_found'
+        | 'suppressed'
       message: string
     }
 
@@ -141,7 +153,7 @@ export async function tasksCreate(
   if (input.dueAt && Number.isNaN(input.dueAt.getTime())) {
     return { ok: false, reason: 'invalid', message: 'The due date could not be read.' }
   }
-  const detail = input.detail?.trim().slice(0, TASK_DETAIL_MAX) || null
+  let detail = input.detail?.trim().slice(0, TASK_DETAIL_MAX) || null
 
   let companyId = input.companyId ?? null
   const notFound = (message: string): Fail<'not_found'> => ({ ok: false, reason: 'not_found', message })
@@ -181,6 +193,33 @@ export async function tasksCreate(
   if (input.assigneeUserId && !(await assignable(db, input.orgId, input.assigneeUserId))) {
     return { ok: false, reason: 'assignee_not_in_org', message: NOT_ON_TEAM }
   }
+  let callDetail: string | null = null
+  if (input.kind === 'call') {
+    if (!companyId) return { ok: false, reason: 'invalid', message: 'A call task is for a company: name the one to call.' }
+    const [company] = await db
+      .select({ phone: schema.companies.phone })
+      .from(schema.companies)
+      .where(and(eq(schema.companies.orgId, input.orgId), eq(schema.companies.id, companyId)))
+      .limit(1)
+    if (!company?.phone) {
+      return { ok: false, reason: 'invalid', message: 'That company has no phone number on record, so there is nothing to call.' }
+    }
+    const [suppressed] = await db
+      .select({ id: schema.suppressions.id })
+      .from(schema.suppressions)
+      .where(and(eq(schema.suppressions.orgId, input.orgId), eq(schema.suppressions.kind, 'phone'), eq(schema.suppressions.value, company.phone)))
+      .limit(1)
+    if (suppressed) {
+      return {
+        ok: false,
+        reason: 'suppressed',
+        message: 'That number is on the suppression list — somebody asked not to be contacted on it. No call task was made.',
+      }
+    }
+    callDetail = CALL_TASK_NOTE
+  }
+
+  if (callDetail) detail = `${callDetail}${detail ? `\n\n${detail}` : ''}`.slice(0, TASK_DETAIL_MAX)
 
   let task: TaskRow | undefined
   try {
