@@ -33,6 +33,9 @@
 #                                         and polishes openers, then run
 #   ./tools/run-worker.sh --slack         ask only for the Slack webhook URL the
 #                                         opt-out alarm posts to, then run
+#   ./tools/run-worker.sh --smtp          ask only the outgoing mailbox's questions
+#                                         (e.g. Google Workspace instead of
+#                                         Resend for cold outreach), then run
 #   ./tools/run-worker.sh --google        ask only for the Google API key that
 #                                         finds businesses on Google Maps and
 #                                         measures sites with PageSpeed, then run
@@ -65,8 +68,9 @@ case "${1:-}" in
   --ai) MODE=ai ;;
   --slack) MODE=slack ;;
   --google) MODE=google ;;
+  --smtp) MODE=smtp ;;
   --forget) MODE=forget ;;
-  *) echo "usage: $0 [--reconfigure | --imap | --secrets-key | --ai | --slack | --google | --forget]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--reconfigure | --imap | --smtp | --secrets-key | --ai | --slack | --google | --forget]" >&2; exit 2 ;;
 esac
 
 # ── The Keychain (macOS only) ──────────────────────────────────────────────
@@ -178,8 +182,8 @@ node_modules/.bin/tsc --build
 
 # ── Read what was saved, or ask ──────────────────────────────────────────────
 LOADED="no"
-# --imap, --secrets-key, --ai, --slack and --google read them too: each asks its own question over them.
-if { [ "$MODE" = run ] || [ "$MODE" = imap ] || [ "$MODE" = secrets-key ] || [ "$MODE" = ai ] \
+# --imap, --smtp, --secrets-key, --ai, --slack and --google read them too: each asks its own question over them.
+if { [ "$MODE" = run ] || [ "$MODE" = imap ] || [ "$MODE" = smtp ] || [ "$MODE" = secrets-key ] || [ "$MODE" = ai ] \
   || [ "$MODE" = slack ] || [ "$MODE" = google ]; } \
   && have_keychain && kc_get DATABASE_URL >/dev/null; then
   for n in "${SAVED_NAMES[@]}"; do
@@ -598,6 +602,44 @@ if [ "$MODE" = imap ] && [ "$LOADED" = yes ]; then
     fi
   done
   [ "$IMAP_SAVED" = yes ] && printf '  Saved in your Keychain; the next run uses them too.\n' >&3
+  exec 3>&-
+fi
+
+# ── --smtp: the mailbox approved mail goes out through, alone ────────────────
+# Cold outreach belongs in a real mailbox — Google Workspace: smtp.gmail.com,
+# port 465, the mailbox's whole address and a Google APP password (the one
+# reply detection already uses works) — not a transactional service. Resend's
+# acceptable-use policy forbids unsolicited outreach, and the web app's
+# sign-in links ride on the Resend account. Only these five answers are asked
+# and saved; with nothing saved yet, every question above was asked instead.
+if [ "$MODE" = smtp ] && [ "$LOADED" = yes ]; then
+  ask_open
+  printf 'Sending only — every other saved answer is kept.\n' >&3
+  SMTP_HOST=$(ask_host 'SMTP host' "${SMTP_HOST:-smtp.gmail.com}"); export SMTP_HOST
+  printf '  SMTP port [%s]: ' "${SMTP_PORT:-465}" >&3; read -r V <&3; export SMTP_PORT="${V:-${SMTP_PORT:-465}}"
+  SMTP_USER_DEFAULT="${SMTP_USER:-${IMAP_USER:-}}"
+  [ "$SMTP_HOST" = smtp.gmail.com ] && [ "${SMTP_USER_DEFAULT:-}" = resend ] && SMTP_USER_DEFAULT="${IMAP_USER:-}"
+  printf '  SMTP username [%s]: ' "$SMTP_USER_DEFAULT" >&3; read -r V <&3; export SMTP_USER="${V:-$SMTP_USER_DEFAULT}"
+  printf '  SMTP password (hidden — for Google an APP password; Enter keeps the saved one): ' >&3
+  read -r -s V <&3; printf '\n' >&3
+  # Google shows an app password in four groups of four; the password has no spaces.
+  [ "$SMTP_HOST" = smtp.gmail.com ] && V="${V//[[:space:]]/}"
+  [ -n "${V:-}" ] && export SMTP_PASSWORD="$V"
+  printf '  From address [%s]: ' "${MAIL_FROM:-}" >&3; read -r V <&3
+  [ -n "${V:-}" ] && export MAIL_FROM="$V"
+  V=""
+  unset SMTP_USER_DEFAULT
+  SMTP_SAVED=yes
+  for n in SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASSWORD MAIL_FROM; do
+    [ -n "${!n:-}" ] || continue
+    kc_put "$n" "${!n}" || true
+    # `security -i` can answer 0 for a write it refused: read it back.
+    if [ "$(kc_get "$n" || true)" != "${!n}" ]; then
+      SMTP_SAVED=no
+      echo "  Could not save $n in the Keychain: this run uses what you typed, the next one what was saved before." >&2
+    fi
+  done
+  [ "$SMTP_SAVED" = yes ] && printf '  Saved in your Keychain; the next run uses it too.\n' >&3
   exec 3>&-
 fi
 

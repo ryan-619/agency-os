@@ -1184,6 +1184,31 @@ describe.runIf(PTY)('tools/run-worker.sh, answered at its prompts', () => {
     expect(readFileSync(join(logs, 'security-argv'), 'utf8')).not.toContain(KEY)
   })
 
+  it('--smtp asks only the outgoing mailbox, offering Google and the reply mailbox, and saves it', async () => {
+    save('DATABASE_URL', DB)
+    save('IMAP_HOST', 'imap.gmail.com')
+    save('IMAP_USER', 'ryan@myagencyos.in')
+    save('SMTP_HOST', 'smtp.resend.com')
+    save('SMTP_USER', 'resend')
+    save('MAIL_FROM', 'Ryan <ryan@myagencyos.in>')
+    const r = await converse(layout(), ['--smtp'], [
+      ['SMTP host', 'smtp.gmail.com'],
+      ['SMTP port', ''],
+      ['SMTP username [ryan@myagencyos.in]', ''],
+      ['SMTP password', 'abcd efgh ijkl mnop'],
+      ['From address', ''],
+    ])
+    expect(r.unanswered, r.transcript).toEqual([])
+    expect(r.status, r.transcript).toBe(0)
+    expect(r.transcript).not.toContain('Production DATABASE_URL')
+    expect(saved('SMTP_HOST')).toBe('smtp.gmail.com')
+    expect(saved('SMTP_USER')).toBe('ryan@myagencyos.in')
+    expect(saved('SMTP_PASSWORD')).toBe('abcdefghijklmnop')
+    expect(saved('MAIL_FROM')).toBe('Ryan <ryan@myagencyos.in>')
+    expect(r.transcript).toContain('sending:  ON  — approved outreach goes via smtp.gmail.com')
+    expect(readFileSync(join(logs, 'security-argv'), 'utf8')).not.toContain('abcdefghijklmnop')
+  })
+
   it('--slack answered none removes a saved webhook', async () => {
     save('DATABASE_URL', DB)
     save('SLACK_WEBHOOK_URL', 'https://hooks.slack.com/services/T000/B000/old')
