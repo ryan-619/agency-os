@@ -576,6 +576,8 @@ async function beginTurn(args: {
       omitTools,
       places,
       pagespeed,
+      // Only the origin: a path or query in the variable is never part of a link.
+      ...(env.WEB_PUBLIC_URL ? { webOrigin: new URL(env.WEB_PUBLIC_URL).origin } : {}),
     },
     {
       orgId: who.orgId,

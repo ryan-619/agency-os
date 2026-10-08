@@ -157,6 +157,12 @@ const { Client } = require("pg");
   console.log("  0022 table: services" +
     (t22.rows[0].present ? "   <- 0022 is applied" : " MISSING   <- 0022 is NOT applied, do not deploy"));
 
+  // 0023: quotes, the agency profile, share links and coordinates. Quotes,
+  // Settings → Business profile and the audit and preview pages need it.
+  const t23 = await c.query("select to_regclass($1) is not null as present", ["quotes"]);
+  console.log("  0023 table: quotes" +
+    (t23.rows[0].present ? "     <- 0023 is applied" : " MISSING   <- 0023 is NOT applied, do not deploy"));
+
   // A count and an age, like the users count below: never a row. /api/health
   // already publishes the same age as worker.ageSeconds.
   if (t18.rows.find(r => r.t === "worker_heartbeats" && r.present)) {

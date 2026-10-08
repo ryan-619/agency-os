@@ -5,7 +5,7 @@ import {
   COMPLIANCE_WINDOW_DAYS, auditResolveActors, auditSubjectsToCompanies, complianceAutoSendOffCold,
   complianceColdOptInTouches, complianceDisclosure, complianceDraftsOnStaleEvidence, complianceEvidenceFreshness,
   complianceOptOutsNotRecorded, complianceOptOutsWithoutSuppression, inboxUnhandledCount, listAudit, listDeals,
-  tasksCounts, type AgencyDb,
+  tasksCounts, todayActions, type AgencyDb,
 } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { AuditLog } from '@/components/audit/log'
@@ -133,7 +133,7 @@ export default async function Dashboard() {
   // that page reads it, so the counter and the list it opens agree.
   const { staleAfterDays } = readIcp(icp?.definition)
 
-  const [c, worker, unhandled, tasks, deals, freshness, compliance, feed, lastRescan] = await Promise.all([
+  const [c, worker, unhandled, tasks, deals, freshness, compliance, feed, lastRescan, today] = await Promise.all([
     counts(user.orgId),
     workerStatus(db, now),
     inboxUnhandledCount(db, user.orgId),
@@ -143,6 +143,7 @@ export default async function Dashboard() {
     complianceMustBeZero(db, user.orgId, staleAfterDays, now),
     mayReadAudit ? listAudit(db, user.orgId, { limit: FEED_ROWS }) : Promise.resolve([]),
     listAudit(db, user.orgId, { limit: 1, actionPrefix: 'scan.cron_run' }),
+    todayActions(db, { orgId: user.orgId, userId: user.id, now }),
   ])
 
   const [companies, people] = await Promise.all([
@@ -210,6 +211,24 @@ export default async function Dashboard() {
           {status.at ? <> <When iso={status.at.toISOString()} /></> : null}
           {status.tail ? <span className="muted"> · {status.tail}</span> : null}
         </p>
+
+        <h2>Today’s top actions</h2>
+        {today.length > 0 ? (
+          <ol className="today">
+            {today.map((a) => (
+              <li key={a.id} className={a.kind === 'call' ? 'today-hot' : undefined}>
+                <a href={a.href}>{a.title}</a>
+                {a.at ? <span className="muted"> · <When iso={a.at.toISOString()} /></span> : null}
+                {a.detail ? <div className="muted today-detail">{a.detail}</div> : null}
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p className="muted" style={{ fontSize: 13.5 }}>
+            Nothing is due right now. Ask Chat to find businesses that need what you sell, or look over the{' '}
+            <a href="/pipeline">pipeline</a>.
+          </p>
+        )}
 
         <h2>Needs a look</h2>
         {look.waiting.length > 0 ? (

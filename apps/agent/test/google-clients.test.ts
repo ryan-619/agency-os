@@ -24,6 +24,7 @@ describe('Google Maps search', () => {
     id: 'ChIJkumar', displayName: { text: 'Kumar Dental Clinic' }, formattedAddress: '12 CMH Road, Bengaluru',
     internationalPhoneNumber: '+91 80 4123 4567', rating: 4.6, userRatingCount: 12, businessStatus: 'OPERATIONAL',
     primaryType: 'dentist', googleMapsUri: 'https://maps.google.com/?cid=1',
+    location: { latitude: 12.9784, longitude: 77.6408 },
   }
 
   it('sends the documented request: key and field mask in headers, never following a redirect', async () => {
@@ -38,6 +39,7 @@ describe('Google Maps search', () => {
       places: [{
         placeId: 'ChIJkumar', name: 'Kumar Dental Clinic', address: '12 CMH Road, Bengaluru', phone: '+91 80 4123 4567',
         website: null, rating: 4.6, reviews: 12, category: 'dentist', mapsUrl: 'https://maps.google.com/?cid=1', status: 'operational',
+        location: { lat: 12.9784, lng: 77.6408 },
       }],
       nextPageToken: 'NEXT',
     })
@@ -47,6 +49,15 @@ describe('Google Maps search', () => {
     expect(placeFrom({ displayName: { text: 'No id' } })).toBeNull()
     expect(placeFrom({ id: 'x' })).toBeNull()
     expect(placeFrom({ ...place, rating: 9 })?.rating).toBeNull()
+  })
+
+  it('reads where a place is (0023) only as a pair on earth, and asks for it in the mask', () => {
+    expect(PLACES_FIELD_MASK.split(',')).toContain('places.location')
+    expect(placeFrom({ ...place, location: { latitude: 0, longitude: 0 } })?.location).toEqual({ lat: 0, lng: 0 })
+    expect(placeFrom({ ...place, location: undefined })?.location).toBeNull()
+    expect(placeFrom({ ...place, location: { latitude: 12.9 } })?.location).toBeNull()
+    expect(placeFrom({ ...place, location: { latitude: 91, longitude: 77 } })?.location).toBeNull()
+    expect(placeFrom({ ...place, location: { latitude: '12.9', longitude: '77.6' } })?.location).toBeNull()
   })
 
   it('says Google’s status word and what to do — never the key or what Google said', async () => {

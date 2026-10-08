@@ -14,6 +14,8 @@ import { EvidencePanelsSlot } from '@/components/company/evidence'
 import { InformationalSlot } from '@/components/company/informational'
 import { NotesSlot } from '@/components/company/notes'
 import { OpportunitiesSlot } from '@/components/company/opportunities'
+import { QuotesSlot } from '@/components/company/quotes'
+import { ShareSlot } from '@/components/company/share'
 import type { CompanySlotProps } from '@/components/company/slot'
 import { ContactsPanel } from '@/components/outreach/contacts'
 import { CompanyActions } from '@/components/pipeline/company-actions'
@@ -172,6 +174,8 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
       </p>
       <CompanyEditSlot {...slot} />
       <OpportunitiesSlot {...slot} />
+      <ShareSlot {...slot} />
+      <QuotesSlot {...slot} />
 
       {isNoSiteDomain(company.domain) ? (
         <div className="note" style={{ marginTop: 18 }}>

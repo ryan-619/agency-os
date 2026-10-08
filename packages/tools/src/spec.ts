@@ -67,6 +67,11 @@ export interface ToolContext {
   readonly places?: PlacesClient
   /** Google PageSpeed Insights, built once at boot; works keyless at a low quota. */
   readonly pagespeed?: PageSpeedClient
+  /**
+   * The web app's own origin (`WEB_PUBLIC_URL`), for a link a tool prints in
+   * full (`create_share_link`). Absent, the tool prints the path and says so.
+   */
+  readonly webOrigin?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +93,8 @@ export interface PlaceListing {
   readonly category: string | null
   readonly mapsUrl: string | null
   readonly status: 'operational' | 'closed_temporarily' | 'closed_permanently' | null
+  /** Where the listing puts it (0023): for the audit page's nearest competitors. Optional, so an older reading is one. */
+  readonly location?: { readonly lat: number; readonly lng: number } | null
 }
 
 export interface PlacesClient {

@@ -92,6 +92,19 @@ matched to the agency's own services catalogue with prices; scans record
 twelve website-presence signals; PageSpeed audits; call and visit tasks a
 person carries out. The `agency` server has fifty-nine tools.
 
+**Then quotes, a business's own pages and today's actions (2026-10-08), on
+migration 0023** (§2, "Quotes, a business's own pages, and today's
+actions"): a priced QUOTE of the agency's services for any business — lines
+from the catalogue its needs point at, GST from Settings → Business profile,
+a UPI QR for the advance, a print/PDF view, and a link the buyer opens and
+accepts, which closes the deal won; a business's own AUDIT PAGE — what we
+noticed about it online, dated, beside its nearest competitors of its kind
+(never named); and a website PREVIEW built from its Google listing under a
+banner saying whose preview it is. A link's first real reader — counted by
+the page's own script, never a link-preview robot or a teammate — gives
+whoever sent it a call task, and the dashboard opens with today's top
+actions. The `agency` server has sixty-four tools.
+
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
 machine"), which needs no public address, because everything but chat is
@@ -176,11 +189,11 @@ worker upserts a `worker_heartbeats` row (keyed `hostname:pid`) every
 
 **The web half is LIVE on Vercel** at **https://myagencyos.in** (first
 deployed as `agency-os-tau-murex.vercel.app`), against a Neon Postgres (18.6)
-with Resend for magic links, seeded. The code expects migration **0021**
+with Resend for magic links, seeded. The code expects migration **0023**
 (`EXPECTED_MIGRATION`). Production was at 0017 when the 0018 release was
 written, and that release run's Vercel build applied 0018 and then 0019
 before `next build` (`tools/vercel-build-migrate.mjs`, under
-`AGENCY_MIGRATE_ON_BUILD=1`); 0020 and 0021 go the same way, through the
+`AGENCY_MIGRATE_ON_BUILD=1`); 0020 to 0023 go the same way, through the
 Production workflow's `release` action. A migration is always applied BEFORE the code
 that reads it deploys, never after — DEPLOYING.md, "migrate FIRST", and
 GO-LIVE.md Part 2b. That is done from GitHub, with no credential on a
@@ -888,7 +901,9 @@ recorded-session mode, so anything needing the SDK to be *defined* is also
 untestable — and a package that CANNOT import the SDK cannot drag it into the
 Next module graph, which CI builds with no secrets on purpose.
 
-Fifty-nine tools ship (`AGENCY_TOOL_NAMES`) — the opportunity finder's five since 2026-10-08
+Sixty-four tools ship (`AGENCY_TOOL_NAMES`) — since 0023 `create_quote` and `update_quote` (medium,
+internal writes), `get_quote` and `list_quotes` (low) and `create_share_link` (medium, an internal write: a link
+sends nothing), the opportunity finder's five since 2026-10-08
 (`find_businesses`, `add_businesses`, `audit_website`, `get_opportunities`, `list_services`), `get_draft` (low) and `edit_draft` (high,
 `leaves_the_building`, carded) since 2026-10-08, and before them the forty-nine below, and since
 0021 `list_icps` (low), `create_icp` (medium, an internal write) and
@@ -1229,6 +1244,141 @@ section walks it, and says to reach a business by email through the send
 path, by a person's call or visit, and never through apollo's own sequences
 or emails, which would go around the suppression list.
 
+### Quotes, a business's own pages, and today's actions (0023, 2026-10-08)
+
+**A quote is the agency's priced offer, in whole rupees.**
+`packages/core/src/quote.ts` is pure: lines (`QuoteItem` — a name, a
+description, a quantity, a unit of one-off, monthly, yearly, hourly or daily,
+and a unit price in whole rupees), `quoteTotals` (integer GST at basis
+points, rounded half up, and the advance), `Q-YYYY-NNNN` numbering, the
+GSTIN and UPI-ID shapes, the UPI deep link (`upiPaymentUri`), rupees in
+words, and validity as India's calendar date: `quoteDayIn`,
+`quoteValidUntil` counting India's day as the first (a quote raised at 02:00
+IST, still the day before in UTC, was a day short until review), and
+`quoteLapsed`. `packages/db/src/quotes.ts` raises one (`quoteCreate`: lines
+from the catalogue services the company's recorded needs point at, else the
+ones named, else typed; numbered under an advisory lock), edits it over the
+version the editor loaded (`quoteUpdate`'s `expectedUpdatedAt`; a SENT quote
+edited becomes a draft again and its links are revoked), sends it
+(`quoteSend`: the seller's details SNAPSHOTTED onto it, the deal moved to
+`proposal`), and records an answer (`quoteDecide`: accepted closes the deal
+won through `setDealStage` and adds a task to collect the advance; withdrawn
+revokes its links; through the link it audits `quote.accepted_via_share` or
+`quote.declined_via_share`). The database holds the arithmetic
+(`quotes_total_adds_up`, the advance within the total) and the record (a
+sent quote has lines, its seller and its time; accepted and declined have
+theirs). `/quotes` lists them; `/quotes/[id]` edits one with live totals and
+holds every act — Print/PDF (`/quotes/[id]/print`, A4), Save, Mark as sent,
+Copy link, Draft email, Accepted, Declined, Withdraw. The UPI QR is drawn by
+`qrcode-generator` 2.0.4 (MIT, no dependencies). Chat raises, reads, edits
+and lists quotes and never sends one, makes its link or records an answer.
+
+**Settings → Business profile** (`/settings/profile`, `org_profiles`, one
+row per org, `users:write` to change, audited `org.profile_updated` by field
+name) is the seller a quote prints: legal name, address, phone (E.164),
+email, website, GSTIN and GST rate (`org_profiles_gst_needs_a_gstin`), UPI
+ID and payee, the advance percent, validity days, terms and a brochure link.
+
+**Three links a business opens** (`share_links`,
+`packages/db/src/share-links.ts`): its quote (`/q/<token>`), its audit page
+(`/r/<token>`) and a website preview (`/w/<token>`). The proposal link's
+rules: 32 random bytes, base64url, only the sha256 stored; an expiry (a
+quote's at the end of its last valid day in IST, the others after
+`SHARE_LINK_TTL_DAYS`, 30; `share_links_expires_after_created`) and a
+revoke; one 404 for an unknown, revoked, expired or other-kind token;
+`no-referrer`, noindex; public in `proxy.ts` as whole segments (`/q`,
+`/api/q`, `/r`, `/w`, `/api/l`). A link is not a send: a person pastes it
+into a message they write, or presses Draft email, which drafts an
+`awaiting_approval` email naming no recipient for `/approvals`
+(`quoteDraftEmail`, `shareLinkDraftEmail`). Those words claim nothing
+unobserved (§2.2): a preview's email says the business has no website of its
+own only when its Google listing was read and names none — a Facebook page
+is not one (`shareLinkPreviewOpening`) — and the audit page's says only that
+it is from public information. Its first version said "does not have a
+website of its own yet" of every business, sites included.
+
+**A view is somebody reading, never a robot fetching.** The first view gives
+whoever made the link a task due that minute — a call when the company has a
+phone on record, a to-do otherwise, "your <kind> link was just opened",
+"most likely by them" — because the hour after somebody reads an offer is
+the hour a call lands. WhatsApp, Slack and mail gateways fetch a link as it
+is pasted or delivered, and counted from the page's GET each would raise
+that task before anybody read a word. So no page counts its GET: its script
+(`components/share/view-beacon.tsx`) posts `/api/l/<token>/view` once the
+page has been visible `VIEW_AFTER_MS` (2.5 s), and the route ignores a user
+agent that names itself a robot (`isRobotAgent`, `lib/link-view.ts`). A
+reader with scripts off is not counted: a missed task, never a false one.
+Nor is a teammate signed in to the org that made the link (`viewerIsTeam`,
+`lib/team-viewer.ts`): they see a note saying so, a quote shows them no
+answer buttons, and the answer routes refuse their session (409), so nobody
+answers a quote in the buyer's name. `/p` still counts its GET, unchanged.
+
+**The audit page** (`presenceReport`, `packages/db/src/presence-report.ts`)
+reads one company's needs and what is not assessed (`needsOf`), the
+catalogue services that answer them at their prices, PageSpeed's mobile
+scores from a current audit, and a comparison with its nearest competitors
+(`packages/core/src/peers.ts`): the same Google category with a current
+listing (`LISTING_STALE_DAYS`), within 8 km by coordinates when both have
+them, else the same city — four at most, from 200 candidates fetched nearest
+first. Each cell is a recorded fact (`peerFactsOf`: a website of its own from
+the domain or the listing; phone-friendly, WhatsApp and online booking in
+the scanner's own words from a scan inside its deadline; a speed score from a
+current mobile audit) or "not checked", never a "no". Competitors are never
+named ("dentist A · 420 m away"), and the headline ("You are #3 of 5 similar
+businesses near you by Google rating; 2 of the 4 others have a website of
+their own") uses only facts known on both sides — "similar businesses",
+because Google's types pluralised by an s read "pharmacys". It names only
+the sources it read — no "your website's public pages" for a business with
+none — and never lists what it could NOT check: `needsOf`'s not-assessed
+sentences are the team's ("scan it before saying anything about it"), so the
+company page's "Show the business" panel lists them, with whether any
+competitor is near enough to compare, under "Before you send it". 0023 gives
+`companies` `latitude` and `longitude` (a pair, on earth, dated by
+`listing_checked_at`, each by CHECK), which `find_businesses` now asks
+Google for (`places.location`, a "Pro" field below the Enterprise tier the
+search already costs) and `add_businesses` replaces with each reading.
+
+**The website preview** (`/w/<token>`, `packages/core/src/site-preview.ts`)
+is one page from the listing — name, rating and reviews, address, call,
+WhatsApp (`whatsappLink`) and directions — with services, words and colours
+from a template for its kind of business (29 categories and their aliases,
+and a plain fallback), under a banner pinned to the top: "A preview made by
+<agency> for <business> — not a live website", with a button to talk to the
+agency. The template's services are examples of what such a business offers,
+never claims about this one, and nothing on it speaks for the business past
+its listing (no "we reply fast"); an Indian number reads `+91 98765 43210`
+(`phoneForDisplay`) while its link dials the E.164. The markup is a
+component of plain data (`components/share/site-preview.tsx`) that a test
+renders. A preview needs a listing on record — the company route answers
+409 and `create_share_link` refuses without one — and for a business with a
+site of its own the tool says to present it as a fresh design.
+
+**From chat**, `create_share_link` makes an audit-page or preview link and
+prints it whole from the worker's `WEB_PUBLIC_URL` (`ToolContext.webOrigin`,
+its origin only), or the path with a sentence saying why. The link is the
+chat owner's (`created_by`), so the first view's task is theirs; the audit
+row's actor is `agent`. The printed link lives in that chat thread like any
+message — the database keeps only its hash — and the summary says to revoke
+it on the company page if it goes astray.
+
+**Today's top actions** open the dashboard (`todayActions`,
+`packages/db/src/today.ts`, at most `TODAY_ACTIONS_MAX`, 8): due call tasks
+first and the freshest first — a business reading its link raises one due
+that minute — then unhandled replies, sent quotes lapsing within
+`QUOTE_LAPSING_DAYS` (2), sent quotes unanswered after
+`QUOTE_FOLLOW_UP_DAYS` (3), drafts awaiting approval, and other visits and
+to-dos due within twelve hours. The person's own tasks and nobody's; each
+line links to where it is done.
+
+**Stated residuals.** A forwarded link raises the same task, which says
+"most likely by them" and no more; `/p` counts every GET; a quote is in whole
+rupees; a company filed before 0023 has no coordinates until it is found on
+the map again, so it is compared by city; and an email carrying a quote or a
+page link is judged by the send path like any other, so a company whose
+latest scan is past its deadline is refused `stale_evidence` until it is
+re-scanned, although the words quote no finding (the SMS template's residual
+in another form) — a business never scanned is not judged by a scan at all.
+
 ### Editing a draft's words (2026-10-08)
 
 **A person changes the words; the send path still judges them.** `editDraft`
@@ -1547,6 +1697,7 @@ quiet stretch. Every panel dates evidence from `scans.ran_at` through
 | 0019 release ✅ | DLT (`dlt.ts`): `parseTemplate`, `renderTemplate`, `matchesTemplate` (both judging links and call-back numbers on the rendered text, `smuggledRuns`), `DLT_VAR_MAX_CHARS` (30 code points), TRAI's `PROMOTIONAL_WINDOW` (10:00–21:00 IST, and `hours` for the recipient's own clock), `promotionalBand` (`{ open, india, opensToday, nextOpen }`), `insidePromotionalBand`, `nextOpenMinute` and `isIndianNumber`, `smsOptOut` (the whole message, since review round 6 clause by clause, since review round 7 a capital STOP ending the text, and since review round 8 not after NON, FULL, a possessive or a place word, not STOP BY/IN/OVER/OFF, nor a bare STOP ending a question), `parseTemplateCategory`, `normaliseDltHeader`; `TEMPLATE_CHANNELS`, `TemplateFacts` and the two template steps in `decideSend`, and the promotional band's two (a band that never opens, `band_never_opens`; a band not open now); from review, `SendRefusal.retryAt` and `deferUntil` with its three bounds (`DEFER_FALLBACK_MS`, `DEFER_MAX_MS`, `DEFER_SLOW_MS`) in `send.ts` |
 | 0020 ✅ | the morning brief's clock and prompt (`morning-brief.ts`): `briefDue`, `localDateIn`, `localWallClock`, `wallClockMinutes`, `WALL_CLOCK`, `morningBriefPrompt`, `briefThreadTitle` |
 | 0021 ✅ | a country read as one code (`country.ts`: `countryCode`, `countryName`); the firmographic disqualifiers (`firmographicDisqualifier`, `icpTargeting`, `FIRMOGRAPHIC_DISQUALIFIERS`, and `scoreCompany`'s optional `firmographics`); a profile derived from another (`icp-derive.ts`: `deriveIcp`, `icpSlug`, `COMPANY_STAGES`); and the catalog's `readOnly` mark |
+| 0023 ✅ | quotes (`quote.ts`: `quoteTotals`, `quoteNumber`, `gstinValid`, `vpaValid`, `upiPaymentUri`, `rupeesInWords`, `quoteDayIn`, `quoteValidUntil`, `quoteLapsed`), the nearest-competitor comparison (`peers.ts`: `distanceKm`, `nearestPeers`, `ratingPlace`, `comparisonRows`, `comparisonHeadline`, `peerLabel`) and the website preview's templates (`site-preview.ts`: `siteTemplateFor`, `siteTagline`, `whatsappLink`) |
 
 ---
 

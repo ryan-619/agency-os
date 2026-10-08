@@ -999,6 +999,41 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   },
 
   // --- Settings → Organisation: the agency's own name --------------------
+  'org.profile_updated': (c) => {
+    const fields = words(c.d, 'fields')
+    return `updated the business profile quotes print${fields && fields.length > 0 ? ` (${fields.join(', ')})` : ''}`
+  },
+
+  // --- Quotes and the links a business opens (0023) ------------------------
+  'quote.created': (c) => {
+    const number = word(c.d, 'number')
+    const lines = num(c.d, 'lines')
+    return `raised quote ${number ?? ''}${lines !== null ? ` with ${lines} ${lines === 1 ? 'line' : 'lines'}` : ''}`.replace(/\s+/g, ' ').trim()
+  },
+  'quote.updated': (c) =>
+    flag(c.d, 'revisedFromSent') ? 'revised a sent quote — it is a draft again and its links no longer open' : 'edited a draft quote',
+  'quote.sent': (c) => `marked quote ${word(c.d, 'number') ?? ''} sent`.replace(/\s+/g, ' ').trim(),
+  'quote.accepted': (c) => `recorded quote ${word(c.d, 'number') ?? ''} as accepted — the deal is won`.replace(/\s+/g, ' ').trim(),
+  'quote.declined': (c) => `recorded quote ${word(c.d, 'number') ?? ''} as declined`.replace(/\s+/g, ' ').trim(),
+  'quote.withdrawn': (c) => `withdrew quote ${word(c.d, 'number') ?? ''} — its links no longer open`.replace(/\s+/g, ' ').trim(),
+  'quote.accepted_via_share': (c) =>
+    `the buyer accepted quote ${word(c.d, 'number') ?? ''} through its link — the deal is won`.replace(/\s+/g, ' ').trim(),
+  'quote.declined_via_share': (c) => `the buyer declined quote ${word(c.d, 'number') ?? ''} through its link`.replace(/\s+/g, ' ').trim(),
+  'quote.email_drafted': (c) =>
+    `drafted the email carrying quote ${word(c.d, 'number') ?? ''} — it waits on Approvals`.replace(/\s+/g, ' ').trim(),
+  'share_link.created': (c) => {
+    const kind = word(c.d, 'kind')
+    const what = kind === 'quote' ? 'a quote' : kind === 'report' ? 'an audit page' : kind === 'preview' ? 'a website preview' : 'a page'
+    return `made a link to ${what} for the business to open`
+  },
+  'share_link.email_drafted': (c) =>
+    `drafted the email carrying ${word(c.d, 'kind') === 'preview' ? 'a website preview' : 'an audit page'} — it waits on Approvals`,
+  'share_link.revoked': (c) => {
+    const kind = word(c.d, 'kind')
+    const what = kind === 'quote' ? 'quote' : kind === 'report' ? 'audit page' : kind === 'preview' ? 'website preview' : 'page'
+    return `revoked a ${what} link — it no longer opens`
+  },
+
   'org.renamed': (c) => {
     const from = text(c.d, 'from', 80)
     const to = text(c.d, 'to', 80)
@@ -1433,6 +1468,8 @@ export function subjectHref(row: AuditLine, company: AuditCompanyRef | null): st
       return '/settings/services'
     case 'org':
       return '/settings'
+    case 'quote':
+      return id ? `/quotes/${id}` : '/quotes'
     default:
       return companyPage
   }
@@ -1446,7 +1483,7 @@ const FAMILY_LABEL: Readonly<Record<string, string>> = {
   approval: 'Approvals', turn: 'Chat turns', connector: 'Connectors', credential: 'Credentials', user: 'Team',
   company: 'Companies', note: 'Notes', task: 'Tasks', call: 'Calls', notification: 'Notifications',
   scan: 'Scheduled rescans', cron: 'Scheduled jobs', export: 'Exports', linkedin: 'LinkedIn steps',
-  template: 'Message templates', sms: 'SMS', assistant: 'Assistant', icp: 'ICP profiles', service: 'Services', org: 'Organisation',
+  template: 'Message templates', sms: 'SMS', assistant: 'Assistant', icp: 'ICP profiles', service: 'Services', org: 'Organisation', quote: 'Quotes', share_link: 'Shared links',
 }
 export const AUDIT_FAMILIES: readonly { readonly value: string; readonly label: string }[] = Object.freeze(
   [...new Set(AUDIT_ACTIONS.map((a) => a.split('.')[0] ?? a))].map((value) => ({

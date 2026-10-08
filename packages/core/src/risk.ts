@@ -180,6 +180,14 @@ export const AGENCY_TOOL_RISK = {
   audit_website: ['low', 'derived_write', 'Asks Google PageSpeed to measure a company homepage from Google’s side and records what it measured.'],
   get_opportunities: ['low', 'read_only', 'Reads what a business needs, with dated evidence, and the services that answer it.'],
   list_services: ['low', 'read_only', 'Reads the agency’s services catalogue with prices and the needs each answers.'],
+  // Quotes (0023): a draft is the agency's own record; marking it sent, its link and the
+  // buyer's answer are a person's acts on the quote page, and no tool does them.
+  create_quote: ['medium', 'writes_internal_state', 'Raises a draft quote of the agency’s services for a company; nothing is sent.'],
+  get_quote: ['low', 'read_only', 'Reads a quote: its lines, totals with GST, advance, validity and status.'],
+  update_quote: ['medium', 'writes_internal_state', 'Changes a draft quote’s lines, prices or terms; a sent one becomes a draft again. Nothing is sent.'],
+  list_quotes: ['low', 'read_only', 'Lists quotes with their numbers, status and totals.'],
+  // A business's own pages (2026-10-08): making the link sends nothing — a person pastes it, or drafts the email for /approvals.
+  create_share_link: ['medium', 'writes_internal_state', 'Makes a link to a business’s audit page or website preview; nothing is sent.'],
   // Editing a draft's words (2026-10-08). The read shows an EMAIL draft whole; the edit
   // rewrites one and keeps its card: a queued auto-send email goes out with the new
   // words unread by anybody, and every other draft still waits on /approvals.

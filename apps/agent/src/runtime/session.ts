@@ -110,6 +110,8 @@ export interface SessionDeps {
   readonly places?: PlacesClient | undefined
   /** Google PageSpeed for `audit_website`, built once at boot. */
   readonly pagespeed?: PageSpeedClient | undefined
+  /** The web app's origin (`WEB_PUBLIC_URL`), for a link a tool prints in full; absent without one. */
+  readonly webOrigin?: string | undefined
 }
 
 export interface TurnRuntime {
@@ -270,6 +272,7 @@ export async function buildTurnRuntime(
     // Google, the same clients for every turn; never the model's to supply.
     ...(deps.places ? { places: deps.places } : {}),
     ...(deps.pagespeed ? { pagespeed: deps.pagespeed } : {}),
+    ...(deps.webOrigin ? { webOrigin: deps.webOrigin } : {}),
   })
 
   const mcpServer = createAgencyMcpServer({

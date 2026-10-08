@@ -22,6 +22,8 @@ export {
   findBusinesses, addBusinessesTool, auditWebsite, makeAuditWebsite, getOpportunities, listServices, priceWords,
   forgetListings, forgetRunningAudits, LISTING_KEEP_MS, PAGESPEED_WORST_MS,
 } from './opportunities.js'
+export { createQuote, getQuote, updateQuote, listQuotes } from './quotes.js'
+export { createShareLink, SHARE_PATHS } from './share.js'
 
 import { AGENCY_TOOL_NAMES } from '@agency/core'
 import type { AgencyToolSpec } from './spec.js'
@@ -39,6 +41,8 @@ import { generateProposalTool, getProposal, listMeetings, rescheduleMeetingTool,
 import { workerStatus, recentErrors, queueStatus, rescanStale } from './ops.js'
 import { listIcps, createIcp, activateIcp } from './profiles.js'
 import { findBusinesses, addBusinessesTool, auditWebsite, getOpportunities, listServices } from './opportunities.js'
+import { createQuote, getQuote, updateQuote, listQuotes } from './quotes.js'
+import { createShareLink } from './share.js'
 
 /**
  * Every tool the `agency` MCP server exposes.
@@ -113,6 +117,11 @@ export const AGENCY_TOOLS: readonly AgencyToolSpec[] = [
   auditWebsite,
   getOpportunities,
   listServices,
+  createQuote,
+  getQuote,
+  updateQuote,
+  listQuotes,
+  createShareLink,
 ] as unknown as readonly AgencyToolSpec[]
 
 export { AGENCY_TOOL_NAMES }

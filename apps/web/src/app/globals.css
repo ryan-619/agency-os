@@ -567,3 +567,66 @@ input[type=search]:focus { outline: 2px solid var(--accent); outline-offset: -1p
   .side, .search-box, .row-actions, button { display: none; }
   .main { margin: 0; }
 }
+
+/* Quotes (0023): the document a buyer reads and prints, and the editor around it. */
+.quote-doc { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 28px 30px; font-size: 13.5px; }
+.quote-head { display: flex; justify-content: space-between; gap: 24px; border-bottom: 2px solid var(--ink); padding-bottom: 14px; }
+.quote-seller { font-size: 18px; font-weight: 700; }
+.quote-meta { text-align: right; }
+.quote-kind { font-size: 20px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.quote-small { font-size: 12px; color: var(--muted); }
+.quote-label { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 2px; }
+.quote-to { margin: 16px 0 8px; }
+.quote-title { font-size: 20px; margin: 14px 0 6px; }
+.quote-intro { white-space: pre-wrap; margin: 6px 0 12px; }
+.quote-why { border: 1px dashed var(--line); border-radius: var(--radius); padding: 10px 14px; margin: 10px 0 14px; }
+.quote-why ul { margin: 4px 0 0; padding-left: 18px; }
+.quote-lines { width: 100%; border-collapse: collapse; margin-top: 8px; }
+.quote-lines th { text-align: left; border-bottom: 1px solid var(--ink); font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
+.quote-lines td, .quote-lines th { padding: 7px 8px; vertical-align: top; }
+.quote-lines tbody tr td { border-bottom: 1px solid var(--line); }
+.quote-lines .num, .quote-lines th.num { text-align: right; white-space: nowrap; }
+.quote-lines tfoot td { padding: 4px 8px; }
+.quote-total td, .quote-total span { font-weight: 700; font-size: 15px; }
+.quote-pay { display: flex; justify-content: space-between; align-items: center; gap: 18px; border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 16px; margin: 16px 0; }
+.quote-qr { width: 132px; height: 132px; flex: none; background: #fff; padding: 4px; border-radius: 6px; }
+.quote-qr svg { width: 100%; height: 100%; display: block; }
+.quote-terms { margin-top: 12px; }
+.quote-edit-lines { width: 100%; }
+.quote-edit-lines td { vertical-align: top; }
+.quote-edit-totals { margin: 12px 0 0 auto; max-width: 340px; display: grid; gap: 4px; }
+.quote-edit-totals > div { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+.pill.quote-status-accepted { background: var(--ok-soft, #e3f6ea); }
+.pill.quote-status-declined, .pill.quote-status-withdrawn { opacity: .7; }
+.button-like { display: inline-block; padding: 7px 12px; border: 1px solid var(--line); border-radius: var(--radius); text-decoration: none; }
+@media (max-width: 640px) {
+  .quote-doc { padding: 16px; }
+  .quote-head { flex-direction: column; }
+  .quote-meta { text-align: left; }
+  .quote-pay { flex-direction: column; align-items: flex-start; }
+}
+
+/* A business's audit page (/r/<token>): readable on a phone first. */
+.report h2 { font-size: 16px; margin: 0 0 6px; }
+.today { margin: 0 0 8px; padding-left: 22px; }
+.today li { margin: 0 0 10px; line-height: 1.4; }
+.today li a { font-weight: 600; }
+.today-hot::marker { color: var(--warn); font-weight: 700; }
+.today-detail { font-size: 12.5px; margin-top: 2px; }
+.team-note { background: #fff7d6; color: #4a3b00; border: 1px solid #e8d48a; border-radius: 8px; padding: 8px 12px; font-size: 13px; margin: 0 0 12px; }
+.report-headline { font-size: 15px; font-weight: 600; border-left: 3px solid var(--ink); padding: 6px 10px; margin: 12px 0; }
+.report-section { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 14px; }
+.report-needs { margin: 0; padding-left: 18px; }
+.report-needs li { margin-bottom: 6px; }
+.report-compare { font-size: 12.5px; min-width: 520px; }
+.report-compare th, .report-compare td { padding: 6px 8px; vertical-align: top; }
+.report-compare thead th { font-size: 11.5px; }
+.report-you { font-weight: 600; }
+.report-scores { display: flex; gap: 10px; flex-wrap: wrap; }
+.report-score { border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 12px; min-width: 96px; text-align: center; }
+.report-score-n { font-size: 22px; font-weight: 700; }
+.report-score.good .report-score-n { color: var(--ok, #1a7f37); }
+.report-score.fair .report-score-n { color: #b7791f; }
+.report-score.poor .report-score-n { color: var(--warn, #c0392b); }
+.report-cta-row { display: flex; gap: 8px; flex-wrap: wrap; }
+

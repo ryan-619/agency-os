@@ -50,6 +50,8 @@ export interface BusinessToAdd {
   readonly reviews: number | null
   readonly category: string | null
   readonly mapsUrl: string | null
+  /** Where the listing puts it; stored only as a pair on earth (0023's CHECKs), and dated by the listing. */
+  readonly location?: { readonly lat: number; readonly lng: number } | null
   readonly timeZone?: string | null
   readonly country?: string | null
   readonly city?: string | null
@@ -67,6 +69,8 @@ const clip = (text: string | null | undefined, max: number): string | null => {
 }
 
 function listingColumns(b: BusinessToAdd, checkedAt: Date) {
+  const at = b.location
+  const onEarth = !!at && Number.isFinite(at.lat) && Number.isFinite(at.lng) && Math.abs(at.lat) <= 90 && Math.abs(at.lng) <= 180
   return {
     phone: b.phone ? normalisePhone(b.phone) : null,
     address: clip(b.address, 300),
@@ -76,6 +80,9 @@ function listingColumns(b: BusinessToAdd, checkedAt: Date) {
     googleReviewCount: b.reviews !== null && Number.isInteger(b.reviews) && b.reviews >= 0 ? b.reviews : null,
     googleCategory: clip(b.category, 80),
     listingWebsite: clip(b.website, 500),
+    // A newer reading replaces the place wholesale, the coordinates with it: none read is none stored.
+    latitude: onEarth ? at!.lat : null,
+    longitude: onEarth ? at!.lng : null,
     listingCheckedAt: checkedAt,
   }
 }

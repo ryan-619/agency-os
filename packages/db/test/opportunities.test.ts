@@ -86,6 +86,30 @@ describe('listings, audits, services and opportunities', () => {
       expect((await company('sharmaoptics.in')).googlePlaceId).toBe('ChIJsharma')
     })
 
+    it('stores where a place is (0023) as a pair on earth, replaced with each reading, and the database holds it so', async () => {
+      const b = business({ location: { lat: 12.9784, lng: 77.6408 } })
+      await addBusinesses(db, { orgId, businesses: [b], checkedAt: NOW, actor: 'agent' })
+      expect(await company(b.domain)).toMatchObject({ latitude: 12.9784, longitude: 77.6408 })
+
+      // A newer reading with none clears it: a listing is the third party's current record.
+      await addBusinesses(db, { orgId, businesses: [business({ location: null })], checkedAt: NOW, actor: 'agent' })
+      expect(await company(b.domain)).toMatchObject({ latitude: null, longitude: null })
+
+      // One off the earth is not stored at all.
+      await addBusinesses(db, { orgId, businesses: [business({ location: { lat: 120, lng: 77 } })], checkedAt: NOW, actor: 'agent' })
+      expect((await company(b.domain)).latitude).toBeNull()
+
+      // The database refuses half a pair, one off the earth, and a place with no date.
+      const refused = async (values: Partial<typeof schema.companies.$inferInsert>, constraint: string) => {
+        const domain = `${constraint.split('_').pop()}.example.in`
+        const e = await db.insert(schema.companies).values({ orgId, domain, listingCheckedAt: NOW, ...values }).catch((x: unknown) => x)
+        expect((e as { cause?: { constraint?: string } }).cause?.constraint).toBe(constraint)
+      }
+      await refused({ latitude: 12.9 }, 'companies_coordinates_are_a_pair')
+      await refused({ latitude: 95, longitude: 77 }, 'companies_coordinates_are_on_earth')
+      await refused({ latitude: 12.9, longitude: 77, listingCheckedAt: null }, 'companies_coordinates_are_dated')
+    })
+
     it('stores no phone it cannot read as E.164, and holds a listing fact to its date in the database', async () => {
       const b = business({ phone: '080 4123 4567' })
       await addBusinesses(db, { orgId, businesses: [b], checkedAt: NOW, actor: 'agent' })

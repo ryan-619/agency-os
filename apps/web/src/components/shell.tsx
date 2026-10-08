@@ -28,6 +28,7 @@ export type ShellCurrent =
   | 'chat'
   | 'approvals'
   | 'pipeline'
+  | 'quotes'
   | 'campaigns'
   | 'calls'
   | 'suppressions'
@@ -43,9 +44,10 @@ export type ShellCurrent =
   | 'spend'
   | 'mail'
   | 'deployment'
+  | 'profile'
 
 const SETTINGS_PAGES: ReadonlySet<ShellCurrent> = new Set<ShellCurrent>([
-  'settings', 'team', 'credentials', 'icp', 'spend', 'mail', 'deployment',
+  'settings', 'team', 'credentials', 'icp', 'spend', 'mail', 'deployment', 'profile',
 ])
 
 /**
@@ -93,6 +95,7 @@ export async function Shell({
             {pendingApprovals > 0 ? <em className="badge">{pendingApprovals}</em> : null}
           </a>
           <a href="/pipeline" className={on('pipeline')}>Pipeline</a>
+          <a href="/quotes" className={on('quotes')}>Quotes</a>
           <a href="/campaigns" className={on('campaigns')}>Campaigns</a>
           <a href="/calls" className={on('calls')}>Calls</a>
           <a href="/suppressions" className={on('suppressions')}>Suppressions</a>

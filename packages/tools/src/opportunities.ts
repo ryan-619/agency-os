@@ -242,7 +242,7 @@ export const addBusinessesTool: AgencyToolSpec<typeof addShape> = {
       const domain = own && isScannableHost(own) ? own : noSiteDomain(l.name, `place:${l.placeId}`)
       businesses.push({
         domain, name: l.name, placeId: l.placeId, address: l.address, phone: l.phone, website: l.website,
-        rating: l.rating, reviews: l.reviews, category: l.category, mapsUrl: l.mapsUrl,
+        rating: l.rating, reviews: l.reviews, category: l.category, mapsUrl: l.mapsUrl, location: l.location ?? null,
         timeZone: input.timeZone ?? null, country: input.country ?? null, city: input.city ?? null,
       })
     }

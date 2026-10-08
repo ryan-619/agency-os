@@ -14,7 +14,7 @@
  */
 import { relations, sql } from 'drizzle-orm'
 import {
-  boolean, date, index, integer, jsonb, numeric, pgTable, primaryKey, text,
+  boolean, date, doublePrecision, index, integer, jsonb, numeric, pgTable, primaryKey, smallint, text,
   time, timestamp, uniqueIndex, uuid, bigint,
 } from 'drizzle-orm/pg-core'
 
@@ -179,6 +179,9 @@ export const companies = pgTable(
     listingWebsite: text('listing_website'),
     /** When the listing facts were read; a listing fact is never stored without it (0022). */
     listingCheckedAt: timestamp('listing_checked_at', { withTimezone: true }),
+    /** Google's coordinates for the listing (0023); a pair, dated by `listingCheckedAt`. */
+    latitude: doublePrecision('latitude'),
+    longitude: doublePrecision('longitude'),
     /** 'apollo' | 'manual' | 'import' | 'agent' | 'inbound' | 'google_maps' */
     source: text('source').notNull().default('manual'),
     firstSeenAt: timestamp('first_seen_at', { withTimezone: true }).notNull().defaultNow(),
@@ -967,6 +970,110 @@ export const siteAudits = pgTable(
     ...timestamps,
   },
   (t) => [index('site_audits_company_ran_idx').on(t.companyId, t.ranAt)],
+)
+
+/**
+ * The agency's own profile (0023): what a quote prints about the seller —
+ * legal name, address, GSTIN and the GST it charges (only with a GSTIN, by
+ * CHECK), the UPI ID an advance is paid to, validity and terms, and a
+ * brochure link. One row per org.
+ */
+export const orgProfiles = pgTable('org_profiles', {
+  id: id(),
+  orgId: uuid('org_id').notNull().unique().references(() => orgs.id, { onDelete: 'cascade' }),
+  legalName: text('legal_name'),
+  address: text('address'),
+  phone: text('phone'),
+  email: text('email'),
+  website: text('website'),
+  gstin: text('gstin'),
+  gstRate: numeric('gst_rate', { precision: 5, scale: 2 }).notNull().default('0'),
+  upiVpa: text('upi_vpa'),
+  upiPayee: text('upi_payee'),
+  advancePercent: smallint('advance_percent').notNull().default(50),
+  quoteValidityDays: smallint('quote_validity_days').notNull().default(15),
+  quoteTerms: text('quote_terms'),
+  brochureUrl: text('brochure_url'),
+  /** Composite FK (updated_by, org_id) → users, SET NULL — in the migration. */
+  updatedBy: uuid('updated_by'),
+  ...timestamps,
+})
+
+/**
+ * A priced offer of the agency's own services (0023): line items, totals the
+ * database holds to `total = subtotal + tax`, the needs it answers with their
+ * dated evidence, and — once sent — the seller as it was then.
+ */
+export const quotes = pgTable(
+  'quotes',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    /** Composite FK (company_id, org_id) → companies, CASCADE — in the migration. */
+    companyId: uuid('company_id').notNull(),
+    /** Composite FK (contact_id, org_id) → contacts, SET NULL — in the migration. */
+    contactId: uuid('contact_id'),
+    number: text('number').notNull(),
+    title: text('title').notNull(),
+    intro: text('intro'),
+    items: jsonb('items').notNull().default(sql`'[]'::jsonb`),
+    currency: text('currency').notNull().default('INR'),
+    subtotal: bigint('subtotal', { mode: 'number' }).notNull().default(0),
+    taxRate: numeric('tax_rate', { precision: 5, scale: 2 }).notNull().default('0'),
+    taxAmount: bigint('tax_amount', { mode: 'number' }).notNull().default(0),
+    total: bigint('total', { mode: 'number' }).notNull().default(0),
+    advancePercent: smallint('advance_percent').notNull().default(0),
+    advanceAmount: bigint('advance_amount', { mode: 'number' }).notNull().default(0),
+    needs: jsonb('needs').notNull().default(sql`'[]'::jsonb`),
+    terms: text('terms'),
+    /** YYYY-MM-DD, the last day it may be accepted, in India's day. */
+    validUntil: date('valid_until').notNull(),
+    seller: jsonb('seller'),
+    /** 'draft' | 'sent' | 'accepted' | 'declined' | 'withdrawn' */
+    status: text('status').notNull().default('draft'),
+    sentAt: timestamp('sent_at', { withTimezone: true }),
+    acceptedAt: timestamp('accepted_at', { withTimezone: true }),
+    acceptedByName: text('accepted_by_name'),
+    declinedAt: timestamp('declined_at', { withTimezone: true }),
+    declineReason: text('decline_reason'),
+    /** Composite FK (created_by, org_id) → users, SET NULL — in the migration. */
+    createdBy: uuid('created_by'),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('quotes_org_number_key').on(t.orgId, t.number),
+    index('quotes_company_created_idx').on(t.companyId, t.createdAt),
+  ],
+)
+
+/**
+ * A link a business opens (0023): its quote, its audit page or a preview of
+ * the website the agency would build. Only the token's sha256 is stored.
+ */
+export const shareLinks = pgTable(
+  'share_links',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    /** 'quote' | 'report' | 'preview' */
+    kind: text('kind').notNull(),
+    /** Composite FK (company_id, org_id) → companies, CASCADE — in the migration. */
+    companyId: uuid('company_id').notNull(),
+    quoteId: uuid('quote_id').references(() => quotes.id, { onDelete: 'cascade' }),
+    tokenHash: text('token_hash').notNull().unique(),
+    /** Composite FK (created_by, org_id) → users, SET NULL — in the migration. */
+    createdBy: uuid('created_by'),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    viewCount: integer('view_count').notNull().default(0),
+    firstViewedAt: timestamp('first_viewed_at', { withTimezone: true }),
+    lastViewedAt: timestamp('last_viewed_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    index('share_links_company_created_idx').on(t.companyId, t.createdAt),
+    index('share_links_quote_idx').on(t.quoteId).where(sql`quote_id IS NOT NULL`),
+  ],
 )
 
 export const messageTemplates = pgTable(

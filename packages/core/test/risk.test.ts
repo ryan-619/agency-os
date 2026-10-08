@@ -254,7 +254,14 @@ describe('the registry cannot drift from what is reachable', () => {
     }
     expect(AGENCY_TOOL_RISK.audit_website.slice(0, 2)).toEqual(['low', 'derived_write'])
     expect(AGENCY_TOOL_RISK.add_businesses.slice(0, 2)).toEqual(['medium', 'writes_internal_state'])
-    expect(AGENCY_TOOL_NAMES).toHaveLength(23 + 26 + 3 + 2 + 5)
+    // Quotes (0023): two reads and two internal writes; sending one is a person's act on its page.
+    for (const read of ['get_quote', 'list_quotes'] as const) {
+      expect(AGENCY_TOOL_RISK[read].slice(0, 2), read).toEqual(['low', 'read_only'])
+    }
+    for (const write of ['create_quote', 'update_quote', 'create_share_link'] as const) {
+      expect(AGENCY_TOOL_RISK[write].slice(0, 2), write).toEqual(['medium', 'writes_internal_state'])
+    }
+    expect(AGENCY_TOOL_NAMES).toHaveLength(23 + 26 + 3 + 2 + 5 + 4 + 1)
   })
 
   it('never lets a write run without a person: every non-read tool but the scans is medium or high', () => {

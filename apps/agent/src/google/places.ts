@@ -11,7 +11,9 @@
  * The field mask decides the price. A phone, a website and a rating put a
  * search in the "Text Search Enterprise" tier — about $35 per 1,000 searches
  * past 1,000 free a month, read from Google's pricing on 2026-10-08 — which is
- * why `PLACES_DAILY_SEARCHES` caps them per org per day.
+ * why `PLACES_DAILY_SEARCHES` caps them per org per day. `places.location`
+ * (0023, for the audit page's nearest competitors) is a "Pro" field, below
+ * the tier those already put the search in, so it costs nothing more.
  *
  * The key lives in this closure and one request header, never in a message,
  * a property or a log; `redirect: 'error'`, because a redirect would carry the
@@ -26,7 +28,7 @@ export const PLACES_ENDPOINT = 'https://places.googleapis.com/v1/places:searchTe
 export const PLACES_FIELD_MASK = [
   'places.id', 'places.displayName', 'places.formattedAddress', 'places.internationalPhoneNumber',
   'places.nationalPhoneNumber', 'places.websiteUri', 'places.rating', 'places.userRatingCount',
-  'places.businessStatus', 'places.primaryType', 'places.googleMapsUri', 'nextPageToken',
+  'places.businessStatus', 'places.primaryType', 'places.googleMapsUri', 'places.location', 'nextPageToken',
 ].join(',')
 
 export const PLACES_TIMEOUT_MS = 15_000
@@ -81,6 +83,10 @@ export function placeFrom(raw: unknown): PlaceListing | null {
   if (!placeId || !name) return null
   const rating = num(p.rating)
   const reviews = num(p.userRatingCount)
+  const at = p.location as { latitude?: unknown; longitude?: unknown } | undefined
+  const lat = num(at?.latitude)
+  const lng = num(at?.longitude)
+  const onEarth = lat !== null && lng !== null && Math.abs(lat) <= 90 && Math.abs(lng) <= 180
   return {
     placeId,
     name,
@@ -92,6 +98,7 @@ export function placeFrom(raw: unknown): PlaceListing | null {
     category: str(p.primaryType, 80),
     mapsUrl: str(p.googleMapsUri, 500),
     status: typeof p.businessStatus === 'string' ? STATUSES[p.businessStatus] ?? null : null,
+    location: onEarth ? { lat: lat!, lng: lng! } : null,
   }
 }
 
