@@ -46,6 +46,8 @@ export type ShellCurrent =
   | 'deployment'
   | 'profile'
   | 'night'
+  | 'visits'
+  | 'insights'
 
 const SETTINGS_PAGES: ReadonlySet<ShellCurrent> = new Set<ShellCurrent>([
   'settings', 'team', 'credentials', 'icp', 'spend', 'mail', 'deployment', 'profile', 'night',
@@ -79,9 +81,16 @@ export async function Shell({
   return (
     <div className="shell">
       <aside className="side">
-        <div className="brand">Agency OS</div>
-        <div className="brand-sub">{org.name}</div>
-
+        <div className="side-top">
+          <div>
+            <div className="brand">Agency OS</div>
+            <div className="brand-sub">{org.name}</div>
+          </div>
+          {/* On a phone the menu folds away behind this, with no script: the checkbox below opens it. */}
+          <label htmlFor="nav-toggle" className="nav-toggle-label">Menu</label>
+        </div>
+        <input type="checkbox" id="nav-toggle" className="nav-toggle" aria-label="Show the menu" />
+        <div className="side-body">
         <SearchBox />
 
         <nav className="nav">
@@ -90,6 +99,7 @@ export async function Shell({
           <a href="/contacts" className={on('contacts')}>Contacts</a>
           <a href="/inbox" className={on('inbox')}>Inbox</a>
           <a href="/tasks" className={on('tasks')}>Tasks</a>
+          <a href="/visits" className={on('visits')}>Visits</a>
           <a href="/chat" className={on('chat')}>Chat</a>
           <a href="/approvals" className={on('approvals')}>
             Approvals
@@ -97,6 +107,7 @@ export async function Shell({
           </a>
           <a href="/pipeline" className={on('pipeline')}>Pipeline</a>
           <a href="/quotes" className={on('quotes')}>Quotes</a>
+          <a href="/insights" className={on('insights')}>What&apos;s working</a>
           <a href="/campaigns" className={on('campaigns')}>Campaigns</a>
           <a href="/calls" className={on('calls')}>Calls</a>
           <a href="/suppressions" className={on('suppressions')}>Suppressions</a>
@@ -119,6 +130,7 @@ export async function Shell({
           <form action={signOut}>
             <button style={{ marginTop: 12, padding: '5px 10px', fontSize: 12.5 }}>Sign out</button>
           </form>
+        </div>
         </div>
       </aside>
       <main className="main">{children}</main>

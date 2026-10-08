@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { staleAfterDaysOf } from '@agency/core'
 import {
-  DIGEST_MAX_PAUSE_NOTICES, DIGEST_WINDOW_HOURS, activeIcpProfile, advanceSequences, appendAudit, digestCampaignPauses, digestCounts,
+  DIGEST_MAX_PAUSE_NOTICES, DIGEST_WINDOW_HOURS, activeIcpProfile, advanceSequences, appendAudit, certificateAlerts, digestCampaignPauses, digestCounts,
   digestFacts, digestOnce, digestRecord, heartbeatReport, heartbeatReportedStatus, heartbeatSilentAfter, listOrgIds,
   readLatestHeartbeat, type AgencyDb, type DigestNotPosted, type DigestRecord,
 } from '@agency/db/queries'
@@ -210,6 +210,16 @@ export async function GET(request: Request): Promise<NextResponse> {
       log.warn('cron digest could not advance follow-up sequences', { route: 'cron.digest', error: errorName(err) })
     }
   }
+  // A website certificate about to expire (2026-10-08): a task to tell the business, once per company per date.
+  let certificates: { alerted: number } | { failed: string } | 'not_run' = 'not_run'
+  if (Date.now() - started < maxDuration * 1000 - ORG_BUDGET_MS) {
+    try {
+      certificates = await certificateAlerts(db, { now: new Date() })
+    } catch (err) {
+      certificates = { failed: errorName(err) }
+      log.warn('cron digest could not check certificates', { route: 'cron.digest', error: errorName(err) })
+    }
+  }
 
   const failed = orgs.some((o) => 'failed' in o || 'notRun' in o)
   const outcome = failed ? 'failed' : !slack ? 'no_slack' : orgs.some((o) => 'why' in o) ? 'slack_failed' : 'ok'
@@ -219,8 +229,8 @@ export async function GET(request: Request): Promise<NextResponse> {
 
   return NextResponse.json(
     slack
-      ? { posted: orgs.some((o) => 'posted' in o && o.posted), orgs, sequences }
-      : { posted: false, why: 'no_slack', orgs, sequences },
+      ? { posted: orgs.some((o) => 'posted' in o && o.posted), orgs, sequences, certificates }
+      : { posted: false, why: 'no_slack', orgs, sequences, certificates },
     { status: failed ? 500 : 200 },
   )
 }

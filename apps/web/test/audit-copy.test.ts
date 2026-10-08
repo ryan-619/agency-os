@@ -349,6 +349,10 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'agent.update_quote': { quoteId: SUBJECT, revisedFromSent: false, turnId: SUBJECT },
   'agent.list_quotes': { count: 3, turnId: SUBJECT },
   'agent.create_share_link': { kind: 'report', companyId: SUBJECT, linkId: SUBJECT, turnId: SUBJECT },
+  // The public free website check (2026-10-08).
+  'check.requested': { recognised: false },
+  // A website certificate about to expire (2026-10-08).
+  'cert.alerted': { expires: '2026-10-20', daysLeft: 12, taskId: SUBJECT },
   // The night shift (0025).
   'night.updated': { enabled: true, at: '02:00', timeZone: 'Asia/Kolkata' },
   'night.requested': {},
@@ -364,6 +368,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   // Follow-up sequences (0024).
   'agent.set_campaign_steps': { campaignId: SUBJECT, steps: 3, turnId: SUBJECT },
   'agent.get_night_finds': { found: 10, turnId: SUBJECT },
+  'agent.get_whats_working': { kinds: 4, campaigns: 2, turnId: SUBJECT },
   'campaign.steps_saved': { steps: 3, messages: 1, calls: 1, visits: 1 },
   'sequence.step_taken': { campaignId: SUBJECT, position: 2, kind: 'message', touchId: SUBJECT },
   'sequence.step_skipped': { campaignId: SUBJECT, position: 3, kind: 'call', why: 'invalid' },

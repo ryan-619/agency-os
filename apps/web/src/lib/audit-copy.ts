@@ -1037,6 +1037,17 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   'quote.declined_via_share': (c) => `the buyer declined quote ${word(c.d, 'number') ?? ''} through its link`.replace(/\s+/g, ' ').trim(),
   'quote.email_drafted': (c) =>
     `drafted the email carrying quote ${word(c.d, 'number') ?? ''} — it waits on Approvals`.replace(/\s+/g, ' ').trim(),
+  'check.requested': (c) =>
+    flag(c.d, 'recognised') === true
+      ? 'a business already on file asked for a free website check through the public page — nothing on file was changed'
+      : 'a business asked for a free website check through the public page — filed as inbound, with the email consent the form asked for',
+  'cert.alerted': (c) => {
+    const left = num(c.d, 'daysLeft')
+    const expires = matching(c.d, 'expires', /^\d{4}-\d{2}-\d{2}$/)
+    return `made a task to tell a business its website’s certificate ${
+      left !== null && left < 0 ? 'has expired' : `expires${expires ? ` on ${expires}` : ''}`
+    } — seen by our scan; nothing was sent`
+  },
   'night.updated': (c) => {
     const on = flag(c.d, 'enabled') === true
     const at = word(c.d, 'at')
@@ -1562,7 +1573,7 @@ const FAMILY_LABEL: Readonly<Record<string, string>> = {
   approval: 'Approvals', turn: 'Chat turns', connector: 'Connectors', credential: 'Credentials', user: 'Team',
   company: 'Companies', note: 'Notes', task: 'Tasks', call: 'Calls', notification: 'Notifications',
   scan: 'Scheduled rescans', cron: 'Scheduled jobs', export: 'Exports', linkedin: 'LinkedIn steps',
-  template: 'Message templates', sms: 'SMS', assistant: 'Assistant', icp: 'ICP profiles', service: 'Services', org: 'Organisation', quote: 'Quotes', share_link: 'Shared links', sequence: 'Follow-up sequences', night: 'Night shift',
+  template: 'Message templates', sms: 'SMS', assistant: 'Assistant', icp: 'ICP profiles', service: 'Services', org: 'Organisation', quote: 'Quotes', share_link: 'Shared links', sequence: 'Follow-up sequences', night: 'Night shift', cert: 'Certificates', check: 'Website checks',
 }
 export const AUDIT_FAMILIES: readonly { readonly value: string; readonly label: string }[] = Object.freeze(
   [...new Set(AUDIT_ACTIONS.map((a) => a.split('.')[0] ?? a))].map((value) => ({

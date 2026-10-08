@@ -27,6 +27,7 @@ export { createShareLink, SHARE_PATHS } from './share.js'
 export { setCampaignSteps } from './sequences.js'
 export { runNightShift, type NightRunResult } from './night.js'
 export { getNightFinds } from './night-read.js'
+export { getWhatsWorking } from './insights.js'
 export { businessFromListing, placesSearchesToday } from './opportunities.js'
 
 import { AGENCY_TOOL_NAMES } from '@agency/core'
@@ -49,6 +50,7 @@ import { createQuote, getQuote, updateQuote, listQuotes } from './quotes.js'
 import { createShareLink } from './share.js'
 import { setCampaignSteps } from './sequences.js'
 import { getNightFinds } from './night-read.js'
+import { getWhatsWorking } from './insights.js'
 
 /**
  * Every tool the `agency` MCP server exposes.
@@ -130,6 +132,7 @@ export const AGENCY_TOOLS: readonly AgencyToolSpec[] = [
   createShareLink,
   setCampaignSteps,
   getNightFinds,
+  getWhatsWorking,
 ] as unknown as readonly AgencyToolSpec[]
 
 export { AGENCY_TOOL_NAMES }

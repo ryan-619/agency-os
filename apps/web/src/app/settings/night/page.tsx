@@ -1,7 +1,7 @@
 import { redirect } from 'next/navigation'
 import { can } from '@agency/core'
 import {
-  heartbeatNight, heartbeatSilentAfter, heartbeatStatus, nightReportLatest, nightSearchesList, nightShiftRead, readLatestHeartbeat,
+  heartbeatNight, heartbeatSilentAfter, heartbeatStatus, lookalikeSearches, nightReportLatest, nightSearchesList, nightShiftRead, readLatestHeartbeat,
   type AgencyDb,
 } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
@@ -27,11 +27,12 @@ export default async function NightShiftPage() {
   if (!can(principal, 'agents:read')) redirect('/settings')
   const db = getDb() as unknown as AgencyDb
   const now = new Date()
-  const [night, searches, report, heartbeat] = await Promise.all([
+  const [night, searches, report, heartbeat, suggestions] = await Promise.all([
     nightShiftRead(db, user.orgId),
     nightSearchesList(db, user.orgId),
     nightReportLatest(db, user.orgId),
     readLatestHeartbeat(db).catch(() => null),
+    lookalikeSearches(db, user.orgId),
   ])
   const worker = nightWorkerLine(heartbeatStatus(heartbeat, now, heartbeatSilentAfter(heartbeat)), heartbeatNight(heartbeat))
   const last = lastNightLine(report ? { ...report, top: report.top.length } : null)
@@ -54,6 +55,7 @@ export default async function NightShiftPage() {
         searches={searches.map((s) => ({
           id: s.id, query: s.query, region: s.region, city: s.city, active: s.active, lastRunAt: s.lastRunAt?.toISOString() ?? null,
         }))}
+        suggestions={suggestions}
         canWrite={can(principal, 'agents:write')}
       />
     </Shell>

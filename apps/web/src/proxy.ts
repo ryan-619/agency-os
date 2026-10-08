@@ -78,6 +78,16 @@ const PUBLIC = [
   '/w',
   // Where those pages' own script counts a view (`lib/link-view.ts`); the token is the credential.
   '/api/l',
+  // The free website check (2026-10-08): a stranger's form, under the agency's booking slug, like /book.
+  '/check',
+  '/api/check',
+  // The app's manifest and icons (2026-10-08): a browser fetches them without the session cookie.
+  '/manifest.webmanifest',
+  '/icon.svg',
+  '/apple-icon.png',
+  '/icon-192.png',
+  '/icon-512.png',
+  '/maskable-512.png',
 ]
 
 export default function proxy(req: NextRequest): NextResponse {

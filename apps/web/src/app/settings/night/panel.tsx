@@ -21,12 +21,14 @@ async function send(url: string, method: string, body?: unknown): Promise<string
 
 /** Settings → Night shift's controls (0025). Only an owner gets them; everyone else reads the page. */
 export function NightPanel({
-  enabled, runAt, timeZone, searches, canWrite,
+  enabled, runAt, timeZone, searches, suggestions, canWrite,
 }: {
   readonly enabled: boolean
   readonly runAt: string
   readonly timeZone: string
   readonly searches: readonly NightSearchView[]
+  /** Searches for more businesses like the ones won (`lookalikeSearches`), not yet saved. */
+  readonly suggestions: readonly { readonly query: string; readonly city: string; readonly won: number }[]
   readonly canWrite: boolean
 }) {
   const [on, setOn] = useState(enabled)
@@ -112,6 +114,21 @@ export function NightPanel({
             </tbody>
           </table>
         )}
+        {suggestions.length > 0 ? (
+          <div style={{ marginTop: 12 }}>
+            <p className="hint" style={{ margin: '0 0 6px' }}>More like the businesses you have won:</p>
+            {suggestions.map((s) => (
+              <div key={s.query} style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '0 0 6px', fontSize: 14 }}>
+                <span>
+                  {s.query} <span className="muted">· {s.won} won</span>
+                </span>
+                <button type="button" disabled={busy} onClick={() => void act(() => send('/api/settings/night/searches', 'POST', { query: s.query, city: s.city, region: 'IN' }), '')}>
+                  Save
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
         <div style={{ display: 'grid', gap: 8, marginTop: 12, maxWidth: 560 }}>
           <input type="text" placeholder="e.g. dentists in Indiranagar, Bengaluru" value={query} maxLength={200} onChange={(e) => setQuery(e.target.value)} />
           <div style={{ display: 'flex', gap: 8 }}>

@@ -69,6 +69,10 @@ describe('the cookie gate', () => {
     '/q/abc', '/api/q/abc/accept', '/api/q/abc/decline',
     // A business's audit page and website preview (2026-10-08).
     '/r/abc', '/w/abc', '/api/l/abc/view',
+    // The app's manifest and icons, fetched without the session cookie.
+    '/manifest.webmanifest', '/icon.svg', '/apple-icon.png', '/icon-192.png', '/icon-512.png', '/maskable-512.png',
+    // The free website check.
+    '/check/agency', '/api/check/agency',
     '/api/inbound/resend',
     // DoveSoft's pushes (0019): each route demands DOVESOFT_WEBHOOK_SECRET.
     '/api/inbound/dovesoft/dlr', '/api/inbound/dovesoft/sms', '/api/inbound/dovesoft/sms?token=x',
@@ -126,7 +130,7 @@ describe('the cookie gate', () => {
     '/pipeline', '/proposals/x', '/api/proposals/x',
     // `/q` likewise: the team's quotes are private.
     '/qx', '/api/qx', '/quotes',
-    '/rx', '/wx', '/api/lx', '/api/companies/x/share', '/api/companies/x/share/email',
+    '/rx', '/wx', '/api/lx', '/api/companies/x/share', '/api/companies/x/share/email', '/visits', '/insights', '/settings/night', '/api/settings/night', '/checks', '/api/checks',
   ])('does not exempt the lookalike %s', (path) => {
     expect(proxy(request(path)).status).toBe(307)
   })

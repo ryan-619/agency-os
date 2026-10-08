@@ -123,6 +123,18 @@ whether it can be called — on the dashboard and for the morning brief
 (`get_night_finds`). It sends nothing and contacts nobody. Settings → Night
 shift is an owner's. The `agency` server has sixty-six tools.
 
+**Then the field tools (2026-10-08), on no migration** (§2, "Visits, what's
+working, certificates, the free check and the phone"): `/visits` orders the
+day's visit tasks into a route from where you are and opens it in Google
+Maps; `/insights` ("What's working") says who replies and what is won — by
+kind of business, city and campaign, and after which message — with
+searches for more businesses like the ones won (`get_whats_working`, and
+one-click on Settings → Night shift); a website certificate about to expire
+becomes a task from a current scan; a public free website check
+(`/check/<booking slug>`) turns a business typing in its site into an
+inbound lead with its own audit page; and the app installs on a phone. The
+`agency` server has sixty-seven tools.
+
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
 machine"), which needs no public address, because everything but chat is
@@ -919,7 +931,7 @@ recorded-session mode, so anything needing the SDK to be *defined* is also
 untestable — and a package that CANNOT import the SDK cannot drag it into the
 Next module graph, which CI builds with no secrets on purpose.
 
-Sixty-six tools ship (`AGENCY_TOOL_NAMES`) — since 0025 `get_night_finds` (low, a read), since 0024 `set_campaign_steps` (high, `leaves_the_building`,
+Sixty-seven tools ship (`AGENCY_TOOL_NAMES`) — `get_whats_working` (low, a read) with the field tools, since 0025 `get_night_finds` (low, a read), since 0024 `set_campaign_steps` (high, `leaves_the_building`,
 carded: its steps are words that will reach people), since 0023 `create_quote` and `update_quote` (medium,
 internal writes), `get_quote` and `list_quotes` (low) and `create_share_link` (medium, an internal write: a link
 sends nothing), the opportunity finder's five since 2026-10-08
@@ -1397,6 +1409,72 @@ page link is judged by the send path like any other, so a company whose
 latest scan is past its deadline is refused `stale_evidence` until it is
 re-scanned, although the words quote no finding (the SMS template's residual
 in another form) — a business never scanned is not judged by a scan at all.
+
+### Visits, what's working, certificates, the free check and the phone (2026-10-08)
+
+**Visits.** `/visits` lists the open visit tasks that are the person's own or
+nobody's whose business has a location on record (0023's coordinates), in
+an order that drives sensibly — nearest next from where they are, then
+improved by reversing any stretch that shortens it (2-opt) — with a sketch
+of the route and the Google Maps directions link that drives it
+(`apps/web/src/lib/visit-route.ts`, pure and client-safe; a link carries at
+most `MAPS_WAYPOINTS_MAX` (9) waypoints and the page says when it cut).
+Where the person is comes from their phone only when they ask, and stays in
+the page. A business filed before the map gave locations is listed apart.
+
+**What's working.** `/insights` and `get_whats_working` read `whatsWorking`
+(`packages/db/src/insights.ts`): of the people written to in the last
+`INSIGHTS_WINDOW_DAYS` (90) — a person counted once, from their first SENT
+message in the window, answers to replies left out — who replied (anything
+but an auto-reply), was interested, asked to stop, and whose company became
+a won deal, by Google category, city (`initcap(btrim(city))`, so
+"bengaluru " is Bengaluru) and campaign; for a campaign, how many of its
+messages had gone before each person's first reply ("replied after the 2nd
+message"), which says whether a follow-up step earns its place; links made
+and opened by kind; quotes sent, accepted and declined. A rate over fewer
+than `INSIGHTS_MIN` (5) people reads "too few to tell" (`rateWords`).
+`lookalikeSearches` turns won deals' kind and city into Google Maps searches
+("dentist in Bengaluru", most wins first), leaving out one the night shift
+already has; Settings → Night shift offers them with Save, and the tool
+lists them for `find_businesses`.
+
+**A certificate about to expire** (`certificateAlerts`,
+`packages/db/src/cert-alerts.ts`, run by the daily digest cron): from the
+`tls` finding's `evidence.expires` on a company's LATEST successful scan,
+only while that scan is inside its re-verification deadline — a certificate
+seen weeks ago may have been renewed — within `CERT_ALERT_DAYS` (14) of the
+date or up to a week past it, a task for the open deal's owner or nobody (a
+call where there is a number nobody asked us to stop calling, a to-do
+otherwise), once per company per expiry date (`cert.alerted`). Its words
+name the scan's date and the expiry date, and what happens after it.
+
+**The free website check** (`/check/<booking slug>`, public, with
+`/api/check`): a business types in its website, name and email, ticks the
+one box (email about the result, its wording stored as the consent's
+evidence, `checkConsentWording`) and goes straight to its own audit page.
+`websiteCheckRequest` (`packages/db/src/website-check.ts`) keeps the booking
+page's rules — the org by its booking slug, a known company or contact used
+as it is and never rewritten, a NEW contact's one email consent, source
+`inbound`, the deal moved to `replied` with "Call — they asked for a free
+website check" — and caps it: `CHECKS_PER_HOUR` (20) an org, one per site an
+hour, a hidden field a robot fills (answered as success, nothing done). The
+route reads the site from the outside like any scan, at the nightly rescan's
+timeouts, within 25 s (a slower one records nothing and the page says what
+it could not check), then mints the audit page link for nobody on the team:
+its first view raises the call task. Audited `check.requested` (whether it
+was already on file, nothing else).
+
+**On a phone.** The app installs to a home screen (`app/manifest.ts`,
+`icon.svg`, `apple-icon.png`, PNGs in `public/`, all public in `proxy.ts`
+because a browser fetches them without the cookie), and below 760 px the
+sidebar folds behind a Menu button with no script (a checkbox and its
+label in `shell.tsx`), with larger tap targets.
+
+**Stated residuals.** Visits measure straight lines, so the order is a
+suggestion and Google drives it; the free check measures nothing on a phone
+(PageSpeed takes up to a minute — the night shift or chat measures it
+later); and a rate in "What's working" is a lower bound wherever a reply
+arrived on a channel the agency cannot read.
 
 ### The night shift (0025, 2026-10-08)
 

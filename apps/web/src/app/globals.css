@@ -45,6 +45,16 @@ a { color: var(--accent); }
 }
 @media (max-width: 760px) { .side { border-right: 0; border-bottom: 1px solid var(--line); } }
 
+.side-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.nav-toggle, .nav-toggle-label { display: none; }
+@media (max-width: 760px) {
+  .side { padding: 12px 16px; }
+  .side .brand-sub { margin-bottom: 0; }
+  .nav-toggle-label { display: inline-block; border: 1px solid var(--line); border-radius: 6px; padding: 7px 14px; font-size: 14px; cursor: pointer; user-select: none; }
+  .side-body { display: none; margin-top: 12px; }
+  .nav-toggle:checked ~ .side-body { display: block; }
+  .nav a, .nav span { padding: 11px 10px; font-size: 15px; }
+}
 .brand { font-weight: 650; letter-spacing: -0.01em; margin-bottom: 2px; }
 .brand-sub { color: var(--muted); font-size: 12px; margin-bottom: 22px; }
 
@@ -621,6 +631,16 @@ input[type=search]:focus { outline: 2px solid var(--accent); outline-offset: -1p
 .today li a { font-weight: 600; }
 .today-hot::marker { color: var(--warn); font-weight: 700; }
 .today-detail { font-size: 12.5px; margin-top: 2px; }
+.visits { display: grid; grid-template-columns: 1fr 300px; gap: 18px; align-items: start; }
+@media (max-width: 760px) { .visits { grid-template-columns: 1fr; } }
+.visit-list { margin: 0; padding-left: 22px; }
+.visit-list li { margin: 0 0 12px; line-height: 1.4; }
+.visit-sketch { width: 100%; max-width: 300px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--muted); }
+.check-form { display: grid; gap: 12px; margin-top: 14px; }
+.check-form label { display: grid; gap: 4px; font-size: 14px; }
+.check-form input[type='text'], .check-form input[type='email'] { width: 100%; box-sizing: border-box; padding: 9px 10px; font-size: 15px; }
+.check-form .check-consent { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; color: var(--muted); }
+.check-trap { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
 .team-note { background: #fff7d6; color: #4a3b00; border: 1px solid #e8d48a; border-radius: 8px; padding: 8px 12px; font-size: 13px; margin: 0 0 12px; }
 .report-headline { font-size: 15px; font-weight: 600; border-left: 3px solid var(--ink); padding: 6px 10px; margin: 12px 0; }
 .report-section { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 14px; }
