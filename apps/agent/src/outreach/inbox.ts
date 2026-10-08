@@ -66,6 +66,7 @@ import {
 import { MAIL_SIGNAL_HEADERS, MAIL_SIGNAL_LIMITS, htmlToText, type LlmProvider } from '@agency/core'
 import { refineReplyKind } from './classify.js'
 import type { Logger } from '../logger.js'
+import { imapLoginFrom } from './mail-login.js'
 import { optOutAlarmFromEnvironment, optOutNotRecordedEvent, type OptOutAlarm } from '../notify.js'
 
 export interface InboxConfig {
@@ -101,6 +102,13 @@ export interface InboxDeps {
   readonly connect?: (config: InboxConfig) => InboxClient
   /** For tests: the idle-time drains' timing. Defaults to `DRAIN_TIMING`. */
   readonly timing?: DrainTiming
+  /**
+   * Each session's outcome as a login state (`mail-login.ts`): `ok` when the
+   * mailbox is open, `refused` or `unreachable` when a session failed. The
+   * worker carries it on its heartbeat, so the dashboard can say the
+   * mailbox refused the login rather than leave it to the log.
+   */
+  readonly onLogin?: (state: 'ok' | 'refused' | 'unreachable') => void
 }
 
 /**
@@ -722,9 +730,11 @@ export function startInbox(deps: InboxDeps): () => Promise<void> {
         backoff = RECONNECT_MIN_MS
       } catch (err) {
         if (stopped) break
+        const failure = imapFailure(err)
+        deps.onLogin?.(imapLoginFrom(failure))
         deps.log.warn('inbox connection dropped; reconnecting', {
           error: err instanceof Error ? err.name : 'UnknownError',
-          ...imapFailure(err),
+          ...failure,
           inMs: backoff,
         })
         await new Promise<void>((r) => setTimeout(r, backoff))
@@ -771,6 +781,7 @@ export function startInbox(deps: InboxDeps): () => Promise<void> {
     const lock = await c.getMailboxLock(deps.config.mailbox)
     try {
       deps.log.info('inbox connected', { mailbox: deps.config.mailbox })
+      deps.onLogin?.('ok')
 
       // Anything unseen at connect time is handled first: replies that
       // arrived while the worker was down are the ones most in need of a

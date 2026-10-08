@@ -4362,6 +4362,27 @@ is worth a week of notices. Once a day, because that is how often the cron
 runs; with several orgs it posts once per org, which one agency with one org
 does not need engineered around.
 
+**A refused mailbox login is said before a message fails on it (2026-10-08).**
+An app password typed at the SMTP username prompt left a worker booting
+"sending: ON" whose first approved email would have failed at the login, to
+be drafted again. Now `MessageProvider` has an optional `verify()` (the SMTP
+provider's is nodemailer's: connect, greet, authenticate, quit, nothing
+sent), and `watchSmtpLogin` (`apps/agent/src/outreach/mail-login.ts`) tries
+it at boot and every 30 minutes until it answers `ok`, within 20 s a try:
+`EAUTH`, 534 or 535 is `refused` — logged `SMTP LOGIN REFUSED` at error, with
+a hint naming the fix for Google (`--gmail`) or Resend (`resend` and an API
+key) — and anything else `unreachable`, which does not blame the settings for
+a machine offline. A failure is logged by reason and hint, never the error's
+message, which can quote a username typed where a password belonged. The
+inbox reports each session's outcome (`onLogin`: `ok` on connect,
+`imapLoginFrom(imapFailure(err))` on a drop). The heartbeat's `detail`
+carries `smtpLogin` and `imapLogin` for a mailbox the worker has;
+`heartbeatMailLogin` reads them into `HeartbeatReport`, and a `refused` one
+turns the dashboard's worker line and `/settings`' to a warning that names
+what fails and the command that fixes it (`SMTP_LOGIN_REFUSED_WORDS`,
+`IMAP_LOGIN_REFUSED_WORDS`, restated in `settings/facts.ts` and held equal
+by `settings-facts.test.ts`).
+
 **A silent worker is a number in `/api/health`, not an inference.**
 `worker_heartbeats` is a SYSTEM table with no `org_id` — the worker serves
 every org — keyed `hostname:pid`, upserted every tick with `{ halted,

@@ -39,6 +39,16 @@ export function ago(seconds: number): string {
  */
 const RETIRED_WORKER_WORDS = 'no worker is configured, so nothing is sending or reading replies'
 
+/**
+ * A mailbox refused the worker's login: the dashboard's words
+ * (`SMTP_LOGIN_REFUSED_WORDS`, `IMAP_LOGIN_REFUSED_WORDS`), restated for the
+ * same reason; `settings-facts.test.ts` holds them equal.
+ */
+export const SMTP_LOGIN_REFUSED_WORDS =
+  'the mail server REFUSED the sending login — approved emails will fail until it is fixed where the worker runs (./tools/run-worker.sh --gmail)'
+export const IMAP_LOGIN_REFUSED_WORDS =
+  'the mailbox REFUSED the reply-reading login — replies are not being read until it is fixed where the worker runs (./tools/run-worker.sh --gmail)'
+
 export interface WorkerLine {
   readonly tone: Tone
   readonly text: string
@@ -73,12 +83,17 @@ export function workerLine(report: HeartbeatReport | null, errorName?: string): 
     }
   }
   switch (report.status) {
-    case 'live':
+    case 'live': {
+      const refused = [
+        report.smtpLogin === 'refused' ? `${SMTP_LOGIN_REFUSED_WORDS[0]!.toUpperCase()}${SMTP_LOGIN_REFUSED_WORDS.slice(1)}.` : null,
+        report.imapLogin === 'refused' ? `${IMAP_LOGIN_REFUSED_WORDS[0]!.toUpperCase()}${IMAP_LOGIN_REFUSED_WORDS.slice(1)}.` : null,
+      ].filter((t): t is string => t !== null)
       return {
-        tone: 'ok',
-        text: `Worker last seen ${age}${report.configured ? '' : ', although this web deployment is not configured to reach it (no AGENT_URL / AGENT_INTERNAL_TOKEN), so chat from here is unavailable'}.`,
+        tone: refused.length > 0 ? 'warn' : 'ok',
+        text: `Worker last seen ${age}${report.configured ? '' : ', although this web deployment is not configured to reach it (no AGENT_URL / AGENT_INTERNAL_TOKEN), so chat from here is unavailable'}.${refused.length > 0 ? ` ${refused.join(' ')}` : ''}`,
         lastSeenAt: report.lastSeenAt,
       }
+    }
     case 'silent':
       return {
         tone: 'warn',

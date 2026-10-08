@@ -15,7 +15,7 @@ import {
   HEARTBEAT_RETIRED_AFTER_DAYS, HEARTBEAT_SILENT_AFTER_SECONDS,
   heartbeatAge, heartbeatBrief, heartbeatReport, heartbeatReportedStatus, heartbeatSilentAfter, heartbeatSms, heartbeatStatus,
   isCheckViolation, readLatestHeartbeat, schema, writeHeartbeat,
-  type AgencyDb, type HeartbeatWrite,
+  type AgencyDb, type HeartbeatWrite, heartbeatMailLogin,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
 
@@ -151,7 +151,7 @@ describe('writeHeartbeat and readLatestHeartbeat', () => {
       ageSeconds: 60,
       outreach: 'send-only',
       chat: 'enabled',
-      sms: null,
+      sms: null, smtpLogin: null, imapLogin: null,
       status: 'live',
       retired: false,
     })
@@ -169,6 +169,19 @@ describe('writeHeartbeat and readLatestHeartbeat', () => {
     })
     await writeHeartbeat(db, beat({ lastTickAt: at(30), detail: { halted: false, lockHeld: true, sms: 'off' } }))
     expect(heartbeatReport(await readLatestHeartbeat(db), true, at(40)).sms).toBe('off')
+  })
+})
+
+describe('the mailboxes’ logins on the row', () => {
+  it('carries what the worker said about each login, and null where it said nothing', () => {
+    const row = (detail: unknown) => ({ lastTickAt: new Date('2026-10-08T07:00:00Z'), outreach: 'send-and-receive', chat: 'enabled', detail })
+    const now = new Date('2026-10-08T07:00:30Z')
+    expect(heartbeatReport(row({ smtpLogin: 'refused', imapLogin: 'ok' }) as never, true, now)).toMatchObject({
+      smtpLogin: 'refused', imapLogin: 'ok',
+    })
+    expect(heartbeatReport(row({ halted: false }) as never, true, now)).toMatchObject({ smtpLogin: null, imapLogin: null })
+    expect(heartbeatReport(row({ smtpLogin: 'something else' }) as never, true, now).smtpLogin).toBeNull()
+    expect(heartbeatMailLogin(null, 'smtpLogin')).toBeNull()
   })
 })
 
@@ -233,7 +246,7 @@ describe('the pure half', () => {
 
     it('says not_configured only when there is no row and no worker is configured', () => {
       expect(heartbeatReport(null, false, at(0))).toEqual({
-        configured: false, lastSeenAt: null, ageSeconds: null, outreach: null, chat: null, sms: null,
+        configured: false, lastSeenAt: null, ageSeconds: null, outreach: null, chat: null, sms: null, smtpLogin: null, imapLogin: null,
         status: 'not_configured', retired: false,
       })
       expect(heartbeatReport(null, true, at(0)).status).toBe('never')

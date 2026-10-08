@@ -93,6 +93,14 @@ export interface MessageProvider {
    * and the sender never picks one up.
    */
   readonly channels: readonly Channel[]
+  /**
+   * Log in and out again, sending nothing, where the transport can: the
+   * worker asks at boot and every half hour until it answers, so a refused
+   * login is said in the log and on the dashboard before an approved message
+   * fails on it (2026-10-08: a username typed wrongly would have failed the
+   * first send of the morning). Throws what the transport threw.
+   */
+  verify?(): Promise<void>
   send(message: {
     readonly to: string
     readonly subject: string

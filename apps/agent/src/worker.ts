@@ -24,6 +24,7 @@ import { createDoveSoftProvider, doveSoftConfigFrom } from './outreach/dovesoft.
 import { outreachOptions } from './outreach/options.js'
 import { providerFrom } from '@agency/llm'
 import { startInbox } from './outreach/inbox.js'
+import { watchSmtpLogin, type MailLogin } from './outreach/mail-login.js'
 import { refineDraft } from './outreach/draft.js'
 import { startMorningBriefs } from './brief/scheduler.js'
 import { createAgentHttpServer, type StartTurnRequest, type TurnHandle } from './http/server.js'
@@ -175,6 +176,12 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
   // Decided once, and said once (`sms: dovesoft on|off`), before the sender
   // starts; the heartbeat row carries the same answer.
   const senders = senderProvidersFrom(env, log)
+  // Whether the mailboxes accept this worker's logins (`mail-login.ts`), on
+  // the heartbeat so the dashboard can say a refused one: the outgoing login
+  // is tried at boot and every half hour until it works, and each inbox
+  // session says how it went.
+  let smtpLogin: MailLogin = 'unchecked'
+  let imapLogin: MailLogin = 'unchecked'
   const healthInputs = (): HealthInputs => ({
     pool,
     halted: halt?.halted() ?? false,
@@ -338,6 +345,17 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
    * is, and leaves rows on the other channel exactly where they are.
    */
   const stops: Array<() => Promise<void>> = []
+  const smtpProvider = senders.providers.find((p) => p.name === 'smtp')
+  if (smtpProvider && env.SMTP_HOST) {
+    const stopWatch = watchSmtpLogin(smtpProvider, {
+      host: env.SMTP_HOST,
+      log,
+      onState: (state) => {
+        smtpLogin = state
+      },
+    })
+    stops.push(async () => stopWatch())
+  }
   if (senders.providers.length > 0) {
     // The required settings are named here; the optional ones — whatever a
     // later feature derives from the environment — arrive through the spread,
@@ -369,6 +387,9 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
           password: env.IMAP_PASSWORD,
           mailbox: env.IMAP_MAILBOX,
         },
+        onLogin: (state) => {
+          imapLogin = state
+        },
       }),
     )
   }
@@ -397,7 +418,15 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
           chat: now.chatEnabled ? 'enabled' : 'disabled',
           // `brief`: whether this worker writes the morning brief (0020) — it
           // needs a model, as chat does — so the Assistant page can say so.
-          detail: { halted: now.halted, lockHeld: now.lockHeld, sms: senders.sms, brief: credential ? 'on' : 'off' },
+          detail: {
+            halted: now.halted,
+            lockHeld: now.lockHeld,
+            sms: senders.sms,
+            brief: credential ? 'on' : 'off',
+            // Only for a mailbox this worker has: absent means not configured.
+            ...(smtpProvider ? { smtpLogin } : {}),
+            ...(env.IMAP_HOST && env.IMAP_USER && env.IMAP_PASSWORD ? { imapLogin } : {}),
+          },
         }
       },
     }),

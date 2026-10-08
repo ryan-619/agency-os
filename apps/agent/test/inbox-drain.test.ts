@@ -446,6 +446,7 @@ In-Reply-To: <sent-1@agency.test>`,
     const boxes = [first, second]
     let connects = 0
     const { log, lines } = captureLog()
+    const logins: string[] = []
     stop = startInbox({
       db,
       log,
@@ -454,6 +455,7 @@ In-Reply-To: <sent-1@agency.test>`,
       now: () => NOON,
       connect: () => boxes[Math.min(connects++, boxes.length - 1)]!,
       timing: { retryMs: 20, refreshMs: 60_000 },
+      onLogin: (state) => logins.push(state),
     })
     await vi.waitFor(() => expect(first.idling).toBe(true))
 
@@ -467,7 +469,29 @@ In-Reply-To: <sent-1@agency.test>`,
     await vi.waitFor(() => expect(second.seen(5)).toBe(true), { timeout: 12_000 })
     expect(connects).toBe(2)
     expect(first.searches).toBe(1)
+    // Each session's outcome reaches the heartbeat: open, dropped, open again.
+    expect(logins).toEqual(['ok', 'unreachable', 'ok'])
   }, 30_000)
+
+  it('says a mailbox that refuses the login is refused, for the heartbeat', async () => {
+    class Refusing extends FakeMailbox {
+      override async connect(): Promise<void> {
+        throw Object.assign(new Error('Authentication failed.'), { authenticationFailed: true })
+      }
+    }
+    const { log } = captureLog()
+    const logins: string[] = []
+    stop = startInbox({
+      db,
+      log,
+      config: { host: 'imap.test', port: 993, secure: true, user: 'outreach', password: 'x', mailbox: 'INBOX' },
+      optOutAlarm: null,
+      now: () => NOON,
+      connect: () => new Refusing(),
+      onLogin: (state) => logins.push(state),
+    })
+    await vi.waitFor(() => expect(logins[0]).toBe('refused'))
+  })
 
   /**
    * The probe (review round 6): a "stop" that never records. It used to be

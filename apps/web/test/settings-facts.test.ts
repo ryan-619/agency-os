@@ -17,8 +17,12 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { HEARTBEAT_RETIRED_AFTER_DAYS, heartbeatReport, heartbeatReportedStatus } from '@agency/db/queries'
-import { deploymentFacts, sendingAnswer, workerLine, workerModes, type DeploymentFactInput } from '../src/app/settings/facts'
-import { RETIRED_WORKER_WORDS } from '../src/lib/dashboard-view'
+import {
+  IMAP_LOGIN_REFUSED_WORDS, SMTP_LOGIN_REFUSED_WORDS, deploymentFacts, sendingAnswer, workerLine, workerModes, type DeploymentFactInput,
+} from '../src/app/settings/facts'
+import {
+  IMAP_LOGIN_REFUSED_WORDS as DASHBOARD_IMAP_REFUSED, RETIRED_WORKER_WORDS, SMTP_LOGIN_REFUSED_WORDS as DASHBOARD_SMTP_REFUSED,
+} from '../src/lib/dashboard-view'
 import { agentMisconfiguredSentence } from '../src/lib/agent-config'
 
 const NOW = new Date('2026-09-30T12:00:00Z')
@@ -306,5 +310,28 @@ describe('the Replies fact', () => {
       }
       expect(replies(input({ smsInbound: false })).on).toBe(false)
     })
+  })
+})
+
+describe('a refused mailbox login', () => {
+  const row = (detail: unknown) =>
+    ({ lastTickAt: new Date(NOW.getTime() - 60_000), outreach: 'send-and-receive', chat: 'enabled', detail }) as never
+
+  it('is said on the worker line, in the dashboard’s words', () => {
+    expect(SMTP_LOGIN_REFUSED_WORDS).toBe(DASHBOARD_SMTP_REFUSED)
+    expect(IMAP_LOGIN_REFUSED_WORDS).toBe(DASHBOARD_IMAP_REFUSED)
+    const line = workerLine(heartbeatReport(row({ smtpLogin: 'refused' }), true, NOW))
+    expect(line.tone).toBe('warn')
+    expect(line.text).toContain('The mail server REFUSED the sending login')
+    const both = workerLine(heartbeatReport(row({ smtpLogin: 'refused', imapLogin: 'refused' }), true, NOW))
+    expect(both.text).toContain('The mailbox REFUSED the reply-reading login')
+  })
+
+  it('leaves the line as it was for any other answer', () => {
+    const plain = workerLine(heartbeatReport(row({}), true, NOW))
+    expect(plain.tone).toBe('ok')
+    for (const smtpLogin of ['unchecked', 'ok', 'unreachable']) {
+      expect(workerLine(heartbeatReport(row({ smtpLogin }), true, NOW))).toEqual(plain)
+    }
   })
 })
