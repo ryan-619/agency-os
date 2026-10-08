@@ -27,6 +27,7 @@ import { startInbox } from './outreach/inbox.js'
 import { watchSmtpLogin, type MailLogin } from './outreach/mail-login.js'
 import { refineDraft } from './outreach/draft.js'
 import { startMorningBriefs } from './brief/scheduler.js'
+import { startSequences } from './sequences/scheduler.js'
 import { createAgentHttpServer, type StartTurnRequest, type TurnHandle } from './http/server.js'
 import { createDeferredEmitter, startTurn } from './chat/turn.js'
 import { buildTurnRuntime, createHalt, resolvePrincipal, type RuntimeHalt } from './runtime/session.js'
@@ -432,6 +433,15 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
     }),
   )
 
+  /**
+   * Follow-up sequences (0024): every five minutes, the next step for each
+   * person a campaign with steps has written to — a draft for /approvals, a
+   * call or a visit task — until they reply. No model needed; after the lock,
+   * like the sender, and claimed step by step, so the web's daily cron
+   * advancing the same runs takes each step once.
+   */
+  const stopSequences = startSequences({ db, log, now: () => new Date() })
+  stops.push(async () => stopSequences())
   /**
    * The morning brief (0020): one unattended turn a day per org that switched
    * it on, through the same `beginTurn` as chat — with `unattended`, so the

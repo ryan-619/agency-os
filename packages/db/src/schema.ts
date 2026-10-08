@@ -1076,6 +1076,60 @@ export const shareLinks = pgTable(
   ],
 )
 
+// ---------------------------------------------------------------------------
+// Follow-up sequences (0024)
+// ---------------------------------------------------------------------------
+
+/** A campaign's steps after its opener: another message on its channel, a call or a visit. */
+export const campaignSteps = pgTable(
+  'campaign_steps',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    /** Composite FK (campaign_id, org_id) → campaigns, CASCADE — in the migration. */
+    campaignId: uuid('campaign_id').notNull(),
+    /** 2 onwards: the opener is step 1, written by enrolment. */
+    position: smallint('position').notNull(),
+    /** 'message' | 'call' | 'visit' */
+    kind: text('kind').notNull(),
+    /** Days after the step before: after its message was sent, or its task made. */
+    afterDays: smallint('after_days').notNull(),
+    subject: text('subject'),
+    /** A message's words, with {first_name}, {company} and {agency}; NULL for a call or a visit. */
+    body: text('body'),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex('campaign_steps_position_key').on(t.campaignId, t.position)],
+)
+
+/** One person's way through a campaign's steps; stopped the moment they reply. */
+export const sequenceRuns = pgTable(
+  'sequence_runs',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    /** Composite FK (campaign_id, org_id) → campaigns, CASCADE — in the migration. */
+    campaignId: uuid('campaign_id').notNull(),
+    /** Composite FK (contact_id, org_id) → contacts, CASCADE — in the migration. */
+    contactId: uuid('contact_id').notNull(),
+    /** When the opener went; a reply after it stops the run. */
+    startedAt: timestamp('started_at', { withTimezone: true }).notNull(),
+    nextPosition: smallint('next_position').notNull().default(2),
+    /** When the step before was taken: its message sent, or its task made. */
+    anchorAt: timestamp('anchor_at', { withTimezone: true }).notNull(),
+    /** Composite FK (waiting_touch_id, org_id) → touches, SET NULL — in the migration. */
+    waitingTouchId: uuid('waiting_touch_id'),
+    stoppedAt: timestamp('stopped_at', { withTimezone: true }),
+    /** 'replied' | 'paused' | 'refused' | 'deal_closed' | 'campaign_ended' | 'finished' */
+    stopReason: text('stop_reason'),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('sequence_runs_campaign_contact_key').on(t.campaignId, t.contactId),
+    index('sequence_runs_live_idx').on(t.orgId, t.anchorAt).where(sql`stopped_at IS NULL`),
+  ],
+)
+
 export const messageTemplates = pgTable(
   'message_templates',
   {

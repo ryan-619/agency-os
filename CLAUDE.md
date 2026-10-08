@@ -105,6 +105,16 @@ the page's own script, never a link-preview robot or a teammate — gives
 whoever sent it a call task, and the dashboard opens with today's top
 actions. The `agency` server has sixty-four tools.
 
+**Then follow-ups (2026-10-08), on migration 0024** (§2, "Follow-up
+sequences, and replies that name a time"): a campaign carries STEPS after
+its opener — another message on its channel, a call task or a visit task,
+each some days after the step before — and everyone it wrote to who has not
+replied is taken through them by the worker every five minutes and the
+daily cron, until a reply, a pause, a closed deal or a message that did not
+go stops them for good. And a reply that names a time to talk again ("call
+me next month", "busy till Diwali") becomes a task on that day. The `agency`
+server has sixty-five tools.
+
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
 machine"), which needs no public address, because everything but chat is
@@ -189,11 +199,11 @@ worker upserts a `worker_heartbeats` row (keyed `hostname:pid`) every
 
 **The web half is LIVE on Vercel** at **https://myagencyos.in** (first
 deployed as `agency-os-tau-murex.vercel.app`), against a Neon Postgres (18.6)
-with Resend for magic links, seeded. The code expects migration **0023**
+with Resend for magic links, seeded. The code expects migration **0024**
 (`EXPECTED_MIGRATION`). Production was at 0017 when the 0018 release was
 written, and that release run's Vercel build applied 0018 and then 0019
 before `next build` (`tools/vercel-build-migrate.mjs`, under
-`AGENCY_MIGRATE_ON_BUILD=1`); 0020 to 0023 go the same way, through the
+`AGENCY_MIGRATE_ON_BUILD=1`); 0020 to 0024 go the same way, through the
 Production workflow's `release` action. A migration is always applied BEFORE the code
 that reads it deploys, never after — DEPLOYING.md, "migrate FIRST", and
 GO-LIVE.md Part 2b. That is done from GitHub, with no credential on a
@@ -901,7 +911,8 @@ recorded-session mode, so anything needing the SDK to be *defined* is also
 untestable — and a package that CANNOT import the SDK cannot drag it into the
 Next module graph, which CI builds with no secrets on purpose.
 
-Sixty-four tools ship (`AGENCY_TOOL_NAMES`) — since 0023 `create_quote` and `update_quote` (medium,
+Sixty-five tools ship (`AGENCY_TOOL_NAMES`) — since 0024 `set_campaign_steps` (high, `leaves_the_building`,
+carded: its steps are words that will reach people), since 0023 `create_quote` and `update_quote` (medium,
 internal writes), `get_quote` and `list_quotes` (low) and `create_share_link` (medium, an internal write: a link
 sends nothing), the opportunity finder's five since 2026-10-08
 (`find_businesses`, `add_businesses`, `audit_website`, `get_opportunities`, `list_services`), `get_draft` (low) and `edit_draft` (high,
@@ -1379,6 +1390,84 @@ latest scan is past its deadline is refused `stale_evidence` until it is
 re-scanned, although the words quote no finding (the SMS template's residual
 in another form) — a business never scanned is not judged by a scan at all.
 
+### Follow-up sequences, and replies that name a time (0024, 2026-10-08)
+
+**A campaign's steps after its opener.** `campaign_steps` (0024) holds a
+campaign's steps 2 onwards — `message`, `call` or `visit`, each `after_days`
+(1–90) after the step before — and a message step's words, with
+`{first_name}`, `{company}` and `{agency}` filled in when it is drafted
+(`renderStepWords`; an unknown placeholder is refused when the steps are
+saved, `sequenceStepsProblem`). A message has words and only a message does,
+by CHECK. A message step goes on the campaign's own channel, so a text
+campaign takes calls and visits only (`campaignStepsSave` refuses,
+`channel`): each text is a registered template filled for one person.
+Saving replaces the steps in one transaction with `campaign.steps_saved`
+(counts by kind, never the words). `/campaigns` shows each campaign's steps
+and how many people are being followed up, stopped by why, with an editor
+(`components/outreach/campaign-steps.tsx`, `PUT
+/api/campaigns/[id]/steps`, `campaigns:write`); chat sets them with
+`set_campaign_steps` — carded, because the steps are words that will reach
+people — and `list_campaigns` prints them.
+
+**A run per person, stopped the moment they reply.** `sequence_runs` holds
+one row per campaign and contact (`UNIQUE`), started when a campaign with
+steps has SENT its first message to that person — within
+`SEQUENCE_START_WINDOW_DAYS` (30), so adding steps to an old campaign wakes
+nobody it wrote to long ago — and never by an answer to a reply. The
+decision is core's (`sequenceNext` in `packages/core/src/sequence.ts`,
+pure): it STOPS on a reply since the opener went (any channel, anything but
+an auto-reply — one that came before the run existed included), then a
+pause, then a closed deal, then a campaign that is `done`, and when the
+message it waits on was refused, failed or bounced (a follow-up to a message
+that never arrived is an opener in disguise); it WAITS while that message is
+still a draft or queued, while the campaign is paused, and until the next
+step's day — counted from when the last message was SENT, or the last task
+made — and finishes after the last step. `advanceSequences`
+(`packages/db/src/sequences.ts`) gathers the facts and obeys: a message step
+inserts a draft on the campaign's channel — `awaiting_approval`, or `queued`
+where the campaign auto-sends — subject "Re: <the opener's>" unless the step
+names one, and the run waits on it; a call or a visit is a task for the open
+deal's owner, or nobody, due at once; a task the rules refuse (no number, a
+suppressed one) is skipped in a savepoint and audited
+`sequence.step_skipped`, never retried for ever. Every write matches the run
+as it was read (its position, its waiting message, not stopped), so the
+worker (`startSequences`, every five minutes, `apps/agent/src/sequences/
+scheduler.ts`) and the daily digest cron — which advances them too, so a
+call, a visit or a LinkedIn step moves with no worker — take each step once;
+`sequences.test.ts` runs two advancers at once. Audited
+`sequence.step_taken` and `sequence.stopped`. Inside its transaction the
+advancer reads only through the transaction: a read through the outer
+handle waits on the transaction itself where the pool is one connection
+(PGlite, and Vercel's), which is how its first version hung.
+
+**A reply that names a time becomes a task.** `laterAsk`
+(`packages/core/src/later-ask.ts`, pure) reads the sender's OWN words
+(`ownWords`, never the quoted thread) for a time phrase — tomorrow, a
+weekday, next week, in N days/weeks/months, a fortnight, next month, the end
+of the month, next quarter, the new year, a month by name ("in March", never
+"you may"), a day ("after the 15th", "on 20 November"), after Christmas, and
+after Diwali for the years `DIWALI` lists — in a sentence that also asks to
+be contacted or says now is not the time, and is not negated ("don't call me
+next week"). A date someone is free again ("after", "till", "until") wins
+over one that starts an absence. It returns OUR phrase and a day after
+today, at most `LATER_ASK_MAX_DAYS` (400) ahead. `recordInboundReply` runs
+it in a savepoint after the deal move, for a reply that is neither an
+opt-out nor an auto-reply (`laterAskTask` in `packages/db/src/
+later-task.ts`): a call — or a to-do where there is no number nobody asked
+us to stop calling — due at 10:00 on that day where the person is (the
+contact's zone, else the company's, else `Asia/Kolkata`;
+`instantAtWallClock`), for the open deal's owner or nobody, titled "Call
+<company> next month, as their reply said". A task that cannot be written
+never costs the reply its record. The dashboard's top actions and
+`list_tasks` show it on its day.
+
+**Stated residuals.** A follow-up quotes no finding but is judged by the
+send path like any message, so a company whose latest scan is past its
+deadline when the step is drafted is refused `stale_evidence` and its run
+stops `refused` (the nightly rescan usually keeps it current); a teammate's
+pause stops a run for good, and lifting it does not restart one; and the
+reader is English, so a reply in Hindi or Tamil names no time it can read.
+
 ### Editing a draft's words (2026-10-08)
 
 **A person changes the words; the send path still judges them.** `editDraft`
@@ -1698,6 +1787,7 @@ quiet stretch. Every panel dates evidence from `scans.ran_at` through
 | 0020 ✅ | the morning brief's clock and prompt (`morning-brief.ts`): `briefDue`, `localDateIn`, `localWallClock`, `wallClockMinutes`, `WALL_CLOCK`, `morningBriefPrompt`, `briefThreadTitle` |
 | 0021 ✅ | a country read as one code (`country.ts`: `countryCode`, `countryName`); the firmographic disqualifiers (`firmographicDisqualifier`, `icpTargeting`, `FIRMOGRAPHIC_DISQUALIFIERS`, and `scoreCompany`'s optional `firmographics`); a profile derived from another (`icp-derive.ts`: `deriveIcp`, `icpSlug`, `COMPANY_STAGES`); and the catalog's `readOnly` mark |
 | 0023 ✅ | quotes (`quote.ts`: `quoteTotals`, `quoteNumber`, `gstinValid`, `vpaValid`, `upiPaymentUri`, `rupeesInWords`, `quoteDayIn`, `quoteValidUntil`, `quoteLapsed`), the nearest-competitor comparison (`peers.ts`: `distanceKm`, `nearestPeers`, `ratingPlace`, `comparisonRows`, `comparisonHeadline`, `peerLabel`) and the website preview's templates (`site-preview.ts`: `siteTemplateFor`, `siteTagline`, `whatsappLink`) |
+| 0024 ✅ | follow-up sequences (`sequence.ts`: `sequenceNext`, `sequenceStepsProblem`, `renderStepWords`, `followUpSubject`, `DEFAULT_FOLLOW_UP_BODY`) and the reply reader for a time to talk again (`later-ask.ts`: `laterAsk`, `instantAtWallClock`, `DIWALI`) |
 
 ---
 

@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import type { EnrolSkip } from '@agency/core'
 import { REFUSAL_WORDS, campaignAutoPausedWords } from '@/lib/refusal-words'
 import { CHANNEL_HINT, SMS_AUTO_SEND_OFF, SMS_NOT_ENROLLED } from '@/components/campaigns/sms-words'
+import { CampaignSteps, type RunsView, type StepView } from './campaign-steps'
 
 /**
  * Campaigns (PROMPT.md §8.4).
@@ -57,6 +58,9 @@ export interface CampaignView {
     /** ISO time of the pause. */
     readonly at: string
   } | null
+  /** Its follow-up steps after the opener (0024), and how the people in them stand. */
+  readonly steps?: readonly StepView[]
+  readonly runs?: RunsView
 }
 
 export function CampaignsPanel({
@@ -150,6 +154,14 @@ export function CampaignsPanel({
                   </span>
                 ))}
               </div>
+              <CampaignSteps
+                campaignId={c.id}
+                channel={c.channel}
+                autoSend={c.autoSend}
+                steps={c.steps ?? []}
+                runs={c.runs ?? { live: 0, stopped: {} }}
+                canWrite={canWrite && c.status !== 'done'}
+              />
               {enrolling === c.id ? (
                 <EnrolPanel campaign={c} noSenderNote={noSenderNote} onClose={() => setEnrolling(null)} />
               ) : null}

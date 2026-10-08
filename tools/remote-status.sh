@@ -163,6 +163,11 @@ const { Client } = require("pg");
   console.log("  0023 table: quotes" +
     (t23.rows[0].present ? "     <- 0023 is applied" : " MISSING   <- 0023 is NOT applied, do not deploy"));
 
+  // 0024: follow-up sequences. The campaign steps and the advancer need it.
+  const t24 = await c.query("select to_regclass($1) is not null as present", ["sequence_runs"]);
+  console.log("  0024 table: sequence_runs" +
+    (t24.rows[0].present ? " <- 0024 is applied" : " MISSING   <- 0024 is NOT applied, do not deploy"));
+
   // A count and an age, like the users count below: never a row. /api/health
   // already publishes the same age as worker.ageSeconds.
   if (t18.rows.find(r => r.t === "worker_heartbeats" && r.present)) {

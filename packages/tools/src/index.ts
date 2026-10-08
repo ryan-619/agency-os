@@ -24,6 +24,7 @@ export {
 } from './opportunities.js'
 export { createQuote, getQuote, updateQuote, listQuotes } from './quotes.js'
 export { createShareLink, SHARE_PATHS } from './share.js'
+export { setCampaignSteps } from './sequences.js'
 
 import { AGENCY_TOOL_NAMES } from '@agency/core'
 import type { AgencyToolSpec } from './spec.js'
@@ -43,6 +44,7 @@ import { listIcps, createIcp, activateIcp } from './profiles.js'
 import { findBusinesses, addBusinessesTool, auditWebsite, getOpportunities, listServices } from './opportunities.js'
 import { createQuote, getQuote, updateQuote, listQuotes } from './quotes.js'
 import { createShareLink } from './share.js'
+import { setCampaignSteps } from './sequences.js'
 
 /**
  * Every tool the `agency` MCP server exposes.
@@ -122,6 +124,7 @@ export const AGENCY_TOOLS: readonly AgencyToolSpec[] = [
   updateQuote,
   listQuotes,
   createShareLink,
+  setCampaignSteps,
 ] as unknown as readonly AgencyToolSpec[]
 
 export { AGENCY_TOOL_NAMES }

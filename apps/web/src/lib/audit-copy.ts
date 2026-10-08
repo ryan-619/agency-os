@@ -682,6 +682,16 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     const queued = num(c.d, 'queued')
     return `enrolled ${queued !== null ? plural(queued, 'contact') : 'contacts'} into a campaign; enrolling queues messages, it sends nothing itself`
   },
+  'campaign.steps_saved': (c) => {
+    const steps = num(c.d, 'steps')
+    if (steps === 0) return 'removed the follow-up steps from a campaign — nobody is followed up after its opener'
+    const parts = join([
+      (num(c.d, 'messages') ?? 0) > 0 && plural(num(c.d, 'messages')!, 'message'),
+      (num(c.d, 'calls') ?? 0) > 0 && plural(num(c.d, 'calls')!, 'call'),
+      (num(c.d, 'visits') ?? 0) > 0 && plural(num(c.d, 'visits')!, 'visit'),
+    ])
+    return `set a campaign's follow-up steps${steps !== null ? ` (${plural(steps, 'step')}${parts ? `: ${parts}` : ''})` : ''}; each message still waits for approval unless the campaign auto-sends`
+  },
   'campaign.auto_paused': (c) => {
     const pct = num(c.d, 'bouncePct')
     const limit = num(c.d, 'threshold')
@@ -1021,6 +1031,33 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   'quote.declined_via_share': (c) => `the buyer declined quote ${word(c.d, 'number') ?? ''} through its link`.replace(/\s+/g, ' ').trim(),
   'quote.email_drafted': (c) =>
     `drafted the email carrying quote ${word(c.d, 'number') ?? ''} — it waits on Approvals`.replace(/\s+/g, ' ').trim(),
+  'sequence.step_taken': (c) => {
+    const kind = word(c.d, 'kind')
+    const position = num(c.d, 'position')
+    const step = position !== null ? `step ${position}` : 'a step'
+    return kind === 'message'
+      ? `drafted a campaign's follow-up message (${step}) — it goes only as a campaign's messages go: approved, or auto-sent, and checked at sending`
+      : `made a ${kind === 'visit' ? 'visit' : 'call'} task — ${step} of a campaign's follow-ups`
+  },
+  'sequence.step_skipped': (c) => {
+    const kind = word(c.d, 'kind')
+    const why = word(c.d, 'why')
+    const reason =
+      why === 'invalid' ? 'there is no number on record to call' : why === 'suppressed' ? 'the number is on the suppression list' : 'the task could not be made'
+    return `skipped a campaign's ${kind === 'visit' ? 'visit' : 'call'} step — ${reason} — and moved on to the next`
+  },
+  'sequence.stopped': (c) => {
+    const why = word(c.d, 'reason')
+    const words: Readonly<Record<string, string>> = {
+      replied: 'they replied',
+      paused: 'they are paused',
+      refused: 'its last message did not go',
+      deal_closed: 'their deal is closed',
+      campaign_ended: 'the campaign is done',
+      finished: 'every step has been taken',
+    }
+    return `stopped following up a contact — ${(why && own(words, why)) ?? 'it ended'}`
+  },
   'share_link.created': (c) => {
     const kind = word(c.d, 'kind')
     const what = kind === 'quote' ? 'a quote' : kind === 'report' ? 'an audit page' : kind === 'preview' ? 'a website preview' : 'a page'
@@ -1483,7 +1520,7 @@ const FAMILY_LABEL: Readonly<Record<string, string>> = {
   approval: 'Approvals', turn: 'Chat turns', connector: 'Connectors', credential: 'Credentials', user: 'Team',
   company: 'Companies', note: 'Notes', task: 'Tasks', call: 'Calls', notification: 'Notifications',
   scan: 'Scheduled rescans', cron: 'Scheduled jobs', export: 'Exports', linkedin: 'LinkedIn steps',
-  template: 'Message templates', sms: 'SMS', assistant: 'Assistant', icp: 'ICP profiles', service: 'Services', org: 'Organisation', quote: 'Quotes', share_link: 'Shared links',
+  template: 'Message templates', sms: 'SMS', assistant: 'Assistant', icp: 'ICP profiles', service: 'Services', org: 'Organisation', quote: 'Quotes', share_link: 'Shared links', sequence: 'Follow-up sequences',
 }
 export const AUDIT_FAMILIES: readonly { readonly value: string; readonly label: string }[] = Object.freeze(
   [...new Set(AUDIT_ACTIONS.map((a) => a.split('.')[0] ?? a))].map((value) => ({

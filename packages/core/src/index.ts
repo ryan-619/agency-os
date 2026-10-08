@@ -46,6 +46,8 @@ export * from './rotting.js'
 export * from './analytics.js'
 export * from './kickoff.js'
 export * from './mail-signals.js'
+export * from './later-ask.js'
+export * from './sequence.js'
 // Round 3: the inbound paths' one HTML-to-text converter, and the Slack message two processes post.
 export * from './html-text.js'
 export * from './slack-payload.js'

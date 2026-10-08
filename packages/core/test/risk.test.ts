@@ -178,11 +178,12 @@ describe('the registry cannot drift from what is reachable', () => {
    * so a person approves the call before any draft exists — and every draft
    * still waits on /approvals before anything is sent.
    */
-  it('has exactly three tools that leave the building, and all are high', () => {
+  it('has exactly four tools that leave the building, and all are high', () => {
     const leaving = AGENCY_TOOL_NAMES.filter((n) => AGENCY_TOOL_RISK[n][1] === 'leaves_the_building')
     // `edit_draft` (2026-10-08) rewrites words to somebody outside: a queued
     // auto-send email would go with them unread, so it is carded like a draft.
-    expect(leaving).toEqual(['queue_touch', 'enrol_contacts', 'edit_draft'])
+    // `set_campaign_steps` (0024) sets follow-up words for everyone a campaign wrote to.
+    expect(leaving).toEqual(['queue_touch', 'enrol_contacts', 'set_campaign_steps', 'edit_draft'])
     for (const name of leaving) expect(AGENCY_TOOL_RISK[name][0], name).toBe('high')
   })
 
@@ -261,7 +262,7 @@ describe('the registry cannot drift from what is reachable', () => {
     for (const write of ['create_quote', 'update_quote', 'create_share_link'] as const) {
       expect(AGENCY_TOOL_RISK[write].slice(0, 2), write).toEqual(['medium', 'writes_internal_state'])
     }
-    expect(AGENCY_TOOL_NAMES).toHaveLength(23 + 26 + 3 + 2 + 5 + 4 + 1)
+    expect(AGENCY_TOOL_NAMES).toHaveLength(23 + 26 + 3 + 2 + 5 + 4 + 1 + 1)
   })
 
   it('never lets a write run without a person: every non-read tool but the scans is medium or high', () => {
@@ -308,7 +309,7 @@ describe('runsWithoutApproval', () => {
    */
   it('keeps a card on exactly the agency tools that reach a person, lift a pause or change how scans are scored', () => {
     const carded = AGENCY_TOOL_NAMES.filter((name) => !runsWithoutApproval(verdictFor(name))).sort()
-    expect(carded).toEqual(['activate_icp', 'edit_draft', 'enrol_contacts', 'queue_touch', 'resume_contact'])
+    expect(carded).toEqual(['activate_icp', 'edit_draft', 'enrol_contacts', 'queue_touch', 'resume_contact', 'set_campaign_steps'])
   })
 
   /**

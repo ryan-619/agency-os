@@ -46,6 +46,7 @@ import {
 // Review round 4: the deferrals a settle of an answer must not read as its end.
 import { REFUSALS_THE_CLOCK_RESOLVES } from '@agency/core'
 import * as schema from './schema.js'
+import { laterAskTask } from './later-task.js'
 import { activeIcpProfile, type AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
 import { addSuppression } from './campaigns.js'
@@ -3056,6 +3057,17 @@ export async function recordInboundReply(
           )
           .catch(() => null)
         deal = moved ? `${moved.outcome}:${moved.deal.stage}` : null
+      }
+
+      // "Call me next month" (2026-10-08): a reply that asks to be contacted later becomes a task on that
+      // day, read from the sender's own words — never an opt-out's, never an auto-reply's — in a savepoint
+      // like the deal move, so a task that cannot be written never costs the reply its record.
+      if (companyId && !optedOut && !automatic) {
+        await tx
+          .transaction((sp) =>
+            laterAskTask(sp as unknown as AgencyDb, { orgId: args.orgId, contactId: args.contactId, companyId, body: body ?? '', now }),
+          )
+          .catch(() => null)
       }
 
       await tx

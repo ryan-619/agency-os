@@ -188,6 +188,8 @@ export const AGENCY_TOOL_RISK = {
   list_quotes: ['low', 'read_only', 'Lists quotes with their numbers, status and totals.'],
   // A business's own pages (2026-10-08): making the link sends nothing — a person pastes it, or drafts the email for /approvals.
   create_share_link: ['medium', 'writes_internal_state', 'Makes a link to a business’s audit page or website preview; nothing is sent.'],
+  // Follow-up sequences (0024): steps are words that will reach people — drafted, or sent unread on auto-send.
+  set_campaign_steps: ['high', 'leaves_the_building', 'Sets a campaign’s follow-up messages, calls and visits for everyone it wrote to who has not replied.'],
   // Editing a draft's words (2026-10-08). The read shows an EMAIL draft whole; the edit
   // rewrites one and keeps its card: a queued auto-send email goes out with the new
   // words unread by anybody, and every other draft still waits on /approvals.

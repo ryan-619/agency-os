@@ -52,7 +52,8 @@ import {
   type Channel, type Draft, type EnrolSkip, type SendDecision, type SendRefusalCode,
 } from '@agency/core'
 import {
-  appendAudit, campaignActivity, campaignAutoPauses, campaignInput, editDraft as editDraftRow, enrolCampaign, evidenceAsOfFor, isUniqueViolation,
+  appendAudit, campaignActivity, campaignAutoPauses, campaignInput, campaignStepsRead, editDraft as editDraftRow, enrolCampaign, evidenceAsOfFor, isUniqueViolation,
+  sequenceRunsSummary,
   linkedinThreadWithheld, pendingDrafts, previewSend, readCampaign, templatesList,
   createCampaign as createCampaignRow, listCampaigns as listCampaignRows, updateCampaign as updateCampaignRow,
   type CampaignRow, type CampaignStatus, type CampaignUpdate, type EnrolOutcome, type LinkedinThreadWithheld,
@@ -204,7 +205,10 @@ export const listCampaigns: AgencyToolSpec<typeof listCampaignsShape> = {
     for (const c of page) {
       const activity = await campaignActivity(ctx.db, ctx.orgId, c.id)
       const pause = c.status === 'paused' ? autoPauses.get(c.id) : undefined
-      rows.push({ c, activity, autoPaused: pause ?? null })
+      // Its follow-up steps after the opener (0024), and how the people in them stand.
+      const steps = await campaignStepsRead(ctx.db, ctx.orgId, c.id)
+      const runs = await sequenceRunsSummary(ctx.db, ctx.orgId, c.id)
+      rows.push({ c, activity, autoPaused: pause ?? null, steps, runs })
     }
 
     await ctx.audit('agent.list_campaigns', {
@@ -249,7 +253,7 @@ export const listCampaigns: AgencyToolSpec<typeof listCampaignsShape> = {
       )
     }
 
-    const entries = rows.map(({ c, activity, autoPaused }) => {
+    const entries = rows.map(({ c, activity, autoPaused, steps, runs }) => {
       const lines = [
         `  “${clip(c.name, 120)}” · id ${c.id} · ${c.channel} · ${c.status} · ${modeWords(c.autoSend)} · ` +
           `up to ${c.dailyCap} a day · ${quietWords(c)}`,
@@ -260,6 +264,15 @@ export const listCampaigns: AgencyToolSpec<typeof listCampaignsShape> = {
             `${activity.waitingToSend} approved, waiting to send`,
             ...activity.refusals.map((r) => `${r.n} not sent — ${refusalWords(r.code)}`),
           ].join(' · '),
+        '    follow-ups: ' +
+          (steps.length === 0
+            ? 'none — nobody it writes to hears from it again (set_campaign_steps adds them)'
+            : steps.map((s) => `${s.kind} after ${s.afterDays} ${s.afterDays === 1 ? 'day' : 'days'}`).join(', ') +
+              ` · ${runs.live} being followed up` +
+              Object.entries(runs.stopped)
+                .filter(([, n]) => n > 0)
+                .map(([why, n]) => ` · ${n} stopped (${why.replace(/_/g, ' ')})`)
+                .join('')),
       ]
       if (autoPaused) {
         lines.push(
