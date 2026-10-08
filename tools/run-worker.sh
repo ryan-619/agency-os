@@ -36,6 +36,9 @@
 #   ./tools/run-worker.sh --smtp          ask only the outgoing mailbox's questions
 #                                         (e.g. Google Workspace instead of
 #                                         Resend for cold outreach), then run
+#   ./tools/run-worker.sh --gmail         one Google Workspace mailbox for BOTH
+#                                         sending and replies: its address and
+#                                         one app password, then run
 #   ./tools/run-worker.sh --google        ask only for the Google API key that
 #                                         finds businesses on Google Maps and
 #                                         measures sites with PageSpeed, then run
@@ -69,8 +72,9 @@ case "${1:-}" in
   --slack) MODE=slack ;;
   --google) MODE=google ;;
   --smtp) MODE=smtp ;;
+  --gmail) MODE=gmail ;;
   --forget) MODE=forget ;;
-  *) echo "usage: $0 [--reconfigure | --imap | --smtp | --secrets-key | --ai | --slack | --google | --forget]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--reconfigure | --imap | --smtp | --gmail | --secrets-key | --ai | --slack | --google | --forget]" >&2; exit 2 ;;
 esac
 
 # ── The Keychain (macOS only) ──────────────────────────────────────────────
@@ -182,9 +186,9 @@ node_modules/.bin/tsc --build
 
 # ── Read what was saved, or ask ──────────────────────────────────────────────
 LOADED="no"
-# --imap, --smtp, --secrets-key, --ai, --slack and --google read them too: each asks its own question over them.
-if { [ "$MODE" = run ] || [ "$MODE" = imap ] || [ "$MODE" = smtp ] || [ "$MODE" = secrets-key ] || [ "$MODE" = ai ] \
-  || [ "$MODE" = slack ] || [ "$MODE" = google ]; } \
+# --imap, --smtp, --gmail, --secrets-key, --ai, --slack and --google read them too: each asks its own question over them.
+if { [ "$MODE" = run ] || [ "$MODE" = imap ] || [ "$MODE" = smtp ] || [ "$MODE" = gmail ] || [ "$MODE" = secrets-key ] \
+  || [ "$MODE" = ai ] || [ "$MODE" = slack ] || [ "$MODE" = google ]; } \
   && have_keychain && kc_get DATABASE_URL >/dev/null; then
   for n in "${SAVED_NAMES[@]}"; do
     if v=$(kc_get "$n"); then export "$n=$v"; fi
@@ -619,8 +623,25 @@ if [ "$MODE" = smtp ] && [ "$LOADED" = yes ]; then
   SMTP_HOST=$(ask_host 'SMTP host' "${SMTP_HOST:-smtp.gmail.com}"); export SMTP_HOST
   printf '  SMTP port [%s]: ' "${SMTP_PORT:-465}" >&3; read -r V <&3; export SMTP_PORT="${V:-${SMTP_PORT:-465}}"
   SMTP_USER_DEFAULT="${SMTP_USER:-${IMAP_USER:-}}"
-  [ "$SMTP_HOST" = smtp.gmail.com ] && [ "${SMTP_USER_DEFAULT:-}" = resend ] && SMTP_USER_DEFAULT="${IMAP_USER:-}"
-  printf '  SMTP username [%s]: ' "$SMTP_USER_DEFAULT" >&3; read -r V <&3; export SMTP_USER="${V:-$SMTP_USER_DEFAULT}"
+  if [ "$SMTP_HOST" = smtp.gmail.com ]; then
+    # Google's username is the mailbox's whole address. A saved value that is
+    # not one — Resend's `resend`, or an app password typed at this prompt
+    # (2026-10-08) — is never offered, and so never printed again.
+    case "$SMTP_USER_DEFAULT" in *@*.*) ;; *) SMTP_USER_DEFAULT="${IMAP_USER:-}" ;; esac
+    case "$SMTP_USER_DEFAULT" in *@*.*) ;; *) SMTP_USER_DEFAULT="" ;; esac
+    while :; do
+      printf '  SMTP username [%s]: ' "$SMTP_USER_DEFAULT" >&3; read -r V <&3
+      V="${V:-$SMTP_USER_DEFAULT}"
+      case "$V" in
+        *[[:space:]]*|'') ;;
+        ?*@?*.?*) break ;;
+      esac
+      printf '    Google needs the whole address here, e.g. hello@myagencyos.in. The app password is the NEXT question, and it is hidden. Try again.\n' >&3
+    done
+    export SMTP_USER="$V"
+  else
+    printf '  SMTP username [%s]: ' "$SMTP_USER_DEFAULT" >&3; read -r V <&3; export SMTP_USER="${V:-$SMTP_USER_DEFAULT}"
+  fi
   printf '  SMTP password (hidden — for Google an APP password; Enter keeps the saved one): ' >&3
   read -r -s V <&3; printf '\n' >&3
   # Enter keeps a saved password only for the server it was saved for: the
@@ -652,6 +673,66 @@ if [ "$MODE" = smtp ] && [ "$LOADED" = yes ]; then
     fi
   done
   [ "$SMTP_SAVED" = yes ] && printf '  Saved in your Keychain; the next run uses it too.\n' >&3
+  exec 3>&-
+fi
+
+# ── --gmail: one Google Workspace mailbox for sending AND replies ────────────
+# The two halves are one Google mailbox — smtp.gmail.com to send, imap.gmail.com
+# to read — and one app password opens both. Set up one at a time, a person
+# typed an address as a host and an app password at the username prompt, which
+# is not hidden, so it was printed on screen (2026-10-08). So: the address,
+# checked as an address, and the app password, hidden, once. The From line is
+# kept when it is this address's, and set to the address when it is not, since
+# Google rewrites a From it has not been told the account may use.
+if [ "$MODE" = gmail ] && [ "$LOADED" = yes ]; then
+  ask_open
+  printf 'One Google Workspace mailbox for sending and replies — every other saved answer is kept.\n' >&3
+  GMAIL_ADDRESS="${IMAP_USER:-}"
+  case "$GMAIL_ADDRESS" in *@*.*) ;; *) GMAIL_ADDRESS="${SMTP_USER:-}" ;; esac
+  case "$GMAIL_ADDRESS" in *[[:space:]]*) GMAIL_ADDRESS="" ;; *@*.*) ;; *) GMAIL_ADDRESS="" ;; esac
+  while :; do
+    printf '  Google address — the whole mailbox address [%s]: ' "$GMAIL_ADDRESS" >&3; read -r V <&3
+    V="${V:-$GMAIL_ADDRESS}"
+    case "$V" in
+      *[[:space:]]*|'') ;;
+      ?*@?*.?*) break ;;
+    esac
+    printf '    That is not an address. Type the whole address, e.g. hello@myagencyos.in — the app password is the NEXT question, and it is hidden. Try again.\n' >&3
+  done
+  GMAIL_ADDRESS="$V"
+  while :; do
+    printf '  App password for %s (hidden — the 16 letters from myaccount.google.com/apppasswords): ' "$GMAIL_ADDRESS" >&3
+    read -r -s V <&3; printf '\n' >&3
+    # Google shows it in four groups of four; the password itself has no spaces.
+    V="${V//[[:space:]]/}"
+    case "$V" in
+      '') printf '    Nothing was entered. Paste the app password. Try again.\n' >&3 ;;
+      *@*) printf '    That is the address, not the app password. Try again.\n' >&3 ;;
+      *) break ;;
+    esac
+  done
+  export IMAP_HOST=imap.gmail.com IMAP_USER="$GMAIL_ADDRESS" IMAP_PASSWORD="$V"
+  export SMTP_HOST=smtp.gmail.com SMTP_PORT=465 SMTP_USER="$GMAIL_ADDRESS" SMTP_PASSWORD="$V"
+  V=""
+  FROM_LOWER=$(printf '%s' "${MAIL_FROM:-}" | tr '[:upper:]' '[:lower:]')
+  ADDRESS_LOWER=$(printf '%s' "$GMAIL_ADDRESS" | tr '[:upper:]' '[:lower:]')
+  case "$FROM_LOWER" in
+    *"$ADDRESS_LOWER"*) ;;
+    *) export MAIL_FROM="$GMAIL_ADDRESS" ;;
+  esac
+  unset FROM_LOWER ADDRESS_LOWER
+  printf '  Mail goes out as: %s\n' "$MAIL_FROM" >&3
+  GMAIL_SAVED=yes
+  for n in IMAP_HOST IMAP_USER IMAP_PASSWORD SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASSWORD MAIL_FROM; do
+    kc_put "$n" "${!n}" || true
+    # `security -i` can answer 0 for a write it refused: read it back.
+    if [ "$(kc_get "$n" || true)" != "${!n}" ]; then
+      GMAIL_SAVED=no
+      echo "  Could not save $n in the Keychain: this run uses what you typed, the next one what was saved before." >&2
+    fi
+  done
+  [ "$GMAIL_SAVED" = yes ] && printf '  Saved in your Keychain; the next run uses them too.\n' >&3
+  unset GMAIL_ADDRESS GMAIL_SAVED
   exec 3>&-
 fi
 

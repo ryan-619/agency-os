@@ -1254,6 +1254,69 @@ describe.runIf(PTY)('tools/run-worker.sh, answered at its prompts', () => {
     expect(saved('SMTP_PASSWORD')).toBe('abcdefghijklmnop')
   })
 
+  it('--gmail sets sending and replies from one address and one app password', async () => {
+    save('DATABASE_URL', DB)
+    save('IMAP_HOST', 'imap.gmail.com')
+    save('IMAP_USER', 'ryan@myagencyos.in')
+    save('IMAP_PASSWORD', 'oldoldoldoldoldo')
+    save('SMTP_HOST', 'smtp.resend.com')
+    // An app password once typed at the username prompt, which is not hidden.
+    save('SMTP_USER', 'qwer tyui opas dfgh')
+    save('SMTP_PASSWORD', SMTP_PASSWORD)
+    save('MAIL_FROM', 'Ryan <ryan@myagencyos.in>')
+    const r = await converse(layout(), ['--gmail'], [
+      ['Google address', 'not an address'],
+      ['That is not an address', ''],
+      ['App password for ryan@myagencyos.in', 'abcd efgh ijkl mnop'],
+    ])
+    expect(r.unanswered, r.transcript).toEqual([])
+    expect(r.status, r.transcript).toBe(0)
+    expect(r.transcript).toContain('One Google Workspace mailbox for sending and replies')
+    expect(r.transcript).not.toContain('Production DATABASE_URL')
+    // The saved username that is not an address is never offered, so never printed.
+    expect(r.transcript).not.toContain('qwer tyui')
+    for (const secret of ['abcd efgh', 'abcdefghijklmnop', SMTP_PASSWORD, 'oldoldoldoldoldo']) {
+      expect(r.transcript).not.toContain(secret)
+    }
+    expect(r.transcript).toContain('sending:  ON  — approved outreach goes via smtp.gmail.com')
+    expect(r.transcript).toContain('replies:  ON')
+    expect(saved('IMAP_HOST')).toBe('imap.gmail.com')
+    expect(saved('IMAP_USER')).toBe('ryan@myagencyos.in')
+    expect(saved('IMAP_PASSWORD')).toBe('abcdefghijklmnop')
+    expect(saved('SMTP_HOST')).toBe('smtp.gmail.com')
+    expect(saved('SMTP_PORT')).toBe('465')
+    expect(saved('SMTP_USER')).toBe('ryan@myagencyos.in')
+    expect(saved('SMTP_PASSWORD')).toBe('abcdefghijklmnop')
+    expect(saved('MAIL_FROM')).toBe('Ryan <ryan@myagencyos.in>')
+    const worker = calls()[1]!.env
+    expect(worker.IMAP_PASSWORD).toBe('abcdefghijklmnop')
+    expect(worker.SMTP_PASSWORD).toBe('abcdefghijklmnop')
+    expect(worker.SMTP_USER).toBe('ryan@myagencyos.in')
+    expect(readFileSync(join(logs, 'security-argv'), 'utf8')).not.toContain('abcdefghijklmnop')
+  })
+
+  it('--smtp on Google offers the reply address, never a saved username that is not one', async () => {
+    save('DATABASE_URL', DB)
+    save('IMAP_USER', 'ryan@myagencyos.in')
+    save('SMTP_HOST', 'smtp.gmail.com')
+    save('SMTP_USER', 'qwer tyui opas dfgh')
+    save('SMTP_PASSWORD', 'abcdefghijklmnop')
+    save('MAIL_FROM', 'Ryan <ryan@myagencyos.in>')
+    const r = await converse(layout(), ['--smtp'], [
+      ['SMTP host', ''],
+      ['SMTP port', ''],
+      ['SMTP username [ryan@myagencyos.in]', 'still not an address'],
+      ['Google needs the whole address here', ''],
+      ['SMTP password', ''],
+      ['From address', ''],
+    ])
+    expect(r.unanswered, r.transcript).toEqual([])
+    expect(r.status, r.transcript).toBe(0)
+    expect(r.transcript).not.toContain('qwer tyui')
+    expect(saved('SMTP_USER')).toBe('ryan@myagencyos.in')
+    expect(saved('SMTP_PASSWORD')).toBe('abcdefghijklmnop')
+  })
+
   it('--slack answered none removes a saved webhook', async () => {
     save('DATABASE_URL', DB)
     save('SLACK_WEBHOOK_URL', 'https://hooks.slack.com/services/T000/B000/old')
