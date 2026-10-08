@@ -53,6 +53,30 @@ describe('laterAsk', () => {
     expect(read('Do not contact us next month')).toBeNull()
   })
 
+  it('reads nothing from a reply that turns an ask around ANYWHERE before it, or asks to be left alone (review, 2026-10-08)', () => {
+    for (const text of [
+      // The negation more than two words back — the first version read each of these as a day to call.
+      'I don’t want you to call me next week',
+      'Please do not ever bother to email me again next month',
+      'We never asked anybody to contact us in March',
+      // Turned around in one sentence, and a day named in another.
+      'Don’t call. Maybe in March.',
+      'Stop calling me. Try in March',
+      'Leave us alone, we might talk after Diwali',
+      // Removal or departure, in the broad reader's words.
+      'Please remove me from your list. Maybe call in March',
+      'I have left the company — contact me after March and I will point you to the right person',
+      'Unsubscribe. Perhaps next quarter.',
+    ]) expect(read(text), text).toBeNull()
+  })
+
+  it('still reads an ask whose clause carries no negation, and the polite phrases that only look like one', () => {
+    expect(read('I don’t have time now, call me next month')).toEqual({ phrase: 'next month', day: '2026-11-01' })
+    expect(read('Don’t hesitate to call me next week')).toMatchObject({ phrase: 'next week' })
+    expect(read('Feel free to stop by and talk next week')).toMatchObject({ phrase: 'next week' })
+    expect(read('Never mind the price, call me tomorrow')).toMatchObject({ phrase: 'tomorrow' })
+  })
+
   it('reads the first sentence that asks, line by line, and never a day that has passed or is too far', () => {
     expect(read('Thanks.\nToo busy now.\nCall next month please')).toEqual({ phrase: 'next month', day: '2026-11-01' })
     expect(read('Call me on 3rd October', '2026-10-08')).toEqual({ phrase: 'on the 3rd of October', day: '2027-10-03' })

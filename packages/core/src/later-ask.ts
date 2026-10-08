@@ -8,13 +8,21 @@
  * the quoted thread), only a reply that is not an opt-out and not an
  * auto-reply — the opt-out reader runs first, always — and it claims little:
  * a day is produced only from a time phrase in a sentence that also asks to
- * be contacted, or says now is not the time, and that is not negated ("don't
- * call me next week"). The phrase it returns is OURS ("next month",
+ * be contacted, or says now is not the time. And nothing at all is read from
+ * a reply that turns an ask around anywhere — a negation ANYWHERE before an
+ * ask in the same clause ("I don't want you to call me next week", where
+ * the first version looked two words back and read a request for next
+ * week), "stop calling", "leave me alone" — or that the broad reader
+ * (`mentionsRemovalOrDeparture`) finds asking to be removed or saying they
+ * have left: "please remove me — maybe try in March" is no request to be
+ * called in March (review, 2026-10-08). The phrase it returns is OURS ("next month",
  * "in 2 weeks"), never the reply's words, so a task title carries nothing the
  * sender wrote. Anything it is unsure of is null: a task nobody needed costs
  * a click, a day misread costs a call on the wrong day, and no reading
  * costs nothing that the reply sitting in /inbox does not already say.
  */
+
+import { mentionsRemovalOrDeparture } from './mail-signals.js'
 
 export interface LaterAsk {
   /** Our words for when: "tomorrow", "on Monday", "next week", "in 2 weeks", "next month", "in March", "after Diwali". */
@@ -37,7 +45,12 @@ const ASK =
   /\b(call|calling|ring|phone|contact|reach out|reach me|reach us|get back|get in touch|ping|follow up|follow-up|check back|check in|try (?:me|us|again|later)|talk|speak|connect|revisit|circle back|touch base|write|email|mail|message|whatsapp|meet|catch up|discuss|revert)\b/
 const BUSY =
   /\b(not now|not right now|not at the moment|not a good time|busy|travell?ing|out of (?:town|station|office)|on leave|on vacation|on holiday|maybe|perhaps|later)\b/
-const NEGATED = /\b(?:don'?t|do not|never|no need to|stop|not to)\s+(?:\w+\s+){0,2}$/
+/** A word that turns an ask around when it comes anywhere before it in the same clause. */
+const NEGATION =
+  /\b(?:(?:don'?t|dont|do not)(?! hesitate\b)|never(?! mind\b)|no need to|stop(?! by\b)|quit|not to|no more|no longer)\b/
+/** Asked to be left alone, in words the opt-out readers leave to a person. */
+const LEAVE_ALONE =
+  /\b(?:(?:stop|quit) (?:calling|phoning|ringing|texting|messaging|whatsapping|bothering|pestering|spamming|following up)|leave (?:me|us) alone|(?:lose|delete) (?:my|our) (?:number|email|address))\b/
 
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'] as const
 const MONTHS: Readonly<Record<string, number>> = {
@@ -167,17 +180,28 @@ function timePhrases(s: string, today: string): Hit[] {
  */
 export function laterAsk(ownWords: string, today: string): LaterAsk | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(today)) return null
+  // Asked to be removed, or gone: whatever else it says, nobody is to be called back on it.
+  if (mentionsRemovalOrDeparture(ownWords)) return null
   const text = ownWords.slice(0, 1_500).toLowerCase().replace(/[‘’]/g, "'")
+  if (LEAVE_ALONE.test(text)) return null
   const sentences = text
     .split(/(?<=[.!?;])\s+|\n+|\s+[-–—]\s+|,\s+(?=but\b)/)
     .map((x) => x.replace(/\s+/g, ' ').trim())
     .filter((x) => x !== '')
+  // "Don't call me next week", "I do not want you to email us next month": one ask turned around anywhere
+  // and nothing is read from the reply — a call on a day somebody said not to is the error that matters.
+  for (const sentence of sentences) {
+    for (const clause of sentence.split(/[,;:]\s*|\s+but\s+/)) {
+      const asks = new RegExp(ASK.source, 'g')
+      for (let m = asks.exec(clause); m; m = asks.exec(clause)) {
+        if (NEGATION.test(clause.slice(0, m.index))) return null
+      }
+    }
+  }
   for (const sentence of sentences) {
     const ask = ASK.exec(sentence)
     const busy = BUSY.exec(sentence)
     if (!ask && !busy) continue
-    // "Don't call me next week" is not a request to be called next week.
-    if (ask && NEGATED.test(sentence.slice(0, ask.index))) continue
     // When they say when they are free again ("after", "till", "until"), that wins over a date that
     // starts an absence ("on leave from the 20th to the 5th, call after the 5th"); otherwise the first
     // time named after the ask ("call me tomorrow, I'm away next week"), then the first at all.

@@ -1037,10 +1037,20 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   'quote.declined_via_share': (c) => `the buyer declined quote ${word(c.d, 'number') ?? ''} through its link`.replace(/\s+/g, ' ').trim(),
   'quote.email_drafted': (c) =>
     `drafted the email carrying quote ${word(c.d, 'number') ?? ''} — it waits on Approvals`.replace(/\s+/g, ' ').trim(),
-  'check.requested': (c) =>
-    flag(c.d, 'recognised') === true
-      ? 'a business already on file asked for a free website check through the public page — nothing on file was changed'
-      : 'a business asked for a free website check through the public page — filed as inbound, with the email consent the form asked for',
+  'check.requested': (c) => {
+    if (flag(c.d, 'recognised') !== true) {
+      return 'a business asked for a free website check through the public page — filed as inbound, with the email consent the form asked for'
+    }
+    const by = matching(c.d, 'by', /^(site|address|site_and_address)$/)
+    const what = by === 'site' ? 'a site' : by === 'address' ? 'an address' : by === 'site_and_address' ? 'a site and an address' : 'something'
+    const task = matching(c.d, 'task', /^(made|already_open|not_made)$/)
+    return `somebody asked for a free website check through the public page naming ${what} already on file — nothing was scanned, changed or sent, and they were only thanked; ${
+      task === 'made' ? 'a task was made to confirm who asked'
+        : task === 'already_open' ? 'a task to confirm who asked was already open'
+          : task === 'not_made' ? 'the task to confirm who asked could not be made — check who it was by hand'
+            : 'confirm who asked before replying'
+    }`
+  },
   'cert.alerted': (c) => {
     const left = num(c.d, 'daysLeft')
     const expires = matching(c.d, 'expires', /^\d{4}-\d{2}-\d{2}$/)
@@ -1095,6 +1105,9 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   'sequence.step_skipped': (c) => {
     const kind = word(c.d, 'kind')
     const why = word(c.d, 'why')
+    if (why === 'channel') {
+      return 'skipped a campaign’s follow-up message — the campaign now sends on a channel whose texts are drafted one person at a time from a registered template — and moved on to the next'
+    }
     const reason =
       why === 'invalid' ? 'there is no number on record to call' : why === 'suppressed' ? 'the number is on the suppression list' : 'the task could not be made'
     return `skipped a campaign's ${kind === 'visit' ? 'visit' : 'call'} step — ${reason} — and moved on to the next`
@@ -1109,7 +1122,10 @@ const SENTENCES: Readonly<Record<string, Template>> = {
       campaign_ended: 'the campaign is done',
       finished: 'every step has been taken',
     }
-    return `stopped following up a contact — ${(why && own(words, why)) ?? 'it ended'}`
+    const back = matching(c.d, 'returnedTouchId', /^[0-9a-f-]{36}$/) !== null
+    return `stopped following up a contact — ${(why && own(words, why)) ?? 'it ended'}${
+      back ? '; its follow-up email, which was queued or approved, went back to Approvals for a person to decide' : ''
+    }`
   },
   'share_link.created': (c) => {
     const kind = word(c.d, 'kind')

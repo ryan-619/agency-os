@@ -350,7 +350,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'agent.list_quotes': { count: 3, turnId: SUBJECT },
   'agent.create_share_link': { kind: 'report', companyId: SUBJECT, linkId: SUBJECT, turnId: SUBJECT },
   // The public free website check (2026-10-08).
-  'check.requested': { recognised: false },
+  'check.requested': { recognised: true, by: 'site_and_address', task: 'made' },
   // A website certificate about to expire (2026-10-08).
   'cert.alerted': { expires: '2026-10-20', daysLeft: 12, taskId: SUBJECT },
   // The night shift (0025).
@@ -372,7 +372,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'campaign.steps_saved': { steps: 3, messages: 1, calls: 1, visits: 1 },
   'sequence.step_taken': { campaignId: SUBJECT, position: 2, kind: 'message', touchId: SUBJECT },
   'sequence.step_skipped': { campaignId: SUBJECT, position: 3, kind: 'call', why: 'invalid' },
-  'sequence.stopped': { campaignId: SUBJECT, reason: 'replied', position: 3 },
+  'sequence.stopped': { campaignId: SUBJECT, reason: 'deal_closed', position: 3, returnedTouchId: SUBJECT },
   'agent.edit_draft': { draftId: SUBJECT, edited: true, reapprove: false, reason: 'changed_meanwhile', turnId: SUBJECT },
   // --- end campaigns.ts ---
 

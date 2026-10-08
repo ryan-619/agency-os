@@ -133,7 +133,17 @@ one-click on Settings → Night shift); a website certificate about to expire
 becomes a task from a current scan; a public free website check
 (`/check/<booking slug>`) turns a business typing in its site into an
 inbound lead with its own audit page; and the app installs on a phone. The
-`agency` server has sixty-seven tools.
+`agency` server has sixty-seven tools. **An independent review found six
+faults before they shipped, all fixed on the same release**: the scanner
+could be pointed at the agency's own network through the public check
+(a name like `127.1`, or a public name resolving to a private address — it
+now refuses both, at the name and at every connection); the check let a
+stranger scan, add a contact to, move the deal of and read the audit page
+of a business already on file (it now changes nothing there and leaves a
+task to confirm who asked); its hourly cap could be raced; a reply asking
+to be removed could still become a "call them in March" task; and one bad
+follow-up run stopped every other, runs waiting on unapproved drafts could
+starve the rest, and a stopped run left its queued follow-up to go out.
 
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
@@ -1453,16 +1463,36 @@ name the scan's date and the expiry date, and what happens after it.
 one box (email about the result, its wording stored as the consent's
 evidence, `checkConsentWording`) and goes straight to its own audit page.
 `websiteCheckRequest` (`packages/db/src/website-check.ts`) keeps the booking
-page's rules — the org by its booking slug, a known company or contact used
-as it is and never rewritten, a NEW contact's one email consent, source
-`inbound`, the deal moved to `replied` with "Call — they asked for a free
-website check" — and caps it: `CHECKS_PER_HOUR` (20) an org, one per site an
-hour, a hidden field a robot fills (answered as success, nothing done). The
-route reads the site from the outside like any scan, at the nightly rescan's
-timeouts, within 25 s (a slower one records nothing and the page says what
-it could not check), then mints the audit page link for nobody on the team:
-its first view raises the call task. Audited `check.requested` (whether it
-was already on file, nothing else).
+page's rules — the org by its booking slug, a NEW contact's one email
+consent, source `inbound`, the deal moved to `replied` with "Call — they
+asked for a free website check" — and caps it: `CHECKS_PER_HOUR` (20) an
+org, one per site and one per address on file an hour, counted under
+`pg_advisory_xact_lock(hashtext('check.requested'), hashtext(orgId))` in the
+transaction that writes the request's row (review, 2026-10-08: counted
+before it, twenty-five requests at once all read nineteen), and a hidden
+field a robot fills (answered as success, nothing done). **A site or an
+address already on file changes nothing** (review, 2026-10-08): anybody can
+type a prospect's domain or a contact's address, so such a request scans
+nothing — a new scan would supersede the one every draft and proposal
+quotes, and refuse them all `stale_evidence` — adds no contact or consent,
+moves no deal and makes no audit page, whose findings are the agency's
+evidence about a prospect; it is recorded with one open task for a person,
+`VERIFY_TASK_TITLE` ("Confirm who asked for a free website check"), its
+detail naming the site, the name and the address they gave
+(`verifyTaskDetail`), and the visitor reads `CHECK_THANKS` only. Before, it
+scanned the company, put a stranger's address on file under it with an
+email consent, moved its deal, and handed back its audit page. Only a site
+AND an address nobody has on file are filed as a new lead: the route then
+reads the site from the outside like any scan, at the nightly rescan's
+timeouts and only at public addresses (below, `publicOnlyLookup`), within
+25 s (a slower one records nothing and the page says what it could not
+check), and mints the audit page link for nobody on the team: its first
+view raises the call task. Audited `check.requested` (whether it was
+already on file, by the site, the address or both, and whether the task was
+made, already open or could not be made — nothing else). **Stated
+residual:** whether the page opens at once tells a visitor whether a site is
+new here, at most twenty sites an hour, each probe leaving a row or a task
+the team sees.
 
 **On a phone.** The app installs to a home screen (`app/manifest.ts`,
 `icon.svg`, `apple-icon.png`, PNGs in `public/`, all public in `proxy.ts`
@@ -1567,7 +1597,25 @@ where the campaign auto-sends — subject "Re: <the opener's>" unless the step
 names one, and the run waits on it; a call or a visit is a task for the open
 deal's owner, or nobody, due at once; a task the rules refuse (no number, a
 suppressed one) is skipped in a savepoint and audited
-`sequence.step_skipped`, never retried for ever. Every write matches the run
+`sequence.step_skipped`, never retried for ever — and so is a message step
+on a channel a sequence cannot write on (`why: 'channel'`: the campaign was
+moved to SMS or WhatsApp after its steps were saved; the first version
+inserted the draft and the template CHECK threw the whole pass away). A pass
+reads only runs it can ACT on (`actionable` in SQL: stopped by a reply, a
+pause, a closed deal or a finished campaign; its waiting message gone or
+refused; or nothing waiting and the next step due or none left), oldest
+anchor first, at most `SEQUENCE_ADVANCE_LIMIT` (200): it read every live
+run, so two hundred people waiting on drafts nobody had approved filled
+every pass and nobody behind them was ever followed up (review,
+2026-10-08). A run that throws is counted (`failed`, with `faults`: run ids
+and error classes, never a message) and left as it was, and the pass goes
+on; the worker logs it at warn on every pass it fails in. A run that STOPS
+while its follow-up email is still `queued` or `approved` puts it back to
+`awaiting_approval`, approver and deferral cleared
+(`sequence.stopped`'s `returnedTouchId`), so nothing automatic follows a
+reply, a pause, a closed deal or a finished campaign — a LinkedIn step is
+left where it is, because a person may be holding it on /tasks or have
+sent it already. Every write matches the run
 as it was read (its position, its waiting message, not stopped), so the
 worker (`startSequences`, every five minutes, `apps/agent/src/sequences/
 scheduler.ts`) and the daily digest cron — which advances them too, so a
@@ -1585,8 +1633,14 @@ weekday, next week, in N days/weeks/months, a fortnight, next month, the end
 of the month, next quarter, the new year, a month by name ("in March", never
 "you may"), a day ("after the 15th", "on 20 November"), after Christmas, and
 after Diwali for the years `DIWALI` lists — in a sentence that also asks to
-be contacted or says now is not the time, and is not negated ("don't call me
-next week"). A date someone is free again ("after", "till", "until") wins
+be contacted or says now is not the time. Nothing at all is read from a reply
+that turns an ask around anywhere — a negation anywhere before an ask in the
+same clause ("I don't want you to call me next week": the first version
+looked two words back and read a request for next week), "stop calling",
+"leave us alone" — or that `mentionsRemovalOrDeparture` finds asking to be
+removed or saying they have left ("please remove me — maybe try in March";
+review, 2026-10-08). "Don't hesitate to", "stop by" and "never mind" are not
+negations. A date someone is free again ("after", "till", "until") wins
 over one that starts an absence. It returns OUR phrase and a day after
 today, at most `LATER_ASK_MAX_DAYS` (400) ahead. `recordInboundReply` runs
 it in a savepoint after the deal move, for a reply that is neither an
@@ -1811,9 +1865,28 @@ still reads like evil.com. IP literals, `localhost`, and the reserved and
 internal-use suffixes are refused too, `169.254.169.254` among them. The CSV
 importer already validates domains, but this check lives in the one place that
 turns a stored string into an outbound request, because Phase 2 gives an agent
-tools that write to that table. It does not resolve DNS, so a public name
-pointing at a private address is still out of scope; that needs a connect-time
-check and should be added if the scanner is ever aimed at untrusted input.
+tools that write to that table.
+
+**And at every connection, since the scanner was aimed at strangers' input
+(review, 2026-10-08).** The free website check hands it whatever domain a
+visitor types, and two holes were open. A host whose last label is a number
+(`127.1`, `0x7f.1`, `169.254.43518`, `10.1`) passed `isScannableHost`, and
+the WHATWG URL parser reads each as an IPv4 address — 127.0.0.1 and
+169.254.169.254 among them; `endsInANumber` refuses them, as the URL
+standard itself treats them. And a public name may RESOLVE to a private
+address: every request and the TLS probe now connect through
+`publicOnlyLookup` (`packages/scanner/src/address.ts`), which resolves every
+address of the name and refuses the connection (`NonPublicAddressError`,
+code `ENOTPUBLIC`) unless all of them are public by `isPublicAddress` —
+loopback, private, link-local, CGNAT, documentation, benchmarking, multicast
+and reserved IPv4; IPv6 loopback, unique-local, link-local, multicast and
+documentation, and an IPv4 address carried inside IPv6 (mapped, NAT64, 6to4,
+Teredo) judged as the IPv4 it carries. The check is the address the socket
+connects to, so a name that answers differently a second time cannot slip
+past it. A redirect to an explicit port is refused too (`redirectTarget`):
+the reference engine's paths are web pages on the default ports, and
+`:22` or `:6379` on a public host is not one. `packages/scanner/test/
+address.test.ts` covers each.
 
 ### Informational signals
 

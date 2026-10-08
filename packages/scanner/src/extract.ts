@@ -83,14 +83,29 @@ const NON_PUBLIC_SUFFIXES = [
  * is refused, so a bad row in `companies.domain` cannot turn the scanner into
  * a request forwarder aimed at the machine it runs on or at cloud metadata.
  *
- * This does not resolve DNS, so it does not stop a public name that resolves
- * to a private address. Blocking that needs resolution plus a connect-time
- * check; if the scanner is ever pointed at untrusted input it should gain one.
+ * It judges the NAME. What the name resolves to is judged when the scanner
+ * connects (`publicOnlyLookup` in `address.ts`, 2026-10-08), because a public
+ * name can point at a private address and only resolution can tell.
+ *
+ * A name whose LAST label is a number is an IPv4 address to the URL parser —
+ * `127.1`, `10.1`, `0x7f.1` and `169.254.43518` become 127.0.0.1, 10.0.0.1,
+ * 127.0.0.1 and 169.254.169.254 — whatever it looks like (the WHATWG URL
+ * standard's "ends in a number"). No top-level domain is a number, so such a
+ * name is never a company's site. The dotted-quad test alone let them all
+ * through (found by review, 2026-10-08).
  */
+export function endsInANumber(host: string): boolean {
+  const labels = host.split('.')
+  if (labels.length > 1 && labels[labels.length - 1] === '') labels.pop()
+  const last = labels[labels.length - 1] ?? ''
+  return /^\d+$/.test(last) || /^0x[0-9a-f]*$/i.test(last)
+}
+
 export function isScannableHost(host: string): boolean {
   if (!host || host.length > 253) return false
   if (host.startsWith('[')) return false                 // IPv6 literal
   if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return false  // IPv4 literal
+  if (endsInANumber(host)) return false                   // an IPv4 address in another spelling
   if (host === 'localhost') return false
   if (NON_PUBLIC_SUFFIXES.some((s) => host.endsWith(s))) return false
   return HOSTNAME.test(host)

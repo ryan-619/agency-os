@@ -11,7 +11,10 @@
  *
  * A pass never overlaps another; a pass that fails is logged once per streak,
  * by the error's class (a driver message can carry the DSN), and once when it
- * works again.
+ * works again. A RUN that fails inside a pass is counted and left as it was,
+ * and the pass goes on (review, 2026-10-08): it is logged at warn with run
+ * ids and error classes, every pass it fails in, because one run that can
+ * never advance is a person whose follow-ups have silently stopped.
  */
 import { advanceSequences, type AdvanceResult, type AgencyDb } from '@agency/db'
 import type { Logger } from '../logger.js'
@@ -26,7 +29,7 @@ export interface SequenceDeps {
 }
 
 const moved = (r: AdvanceResult) =>
-  r.started + r.messages + r.tasks + r.skipped + Object.values(r.stopped).reduce((a, n) => a + (n ?? 0), 0) > 0
+  r.started + r.messages + r.tasks + r.skipped + r.returned + Object.values(r.stopped).reduce((a, n) => a + (n ?? 0), 0) > 0
 
 export function startSequences(deps: SequenceDeps): () => void {
   let busy = false
@@ -37,7 +40,9 @@ export function startSequences(deps: SequenceDeps): () => void {
     try {
       const r = await advanceSequences(deps.db, { now: deps.now() })
       // Counts only: who and which campaign are in the audit rows the pass wrote.
-      if (moved(r)) deps.log.info('follow-up sequences advanced', { ...r })
+      const { faults, ...counts } = r
+      if (moved(r)) deps.log.info('follow-up sequences advanced', { ...counts })
+      if (r.failed > 0) deps.log.warn('follow-up sequences: some runs could not be advanced', { failed: r.failed, faults })
       if (failing !== null) deps.log.info('follow-up sequences advance again', { after: failing })
       failing = null
     } catch (err) {

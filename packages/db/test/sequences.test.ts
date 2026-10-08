@@ -3,7 +3,10 @@
  * when a campaign with steps has sent its opener, drafts the next message on
  * its day as a draft for /approvals, makes call and visit tasks, and stops
  * for good the moment the person replies — and two advancers take each step
- * once.
+ * once. And review's three (2026-10-08): a pass reads only runs it can act
+ * on, one run that throws does not stop the rest, a message step on a
+ * channel a sequence cannot write on is skipped, and a stopped run puts its
+ * queued or approved follow-up email back on /approvals.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
@@ -71,7 +74,8 @@ describe('follow-up sequences', () => {
 
   it('starts when the opener has gone, drafts the follow-up on its day, then a call and a visit, then finishes', async () => {
     await save()
-    expect(await advanceSequences(db, { now: at(1) })).toMatchObject({ started: 1, messages: 0, waiting: 1 })
+    // A run with nothing to do yet is not even read: `waiting` counts only runs a pass read and could not move.
+    expect(await advanceSequences(db, { now: at(1) })).toMatchObject({ started: 1, messages: 0, waiting: 0, failed: 0 })
     expect(await followUps()).toEqual([])
 
     expect(await advanceSequences(db, { now: at(3) })).toMatchObject({ started: 0, messages: 1 })
@@ -81,7 +85,7 @@ describe('follow-up sequences', () => {
     expect(draft!.body).toMatch(/Accemy$/)
 
     // The call waits for the follow-up to GO, then counts two days from then.
-    expect(await advanceSequences(db, { now: at(9) })).toMatchObject({ tasks: 0, waiting: 1 })
+    expect(await advanceSequences(db, { now: at(9) })).toMatchObject({ tasks: 0, waiting: 0 })
     await db.update(schema.touches).set({ status: 'sent', sentAt: at(10), approvedBy: ownerId, approvedAt: at(10) }).where(eq(schema.touches.id, draft!.id))
     expect(await advanceSequences(db, { now: at(11) })).toMatchObject({ tasks: 0, waiting: 1 })
     expect(await advanceSequences(db, { now: at(12) })).toMatchObject({ tasks: 1 })
@@ -146,5 +150,99 @@ describe('follow-up sequences', () => {
       recipient: 'old@kumardental.in', sentAt: at(-SEQUENCE_START_WINDOW_DAYS - 2), approvedBy: ownerId, approvedAt: at(-40),
     })
     expect(await advanceSequences(db, { now: at(3) })).toMatchObject({ started: 0 })
+  })
+
+  const secondContact = async (email: string, sentAt: Date) => {
+    const id = (await db.insert(schema.contacts).values({ orgId, companyId, email, firstName: 'Asha' }).returning({ id: schema.contacts.id }))[0]!.id
+    await db.insert(schema.touches).values({
+      orgId, campaignId, contactId: id, companyId, channel: 'email', direction: 'out', status: 'sent', subject: 'Hello', body: 'Hello',
+      recipient: email, sentAt, approvedBy: ownerId, approvedAt: sentAt,
+    })
+    return id
+  }
+
+  it('reads only runs it can act on, so runs waiting on drafts nobody approved never crowd out a run that is due', async () => {
+    await save()
+    await advanceSequences(db, { now: at(3) })
+    expect(await followUps()).toHaveLength(1) // Ravi's follow-up now waits on /approvals, with the oldest anchor.
+    const asha = await secondContact('asha@kumardental.in', at(1))
+    await advanceSequences(db, { now: at(2) }) // Asha's run starts.
+    // One run a pass: the first version read Ravi's (oldest, waiting) every time and never reached Asha's.
+    expect(await advanceSequences(db, { now: at(5), limit: 1 })).toMatchObject({ messages: 1 })
+    const drafts = await followUps()
+    expect(drafts.map((d) => d.contactId).sort()).toEqual([contactId, asha].sort())
+  })
+
+  it('goes on past a run that throws, and says which', async () => {
+    await save()
+    const asha = await secondContact('asha@kumardental.in', SENT)
+    await advanceSequences(db, { now: at(1) })
+    // A fault on one person's insert, made by hand: the other's follow-up is still drafted.
+    await test.pg.exec(`
+      CREATE FUNCTION refuse_one() RETURNS trigger AS $$
+      BEGIN IF NEW.contact_id = '${contactId}' AND NEW.direction = 'out' THEN RAISE EXCEPTION 'refused for the test'; END IF; RETURN NEW; END $$ LANGUAGE plpgsql;
+      CREATE TRIGGER refuse_one BEFORE INSERT ON touches FOR EACH ROW EXECUTE FUNCTION refuse_one();`)
+    const ravisRun = (await db.select().from(schema.sequenceRuns).where(eq(schema.sequenceRuns.contactId, contactId)))[0]!
+    const r = await advanceSequences(db, { now: at(3) })
+    expect(r).toMatchObject({ messages: 1, failed: 1 })
+    expect(r.faults).toEqual([{ runId: ravisRun.id, error: expect.any(String) }])
+    expect((await followUps()).map((d) => d.contactId)).toEqual([asha])
+    // Left as it was: the next pass, with the fault gone, takes the step.
+    expect((await db.select().from(schema.sequenceRuns).where(eq(schema.sequenceRuns.id, ravisRun.id)))[0]!.nextPosition).toBe(2)
+    await test.pg.exec('DROP TRIGGER refuse_one ON touches')
+    expect(await advanceSequences(db, { now: at(3) })).toMatchObject({ messages: 1, failed: 0 })
+  })
+
+  it('skips a message step once the campaign sends on a channel a sequence cannot write on, and moves on', async () => {
+    await save()
+    await advanceSequences(db, { now: at(1) })
+    await db.update(schema.campaigns).set({ channel: 'sms' }).where(eq(schema.campaigns.id, campaignId))
+    expect(await advanceSequences(db, { now: at(3) })).toMatchObject({ messages: 0, skipped: 1, failed: 0 })
+    expect(await db.select().from(schema.touches).where(eq(schema.touches.channel, 'sms'))).toEqual([])
+    const [skip] = await db.select().from(schema.auditLog).where(eq(schema.auditLog.action, 'sequence.step_skipped'))
+    expect(skip!.detail).toMatchObject({ position: 2, kind: 'message', why: 'channel' })
+    expect((await run())!.nextPosition).toBe(3)
+  })
+
+  it('puts a queued or approved follow-up email back on /approvals when the run stops — never a LinkedIn step', async () => {
+    await db.update(schema.campaigns).set({ autoSend: true }).where(eq(schema.campaigns.id, campaignId))
+    await save()
+    await advanceSequences(db, { now: at(3) })
+    const [queued] = await db.select().from(schema.touches).where(and(eq(schema.touches.campaignId, campaignId), eq(schema.touches.status, 'queued')))
+    expect(queued).toBeDefined()
+    await db.update(schema.deals).set({ stage: 'won', closedAt: at(3) }).where(eq(schema.deals.companyId, companyId))
+    expect(await advanceSequences(db, { now: at(4) })).toMatchObject({ stopped: { deal_closed: 1 }, returned: 1 })
+    expect((await db.select().from(schema.touches).where(eq(schema.touches.id, queued!.id)))[0]).toMatchObject({
+      status: 'awaiting_approval', approvedBy: null, approvedAt: null, scheduledFor: null,
+    })
+    const [stop] = await db.select().from(schema.auditLog).where(eq(schema.auditLog.action, 'sequence.stopped'))
+    expect(stop!.detail).toMatchObject({ reason: 'deal_closed', returnedTouchId: queued!.id })
+  })
+
+  it('clears the approver of an approved follow-up it puts back, and leaves a LinkedIn step where a person may be holding it', async () => {
+    await save()
+    await advanceSequences(db, { now: at(3) })
+    const [draft] = await followUps()
+    await db.update(schema.touches).set({ status: 'approved', approvedBy: ownerId, approvedAt: at(3), scheduledFor: at(4) }).where(eq(schema.touches.id, draft!.id))
+    await db.update(schema.campaigns).set({ status: 'done' }).where(eq(schema.campaigns.id, campaignId))
+    expect(await advanceSequences(db, { now: at(4) })).toMatchObject({ stopped: { campaign_ended: 1 }, returned: 1 })
+    expect((await db.select().from(schema.touches).where(eq(schema.touches.id, draft!.id)))[0]).toMatchObject({
+      status: 'awaiting_approval', approvedBy: null, approvedAt: null, scheduledFor: null,
+    })
+
+    // The same stop on a LinkedIn campaign leaves its approved step alone.
+    const li = (await db.insert(schema.campaigns).values({ orgId, name: 'LinkedIn', channel: 'linkedin', status: 'active' }).returning({ id: schema.campaigns.id }))[0]!.id
+    await campaignStepsSave(db, { orgId, campaignId: li, steps: [STEPS[0]!], actor: ownerId })
+    await db.update(schema.contacts).set({ linkedinUrl: 'https://www.linkedin.com/in/ravi-kumar' }).where(eq(schema.contacts.id, contactId))
+    await db.insert(schema.touches).values({
+      orgId, campaignId: li, contactId, companyId, channel: 'linkedin', direction: 'out', status: 'sent', body: 'Hello',
+      recipient: 'in/ravi-kumar', sentAt: at(4), approvedBy: ownerId, approvedAt: at(4),
+    })
+    await advanceSequences(db, { now: at(8) })
+    const [step] = await db.select().from(schema.touches).where(and(eq(schema.touches.campaignId, li), eq(schema.touches.status, 'awaiting_approval')))
+    await db.update(schema.touches).set({ status: 'approved', approvedBy: ownerId, approvedAt: at(8) }).where(eq(schema.touches.id, step!.id))
+    await db.update(schema.campaigns).set({ status: 'done' }).where(eq(schema.campaigns.id, li))
+    expect(await advanceSequences(db, { now: at(9) })).toMatchObject({ stopped: { campaign_ended: 1 }, returned: 0 })
+    expect((await db.select().from(schema.touches).where(eq(schema.touches.id, step!.id)))[0]!.status).toBe('approved')
   })
 })

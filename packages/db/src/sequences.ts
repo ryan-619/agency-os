@@ -15,6 +15,22 @@
  * deal's owner, or nobody; a call only where there is a number nobody asked
  * us to stop calling (`tasksCreate`), and a step whose task cannot be made is
  * skipped and recorded, never retried for ever.
+ *
+ * Three rules from review (2026-10-08). A pass reads only runs it can act on
+ * (`actionable`): one stopped by a reply, a pause, a closed deal or a
+ * finished campaign; one whose waiting message has gone or did not go; or
+ * one with nothing waiting whose next step is due or that has none left —
+ * so runs waiting weeks on a draft nobody approved, or on a paused
+ * campaign, no longer fill the pass and starve the rest. One run that
+ * throws is counted (`failed`) and the pass goes on to the next. A message
+ * step on a channel a sequence cannot write on — the campaign was moved to
+ * SMS or WhatsApp after its steps were saved — is skipped (`channel`),
+ * never inserted for the database to refuse. And a run that stops while its
+ * follow-up EMAIL is still queued or approved puts it back on /approvals,
+ * approver and deferral cleared, so a reply, a pause, a closed deal or a
+ * finished campaign is never followed by an automatic "just following up"
+ * — a LinkedIn step is left where it is, because a person may be holding it
+ * on /tasks or have sent it already.
  */
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm'
 import {
@@ -137,6 +153,44 @@ export interface AdvanceResult {
   readonly skipped: number
   readonly stopped: Readonly<Partial<Record<SequenceStopReason, number>>>
   readonly waiting: number
+  /** Follow-up emails a stopped run put back on /approvals. */
+  readonly returned: number
+  /** Runs this pass could not advance: each was left as it was, and the pass went on. */
+  readonly failed: number
+  /** The first few of them, by run id and the error's class — never its message. */
+  readonly faults: readonly { readonly runId: string; readonly error: string }[]
+}
+
+/** How many faults a pass reports by name. */
+const FAULTS_REPORTED = 5
+
+/**
+ * The runs a pass can act on — everything `sequenceNext` would stop, settle
+ * or take — so a run that can only wait is never read and never takes a
+ * place another run needed.
+ */
+function actionable(now: Date) {
+  const runs = schema.sequenceRuns
+  return sql`(
+    ${schema.campaigns.status} = 'done'
+    OR ${schema.contacts.pausedAt} IS NOT NULL
+    OR EXISTS (
+      SELECT 1 FROM touches i
+       WHERE i.org_id = ${runs.orgId} AND i.contact_id = ${runs.contactId} AND i.direction = 'in'
+         AND i.created_at >= ${runs.startedAt} AND i.reply_kind IS DISTINCT FROM 'auto_reply')
+    OR (${schema.contacts.companyId} IS NOT NULL
+        AND EXISTS (SELECT 1 FROM deals d WHERE d.org_id = ${runs.orgId} AND d.company_id = ${schema.contacts.companyId})
+        AND NOT EXISTS (
+          SELECT 1 FROM deals d WHERE d.org_id = ${runs.orgId} AND d.company_id = ${schema.contacts.companyId} AND d.closed_at IS NULL))
+    OR (${runs.waitingTouchId} IS NOT NULL AND EXISTS (
+          SELECT 1 FROM touches w
+           WHERE w.id = ${runs.waitingTouchId} AND w.status IN ('sent', 'delivered', 'refused', 'failed', 'bounced')))
+    OR (${runs.waitingTouchId} IS NULL AND ${schema.campaigns.status} = 'active' AND NOT EXISTS (
+          SELECT 1 FROM campaign_steps s
+           WHERE s.campaign_id = ${runs.campaignId}
+             AND s.position = (SELECT min(n.position) FROM campaign_steps n WHERE n.campaign_id = ${runs.campaignId} AND n.position >= ${runs.nextPosition})
+             AND ${runs.anchorAt} + make_interval(days => s.after_days) > ${now.toISOString()}::timestamptz))
+  )`
 }
 
 /**
@@ -183,7 +237,7 @@ export async function advanceSequences(
     .from(schema.sequenceRuns)
     .innerJoin(schema.campaigns, eq(schema.campaigns.id, schema.sequenceRuns.campaignId))
     .innerJoin(schema.contacts, eq(schema.contacts.id, schema.sequenceRuns.contactId))
-    .where(and(isNull(schema.sequenceRuns.stoppedAt), ...(args.orgId ? [eq(schema.sequenceRuns.orgId, args.orgId)] : [])))
+    .where(and(isNull(schema.sequenceRuns.stoppedAt), actionable(now), ...(args.orgId ? [eq(schema.sequenceRuns.orgId, args.orgId)] : [])))
     .orderBy(asc(schema.sequenceRuns.anchorAt))
     .limit(args.limit ?? SEQUENCE_ADVANCE_LIMIT)
 
@@ -205,9 +259,16 @@ export async function advanceSequences(
   let tasks = 0
   let skipped = 0
   let waiting = 0
+  let returned = 0
+  let failed = 0
+  const faults: { runId: string; error: string }[] = []
   const stopped: Partial<Record<SequenceStopReason, number>> = {}
 
-  for (const r of runs) {
+  type Outcome =
+    | { readonly kind: 'stopped'; readonly reason: SequenceStopReason; readonly returned: boolean }
+    | { readonly kind: 'waiting' | 'message' | 'task' | 'skipped' | 'lost' }
+
+  const advanceRun = async (r: (typeof runs)[number]): Promise<Outcome> => {
     const run = r.run
     const [waitingMessage] = run.waitingTouchId
       ? await db.select({ status: schema.touches.status, sentAt: schema.touches.sentAt }).from(schema.touches).where(eq(schema.touches.id, run.waitingTouchId)).limit(1)
@@ -247,29 +308,41 @@ export async function advanceSequences(
     )
 
     if (decision.kind === 'stop') {
-      const done = await db.transaction(async (tx) => {
+      return db.transaction(async (tx): Promise<Outcome> => {
         const t = tx as unknown as AgencyDb
         const rows = await t
           .update(schema.sequenceRuns)
           .set({ stoppedAt: now, stopReason: decision.reason, waitingTouchId: null, updatedAt: now })
           .where(asRead)
           .returning({ id: schema.sequenceRuns.id })
-        if (rows.length === 0) return false
+        if (rows.length === 0) return { kind: 'lost' }
+        // A follow-up email still queued or approved goes back to a person: nothing automatic follows a reply,
+        // a pause, a closed deal or a finished campaign. Never a LinkedIn step, which a person may be holding.
+        const back = run.waitingTouchId
+          ? await t
+              .update(schema.touches)
+              .set({ status: 'awaiting_approval', approvedBy: null, approvedAt: null, decisionNote: null, scheduledFor: null })
+              .where(and(
+                eq(schema.touches.id, run.waitingTouchId), eq(schema.touches.orgId, run.orgId), eq(schema.touches.direction, 'out'),
+                eq(schema.touches.channel, 'email'), inArray(schema.touches.status, ['queued', 'approved']),
+              ))
+              .returning({ id: schema.touches.id })
+          : []
         await appendAudit(t, {
           orgId: run.orgId, actor: 'system', action: 'sequence.stopped', subjectType: 'contact', subjectId: run.contactId,
-          detail: { campaignId: run.campaignId, reason: decision.reason, position: run.nextPosition },
+          detail: {
+            campaignId: run.campaignId, reason: decision.reason, position: run.nextPosition,
+            ...(back.length > 0 ? { returnedTouchId: back[0]!.id } : {}),
+          },
         })
-        return true
+        return { kind: 'stopped', reason: decision.reason, returned: back.length > 0 }
       })
-      if (done) stopped[decision.reason] = (stopped[decision.reason] ?? 0) + 1
-      continue
     }
     if (decision.kind === 'wait') {
-      waiting += 1
       if (decision.settled) {
         await db.update(schema.sequenceRuns).set({ anchorAt: decision.anchorAt, waitingTouchId: null, updatedAt: now }).where(asRead)
       }
-      continue
+      return { kind: 'waiting' }
     }
 
     const step = decision.step
@@ -293,6 +366,14 @@ export async function advanceSequences(
         : []
       const companyName = company?.name || company?.domain || 'your business'
 
+      if (step.kind === 'message' && !(SEQUENCE_CHANNELS as readonly string[]).includes(r.channel)) {
+        // The campaign moved to a channel whose texts are a registered template filled for one person.
+        await appendAudit(t, {
+          orgId: run.orgId, actor: 'system', action: 'sequence.step_skipped', subjectType: 'contact', subjectId: run.contactId,
+          detail: { campaignId: run.campaignId, position: step.position, kind: 'message', why: 'channel' },
+        })
+        return 'skipped' as const
+      }
       if (step.kind === 'message') {
         const vars = { firstName: r.firstName, company: companyName, agency }
         const [opener] = await t
@@ -369,11 +450,28 @@ export async function advanceSequences(
       })
       return 'task' as const
     })
-    if (outcome === 'message') messages += 1
-    else if (outcome === 'task') tasks += 1
-    else if (outcome === 'skipped') skipped += 1
+    return { kind: outcome ?? 'lost' }
   }
-  return { started: startedRows.length, messages, tasks, skipped, stopped, waiting }
+
+  for (const r of runs) {
+    let outcome: Outcome
+    try {
+      outcome = await advanceRun(r)
+    } catch (err) {
+      // One run that cannot be advanced is left as it was; the rest of the pass still runs.
+      failed += 1
+      if (faults.length < FAULTS_REPORTED) faults.push({ runId: r.run.id, error: err instanceof Error ? err.name : 'UnknownError' })
+      continue
+    }
+    if (outcome.kind === 'stopped') {
+      stopped[outcome.reason] = (stopped[outcome.reason] ?? 0) + 1
+      if (outcome.returned) returned += 1
+    } else if (outcome.kind === 'waiting') waiting += 1
+    else if (outcome.kind === 'message') messages += 1
+    else if (outcome.kind === 'task') tasks += 1
+    else if (outcome.kind === 'skipped') skipped += 1
+  }
+  return { started: startedRows.length, messages, tasks, skipped, stopped, waiting, returned, failed, faults }
 }
 
 class SkippedStep extends Error {

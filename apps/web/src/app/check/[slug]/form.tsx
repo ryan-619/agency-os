@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { CHECK_THANKS } from '@/lib/check-copy'
 
 /** The free website check's form (2026-10-08). On success the visitor goes straight to their own page. */
 export function CheckForm({ slug, consentWording }: { readonly slug: string; readonly consentWording: string }) {
@@ -39,7 +40,7 @@ export function CheckForm({ slug, consentWording }: { readonly slug: string; rea
     }
   }
 
-  if (done) return <p className="note">Thank you — we will email you about your website.</p>
+  if (done) return <p className="note">{CHECK_THANKS}</p>
   return (
     <form onSubmit={(e) => void submit(e)} className="check-form">
       <label>

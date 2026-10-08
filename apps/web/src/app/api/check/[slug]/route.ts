@@ -18,10 +18,20 @@ import { log } from '@/lib/logger'
  * fills (a form-filling robot does).
  *
  * The site is read from the outside like any scan — its public pages only,
- * at the nightly rescan's timeouts — within `SCAN_BUDGET_MS`; one that takes
- * longer records nothing, and the page says what it could not check. The
- * answer is a link to the business's own audit page, made for nobody on the
- * team: its first view gives the team the task to call.
+ * at the nightly rescan's timeouts, and only at a public address (the
+ * scanner checks each connection, `publicOnlyLookup`) — within
+ * `SCAN_BUDGET_MS`; one that takes longer records nothing, and the page says
+ * what it could not check. The answer is a link to the business's own audit
+ * page, made for nobody on the team: its first view gives the team the task
+ * to call.
+ *
+ * A site or an address already on file gets none of that (review,
+ * 2026-10-08): `websiteCheckRequest` records it with a task for a person to
+ * confirm who asked, and this route answers the thank-you alone — no scan,
+ * no link — because anybody can type a prospect's domain or a contact's
+ * address, and the agency's findings about them are not a stranger's to
+ * read. Stated residual: whether the page opens at once tells a visitor
+ * whether a site is new here, at most `CHECKS_PER_HOUR` sites an hour.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -74,6 +84,8 @@ export async function POST(request: Request, context: { params: Promise<{ slug: 
     return NextResponse.json({ error: 'That could not be recorded just now. Please try again in a few minutes.' }, { status: 500 })
   }
   if (!r.ok) return NextResponse.json({ error: r.message }, { status: r.status })
+  // On file already: recorded, with a task to confirm who asked. Nothing is scanned and no page is made.
+  if (r.recognised) return NextResponse.json({ ok: true, url: null }, { status: 201 })
 
   // Read the site, bounded: a slow one costs the visitor the lines we could not check, never the page.
   try {
