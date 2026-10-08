@@ -1130,6 +1130,43 @@ export const sequenceRuns = pgTable(
   ],
 )
 
+// ---------------------------------------------------------------------------
+// The night shift (0025)
+// ---------------------------------------------------------------------------
+
+/** One row per org: whether the night shift runs, when in which zone, and the night it last ran. */
+export const nightShifts = pgTable('night_shifts', {
+  id: id(),
+  orgId: uuid('org_id').notNull().unique().references(() => orgs.id, { onDelete: 'cascade' }),
+  enabled: boolean('enabled').notNull().default(false),
+  /** HH:MM, by CHECK. */
+  runAt: text('run_at').notNull().default('02:00'),
+  timeZone: text('time_zone').notNull().default('Asia/Kolkata'),
+  /** The zone's date of the last run (its claim). */
+  lastRunOn: date('last_run_on'),
+  /** "Run it now": due at the next look; cleared by the claim. */
+  requestedAt: timestamp('requested_at', { withTimezone: true }),
+  /** Composite FK (updated_by, org_id) → users, SET NULL — in the migration. */
+  updatedBy: uuid('updated_by'),
+  ...timestamps,
+})
+
+/** A saved Google Maps search the night shift runs. */
+export const nightSearches = pgTable('night_searches', {
+  id: id(),
+  orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+  query: text('query').notNull(),
+  /** Two letters Google searches from; NULL is India. */
+  region: text('region'),
+  /** The city the businesses found are filed under. */
+  city: text('city'),
+  active: boolean('active').notNull().default(true),
+  lastRunAt: timestamp('last_run_at', { withTimezone: true }),
+  /** Composite FK (created_by, org_id) → users, SET NULL — in the migration. */
+  createdBy: uuid('created_by'),
+  ...timestamps,
+})
+
 export const messageTemplates = pgTable(
   'message_templates',
   {

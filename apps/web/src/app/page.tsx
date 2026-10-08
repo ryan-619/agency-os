@@ -1,11 +1,11 @@
 import { redirect } from 'next/navigation'
 import { sql } from 'drizzle-orm'
-import { can } from '@agency/core'
+import { NEEDS, can } from '@agency/core'
 import {
   COMPLIANCE_WINDOW_DAYS, auditResolveActors, auditSubjectsToCompanies, complianceAutoSendOffCold,
   complianceColdOptInTouches, complianceDisclosure, complianceDraftsOnStaleEvidence, complianceEvidenceFreshness,
   complianceOptOutsNotRecorded, complianceOptOutsWithoutSuppression, inboxUnhandledCount, listAudit, listDeals,
-  tasksCounts, todayActions, type AgencyDb,
+  nightReportLatest, tasksCounts, todayActions, type AgencyDb,
 } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { AuditLog } from '@/components/audit/log'
@@ -133,7 +133,7 @@ export default async function Dashboard() {
   // that page reads it, so the counter and the list it opens agree.
   const { staleAfterDays } = readIcp(icp?.definition)
 
-  const [c, worker, unhandled, tasks, deals, freshness, compliance, feed, lastRescan, today] = await Promise.all([
+  const [c, worker, unhandled, tasks, deals, freshness, compliance, feed, lastRescan, today, night] = await Promise.all([
     counts(user.orgId),
     workerStatus(db, now),
     inboxUnhandledCount(db, user.orgId),
@@ -144,7 +144,11 @@ export default async function Dashboard() {
     mayReadAudit ? listAudit(db, user.orgId, { limit: FEED_ROWS }) : Promise.resolve([]),
     listAudit(db, user.orgId, { limit: 1, actionPrefix: 'scan.cron_run' }),
     todayActions(db, { orgId: user.orgId, userId: user.id, now }),
+    // The night shift's morning list (0025); a database before 0025 shows none rather than failing the page.
+    nightReportLatest(db, user.orgId).catch(() => null),
   ])
+  // Last night's, not last week's: a list a day and a half old is no longer this morning's.
+  const overnight = night && now.getTime() - night.at.getTime() <= 36 * 3_600_000 && night.top.length > 0 ? night : null
 
   const [companies, people] = await Promise.all([
     auditSubjectsToCompanies(db, user.orgId, feed),
@@ -229,6 +233,35 @@ export default async function Dashboard() {
             <a href="/pipeline">pipeline</a>.
           </p>
         )}
+
+        {overnight ? (
+          <>
+            <h2>Found overnight</h2>
+            <p className="muted" style={{ fontSize: 13, margin: '0 0 8px' }}>
+              The night shift&apos;s best new finds{overnight.date ? ` (${overnight.date})` : ''}, by what they need and whether
+              they can be called — from {overnight.searches} saved {overnight.searches === 1 ? 'search' : 'searches'}, {overnight.added} new in
+              all. <a href="/settings/night">Night shift settings →</a>
+            </p>
+            <ol className="today">
+              {overnight.top.map((co) => {
+                const needs = (overnight.needs.get(co.id) ?? []).map((k) => NEEDS[k].label)
+                const facts = [
+                  co.googleCategory?.replace(/_/g, ' '),
+                  co.city,
+                  co.googleRating !== null ? `★${Number(co.googleRating).toFixed(1)}${co.googleReviewCount ? ` (${co.googleReviewCount})` : ''}` : null,
+                  co.phone ? 'phone on file' : null,
+                ].filter(Boolean)
+                return (
+                  <li key={co.id}>
+                    <a href={`/companies/${encodeURIComponent(co.domain)}`}>{co.name || co.domain}</a>
+                    {facts.length > 0 ? <span className="muted"> · {facts.join(' · ')}</span> : null}
+                    {needs.length > 0 ? <div className="muted today-detail">{needs.join(' · ')}</div> : null}
+                  </li>
+                )
+              })}
+            </ol>
+          </>
+        ) : null}
 
         <h2>Needs a look</h2>
         {look.waiting.length > 0 ? (

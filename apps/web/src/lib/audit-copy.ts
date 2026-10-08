@@ -125,6 +125,12 @@ function flag(d: unknown, key: string): boolean | null {
   return typeof v === 'boolean' ? v : null
 }
 
+/** How many entries a list in the detail holds — its length only, whatever its entries are. */
+function listLength(d: unknown, key: string): number | null {
+  const v = detailValue(d, key)
+  return Array.isArray(v) ? v.length : null
+}
+
 function words(d: unknown, key: string): string[] | null {
   const v = detailValue(d, key)
   if (!Array.isArray(v)) return null
@@ -1031,6 +1037,42 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   'quote.declined_via_share': (c) => `the buyer declined quote ${word(c.d, 'number') ?? ''} through its link`.replace(/\s+/g, ' ').trim(),
   'quote.email_drafted': (c) =>
     `drafted the email carrying quote ${word(c.d, 'number') ?? ''} — it waits on Approvals`.replace(/\s+/g, ' ').trim(),
+  'night.updated': (c) => {
+    const on = flag(c.d, 'enabled') === true
+    const at = word(c.d, 'at')
+    const zone = text(c.d, 'timeZone', 64)
+    return on
+      ? `switched the night shift on${at ? `, at ${at}` : ''}${zone ? ` ${zone}` : ''} — it searches Google Maps, files new businesses and scans their sites overnight`
+      : 'switched the night shift off'
+  },
+  'night.requested': () => 'asked for the night shift to run now, at the worker’s next look',
+  'night.search_added': () => 'saved a search for the night shift to run',
+  'night.search_removed': () => 'removed a night shift search',
+  'night.search_toggled': (c) => (flag(c.d, 'active') === true ? 'resumed a night shift search' : 'paused a night shift search'),
+  'night.searched': (c) => {
+    if (flag(c.d, 'failed') === true) return 'ran a saved search on Google Maps overnight — Google did not answer, so nothing was filed'
+    const returned = num(c.d, 'returned')
+    const added = num(c.d, 'added')
+    return `ran a saved search on Google Maps overnight${returned !== null ? `: ${plural(returned, 'business', 'businesses')} listed` : ''}${
+      added !== null ? `, ${added} new to the CRM` : ''
+    }`
+  },
+  'night.ran': (c) => {
+    const why = word(c.d, 'why')
+    if (why === 'no_searches') return 'ran the night shift with no saved searches — nothing was looked for'
+    if (why === 'cap_reached') return 'ran the night shift after the day’s Google Maps searches were used up — nothing was looked for'
+    const added = num(c.d, 'added')
+    const scanned = num(c.d, 'scanned')
+    const audited = num(c.d, 'audited')
+    const top = listLength(c.d, 'top')
+    return `ran the night shift: ${join([
+      added !== null && `${plural(added, 'new business', 'new businesses')} filed`,
+      scanned !== null && `${scanned} scanned`,
+      audited !== null && `${audited} measured on a phone`,
+      top !== null && top > 0 && `the best ${top} listed for the morning`,
+    ]) || 'nothing new'}; it sent nothing and contacted nobody`
+  },
+  'night.failed': (c) => `the night shift failed${word(c.d, 'error') ? ` (${word(c.d, 'error')})` : ''}; it runs again tomorrow night`,
   'sequence.step_taken': (c) => {
     const kind = word(c.d, 'kind')
     const position = num(c.d, 'position')
@@ -1520,7 +1562,7 @@ const FAMILY_LABEL: Readonly<Record<string, string>> = {
   approval: 'Approvals', turn: 'Chat turns', connector: 'Connectors', credential: 'Credentials', user: 'Team',
   company: 'Companies', note: 'Notes', task: 'Tasks', call: 'Calls', notification: 'Notifications',
   scan: 'Scheduled rescans', cron: 'Scheduled jobs', export: 'Exports', linkedin: 'LinkedIn steps',
-  template: 'Message templates', sms: 'SMS', assistant: 'Assistant', icp: 'ICP profiles', service: 'Services', org: 'Organisation', quote: 'Quotes', share_link: 'Shared links', sequence: 'Follow-up sequences',
+  template: 'Message templates', sms: 'SMS', assistant: 'Assistant', icp: 'ICP profiles', service: 'Services', org: 'Organisation', quote: 'Quotes', share_link: 'Shared links', sequence: 'Follow-up sequences', night: 'Night shift',
 }
 export const AUDIT_FAMILIES: readonly { readonly value: string; readonly label: string }[] = Object.freeze(
   [...new Set(AUDIT_ACTIONS.map((a) => a.split('.')[0] ?? a))].map((value) => ({

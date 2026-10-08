@@ -18,7 +18,7 @@ import { reconcileAfterRestart, recoverStuckSends, sweepExpired } from './boot/r
 import { lastHeartbeatAt, startHeartbeat, workerVersion } from './boot/heartbeat.js'
 import { watchIdleConnections } from './boot/pool-errors.js'
 import { createRecentLog, recordingLogger } from './ops/recent-log.js'
-import { opsContextFrom } from './ops/context.js'
+import { opsContextFrom, withRescanTimeouts } from './ops/context.js'
 import { startSender, WORKER_SEND_CHANNELS } from './outreach/sender.js'
 import { createDoveSoftProvider, doveSoftConfigFrom } from './outreach/dovesoft.js'
 import { outreachOptions } from './outreach/options.js'
@@ -28,6 +28,7 @@ import { watchSmtpLogin, type MailLogin } from './outreach/mail-login.js'
 import { refineDraft } from './outreach/draft.js'
 import { startMorningBriefs } from './brief/scheduler.js'
 import { startSequences } from './sequences/scheduler.js'
+import { startNightShift } from './night/scheduler.js'
 import { createAgentHttpServer, type StartTurnRequest, type TurnHandle } from './http/server.js'
 import { createDeferredEmitter, startTurn } from './chat/turn.js'
 import { buildTurnRuntime, createHalt, resolvePrincipal, type RuntimeHalt } from './runtime/session.js'
@@ -424,6 +425,8 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
             lockHeld: now.lockHeld,
             sms: senders.sms,
             brief: credential ? 'on' : 'off',
+            // Whether it runs the night shift (0025): Places is its search, so it needs GOOGLE_API_KEY.
+            night: places ? 'on' : 'off',
             // Only for a mailbox this worker has: absent means not configured.
             ...(smtpProvider ? { smtpLogin } : {}),
             ...(env.IMAP_HOST && env.IMAP_USER && env.IMAP_PASSWORD ? { imapLogin } : {}),
@@ -442,6 +445,18 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
    */
   const stopSequences = startSequences({ db, log, now: () => new Date() })
   stops.push(async () => stopSequences())
+  /**
+   * The night shift (0025): once a night per org that switched it on, its saved
+   * Google Maps searches, the new businesses filed, scanned and measured, and a
+   * morning list. Places is the search, so only a worker with GOOGLE_API_KEY
+   * runs it; scans take the nightly rescan's timeouts.
+   */
+  if (places) {
+    const stopNights = startNightShift({ db, log, now: () => new Date(), places, pagespeed, scan: withRescanTimeouts() })
+    stops.push(async () => stopNights())
+  } else {
+    log.info('night shift: off on this worker — it searches Google Maps, which needs GOOGLE_API_KEY (./tools/run-worker.sh --google)')
+  }
   /**
    * The morning brief (0020): one unattended turn a day per org that switched
    * it on, through the same `beginTurn` as chat — with `unattended`, so the

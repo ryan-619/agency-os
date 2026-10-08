@@ -115,6 +115,14 @@ go stops them for good. And a reply that names a time to talk again ("call
 me next month", "busy till Diwali") becomes a task on that day. The `agency`
 server has sixty-five tools.
 
+**Then the night shift (2026-10-08), on migration 0025** (§2, "The night
+shift"): once a night, at a time in the agency's zone, the worker runs the
+org's saved Google Maps searches, files the new businesses, scans and
+measures their sites, and leaves a ranked list — by what each needs and
+whether it can be called — on the dashboard and for the morning brief
+(`get_night_finds`). It sends nothing and contacts nobody. Settings → Night
+shift is an owner's. The `agency` server has sixty-six tools.
+
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
 machine"), which needs no public address, because everything but chat is
@@ -199,11 +207,11 @@ worker upserts a `worker_heartbeats` row (keyed `hostname:pid`) every
 
 **The web half is LIVE on Vercel** at **https://myagencyos.in** (first
 deployed as `agency-os-tau-murex.vercel.app`), against a Neon Postgres (18.6)
-with Resend for magic links, seeded. The code expects migration **0024**
+with Resend for magic links, seeded. The code expects migration **0025**
 (`EXPECTED_MIGRATION`). Production was at 0017 when the 0018 release was
 written, and that release run's Vercel build applied 0018 and then 0019
 before `next build` (`tools/vercel-build-migrate.mjs`, under
-`AGENCY_MIGRATE_ON_BUILD=1`); 0020 to 0024 go the same way, through the
+`AGENCY_MIGRATE_ON_BUILD=1`); 0020 to 0025 go the same way, through the
 Production workflow's `release` action. A migration is always applied BEFORE the code
 that reads it deploys, never after — DEPLOYING.md, "migrate FIRST", and
 GO-LIVE.md Part 2b. That is done from GitHub, with no credential on a
@@ -911,7 +919,7 @@ recorded-session mode, so anything needing the SDK to be *defined* is also
 untestable — and a package that CANNOT import the SDK cannot drag it into the
 Next module graph, which CI builds with no secrets on purpose.
 
-Sixty-five tools ship (`AGENCY_TOOL_NAMES`) — since 0024 `set_campaign_steps` (high, `leaves_the_building`,
+Sixty-six tools ship (`AGENCY_TOOL_NAMES`) — since 0025 `get_night_finds` (low, a read), since 0024 `set_campaign_steps` (high, `leaves_the_building`,
 carded: its steps are words that will reach people), since 0023 `create_quote` and `update_quote` (medium,
 internal writes), `get_quote` and `list_quotes` (low) and `create_share_link` (medium, an internal write: a link
 sends nothing), the opportunity finder's five since 2026-10-08
@@ -1390,6 +1398,58 @@ latest scan is past its deadline is refused `stale_evidence` until it is
 re-scanned, although the words quote no finding (the SMS template's residual
 in another form) — a business never scanned is not judged by a scan at all.
 
+### The night shift (0025, 2026-10-08)
+
+**Overnight, what a person did by hand in chat.** `night_shifts` (one row
+per org: on or off, `run_at` HH:MM by CHECK, a declared `time_zone`, the
+night it last ran, and "Run it now") and `night_searches` (what and where,
+as a person types it into Google Maps — one per wording per org,
+case-blind, at most `NIGHT_SEARCHES_MAX` (10)) are Settings → Night shift
+(`/settings/night`: every member reads it, an owner — `agents:write` —
+changes it, because it spends the agency's Places quota every night with
+nobody watching; every change audited `night.*`). The worker looks once a
+minute (`startNightShift`, `apps/agent/src/night/scheduler.ts`): an org whose
+zone's clock has passed its time on a night that has not run — the brief's
+own `briefDue` — or that asked to run now is CLAIMED by one UPDATE
+(`claimNightShift`), so a night runs once, and then run (`runNightShift`,
+`packages/tools/src/night.ts`). Only a worker holding `GOOGLE_API_KEY` runs
+it — the heartbeat says so (`detail.night`, `heartbeatNight`), and the page
+words it — and a night that fails is audited `night.failed` and tried the
+next night, never every minute.
+
+**One night.** At most `NIGHT_SEARCHES_PER_RUN` (5) saved searches, the one
+that ran longest ago first, never past the org's daily Places cap — which
+chat's searches share: `placesSearchesToday` counts `agent.find_businesses`
+and `night.searched` rows alike. Each search reads one page of Google Maps;
+every business not closed is filed as `add_businesses` files it
+(`businessFromListing`, shared, so a business is filed the same way whoever
+found it), with the search's city and, for India, `Asia/Kolkata`. Then the
+NEW ones with a site of their own are scanned (at most
+`NIGHT_SCANS_PER_RUN`, 15, at the nightly rescan's timeouts) and measured on
+a phone by PageSpeed (at most `NIGHT_AUDITS_PER_RUN`, 10; the first
+PageSpeed error ends the measuring for the night, because a quota or a
+refused key fails every request after it). A refused search costs that
+search; a failed scan, that scan. Then the new finds are ranked
+(`nightRank` in `packages/core/src/night.ts`: three for each need read from
+evidence, two for a phone on file, one for a rating of 4 or more, and
+reviews up to 300 — so a famous chain never outranks a clinic that needs a
+website; a find that needs nothing we can see is left off) and the night's
+report written: `night.ran` with counts, the top `NIGHT_TOP` (10) company
+ids and each one's need KEYS — core's fixed vocabulary, never words.
+
+**The morning list.** `nightReportLatest` reads the newest `night.ran` with
+its companies as they are now, in this org only; the dashboard shows it as
+"Found overnight" for 36 hours — name, kind, city, rating, phone on file,
+and what each needs — and `get_night_finds` gives chat and the morning brief
+the same list (the brief's prompt reads it before choosing the day's
+targets). Nothing in the night sends anything or contacts anybody: it writes
+companies, scans, audits and audit rows, as a person's search and scan do.
+
+**Stated residuals.** A Mac asleep at the hour runs the night when the
+worker next looks — later, never twice; one page of Google results a search
+a night; and a business filed by the night shift is scanned only once, that
+night, until the nightly rescan reaches it.
+
 ### Follow-up sequences, and replies that name a time (0024, 2026-10-08)
 
 **A campaign's steps after its opener.** `campaign_steps` (0024) holds a
@@ -1788,6 +1848,7 @@ quiet stretch. Every panel dates evidence from `scans.ran_at` through
 | 0021 ✅ | a country read as one code (`country.ts`: `countryCode`, `countryName`); the firmographic disqualifiers (`firmographicDisqualifier`, `icpTargeting`, `FIRMOGRAPHIC_DISQUALIFIERS`, and `scoreCompany`'s optional `firmographics`); a profile derived from another (`icp-derive.ts`: `deriveIcp`, `icpSlug`, `COMPANY_STAGES`); and the catalog's `readOnly` mark |
 | 0023 ✅ | quotes (`quote.ts`: `quoteTotals`, `quoteNumber`, `gstinValid`, `vpaValid`, `upiPaymentUri`, `rupeesInWords`, `quoteDayIn`, `quoteValidUntil`, `quoteLapsed`), the nearest-competitor comparison (`peers.ts`: `distanceKm`, `nearestPeers`, `ratingPlace`, `comparisonRows`, `comparisonHeadline`, `peerLabel`) and the website preview's templates (`site-preview.ts`: `siteTemplateFor`, `siteTagline`, `whatsappLink`) |
 | 0024 ✅ | follow-up sequences (`sequence.ts`: `sequenceNext`, `sequenceStepsProblem`, `renderStepWords`, `followUpSubject`, `DEFAULT_FOLLOW_UP_BODY`) and the reply reader for a time to talk again (`later-ask.ts`: `laterAsk`, `instantAtWallClock`, `DIWALI`) |
+| 0025 ✅ | the night shift's morning list (`night.ts`: `nightScore`, `nightRank`) |
 
 ---
 

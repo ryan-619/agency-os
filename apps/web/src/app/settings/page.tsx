@@ -38,6 +38,7 @@ const AREAS: readonly { readonly href: string; readonly title: string; readonly 
   { href: '/settings/assistant', title: 'Assistant', what: 'The playbook the AI reads with every message, and its morning brief.' },
   { href: '/settings/services', title: 'Services', what: 'What the agency sells, at what price, and which needs each answers.' },
   { href: '/settings/profile', title: 'Business profile', what: 'What quotes print about you: legal name, GSTIN and GST, the UPI ID for advances, terms.' },
+  { href: '/settings/night', title: 'Night shift', what: 'Saved Google Maps searches run overnight: new businesses filed, scanned and measured, the best listed for the morning.' },
   { href: '/settings/agents', title: 'Agents', what: 'Subagent definitions: prompt, tools, model.' },
   { href: '/settings/team', title: 'Team', what: 'Who can sign in, and as what.' },
   { href: '/settings/credentials', title: 'Credentials', what: 'Encrypted connector credentials. Never shown.' },

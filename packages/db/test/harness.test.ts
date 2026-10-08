@@ -52,9 +52,12 @@ describe('the migrated-database harness', () => {
     for (const expected of ['orgs', 'users', 'companies', 'deals', 'touches', 'calls', 'suppressions']) {
       expect(names, expected).toContain(expected)
     }
-    // 0024's tables, the most recent things a migration added. This
+    // 0025's tables, the most recent things a migration added. This
     // assertion has to name the NEWEST: a snapshot built from an older set
     // of migrations would still carry every earlier one.
+    expect(names).toContain('night_shifts')
+    expect(names).toContain('night_searches')
+    // 0024's, as further lines.
     expect(names).toContain('campaign_steps')
     expect(names).toContain('sequence_runs')
     // 0023's, as further lines.

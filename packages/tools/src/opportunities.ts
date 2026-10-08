@@ -28,7 +28,7 @@ import {
 } from '@agency/core'
 import {
   addBusinesses, companyOpportunity, findCompanyByDomain, isKnownTimeZone, opportunitiesAcross, recordSiteAudit,
-  servicesList, type BusinessToAdd, type CompanyOpportunity, type ServiceRow,
+  servicesList, type AgencyDb, type BusinessToAdd, type CompanyOpportunity, type ServiceRow,
 } from '@agency/db'
 import * as schema from '@agency/db/schema'
 import { isScannableHost, normaliseDomain } from '@agency/scanner'
@@ -88,20 +88,48 @@ const findShape = {
   region: z.string().regex(/^[A-Za-z]{2}$/).optional().describe('Two-letter country code to search from. Default IN.'),
 }
 
-async function searchesToday(ctx: ToolContext): Promise<number> {
-  const now = ctx.now()
+/**
+ * One business as `addBusinesses` files it, from its listing: by its own
+ * domain when the listing names a scannable site of its own, under a
+ * placeholder otherwise. Shared by `add_businesses` and the night shift, so
+ * a business is filed the same way whoever found it.
+ */
+export function businessFromListing(
+  l: PlaceListing,
+  where: { readonly timeZone: string | null; readonly country: string | null; readonly city: string | null },
+): BusinessToAdd {
+  const site = classifyWebsite(l.website)
+  const own = site.kind === 'own' && site.host ? normaliseDomain(site.host) : null
+  const domain = own && isScannableHost(own) ? own : noSiteDomain(l.name, `place:${l.placeId}`)
+  return {
+    domain, name: l.name, placeId: l.placeId, address: l.address, phone: l.phone, website: l.website,
+    rating: l.rating, reviews: l.reviews, category: l.category, mapsUrl: l.mapsUrl, location: l.location ?? null,
+    timeZone: where.timeZone, country: where.country, city: where.city,
+  }
+}
+
+/**
+ * Places searches an org has made today (UTC), from chat and from the night
+ * shift alike — both count against the one daily cap, because both cost the
+ * agency the same past Google's free tier.
+ */
+export async function placesSearchesToday(db: AgencyDb, orgId: string, now: Date): Promise<number> {
   const midnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
-  const [row] = await ctx.db
+  const [row] = await db
     .select({ n: sql<number>`count(*)::int` })
     .from(schema.auditLog)
     .where(
       and(
-        eq(schema.auditLog.orgId, ctx.orgId),
-        eq(schema.auditLog.action, 'agent.find_businesses'),
+        eq(schema.auditLog.orgId, orgId),
+        inArray(schema.auditLog.action, ['agent.find_businesses', 'night.searched']),
         gte(schema.auditLog.createdAt, midnight),
       ),
     )
   return row?.n ?? 0
+}
+
+async function searchesToday(ctx: ToolContext): Promise<number> {
+  return placesSearchesToday(ctx.db, ctx.orgId, ctx.now())
 }
 
 export const findBusinesses: AgencyToolSpec<typeof findShape> = {
@@ -237,14 +265,7 @@ export const addBusinessesTool: AgencyToolSpec<typeof addShape> = {
       }
       const l = hit.listing
       if (hit.at < checkedAt.getTime()) checkedAt = new Date(hit.at)
-      const site = classifyWebsite(l.website)
-      const own = site.kind === 'own' && site.host ? normaliseDomain(site.host) : null
-      const domain = own && isScannableHost(own) ? own : noSiteDomain(l.name, `place:${l.placeId}`)
-      businesses.push({
-        domain, name: l.name, placeId: l.placeId, address: l.address, phone: l.phone, website: l.website,
-        rating: l.rating, reviews: l.reviews, category: l.category, mapsUrl: l.mapsUrl, location: l.location ?? null,
-        timeZone: input.timeZone ?? null, country: input.country ?? null, city: input.city ?? null,
-      })
+      businesses.push(businessFromListing(l, { timeZone: input.timeZone ?? null, country: input.country ?? null, city: input.city ?? null }))
     }
     if (businesses.length === 0) {
       return fail(

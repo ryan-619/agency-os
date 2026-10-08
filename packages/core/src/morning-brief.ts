@@ -97,12 +97,14 @@ export function morningBriefPrompt(input: { readonly localDate: string; readonly
     '2. Replies: get_replies. List the replies nobody has handled, and what each one needs.',
     '3. Pipeline: get_pipeline and list_tasks. Deals left untouched or overdue, and tasks due today.',
     '4. Evidence: get_stale_companies, then rescan_stale once to refresh a few of them.',
-    '5. Today\'s targets: search_companies for qualified companies not yet contacted. For the best three,',
-    '   read get_company and get_company_timeline and work out the angle: one finding they can verify on',
-    '   their own site, and why it matters to them.',
+    '5. Overnight: get_night_finds. If the night shift ran, its morning list is the first place to look for',
+    '   targets — what each new business needs, and whether it can be called.',
+    '6. Today\'s targets: search_companies for qualified companies not yet contacted, and the night\'s finds. For',
+    '   the best three, read get_company or get_opportunities and get_company_timeline and work out the angle:',
+    '   one thing they can see for themselves — on their own site or listing — and why it matters to them.',
     '',
     'Then write the brief. Open with the three things most worth doing today. Then the replies waiting,',
-    'the pipeline items, what was re-scanned, and the three companies with their angles. Short and',
+    'the pipeline items, what was re-scanned, what the night shift found, and the three companies with their angles. Short and',
     'concrete, with company names. End with the next steps that need a person, such as drafting openers.',
   ].join('\n')
 }

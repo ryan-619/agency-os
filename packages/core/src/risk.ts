@@ -190,6 +190,8 @@ export const AGENCY_TOOL_RISK = {
   create_share_link: ['medium', 'writes_internal_state', 'Makes a link to a business’s audit page or website preview; nothing is sent.'],
   // Follow-up sequences (0024): steps are words that will reach people — drafted, or sent unread on auto-send.
   set_campaign_steps: ['high', 'leaves_the_building', 'Sets a campaign’s follow-up messages, calls and visits for everyone it wrote to who has not replied.'],
+  // The night shift (0025): what it found overnight, a read.
+  get_night_finds: ['low', 'read_only', 'Reads what the night shift found overnight, best first.'],
   // Editing a draft's words (2026-10-08). The read shows an EMAIL draft whole; the edit
   // rewrites one and keeps its card: a queued auto-send email goes out with the new
   // words unread by anybody, and every other draft still waits on /approvals.

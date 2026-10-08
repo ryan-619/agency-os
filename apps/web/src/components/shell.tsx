@@ -45,9 +45,10 @@ export type ShellCurrent =
   | 'mail'
   | 'deployment'
   | 'profile'
+  | 'night'
 
 const SETTINGS_PAGES: ReadonlySet<ShellCurrent> = new Set<ShellCurrent>([
-  'settings', 'team', 'credentials', 'icp', 'spend', 'mail', 'deployment', 'profile',
+  'settings', 'team', 'credentials', 'icp', 'spend', 'mail', 'deployment', 'profile', 'night',
 ])
 
 /**

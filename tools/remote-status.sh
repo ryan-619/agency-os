@@ -168,6 +168,11 @@ const { Client } = require("pg");
   console.log("  0024 table: sequence_runs" +
     (t24.rows[0].present ? " <- 0024 is applied" : " MISSING   <- 0024 is NOT applied, do not deploy"));
 
+  // 0025: the night shift. Settings → Night shift and the nightly run of the worker need it.
+  const t25 = await c.query("select to_regclass($1) is not null as present", ["night_searches"]);
+  console.log("  0025 table: night_searches" +
+    (t25.rows[0].present ? " <- 0025 is applied" : " MISSING   <- 0025 is NOT applied, do not deploy"));
+
   // A count and an age, like the users count below: never a row. /api/health
   // already publishes the same age as worker.ageSeconds.
   if (t18.rows.find(r => r.t === "worker_heartbeats" && r.present)) {

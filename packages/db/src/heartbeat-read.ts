@@ -156,6 +156,18 @@ export function heartbeatBrief(row: { readonly detail: unknown } | null): 'on' |
 }
 
 /**
+ * Whether this worker runs the night shift (0025): `detail.night`, `on` when
+ * it holds the Google key Places needs, `off` without. Null for no row and
+ * for a worker from before 0025, which never ran one.
+ */
+export function heartbeatNight(row: { readonly detail: unknown } | null): 'on' | 'off' | null {
+  const detail = row?.detail
+  const night =
+    typeof detail === 'object' && detail !== null && 'night' in detail ? (detail as { night: unknown }).night : null
+  return night === 'on' || night === 'off' ? night : null
+}
+
+/**
  * Whether a mailbox accepted the worker's login (`apps/agent/src/outreach/
  * mail-login.ts`), from `detail.smtpLogin` or `detail.imapLogin`. Null for no
  * row, a worker with no such mailbox, and a worker from before the check —
