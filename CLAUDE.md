@@ -133,7 +133,7 @@ one-click on Settings → Night shift); a website certificate about to expire
 becomes a task from a current scan; a public free website check
 (`/check/<booking slug>`) turns a business typing in its site into an
 inbound lead with its own audit page; and the app installs on a phone. The
-`agency` server has sixty-seven tools. **An independent review found six
+`agency` server had sixty-seven tools. **An independent review found six
 faults before they shipped, all fixed on the same release**: the scanner
 could be pointed at the agency's own network through the public check
 (a name like `127.1`, or a public name resolving to a private address — it
@@ -178,6 +178,13 @@ never as a message, never sent as it is, and checked before it is shown
 (`replyDraftProblems`: no invented price, no invented link, no claim of
 testing). A reply nobody should answer with a model's help gets none
 (`replySuggestionFacts`), recorded `skipped` with why, once.
+
+**Then what changed (2026-10-09), on no migration** (§2, "What changed:
+a dated reason to call"): `recordScan` compares every successful scan with
+the one before it and, when a scored gap was fixed or opened, writes one
+`evidence.changed` row — keys and counts, never details — and a task for the
+open deal's owner; the dashboard's "What changed", `get_evidence_signals`
+and the morning brief read them. The `agency` server has sixty-eight tools.
 
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
@@ -992,7 +999,7 @@ recorded-session mode, so anything needing the SDK to be *defined* is also
 untestable — and a package that CANNOT import the SDK cannot drag it into the
 Next module graph, which CI builds with no secrets on purpose.
 
-Sixty-seven tools ship (`AGENCY_TOOL_NAMES`) — `get_whats_working` (low, a read) with the field tools, since 0025 `get_night_finds` (low, a read), since 0024 `set_campaign_steps` (high, `leaves_the_building`,
+Sixty-eight tools ship (`AGENCY_TOOL_NAMES`) — `get_evidence_signals` (low, a read) with what changed (2026-10-09), `get_whats_working` (low, a read) with the field tools, since 0025 `get_night_finds` (low, a read), since 0024 `set_campaign_steps` (high, `leaves_the_building`,
 carded: its steps are words that will reach people), since 0023 `create_quote` and `update_quote` (medium,
 internal writes), `get_quote` and `list_quotes` (low) and `create_share_link` (medium, an internal write: a link
 sends nothing), the opportunity finder's five since 2026-10-08
@@ -1940,6 +1947,52 @@ guard reads prices and links, not tone, so a draft can still be too eager
 and the person is the check; a reply in Hindi is answered in whatever the
 model makes of it; and a suggestion is drafted only where a worker with a
 model runs — on the web alone the composer is as it was.
+
+### What changed: a dated reason to call (2026-10-09)
+
+**A re-scan that finds a gap closed says the business is investing; one that
+finds a gap opened is a problem they can see.** Both were visible one
+company at a time (`get_evidence_changes`, the company page's diff) and
+nowhere together. Now `recordScan` (`packages/db/src/repository.ts`) calls
+`noteEvidenceChange` (`packages/db/src/evidence-signals.ts`) after an `ok`
+scan's findings and score are written, in a savepoint of its own so a scan
+that was recorded is never rolled back for a line about it: the new scan is
+compared with the previous SUCCESSFUL scan through `diffFindings` — the one
+reader of a change, so a signal neither scan observed is not a change and a
+side with nothing to judge is never a fix or a regression — over SCORED
+signals only, and when something was fixed or regressed ONE
+`evidence.changed` row is appended with the company as subject: `{ scanId,
+olderScanId, fixed, regressed, keys: { fixed, regressed }, taskId }` — signal
+keys and counts, never a detail. The row is the record and the dedupe: one
+per scan, whichever writer ran it (the nightly rescan, `scan_company`,
+`rescan_stale`, the night shift, the CLI). A company with an OPEN deal also
+gets one task, due now, for the deal's owner or nobody — a call where there
+is a number nobody asked us to stop calling, a to-do otherwise — "Call
+<name>: their site lost something since our last look" when anything
+regressed, else "Follow up <name>: they fixed something on their site",
+with the signals named in the ICP's own `why`, dated by the scan, and a
+line saying only what the latest scan observed may be quoted. No deal, no
+task: a note nobody is working is a line on the dashboard, not a to-do.
+
+**Three readers, one row.** `whatChanged` reads the last
+`EVIDENCE_SIGNALS_DAYS` (7) of rows, newest first, each company as it is
+now and whether its deal is open; the dashboard shows them as "What
+changed" under the ICP's `why` for each key; `get_evidence_signals` (low, a
+read, `companies:read`) prints the same list for chat and says only what
+the latest scan observed may be quoted; and the morning brief's step 4 asks
+for it after the re-scan, by name. `/audit` words the row ("compared the
+latest scan of X with the one before: 1 gap opened, 1 gap fixed; a task was
+made for the open deal"). `packages/db/test/evidence-signals.test.ts` runs
+`recordScan` through every case: nothing for a first, an unchanged, a
+failed or an informational-only scan; the keys and the task; a to-do
+without a number; no task without a deal; another org's rows for nobody.
+
+**Stated residuals.** A re-scan that finds nothing changed leaves no row,
+so "nothing changed this week" and "nothing was re-scanned this week" read
+the same on the dashboard — the rescan cron's own audit row tells them
+apart; and a task is made on every changed scan of a company with an open
+deal, so a site that flaps between two readings makes a task a night until
+somebody closes the deal or the scan settles.
 
 ### Editing a draft's words (2026-10-08)
 

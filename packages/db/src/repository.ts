@@ -15,6 +15,7 @@ import {
   type IcpDefinition, type ScoreResult, type SiteProfile,
 } from '@agency/core'
 import * as schema from './schema.js'
+import { noteEvidenceChange, type EvidenceChangeNote } from './evidence-signals.js'
 
 export { parseCompanySeeds } from './csv.js'
 
@@ -132,6 +133,13 @@ export interface RecordScanOutput {
   readonly unobservedCount: number
   /** Rows written `scored = false`: observed context, never part of the score. */
   readonly informationalCount: number
+  /**
+   * What changed since the previous successful scan (2026-10-09): the scored
+   * signals fixed and regressed, and the task made where a deal is open —
+   * null when there was no earlier successful scan, nothing changed, or the
+   * note could not be written (the scan still was).
+   */
+  readonly changed: EvidenceChangeNote | null
 }
 
 /**
@@ -226,10 +234,26 @@ export async function recordScan(db: AgencyDb, input: RecordScanInput): Promise<
 
     if (!score) throw new Error('failed to insert score')
 
+    // What changed since the previous successful scan (2026-10-09): one
+    // audit row, and a task where a deal is open. Best-effort inside the
+    // transaction's own savepoint, because a scan that was recorded must not
+    // be rolled back for a line about it.
+    let changed: EvidenceChangeNote | null = null
+    if (profile.fetchOk) {
+      try {
+        changed = await tx.transaction((sp) =>
+          noteEvidenceChange(sp as unknown as AgencyDb, { orgId, companyId, scanId: scan.id, icp }),
+        )
+      } catch {
+        changed = null
+      }
+    }
+
     return {
       scanId: scan.id,
       scoreId: score.id,
       result,
+      changed,
       findingsWritten: findingRows.length,
       observedCount: findingRows.filter((f) => f.scored && f.observed).length,
       unobservedCount: findingRows.filter((f) => f.scored && !f.observed).length,

@@ -262,7 +262,7 @@ describe('the registry cannot drift from what is reachable', () => {
     for (const write of ['create_quote', 'update_quote', 'create_share_link'] as const) {
       expect(AGENCY_TOOL_RISK[write].slice(0, 2), write).toEqual(['medium', 'writes_internal_state'])
     }
-    expect(AGENCY_TOOL_NAMES).toHaveLength(23 + 26 + 3 + 2 + 5 + 4 + 1 + 1 + 1 + 1)
+    expect(AGENCY_TOOL_NAMES).toHaveLength(23 + 26 + 3 + 2 + 5 + 4 + 1 + 1 + 1 + 1 + 1)
   })
 
   it('never lets a write run without a person: every non-read tool but the scans is medium or high', () => {

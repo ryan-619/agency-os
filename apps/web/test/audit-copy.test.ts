@@ -187,6 +187,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'reply.suggested': { contactId: SUBJECT, companyId: SUBJECT, model: 'anthropic/claude-haiku-4-5', chars: 412 },
   'reply.suggestion_dismissed': { suggestionId: SUBJECT },
   'reply.suggestion_used': { suggestionId: SUBJECT, answerTouchId: SUBJECT },
+  'evidence.changed': { scanId: SUBJECT, olderScanId: SUBJECT, fixed: 1, regressed: 2, keys: { fixed: ['csp'], regressed: ['hsts', 'tls'] }, taskId: SUBJECT },
   // `authorUserId` is written only when the writer is not the author — the
   // agent's add_note, with actor `agent`.
   'note.added': { companyId: SUBJECT, noteId: SUBJECT, contactId: SUBJECT, authorUserId: ORG_USER },
@@ -371,6 +372,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   // Follow-up sequences (0024).
   'agent.set_campaign_steps': { campaignId: SUBJECT, steps: 3, turnId: SUBJECT },
   'agent.get_night_finds': { found: 10, turnId: SUBJECT },
+  'agent.get_evidence_signals': { sinceDays: 7, returned: 3, turnId: SUBJECT },
   'agent.get_whats_working': { kinds: 4, campaigns: 2, turnId: SUBJECT },
   'campaign.steps_saved': { steps: 3, messages: 1, calls: 1, visits: 1 },
   'sequence.step_taken': { campaignId: SUBJECT, position: 2, kind: 'message', touchId: SUBJECT },

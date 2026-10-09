@@ -739,6 +739,17 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     return `suggested an answer to a reply from a contact at ${c.co}${chars !== null ? ` (${chars} characters` : ''}${model ? `${chars !== null ? ', ' : ' ('}${model}` : ''}${chars !== null || model ? ')' : ''}; it waits on /inbox for a person, and nothing was sent`
   },
   'reply.suggestion_dismissed': (c) => `put away the suggested answer to a reply from a contact at ${c.co}`,
+  // --- what changed (2026-10-09): a scan compared with the one before -------
+  'evidence.changed': (c) => {
+    const fixed = num(c.d, 'fixed') ?? 0
+    const regressed = num(c.d, 'regressed') ?? 0
+    const task = word(c.d, 'taskId')
+    const parts = [
+      regressed > 0 && `${regressed} gap${regressed === 1 ? '' : 's'} opened`,
+      fixed > 0 && `${fixed} gap${fixed === 1 ? '' : 's'} fixed`,
+    ].filter(Boolean)
+    return `compared the latest scan of ${c.co} with the one before: ${parts.join(', ') || 'something changed'}${task ? '; a task was made for the open deal' : ''}`
+  },
   'reply.suggestion_used': (c) =>
     `drafted an answer to a reply from a contact at ${c.co} starting from the suggested one; the draft waits for approval`,
 

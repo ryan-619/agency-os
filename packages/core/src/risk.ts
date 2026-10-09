@@ -192,6 +192,8 @@ export const AGENCY_TOOL_RISK = {
   set_campaign_steps: ['high', 'leaves_the_building', 'Sets a campaign’s follow-up messages, calls and visits for everyone it wrote to who has not replied.'],
   // The night shift (0025): what it found overnight, a read.
   get_night_finds: ['low', 'read_only', 'Reads what the night shift found overnight, best first.'],
+  // What changed (2026-10-09): a gap fixed or opened since the previous scan, from our own scans. A read.
+  get_evidence_signals: ['low', 'read_only', 'Reads which companies’ sites changed since our previous scan: gaps fixed or opened.'],
   // What's working (2026-10-08): reply and win rates, and searches for more like what was won. A read.
   get_whats_working: ['low', 'read_only', 'Reads who replied and what was won, by kind, city and campaign.'],
   // Editing a draft's words (2026-10-08). The read shows an EMAIL draft whole; the edit

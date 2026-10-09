@@ -5,7 +5,7 @@ import {
   COMPLIANCE_WINDOW_DAYS, auditResolveActors, auditSubjectsToCompanies, complianceAutoSendOffCold,
   complianceColdOptInTouches, complianceDisclosure, complianceDraftsOnStaleEvidence, complianceEvidenceFreshness,
   complianceOptOutsNotRecorded, complianceOptOutsWithoutSuppression, inboxUnhandledCount, listAudit, listDeals,
-  nightReportLatest, tasksCounts, todayActions, type AgencyDb,
+  nightReportLatest, tasksCounts, todayActions, whatChanged, type AgencyDb,
 } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { AuditLog } from '@/components/audit/log'
@@ -126,8 +126,10 @@ export default async function Dashboard() {
   // reason the channels and cap are headed as the profile's DESCRIPTION — the
   // send path applies each campaign's own, and reads neither of these.
   const def = icp?.definition as
-    | { scoring?: { qualify_at?: number }; outreach?: { channels?: string[]; max_per_day?: number } }
+    | { scoring?: { qualify_at?: number }; outreach?: { channels?: string[]; max_per_day?: number }; signals?: Record<string, { why?: string }> }
     | undefined
+  // A changed signal is shown under the ICP's own words for it, as a finding is everywhere else.
+  const signalWords = (key: string): string => def?.signals?.[key]?.why ?? key
   const qualifyAt = def?.scoring?.qualify_at
   const channels = def?.outreach?.channels
   const dailyCap = def?.outreach?.max_per_day
@@ -135,7 +137,7 @@ export default async function Dashboard() {
   // that page reads it, so the counter and the list it opens agree.
   const { staleAfterDays } = readIcp(icp?.definition)
 
-  const [c, worker, unhandled, tasks, deals, freshness, compliance, feed, lastRescan, today, night] = await Promise.all([
+  const [c, worker, unhandled, tasks, deals, freshness, compliance, feed, lastRescan, today, night, changed] = await Promise.all([
     counts(user.orgId),
     workerStatus(db, now),
     inboxUnhandledCount(db, user.orgId),
@@ -148,6 +150,8 @@ export default async function Dashboard() {
     todayActions(db, { orgId: user.orgId, userId: user.id, now }),
     // The night shift's morning list (0025); a database before 0025 shows none rather than failing the page.
     nightReportLatest(db, user.orgId).catch(() => null),
+    // What changed since the previous scan of each company (2026-10-09): a gap fixed or opened in the last week.
+    whatChanged(db, { orgId: user.orgId, now }).catch(() => []),
   ])
   // Last night's, not last week's: a list a day and a half old is no longer this morning's.
   const overnight = night && now.getTime() - night.at.getTime() <= 36 * 3_600_000 && night.top.length > 0 ? night : null
@@ -268,6 +272,34 @@ export default async function Dashboard() {
                   </li>
                 )
               })}
+            </ol>
+          </>
+        ) : null}
+
+        {changed.length > 0 ? (
+          <>
+            <h2>What changed</h2>
+            <p className="muted" style={{ fontSize: 13, margin: '0 0 8px' }}>
+              Companies whose latest scan differs from the one before, this week. A gap fixed means they are investing in
+              their site; a gap opened is a problem they can see for themselves — a dated reason to call. Only what the
+              latest scan observed may be quoted.
+            </p>
+            <ol className="today">
+              {changed.map((s) => (
+                <li key={`${s.company.id}-${s.at.toISOString()}`}>
+                  <a href={`/companies/${encodeURIComponent(s.company.domain)}`}>{s.company.name || s.company.domain}</a>
+                  <span className="muted">
+                    {' '}· <When iso={s.at.toISOString()} />
+                    {s.openDeal ? ' · open deal' : null}
+                    {s.taskId ? ' · task made' : null}
+                  </span>
+                  <div className="muted today-detail">
+                    {s.regressed.length > 0 ? `New gaps: ${s.regressed.map(signalWords).join('; ')}` : null}
+                    {s.regressed.length > 0 && s.fixed.length > 0 ? ' · ' : null}
+                    {s.fixed.length > 0 ? `Fixed: ${s.fixed.map(signalWords).join('; ')}` : null}
+                  </div>
+                </li>
+              ))}
             </ol>
           </>
         ) : null}
