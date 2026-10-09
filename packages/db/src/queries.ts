@@ -13,6 +13,7 @@
  * so having `repository.ts` re-export them would be a cycle.
  */
 export * from './repository.js'
+export * from './connection-string.js'
 export * from './approvals.js'
 export * from './chat.js'
 export * from './assistant.js'

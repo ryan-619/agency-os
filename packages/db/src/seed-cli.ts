@@ -6,6 +6,7 @@
  *   npm run db:seed
  */
 import { Client } from 'pg'
+import { pgConnectionString } from './connection-string.js'
 import { pgDriver } from './driver.js'
 import { seed } from './seed.js'
 
@@ -21,7 +22,7 @@ async function main(): Promise<void> {
     process.exit(1)
   }
 
-  const client = new Client({ connectionString: url })
+  const client = new Client({ connectionString: pgConnectionString(url) })
   await client.connect()
   try {
     const result = await seed(

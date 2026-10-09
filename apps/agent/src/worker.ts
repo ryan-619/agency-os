@@ -4,7 +4,7 @@ import { Pool } from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import {
   appendAudit, appendChatMessage, cancelPendingApprovals, clearTurnRunning,
-  createSmtpProvider, ensureChatSessionTitle, markTurnRunning, masterKey, readConnector, schema,
+  createSmtpProvider, ensureChatSessionTitle, markTurnRunning, masterKey, pgConnectionString, readConnector, schema,
   sessionCostUsd, setSdkSessionId, usd, type AgencyDb, type MessageProvider,
 } from '@agency/db'
 import type { Channel, Draft } from '@agency/core'
@@ -195,7 +195,9 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
   })
   const health = await startHealthServer(env.AGENT_PORT, healthInputs, log)
 
-  pool = new Pool({ connectionString: env.DATABASE_URL, max: env.DATABASE_POOL_MAX })
+  // `sslmode=require` spelled as the `verify-full` pg already treats it as (pgConnectionString).
+  const databaseUrl = pgConnectionString(env.DATABASE_URL)
+  pool = new Pool({ connectionString: databaseUrl, max: env.DATABASE_POOL_MAX })
   watchIdleConnections(pool, log)
   const db = drizzle(pool, { schema }) as unknown as AgencyDb
 
@@ -206,7 +208,7 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
     log.error('database unreachable at startup', faultFields(err))
   }
 
-  lock = await acquireWorkerLock({ connectionString: env.DATABASE_URL, log })
+  lock = await acquireWorkerLock({ connectionString: databaseUrl, log })
   // Stamped AFTER the lock. Everything before this instant is the outgoing
   // worker's — including a message it claimed during the seconds this one
   // spent waiting for the lock, which a stamp taken at process start would

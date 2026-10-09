@@ -237,7 +237,16 @@ the error or the one it wraps (a Node system code, or a Postgres SQLSTATE),
 plus a hint when the code says the network or the database went away
 (`faultFields` in `apps/agent/src/log-fields.ts`), never the message; a
 five-minute Wi-Fi drop had filled the terminal with bare `"error":"Error"`
-lines. `recent_errors` keeps such a line by its code. **The script's own tests run
+lines. `recent_errors` keeps such a line by its code. **And no SECURITY
+WARNING at start** (2026-10-09): pg-connection-string 2.x treats
+`sslmode=prefer|require|verify-ca` exactly as `verify-full` and warns that
+pg 9 will weaken them to libpq's meaning; Neon hands out `require`. Every
+process opens its database through `pgConnectionString` (`packages/db/src/
+connection-string.ts`: the web pool, the worker's pool and lock, the voice
+service, the migration and seed CLIs), which spells those modes
+`verify-full` — the same TLS settings, measured by the test against
+`pg-connection-string`'s own parse — kept through that change, and leaves
+`disable`, `no-verify`, no mode, and `uselibpqcompat=true` alone. **The script's own tests run
 it on ports nothing real uses** (`AGENT_PORT=39401`): it stops any ngrok
 on the worker's API port before opening its own, and one run of
 `run-worker-script.test.ts` on the operator's Mac killed the live
