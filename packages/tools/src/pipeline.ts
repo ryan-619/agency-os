@@ -15,7 +15,8 @@
  * connector (§8.6), reached like any other connector, through the gate.
  */
 import { z } from 'zod'
-import { DEAL_STAGES, type DealStage } from '@agency/db'
+import { DEAL_STAGES, dealHealthFacts, type DealStage } from '@agency/db'
+import { dealHealth, rottingState } from '@agency/core'
 import {
   advanceDeal, createMeeting, findCompanyByDomain, openDealFor, setDealStage, type AgencyDb,
 } from '@agency/db'
@@ -45,6 +46,7 @@ export const getPipeline: AgencyToolSpec<typeof pipelineShape> = {
     const rows = await ctx.db
       .select({
         dealId: schema.deals.id,
+        companyId: schema.deals.companyId,
         domain: schema.companies.domain,
         name: schema.companies.name,
         stage: schema.deals.stage,
@@ -67,13 +69,28 @@ export const getPipeline: AgencyToolSpec<typeof pipelineShape> = {
       .limit(input.limit ?? 50)
 
     await ctx.audit('agent.get_pipeline', { stage: input.stage ?? null, returned: rows.length })
-    const lines = rows.map(
-      (r) =>
-        // The id is printed because only this summary reaches the model, and
-        // set_deal_owner names a deal by it.
+    // Why each deal needs a look (2026-10-09): the board's own reading, from the same facts.
+    const now = ctx.now()
+    const facts = await dealHealthFacts(ctx.db, { orgId: ctx.orgId, companyIds: rows.map((r) => r.companyId), now }).catch(() => new Map())
+    const healthOf = (r: (typeof rows)[number]) => {
+      const f = facts.get(r.companyId)
+      if (!f) return null
+      const rot = rottingState(r.stage, r.updatedAt ?? r.createdAt, now)
+      return dealHealth(
+        { stage: r.stage, closed: false, untouched: rot ? { days: rot.days, rotten: rot.rotten } : null, nextActionAt: r.nextActionAt, nextAction: r.nextAction, ...f },
+        now,
+      )
+    }
+    const lines = rows.map((r) => {
+      const h = healthOf(r)
+      const look = h && h.reasons.length > 0 ? ` · ${h.level === 'act' ? 'needs a person' : h.level === 'watch' ? 'drifting' : 'on track'}: ${h.reasons.join('; ')}` : ''
+      // The id is printed because only this summary reaches the model, and
+      // set_deal_owner names a deal by it.
+      return (
         `${r.stage.padEnd(9)} ${r.domain}${r.name ? ` (${r.name})` : ''}${r.nextAction ? ` — next: ${r.nextAction}` : ''}` +
-        ` · deal ${r.dealId}`,
-    )
+        `${look} · deal ${r.dealId}`
+      )
+    })
     return ok(
       rows.map((r) => ({
         dealId: r.dealId,
@@ -84,6 +101,7 @@ export const getPipeline: AgencyToolSpec<typeof pipelineShape> = {
         nextActionAt: r.nextActionAt?.toISOString() ?? null,
         valueCents: r.valueCents,
         lastTouched: (r.updatedAt ?? r.createdAt).toISOString(),
+        health: healthOf(r),
       })),
       rows.length === 0
         ? 'No open deals. Nothing has been sent to anyone yet, or everything is closed.'

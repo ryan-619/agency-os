@@ -226,7 +226,9 @@ action overdue, a quote lapsing or unanswered, a draft waiting for approval
 sent yet (`watch`); a meeting on the books (`ok`) — from `dealHealth`
 (`packages/core/src/deal-health.ts`, pure) over facts `dealHealthFacts`
 gathers for the whole board in three queries, keyed by company. A reason is
-a fact with a date on it, never a prediction.
+a fact with a date on it, never a prediction. `get_pipeline` prints the same
+reading per deal ("needs a person: a reply is waiting unanswered"), so chat
+and the morning brief read the board as a person does.
 
 **Then "Ask the assistant about this" (2026-10-09), on no migration**: a
 company page and an inbox row link to chat with the question already typed
