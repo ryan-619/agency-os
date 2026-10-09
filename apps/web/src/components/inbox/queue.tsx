@@ -14,6 +14,7 @@ import {
 import { Sparkles } from 'lucide-react'
 import { SHARED_NUMBER_LABEL, isSharedNumberOptOutPause } from '@/lib/shared-number-pause'
 import { toast } from '../toast/toast'
+import { askAboutReply, askLink } from '@/lib/ask-link'
 
 /**
  * The inbox's rows and what a person can do with each (PROMPT.md §8.4).
@@ -522,6 +523,11 @@ export function InboxQueue({
                       <button type="button" disabled={busy === row.id} onClick={() => setOpen(row.id)}>
                         Answer
                       </button>
+                    ) : null}
+                    {!optedOut ? (
+                      <a className="linkish" style={{ fontSize: 12.5 }} href={askLink(askAboutReply(row.company?.domain ?? null, row.company?.name ?? null))}>
+                        Ask the assistant
+                      </a>
                     ) : null}
                   </div>
                 </div>

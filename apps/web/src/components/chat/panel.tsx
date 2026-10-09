@@ -32,6 +32,7 @@ export function ChatPanel({
   archived = false,
   canDecide,
   initialBlocks = [],
+  initialDraft = '',
 }: {
   /**
    * The thread this panel speaks in. The page renders the panel with
@@ -63,9 +64,15 @@ export function ChatPanel({
    * things that were no longer on screen.
    */
   initialBlocks?: readonly Block[]
+  /**
+   * Words a record page sent along ("Ask the assistant about this",
+   * 2026-10-09): in the composer when the thread opens, and nothing sent
+   * until the person presses Send.
+   */
+  initialDraft?: string
 }) {
   const [state, setState] = useState<ChatState>(() => ({ ...emptyChat, blocks: initialBlocks }))
-  const [draft, setDraft] = useState('')
+  const [draft, setDraft] = useState(initialDraft)
   // "Think harder": the next message only. It runs on a stronger, dearer
   // model, so it never stays on by itself.
   const [deep, setDeep] = useState(false)

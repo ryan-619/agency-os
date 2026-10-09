@@ -228,6 +228,13 @@ sent yet (`watch`); a meeting on the books (`ok`) — from `dealHealth`
 gathers for the whole board in three queries, keyed by company. A reason is
 a fact with a date on it, never a prediction.
 
+**Then "Ask the assistant about this" (2026-10-09), on no migration**: a
+company page and an inbox row link to chat with the question already typed
+(`/chat?ask=…`, carried through the thread redirect into the composer's
+first state — `apps/web/src/lib/ask-link.ts`, pure, bounded to
+`ASK_MAX_CHARS`); the words name the record by domain and title and carry
+nothing about its people, and nothing is sent until the person presses Send.
+
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
 machine"), which needs no public address, because everything but chat is

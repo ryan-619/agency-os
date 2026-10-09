@@ -4,6 +4,8 @@ import {
 } from '@agency/core'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
+import { Sparkles } from 'lucide-react'
+import { askAboutCompany, askLink } from '@/lib/ask-link'
 import { can, isNoSiteDomain } from '@agency/core'
 import {
   companyThread, linkedinThreadWithheld, listContactsForCompany, meetingsForCompany, openDealFor, proposalsForCompany,
@@ -172,6 +174,14 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
           ' · never scanned'
         )}
       </p>
+      {can(principal, 'chat:use') ? (
+        <p style={{ margin: '-4px 0 14px' }}>
+          <a className="cta cta-secondary" href={askLink(askAboutCompany(company.domain, company.name))}>
+            <Sparkles aria-hidden="true" style={{ width: 14, height: 14, verticalAlign: '-2px', marginRight: 6 }} />
+            Ask the assistant about this company
+          </a>
+        </p>
+      ) : null}
       <CompanyEditSlot {...slot} />
       <OpportunitiesSlot {...slot} />
       <ShareSlot {...slot} />

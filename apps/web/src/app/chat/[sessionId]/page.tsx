@@ -6,6 +6,7 @@ import {
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { ChatPanel } from '@/components/chat/panel'
+import { askDraftFrom } from '@/lib/ask-link'
 import { ChatThreads, type ThreadView } from '@/components/chat/threads'
 import { blocksFromTranscript } from '@/components/chat/reducer'
 import { getDb } from '@/lib/db'
@@ -30,11 +31,18 @@ import { agentMisconfiguredSentence } from '@/lib/agent-config'
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
 
-export default async function ChatThreadPage({ params }: { params: Promise<{ sessionId: string }> }) {
+export default async function ChatThreadPage({
+  params, searchParams,
+}: {
+  params: Promise<{ sessionId: string }>
+  searchParams: Promise<{ ask?: string | string[] }>
+}) {
   const session = await auth()
   if (!session?.user) redirect('/signin')
   const user = session.user
   const { sessionId } = await params
+  // Words a record page sent along (2026-10-09): typed into the composer, never sent.
+  const initialDraft = askDraftFrom((await searchParams).ask)
 
   const db = getDb() as unknown as AgencyDb
   const thread = await chatReadOwnSession(db, user.orgId, user.id, sessionId)
@@ -106,6 +114,7 @@ export default async function ChatThreadPage({ params }: { params: Promise<{ ses
           <ChatPanel
             key={thread.id}
             sessionId={thread.id}
+            initialDraft={initialDraft}
             agentAvailable={agent.state === 'configured'}
             agentMisconfigured={agent.state === 'misconfigured' ? agentMisconfiguredSentence(agent.variables) : undefined}
             archived={thread.archived}
