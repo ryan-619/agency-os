@@ -74,7 +74,7 @@ export default async function SharedQuotePage({ params }: { params: Promise<{ to
 
 function Frame({ wide = false, children }: { wide?: boolean; children: React.ReactNode }) {
   return (
-    <div className="auth-wrap">
+    <div className="auth-wrap" data-read-progress={wide ? '' : undefined}>
       <div className={wide ? 'auth buyer' : 'auth'}>{children}</div>
     </div>
   )

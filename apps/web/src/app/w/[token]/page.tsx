@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation'
 import { and, eq } from 'drizzle-orm'
 import { whatsappLink } from '@agency/core'
 import { SHARE_LINK_TOKEN_SHAPE, orgProfileRead, schema, shareLinkResolve, type AgencyDb } from '@agency/db/queries'
+import { PreviewMotion } from '@/components/share/preview-motion'
 import { SitePreview } from '@/components/share/site-preview'
 import { TeamNote } from '@/components/share/team-note'
 import { ViewBeacon } from '@/components/share/view-beacon'
@@ -61,22 +62,25 @@ export default async function PreviewPage({ params }: { params: Promise<{ token:
     (profile.email ? `mailto:${profile.email}` : org?.bookingSlug ? new URL(`/book/${org.bookingSlug}`, env().AUTH_URL).toString() : null)
 
   return (
-    <SitePreview
-      business={{
-        name,
-        category: company.googleCategory,
-        city: company.city,
-        phone: company.phone,
-        address: company.address,
-        mapsUrl: company.googleMapsUrl,
-        rating: company.googleRating === null ? null : Number(company.googleRating),
-        reviews: company.googleReviewCount,
-        listingCheckedAt: company.listingCheckedAt,
-      }}
-      agency={agency}
-      talkToAgency={talkToAgency}
-      year={now.getUTCFullYear()}
-      notice={team ? <TeamNote agency={agency} /> : <ViewBeacon token={token} kind="preview" />}
-    />
+    <>
+      <SitePreview
+        business={{
+          name,
+          category: company.googleCategory,
+          city: company.city,
+          phone: company.phone,
+          address: company.address,
+          mapsUrl: company.googleMapsUrl,
+          rating: company.googleRating === null ? null : Number(company.googleRating),
+          reviews: company.googleReviewCount,
+          listingCheckedAt: company.listingCheckedAt,
+        }}
+        agency={agency}
+        talkToAgency={talkToAgency}
+        year={now.getUTCFullYear()}
+        notice={team ? <TeamNote agency={agency} /> : <ViewBeacon token={token} kind="preview" />}
+      />
+      <PreviewMotion />
+    </>
   )
 }

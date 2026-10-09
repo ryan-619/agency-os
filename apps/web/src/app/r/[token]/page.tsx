@@ -78,7 +78,7 @@ export default async function ReportPage({ params }: { params: Promise<{ token: 
     <Frame>
       {team ? <TeamNote agency={agency} /> : <ViewBeacon token={token} kind="report" />}
       <p className="quote-small" style={{ margin: 0 }}>{agency} · prepared {day(report.generatedAt)}</p>
-      <h1 style={{ margin: '4px 0 6px' }}>{business}: your online presence</h1>
+      <h1 style={{ margin: '4px 0 6px' }} data-split>{business}: your online presence</h1>
       <p className="muted" style={{ marginTop: 0 }}>
         A short look at how customers find and reach {business} online{report.company.city ? ` in ${report.company.city}` : ''}.
       </p>
@@ -162,10 +162,10 @@ export default async function ReportPage({ params }: { params: Promise<{ token: 
         <h2>Talk to us</h2>
         <p style={{ marginTop: 0 }}>Reply to the message this link came in, or:</p>
         <div className="report-cta-row">
-          {whatsapp ? <a className="button-like" href={whatsapp} target="_blank" rel="noreferrer noopener">WhatsApp us</a> : null}
-          {profile.phone ? <a className="button-like" href={`tel:${profile.phone}`}>Call {phoneForDisplay(profile.phone)}</a> : null}
-          {booking ? <a className="button-like" href={booking} target="_blank" rel="noreferrer noopener">Book a time</a> : null}
-          {profile.email ? <a className="button-like" href={`mailto:${profile.email}`}>Email us</a> : null}
+          {whatsapp ? <a className="button-like" data-magnetic href={whatsapp} target="_blank" rel="noreferrer noopener">WhatsApp us</a> : null}
+          {profile.phone ? <a className="button-like" data-magnetic href={`tel:${profile.phone}`}>Call {phoneForDisplay(profile.phone)}</a> : null}
+          {booking ? <a className="button-like" data-magnetic href={booking} target="_blank" rel="noreferrer noopener">Book a time</a> : null}
+          {profile.email ? <a className="button-like" data-magnetic href={`mailto:${profile.email}`}>Email us</a> : null}
         </div>
       </section>
 
@@ -179,7 +179,8 @@ export default async function ReportPage({ params }: { params: Promise<{ token: 
 
 function Frame({ children }: { children: React.ReactNode }) {
   return (
-    <div className="auth-wrap">
+    // A long page a client reads: the bar at the top shows how far down it they are (motion-root.tsx).
+    <div className="auth-wrap" data-read-progress>
       <div className="auth buyer report">{children}</div>
     </div>
   )

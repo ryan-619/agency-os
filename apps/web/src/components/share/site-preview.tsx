@@ -73,6 +73,9 @@ export function SitePreview({
       </nav>
 
       <header className="sp-hero">
+        {/* Shapes behind the hero, which drift as the page scrolls (preview-motion.tsx). */}
+        <span className="sp-blob sp-blob-1" aria-hidden="true" />
+        <span className="sp-blob sp-blob-2" aria-hidden="true" />
         <div className="sp-hero-in">
           <div className="sp-kind">{t.kind}{b.city ? ` · ${b.city}` : ''}</div>
           <h1>{b.name}</h1>
@@ -146,18 +149,23 @@ export function SitePreview({
 }
 
 const CSS = `
-.sp { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #1c1c1e; background: #fff; min-height: 100vh; }
+.sp { font-family: var(--font-geist-sans, -apple-system), -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #1c1c1e; background: #fff; min-height: 100vh; overflow-x: clip; }
+.motion-ok .sp:not(.sp-ready) { visibility: hidden; animation: sp-shown-anyway 0s linear 1.2s forwards; }
+@keyframes sp-shown-anyway { to { visibility: visible; } }
 .sp a { color: inherit; }
 .sp-banner { position: sticky; top: 0; z-index: 10; background: #111; color: #fff; font-size: 13px; padding: 8px 16px; display: flex; gap: 10px; justify-content: center; align-items: center; flex-wrap: wrap; text-align: center; }
 .sp-banner a { background: #fff; color: #111 !important; border-radius: 999px; padding: 4px 12px; text-decoration: none; font-weight: 600; }
 .sp-nav { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 20px; max-width: 1040px; margin: 0 auto; }
 .sp-brand { font-weight: 800; font-size: 18px; color: var(--deep); }
-.sp-btn { display: inline-block; border-radius: 999px; padding: 11px 20px; font-weight: 600; text-decoration: none; border: 2px solid var(--deep); white-space: nowrap; }
+.sp-btn { display: inline-block; position: relative; overflow: hidden; isolation: isolate; border-radius: 999px; padding: 11px 20px; font-weight: 600; text-decoration: none; border: 2px solid var(--deep); white-space: nowrap; transition: transform .25s cubic-bezier(.22,1,.36,1), box-shadow .25s cubic-bezier(.22,1,.36,1), background-color .2s; }
+.sp-btn:active { transform: scale(.97); }
 .sp-btn.sp-small { padding: 7px 14px; font-size: 14px; }
 .sp-btn.primary { background: var(--deep); color: #fff !important; }
 .sp-btn.ghost { background: #fff; color: var(--deep) !important; }
 .sp-hero { position: relative; overflow: hidden; background: linear-gradient(135deg, var(--light), #fff 70%); padding: 56px 20px 64px; }
-.sp-hero::after { content: ""; position: absolute; right: -80px; top: -80px; width: 320px; height: 320px; border-radius: 50%; background: var(--deep); opacity: .07; }
+.sp-blob { position: absolute; border-radius: 50%; pointer-events: none; background: var(--deep); }
+.sp-blob-1 { right: -90px; top: -90px; width: 340px; height: 340px; opacity: .08; }
+.sp-blob-2 { left: -140px; bottom: -170px; width: 320px; height: 320px; opacity: .05; }
 .sp-hero-in { position: relative; max-width: 1040px; margin: 0 auto; }
 .sp-kind { text-transform: uppercase; letter-spacing: .12em; font-size: 12px; color: var(--deep); font-weight: 700; }
 .sp-hero h1 { font-size: clamp(32px, 6vw, 56px); line-height: 1.05; margin: 10px 0 12px; color: #111; }
@@ -168,10 +176,14 @@ const CSS = `
 .sp-sec { max-width: 1040px; margin: 0 auto; padding: 48px 20px; }
 .sp-sec h2 { font-size: 26px; margin: 0 0 18px; color: #111; }
 .sp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
-.sp-card { border: 1px solid #ececf0; border-radius: 14px; padding: 18px; background: #fff; color: #1c1c1e; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+.sp-card { border: 1px solid #ececf0; border-radius: 14px; padding: 18px; background: #fff; color: #1c1c1e; box-shadow: 0 1px 2px rgba(0,0,0,.04); transition: transform .3s cubic-bezier(.22,1,.36,1), box-shadow .3s cubic-bezier(.22,1,.36,1); }
+@media (hover: hover) {
+  .sp-btn:hover { transform: translateY(-2px); box-shadow: 0 12px 24px -12px var(--deep); }
+  .sp-card:hover { transform: translateY(-4px); box-shadow: 0 20px 40px -20px rgba(0,0,0,.28); }
+}
 .sp-card b { display: block; font-size: 16px; margin-bottom: 4px; }
 .sp-muted { color: #666; font-size: 14px; }
-.sp-dot { width: 34px; height: 34px; border-radius: 10px; background: var(--light); border: 1px solid var(--deep); margin-bottom: 10px; }
+.sp-dot { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, var(--light), #fff); border: 1px solid var(--deep); margin-bottom: 10px; }
 .sp-band { background: var(--deep); }
 .sp-band h2 { color: #fff; }
 .sp-services { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }

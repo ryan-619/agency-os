@@ -145,6 +145,16 @@ to be removed could still become a "call them in March" task; and one bad
 follow-up run stopped every other, runs waiting on unapproved drafts could
 starve the rest, and a stopped run left its queued follow-up to go out.
 
+**Then the look (2026-10-09), on no migration** (§2, "The look and the
+motion"): the Geist font, a refreshed set of design tokens, a sticky
+sidebar in four groups with an icon per page and a highlight that slides to
+the page you open, pages that move without reloading, and GSAP motion —
+content rising into view as it is scrolled to, numbers counting up, a
+ripple on every button press, a loading bar between pages — plus intros on
+the pages clients open (the website preview, the free check, the audit
+page). None of it moves for a visitor who asked their system for less
+motion.
+
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
 machine"), which needs no public address, because everything but chat is
@@ -1505,6 +1515,61 @@ suggestion and Google drives it; the free check measures nothing on a phone
 (PageSpeed takes up to a minute — the night shift or chat measures it
 later); and a rate in "What's working" is a lower bound wherever a reply
 arrived on a channel the agency cannot read.
+
+### The look and the motion (2026-10-09)
+
+**A design refresh in the stylesheet, and motion only where it is
+welcome.** Type is Geist (`geist` 1.7.2, self-hosted by next/font in the
+root layout, the system face until it loads); `globals.css` gains tokens for
+surfaces, shadows, radii, a focus ring (`--ring`) and two curves
+(`--ease-out`, `--ease-spring`), buttons that lift under a mouse and press
+in (their width and margins unchanged, because a hundred places size from
+them), tinted pills, highlighted table rows and one focus style for every
+field. The sidebar is sticky, in four groups (Work, Sell, Trust, Setup),
+each page with a Lucide icon (`lucide-react` 1.54.0, drawn on the server);
+its links are `next/link` with `prefetch={false}` — moving between pages no
+longer reloads the document, and twenty links in view do not read the
+database for pages nobody opened — and on a phone the menu folds itself
+away after a link is tapped (`NavCloser`). `brand-sub` still names the org
+from `orgs.name` (the sidebar test's pin).
+
+**GSAP 3.15 lives in `components/motion/`, and only in client modules**
+(free under GSAP's standard licence, ScrollTrigger and SplitText included;
+its one restriction is on no-code animation builders competing with
+Webflow). `MotionRoot`, in the root layout: content below the fold rises
+into view as it is scrolled to (`REVEAL_SELECTOR`) — by opacity, so it stays
+focusable, and printed by `.motion-pending` — never content already on
+screen, which gets the stylesheet's entrance instead (`.main > *`, replayed
+per page because `MainFrame` keys `<main>` by the path); a plain number on
+a card counts up from zero to exactly the text rendered (`countPlan` in
+`lib/motion-rules.ts` plans only text it can reproduce, and the counter
+rewrites the text node React keeps, stepping aside if React rewrites it); a
+`data-split` heading rises word by word; a `data-magnetic` button leans
+toward a mouse; every button press ripples; a bar at the top runs from a
+click that loads another page (`startsNavigation`) to its arrival; and a
+client's long document (`data-read-progress`) shows how far down it they
+are. `NavIndicator` slides one highlight from the clicked link to the new
+page's — each page mounts its own sidebar, so the click's position and the
+sidebar's scroll are kept in module state — and while it is not placed, the
+link's own highlight shows. The website preview has an intro of its own
+(`PreviewMotion`: the banner drops, the name rises letter by letter, the
+hero's shapes drift on scroll, the cards arrive as reached), found by class
+so `SitePreview`'s markup and its test stay as they were; and the free check
+page shows what the check reads while it runs (`CHECK_STEPS`), paced by the
+clock, never saying a step has finished or what it found.
+
+**Nothing moves for a visitor who asked for less motion.** Every GSAP
+animation sits inside `gsap.matchMedia().add(MOTION_OK)`, the stylesheet's
+entrances inside `@media (prefers-reduced-motion: no-preference)`, and a
+`reduce` block stops every transition and keyframe. The two things that wait
+hidden for their animation — a `[data-split]` heading and the preview's page
+— are hidden only under `.motion-ok`, a class a `beforeInteractive` script
+sets from the same query before the first paint, and shown anyway after
+1.6 s and 1.2 s if no script runs. `apps/web/test/motion.test.ts` holds the
+rules and these promises. **Stated residuals:** a card's number shows,
+drops to zero and counts back up when the page's script arrives late; and
+in a browser tab that throttles animation frames (a background tab, an
+embedded preview pane) the intros run slowly, which is the tab's choice.
 
 ### The night shift (0025, 2026-10-08)
 
