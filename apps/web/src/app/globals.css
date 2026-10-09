@@ -268,7 +268,8 @@ button {
 }
 button:where(:not(.linkish, .link-like, :disabled)):active { transform: translateY(0) scale(.97); box-shadow: var(--shadow-xs); transition-duration: 80ms; }
 button:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--ring); }
-button:disabled { cursor: not-allowed; }
+/* A button that cannot be pressed looks it — a busy "Saving…" one included — not only the chat bar's and the approval cards'. */
+button:disabled { cursor: not-allowed; opacity: .5; }
 .err { color: var(--warn); font-size: 13px; margin: 0 0 14px; }
 .fine { color: var(--muted); font-size: 12px; margin-top: 18px; line-height: 1.5; }
 
