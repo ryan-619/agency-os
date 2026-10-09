@@ -3,7 +3,10 @@
 import { CircleAlert, CircleCheck, Info, X } from 'lucide-react'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Flip, MOTION_OK, gsap } from '../motion/gsap'
-import { TOAST_MAX_SHOWN, carryToasts, forgetCarriedToasts, onToast, showCarried, takeToastsAfterReload, toastLifeMs, type ToastItem } from './toast'
+import {
+  OFFLINE_WORDS, ONLINE_WORDS, TOAST_MAX_SHOWN, carryToasts, forgetCarriedToasts, onToast, showCarried, takeToastsAfterReload, toast,
+  toastLifeMs, type ToastItem,
+} from './toast'
 
 const ICON = { success: CircleCheck, error: CircleAlert, info: Info } as const
 
@@ -17,7 +20,8 @@ const ICON = { success: CircleCheck, error: CircleAlert, info: Info } as const
  * clock — or when dismissed, and the stack closes up behind it. Hovering or
  * focusing the stack holds every clock, so nothing leaves while being read.
  * A toast still on screen when the page reloads — most forms here reload
- * as soon as they save — is shown again on the page that loads next.
+ * as soon as they save — is shown again on the page that loads next. And
+ * it says when the connection drops and when it is back.
  * The list is a polite live region that exists before any toast, so a
  * screen reader announces each one as it is added. With reduced motion the
  * same toasts appear and leave without moving.
@@ -71,10 +75,17 @@ export function Toaster() {
     }
     window.addEventListener('pagehide', leaving)
     window.addEventListener('pageshow', back)
+    // The connection going and coming back: said once each way, so a form never looks saved while offline.
+    const offline = () => toast.error(OFFLINE_WORDS)
+    const online = () => toast.success(ONLINE_WORDS)
+    window.addEventListener('offline', offline)
+    window.addEventListener('online', online)
     return () => {
       off()
       window.removeEventListener('pagehide', leaving)
       window.removeEventListener('pageshow', back)
+      window.removeEventListener('offline', offline)
+      window.removeEventListener('online', online)
     }
   }, [capture])
 

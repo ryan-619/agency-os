@@ -172,6 +172,12 @@ describe('the toaster keeps its promises', () => {
     expect(src).toMatch(/clock\.pause\(\)/)
   })
 
+  it('says when the connection drops and when it is back', () => {
+    expect(src).toMatch(/window\.addEventListener\('offline', offline\)/)
+    expect(src).toMatch(/window\.addEventListener\('online', online\)/)
+    expect(src).toMatch(/const offline = \(\) => toast\.error\(OFFLINE_WORDS\)/)
+  })
+
   it('shows what a page left before it reloaded, and keeps what is on screen when a page goes away', () => {
     expect(src).toMatch(/for \(const t of takeToastsAfterReload\(\)\) showCarried\(t\)/)
     expect(src).toMatch(/if \(!item\.carried\) capture\(\)/)

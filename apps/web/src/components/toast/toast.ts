@@ -58,6 +58,14 @@ function emit(message: string, tone: ToastTone, carried = false): void {
   for (const l of listeners) l(item)
 }
 
+/**
+ * What the toaster says when the connection drops and comes back
+ * (2026-10-09): on a phone or a laptop that loses its network, a form looks
+ * as if it saved when it never reached the server.
+ */
+export const OFFLINE_WORDS = 'You are offline. Nothing you do here is saved until the connection is back.'
+export const ONLINE_WORDS = 'Back online.'
+
 /** Where toasts wait across a page reload: this tab only, read once and removed. */
 export const TOAST_AFTER_RELOAD_KEY = 'agency-os:toasts-next'
 

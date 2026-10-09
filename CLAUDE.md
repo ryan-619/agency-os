@@ -164,6 +164,9 @@ they were dropped on (GSAP Flip) and ring where they land, a win with a
 burst of colour; pages with nothing on them say what goes there and link
 the first step; and a Light / Dark / Match-this-device switch under each
 person's name, kept in their browser and applied before the first paint.
+Beside them: the app installed on an iPhone signs in by pasting the email's
+link (Safari otherwise takes the session), ⌘K, Ctrl+K or `/` jumps to
+search, and a pop-up says when the connection drops and comes back.
 
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
@@ -1663,6 +1666,29 @@ browser has View Transitions and motion is welcome, the new look opens out
 in a circle from the button. **Stated residuals:** the choice is per
 browser, not per person; and in a tab that throttles animation frames a
 toast's clock runs slowly too, so it waits until it can be read.
+
+**Signing in from the app on a phone.** Installed to an iPhone's home
+screen, the app keeps its own cookies, and the link in the sign-in email
+opens in Safari — signed in there, and not in the app. So `/signin` and
+`/signin/check-email` carry "Signing in from the app on your phone?"
+(`PasteSignInLink`, open from the start where `display-mode: standalone`
+holds): copy the link from the email, paste it, and the app opens it in its
+own window. `signInLinkFrom` (`apps/web/src/lib/signin-link.ts`) opens only
+this app's own magic-link callback — the page's own origin, exactly
+`/api/auth/callback/nodemailer`, a token and an address, no userinfo —
+taking the first URL in a pasted line of the email and the brackets or
+full stop around it off, so the box cannot be talked into opening anything
+else; the link is a bearer credential, read in the browser and handed to
+the browser, never logged or sent anywhere else.
+`apps/web/test/signin-link.test.ts`.
+
+**⌘K, and the connection.** ⌘K or Ctrl+K from anywhere, or `/` where
+nobody is typing (`isSearchShortcut` in `components/search-box.tsx`), jumps
+to the sidebar's search — on a phone it opens the menu first — and the box
+shows the shortcut where a keyboard is likely. The toaster says when the
+browser goes offline (`OFFLINE_WORDS`: nothing done here is saved until the
+connection is back) and when it is back, so a form never looks saved on a
+phone that lost its signal.
 
 ### The night shift (0025, 2026-10-08)
 
