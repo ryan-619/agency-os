@@ -211,6 +211,14 @@ that had any — and a business found on the map again gets fresh ones with
 the reading; until then `/visits` lists it apart and the audit page compares
 it by city, as both do for a company with none.
 
+**Then the three pages nobody designs (2026-10-09), on no migration**:
+`app/error.tsx` (a sentence, the error's digest for a teammate to find in
+the log, Try again — never the error's message, which from the driver
+quotes a query and its bound values), `app/not-found.tsx` (one sentence,
+Dashboard and Companies) and `app/loading.tsx` (the shape of a page, no
+spinner; the shimmer stops under reduced motion). Next 16's `error.tsx`
+takes `retry`, not `reset`.
+
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
 machine"), which needs no public address, because everything but chat is

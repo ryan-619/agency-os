@@ -407,6 +407,18 @@ textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3
   border: 1px solid var(--line); border-radius: 6px; font-size: 12px;
   max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word;
 }
+.page-fallback { max-width: 640px; margin: 10vh auto; padding: 0 16px; }
+.page-fallback code { font-family: var(--mono, ui-monospace, monospace); font-size: 12.5px; }
+.loading-page { max-width: 960px; margin: 28px auto; padding: 0 16px; display: grid; gap: 14px; }
+.loading-bar { height: 14px; border-radius: 7px; background: color-mix(in srgb, var(--ink) 8%, var(--panel)); }
+.loading-title { width: 34%; height: 26px; border-radius: 9px; }
+.loading-lede { width: 70%; }
+.loading-rows { display: grid; gap: 10px; margin-top: 8px; }
+.loading-rows .loading-bar { height: 52px; border-radius: var(--radius); }
+@media (prefers-reduced-motion: no-preference) {
+  .loading-bar { animation: loading-shimmer 1.4s ease-in-out infinite; }
+  @keyframes loading-shimmer { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+}
 .approval-reading { display: grid; gap: 8px; margin-bottom: 10px; }
 .approval-title { font-size: 13.5px; font-weight: 600; }
 .approval-message { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; }
