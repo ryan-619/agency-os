@@ -16,6 +16,7 @@
 import { appendAudit, claimNightShift, nightShiftsDue, type AgencyDb } from '@agency/db'
 import { runNightShift, type OpsScan, type PageSpeedClient, type PlacesClient } from '@agency/tools'
 import type { Logger } from '../logger.js'
+import { faultFields } from '../log-fields.js'
 
 export interface NightShiftDeps {
   readonly db: AgencyDb
@@ -46,7 +47,7 @@ export async function runDueNights(deps: NightShiftDeps): Promise<number> {
       ran++
     } catch (err) {
       const error = err instanceof Error ? err.name : 'UnknownError'
-      deps.log.warn('the night shift failed', { orgId: due.orgId, date: due.localDate, error })
+      deps.log.warn('the night shift failed', { orgId: due.orgId, date: due.localDate, ...faultFields(err) })
       await appendAudit(deps.db, {
         orgId: due.orgId, actor: 'night_shift', action: 'night.failed', subjectType: 'org', subjectId: due.orgId,
         detail: { date: due.localDate, error },
@@ -68,7 +69,7 @@ export function startNightShift(deps: NightShiftDeps): () => void {
       failing = null
     } catch (err) {
       const error = err instanceof Error ? err.name : 'UnknownError'
-      if (error !== failing) deps.log.warn('the night shift check failed', { error })
+      if (error !== failing) deps.log.warn('the night shift check failed', faultFields(err))
       failing = error
     } finally {
       busy = false

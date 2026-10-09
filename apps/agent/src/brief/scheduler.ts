@@ -19,6 +19,7 @@
 import { briefThreadTitle, morningBriefPrompt } from '@agency/core'
 import { appendAudit, briefsDue, claimBrief, createChatSession, type AgencyDb } from '@agency/db'
 import type { Logger } from '../logger.js'
+import { faultFields } from '../log-fields.js'
 
 /** Starts the unattended turn; `finished` settles when the turn has ended. */
 export type BriefStarter = (req: {
@@ -95,7 +96,7 @@ export function startMorningBriefs(deps: MorningBriefDeps): () => void {
       failing = null
     } catch (err) {
       const error = err instanceof Error ? err.name : 'UnknownError'
-      if (error !== failing) deps.log.warn('the morning brief check failed', { error })
+      if (error !== failing) deps.log.warn('the morning brief check failed', faultFields(err))
       failing = error
     } finally {
       busy = false

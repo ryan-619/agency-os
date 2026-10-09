@@ -18,6 +18,7 @@
  */
 import { advanceSequences, type AdvanceResult, type AgencyDb } from '@agency/db'
 import type { Logger } from '../logger.js'
+import { faultFields } from '../log-fields.js'
 
 export const SEQUENCE_INTERVAL_MS = 5 * 60_000
 
@@ -47,7 +48,7 @@ export function startSequences(deps: SequenceDeps): () => void {
       failing = null
     } catch (err) {
       const error = err instanceof Error ? err.name : 'UnknownError'
-      if (error !== failing) deps.log.warn('follow-up sequences could not advance', { error })
+      if (error !== failing) deps.log.warn('follow-up sequences could not advance', faultFields(err))
       failing = error
     } finally {
       busy = false

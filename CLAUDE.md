@@ -226,7 +226,15 @@ network changed under a client idle in the pool, and pg-pool's 'error'
 event had no listener. `watchIdleConnections` (`apps/agent/src/boot/
 pool-errors.ts`) hears it, logs its class and code, and the pool opens a
 new connection when next asked, as the web app's and the voice service's
-pools always did (`apps/agent/test/pool-errors.test.ts`). **The script's own tests run
+pools always did (`apps/agent/test/pool-errors.test.ts`). **And an outage
+reads as one** (2026-10-09): every warning the worker writes about a fault
+it rides out — the sender, the heartbeat, the sweeps, the brief, the night
+shift, the follow-ups — carries the error's class AND its code, read from
+the error or the one it wraps (a Node system code, or a Postgres SQLSTATE),
+plus a hint when the code says the network or the database went away
+(`faultFields` in `apps/agent/src/log-fields.ts`), never the message; a
+five-minute Wi-Fi drop had filled the terminal with bare `"error":"Error"`
+lines. `recent_errors` keeps such a line by its code. **The script's own tests run
 it on ports nothing real uses** (`AGENT_PORT=39401`): it stops any ngrok
 on the worker's API port before opening its own, and one run of
 `run-worker-script.test.ts` on the operator's Mac killed the live

@@ -80,6 +80,7 @@ import {
   type AgencyDb, type MessageProvider, type TouchRow,
 } from '@agency/db'
 import type { Logger } from '../logger.js'
+import { faultFields } from '../log-fields.js'
 
 /**
  * The channels a worker provider exists for: email through the mailbox, SMS
@@ -175,7 +176,7 @@ export async function pauseBouncingCampaigns(
       minSentTo: BOUNCE_PAUSE_MIN_SENT_TO,
     })
   } catch (err) {
-    deps.log.warn('bounce check could not read the rates', { error: err instanceof Error ? err.name : 'UnknownError' })
+    deps.log.warn('bounce check could not read the rates', faultFields(err))
     return 0
   }
 
@@ -248,9 +249,7 @@ async function reportWaiting(
       .orderBy(asc(schema.touches.createdAt))
       .limit(WAITING_REPORT_LIMIT + 1)
   } catch (err) {
-    deps.log.warn('sender could not read the rows waiting for a provider', {
-      error: err instanceof Error ? err.name : 'UnknownError',
-    })
+    deps.log.warn('sender could not read the rows waiting for a provider', faultFields(err))
     return 0
   }
 
@@ -293,9 +292,7 @@ export async function runSenderTick(deps: SenderDeps, memo?: SenderMemo): Promis
   try {
     due = await dueTouches(deps.db, deps.batch, now, [...carried.keys()])
   } catch (err) {
-    deps.log.warn('sender could not read the queue', {
-      error: err instanceof Error ? err.name : 'UnknownError',
-    })
+    deps.log.warn('sender could not read the queue', faultFields(err))
     if (summary.autoPaused > 0) deps.log.info('sender tick', summary)
     return summary
   }

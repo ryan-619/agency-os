@@ -6,7 +6,9 @@
  * What is kept is a KIND, not a line: the message, the level, how many times
  * and when it was first and last seen — and the line's `error` field only
  * when it is an error CLASS (`TypeError`, `DoveSoftHttpError`) or an
- * upper-case CODE (`ENOTFOUND`). Every other field, and any other `error`, is
+ * upper-case CODE (`ENOTFOUND`); where `error` is neither — a network error's
+ * class is plain `Error` — its `code` field, by the same rule (2026-10-09,
+ * `faultFields` in log-fields.ts). Every other field, and any other `error`, is
  * dropped as it arrives, because a field value can carry a touch id, an
  * address, a host or a reason (§2.3) — and what this keeps reaches a model's
  * context. Repeats of one (level, message, error) collapse into one entry
@@ -65,7 +67,7 @@ export function createRecentLog(
       const message = typeof msg === 'string' ? bound(msg) : 'unreadable message'
       let error: string | undefined
       try {
-        error = keptError(fields?.['error'])
+        error = keptError(fields?.['error']) ?? keptError(fields?.['code'])
       } catch {
         error = undefined
       }

@@ -37,6 +37,7 @@ import { inspectSkillsRoot } from './runtime/skills.js'
 import { agencyToolsToOmit } from './mcp/agency.js'
 import { placesClient } from './google/places.js'
 import { pageSpeedClient } from './google/pagespeed.js'
+import { faultFields } from './log-fields.js'
 
 export interface WorkerDeps {
   /** Already validated — `loadEnv()` in `index.ts`, or a test's own. */
@@ -202,9 +203,7 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
     await pool.query('SELECT 1')
     log.info('database reachable')
   } catch (err) {
-    log.error('database unreachable at startup', {
-      error: err instanceof Error ? err.name : 'UnknownError',
-    })
+    log.error('database unreachable at startup', faultFields(err))
   }
 
   lock = await acquireWorkerLock({ connectionString: env.DATABASE_URL, log })

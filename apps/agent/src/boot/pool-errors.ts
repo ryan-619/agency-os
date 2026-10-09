@@ -1,5 +1,6 @@
 import type { Pool } from 'pg'
 import type { Logger } from '../logger.js'
+import { faultFields } from '../log-fields.js'
 
 /**
  * Hear the pool's own 'error' event, so a dropped idle connection is a log
@@ -19,10 +20,6 @@ import type { Logger } from '../logger.js'
  */
 export function watchIdleConnections(pool: Pool, log: Logger): void {
   pool.on('error', (err: Error) => {
-    const code = (err as { code?: unknown }).code
-    log.warn('an idle database connection dropped; the pool opens a new one when it is next needed', {
-      error: err.name,
-      ...(typeof code === 'string' && /^[A-Za-z0-9_]{1,40}$/.test(code) ? { code } : {}),
-    })
+    log.warn('an idle database connection dropped; the pool opens a new one when it is next needed', faultFields(err))
   })
 }

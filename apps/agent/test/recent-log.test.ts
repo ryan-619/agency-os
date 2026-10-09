@@ -191,3 +191,17 @@ describe('recordingLogger', () => {
     expect(calls).toEqual([['error', 'agency tool threw', { error: 'TypeError' }]])
   })
 })
+
+describe('a fault whose class is plain Error', () => {
+  it('is kept by its code, the faultFields shape', () => {
+    const ring = createRecentLog()
+    ring.record('warn', 'sender could not read the queue', { error: 'Error', code: 'ETIMEDOUT', hint: 'the network…' })
+    ring.record('warn', 'sender could not read the queue', { error: 'Error', code: 'ETIMEDOUT' })
+    ring.record('warn', 'sender could not read the queue', { error: 'Error', code: '57P01' })
+    const kinds = ring.entries()
+    expect(kinds.map((k) => [k.error ?? null, k.count])).toEqual([
+      [null, 1],
+      ['ETIMEDOUT', 2],
+    ])
+  })
+})

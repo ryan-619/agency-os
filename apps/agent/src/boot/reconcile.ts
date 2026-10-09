@@ -40,6 +40,7 @@ import {
   type AgencyDb, type InterruptedTurn,
 } from '@agency/db'
 import type { Logger } from '../logger.js'
+import { faultFields } from '../log-fields.js'
 
 export interface ReconcileReport {
   readonly interruptedTurns: readonly InterruptedTurn[]
@@ -199,7 +200,7 @@ export async function sweepExpired(db: AgencyDb, log: Logger): Promise<number> {
     if (expired.length > 0) log.info('expired lapsed approvals', { count: expired.length })
     return expired.length
   } catch (err) {
-    log.warn('approval sweep failed', { error: err instanceof Error ? err.name : 'UnknownError' })
+    log.warn('approval sweep failed', faultFields(err))
     return 0
   }
 }
@@ -259,7 +260,7 @@ export async function recoverStuckSends(db: AgencyDb, bootAt: Date, log: Logger)
       return stuck.length
     })
   } catch (err) {
-    log.warn('could not recover stuck sends', { error: err instanceof Error ? err.name : 'UnknownError' })
+    log.warn('could not recover stuck sends', faultFields(err))
     return 0
   }
 }

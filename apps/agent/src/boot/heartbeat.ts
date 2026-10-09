@@ -22,6 +22,7 @@
 import { writeHeartbeat, type AgencyDb } from '@agency/db'
 import type { HealthInputs } from '../health.js'
 import type { Logger } from '../logger.js'
+import { faultFields } from '../log-fields.js'
 
 /** What one heartbeat row says about the worker, read fresh at every write. */
 export interface HeartbeatInputs {
@@ -115,7 +116,7 @@ export function startHeartbeat(deps: HeartbeatDeps): () => Promise<void> {
       if (failing !== name) {
         deps.log.warn('heartbeat not written; the worker carries on', {
           workerId: deps.workerId,
-          error: name,
+          ...faultFields(err),
         })
         failing = name
       }

@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { Pool } from 'pg'
 import { watchIdleConnections } from '../src/boot/pool-errors.js'
+import { NETWORK_HINT } from '../src/log-fields.js'
 import type { Logger } from '../src/logger.js'
 
 function captureLog(): { log: Logger; lines: Record<string, unknown>[] } {
@@ -34,7 +35,7 @@ describe('watchIdleConnections', () => {
     await bare.end()
   })
 
-  it('logs the dropped connection by class and code, and throws nothing', async () => {
+  it('logs the dropped connection by class and code, says it was the network, and throws nothing', async () => {
     const watched = pool()
     const { log, lines } = captureLog()
     watchIdleConnections(watched, log)
@@ -45,6 +46,7 @@ describe('watchIdleConnections', () => {
         msg: 'an idle database connection dropped; the pool opens a new one when it is next needed',
         error: 'Error',
         code: 'EADDRNOTAVAIL',
+        hint: NETWORK_HINT,
       },
     ])
     await watched.end()
