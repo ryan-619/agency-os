@@ -107,7 +107,7 @@ describe('leadDataFor', () => {
    * flag mean anything.
    */
   it('treats everything about a prospect as lead data', () => {
-    const tasks: LlmTask[] = ['summarise_call', 'classify_reply', 'draft_outreach', 'summarise_findings']
+    const tasks: LlmTask[] = ['summarise_call', 'classify_reply', 'draft_outreach', 'draft_reply', 'summarise_findings']
     for (const t of tasks) expect(leadDataFor(t)).toBe(true)
     expect(leadDataFor('polish_copy')).toBe(false)
   })

@@ -1134,6 +1134,31 @@ export const sequenceRuns = pgTable(
 // The night shift (0025)
 // ---------------------------------------------------------------------------
 
+/**
+ * A suggested answer to an email reply (0026): the model's words, waiting on
+ * /inbox for a person to read, change and send through the answer path.
+ * Never a message — nothing reads it but the inbox. One per reply; a reply
+ * the readers refuse is recorded `skipped` with why, and never asked again.
+ */
+export const replySuggestions = pgTable(
+  'reply_suggestions',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    /** Same-org composite FK to touches (id, org_id), CASCADE — owned by 0026. */
+    touchId: uuid('touch_id').notNull(),
+    /** 'drafted' | 'skipped' */
+    status: text('status').notNull(),
+    body: text('body'),
+    model: text('model'),
+    skippedWhy: text('skipped_why'),
+    usedAt: timestamp('used_at', { withTimezone: true }),
+    dismissedAt: timestamp('dismissed_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex('reply_suggestions_one_per_reply').on(t.touchId)],
+)
+
 /** One row per org: whether the night shift runs, when in which zone, and the night it last ran. */
 export const nightShifts = pgTable('night_shifts', {
   id: id(),

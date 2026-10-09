@@ -69,6 +69,7 @@ import { appendAudit } from './approvals.js'
 import { looksLikeOptOut, pauseContact, replyIsFromTheContact, resumeContact, type TouchRow } from './outreach.js'
 import { previewSend } from './send-preview.js'
 import { heldForUnrecordedSharedNumber, isSharedNumberOptOutPause } from './sms.js'
+import { replySuggestionsFor, type ReplySuggestionView } from './suggestions.js'
 
 /** A group on the inbox: a stored kind, or the rows nobody has classified. */
 export type InboxKindFilter = ReplyKind | 'unclassified'
@@ -166,6 +167,12 @@ export interface InboxRow {
   readonly handledBy: { readonly id: string; readonly email: string; readonly name: string | null } | null
   /** The most recent outbound draft answering this reply, and where it got to. */
   readonly answered: { readonly touchId: string; readonly status: string } | null
+  /**
+   * The model's suggested answer, waiting for a person (0026): drafted and
+   * not dismissed. Never a message — the composer starts from it, and the
+   * answer then goes the way every answer goes. Null for a reply with none.
+   */
+  readonly suggestion: ReplySuggestionView | null
 }
 
 /**
@@ -277,6 +284,7 @@ export async function inboxTouches(
       answered.set(a.answersTouchId, { touchId: a.id, status: a.status })
     }
   }
+  const suggestions = await replySuggestionsFor(db, orgId, ids)
 
   // The suppression lookup, over the SAME keys the send path uses
   // (`suppressionKeysFor`: an email is suppressed by address and by domain),
@@ -326,6 +334,7 @@ export async function inboxTouches(
     fromIsContact: fromIsContact.get(r.touch.id) ?? true,
     handledBy: r.handler,
     answered: answered.get(r.touch.id) ?? null,
+    suggestion: suggestions.get(r.touch.id) ?? null,
   }))
 }
 

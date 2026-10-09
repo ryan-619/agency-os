@@ -95,6 +95,9 @@ export default async function InboxPage({
           ? { by: r.handledBy.name ?? r.handledBy.email, at: r.touch.handledAt.toISOString() }
           : null,
       answered: r.answered,
+      suggestion: r.suggestion
+        ? { id: r.suggestion.id, body: r.suggestion.body, model: r.suggestion.model, createdAt: r.suggestion.createdAt.toISOString() }
+        : null,
     }
   })
 

@@ -732,6 +732,15 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   },
   'reply.answer_drafted': (c) =>
     `drafted an answer to a reply from a contact at ${c.co}; it waits for approval and nothing was sent`,
+  // --- a suggested answer (0026): never a message, never sent --------------
+  'reply.suggested': (c) => {
+    const chars = num(c.d, 'chars')
+    const model = word(c.d, 'model')
+    return `suggested an answer to a reply from a contact at ${c.co}${chars !== null ? ` (${chars} characters` : ''}${model ? `${chars !== null ? ', ' : ' ('}${model}` : ''}${chars !== null || model ? ')' : ''}; it waits on /inbox for a person, and nothing was sent`
+  },
+  'reply.suggestion_dismissed': (c) => `put away the suggested answer to a reply from a contact at ${c.co}`,
+  'reply.suggestion_used': (c) =>
+    `drafted an answer to a reply from a contact at ${c.co} starting from the suggested one; the draft waits for approval`,
 
   // --- LinkedIn: the provider is a person ----------------------------------
   // Written with the person as actor; the words are never in the row.

@@ -8,9 +8,10 @@ import { optedOutNote, optedOutWarning, type OptedOutRow } from '@/components/in
 import { answerComposerNote, colleagueHeadline, resumedLine, type ReplySender } from '@/components/inbox/sender'
 import { SharedNumberHolderNote } from '@/components/shared-number-note'
 import {
-  ANSWER_BODY_MAX, ANSWER_SUBJECT_MAX, HUMAN_REPLY_KINDS, INBOX_GROUP_LABELS, RECLASSIFY_HINT, answerIsLive,
-  answerStateWords, answerSubject, type InboxGroup,
+  ANSWER_BODY_MAX, ANSWER_SUBJECT_MAX, HUMAN_REPLY_KINDS, INBOX_GROUP_LABELS, RECLASSIFY_HINT, SUGGESTION_LABEL, SUGGESTION_NOTE,
+  answerIsLive, answerStateWords, answerSubject, type InboxGroup,
 } from '@/lib/inbox-view'
+import { Sparkles } from 'lucide-react'
 import { SHARED_NUMBER_LABEL, isSharedNumberOptOutPause } from '@/lib/shared-number-pause'
 import { toast } from '../toast/toast'
 
@@ -84,6 +85,12 @@ export interface InboxRowView {
   readonly fromIsContact: boolean
   readonly handled: { readonly by: string; readonly at: string } | null
   readonly answered: { readonly touchId: string; readonly status: string } | null
+  /**
+   * The assistant's suggested answer (0026), waiting for a person: shown
+   * whole, with "Answer with this" to start the composer from it and
+   * "Dismiss" to put it away. Never sent as it is.
+   */
+  readonly suggestion: { readonly id: string; readonly body: string; readonly model: string; readonly createdAt: string } | null
 }
 
 export interface InboxCampaignChoice {
@@ -150,6 +157,8 @@ export function InboxQueue({
   const [drafted, setDrafted] = useState<Record<string, Drafted>>({})
   const [open, setOpen] = useState<string | null>(null)
   const [form, setForm] = useState<Record<string, { subject: string; body: string; campaignId: string }>>({})
+  /** Which suggestion a row's composer started from, so the answer says so; edits keep it — the person changed it, still used it. */
+  const [fromSuggestion, setFromSuggestion] = useState<Record<string, string>>({})
 
   const fail = (id: string, message: string) => setErrors((e) => ({ ...e, [id]: message }))
 
@@ -213,12 +222,28 @@ export function InboxQueue({
   const edit = (row: InboxRowView, patch: Partial<{ subject: string; body: string; campaignId: string }>) =>
     setForm((f) => ({ ...f, [row.id]: { ...formFor(row), ...f[row.id], ...patch } }))
 
+  /** Open the composer with the suggestion's words in it. The subject and campaign are the composer's own defaults. */
+  const answerWith = (row: InboxRowView) => {
+    if (!row.suggestion) return
+    edit(row, { body: row.suggestion.body })
+    setFromSuggestion((m) => ({ ...m, [row.id]: row.suggestion!.id }))
+    setOpen(row.id)
+  }
+
+  const dismissSuggestion = async (row: InboxRowView) => {
+    if (await send(row.id, `/api/inbox/${row.id}/suggestion`, 'POST', { action: 'dismiss' })) {
+      toast.info('Put away.')
+      router.refresh()
+    }
+  }
+
   const answer = async (row: InboxRowView) => {
     const f = formFor(row)
     const b = await send(row.id, `/api/inbox/${row.id}/reply`, 'POST', {
       subject: f.subject,
       body: f.body,
       campaignId: f.campaignId || null,
+      suggestionId: fromSuggestion[row.id] ?? null,
     })
     if (!b) return
     const lines: string[] = [typeof b.note === 'string' ? b.note : DRAFTED_WORDS]
@@ -337,6 +362,28 @@ export function InboxQueue({
                         {done.lines.map((l) => (
                           <div key={l}>{l}</div>
                         ))}
+                      </div>
+                    ) : null}
+
+                    {row.suggestion && canAnswer && row.contact && !optedOut && !row.suppressed && !live && !done && open !== row.id ? (
+                      <div className="suggested" data-reveal>
+                        <div className="suggested-head">
+                          <Sparkles aria-hidden="true" />
+                          <strong>{SUGGESTION_LABEL}</strong>
+                          <span className="muted" title={row.suggestion.model}>
+                            written <When iso={row.suggestion.createdAt} />
+                          </span>
+                        </div>
+                        <pre className="touch-body suggested-body">{row.suggestion.body}</pre>
+                        <p className="hint">{SUGGESTION_NOTE}</p>
+                        <div className="inbox-actions">
+                          <button type="button" disabled={busy === row.id} onClick={() => answerWith(row)}>
+                            Answer with this
+                          </button>
+                          <button type="button" className="linkish" disabled={busy === row.id} onClick={() => void dismissSuggestion(row)}>
+                            Dismiss
+                          </button>
+                        </div>
                       </div>
                     ) : null}
 

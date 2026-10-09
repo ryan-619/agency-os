@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { z } from 'zod'
 import { assertCan } from '@agency/core'
-import { replyQueueDraft, type AgencyDb } from '@agency/db/queries'
+import { replyQueueDraft, replySuggestionMarkUsed, type AgencyDb } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
 import { deployment, nothingWillSendNote } from '@/lib/deployment'
@@ -76,6 +76,14 @@ export async function POST(
     }
     const error = r.reason === 'opted_out' ? ANSWER_OPTED_OUT_ERROR : r.message
     return NextResponse.json({ error, reason: r.reason }, { status: ANSWER_REFUSAL_STATUS[r.reason] })
+  }
+
+  // The suggestion the composer started from, if any: marked used, best-effort.
+  // An answer is an answer whether or not this lands.
+  if (parsed.data.suggestionId) {
+    await replySuggestionMarkUsed(db, {
+      orgId: user.orgId, touchId: id, suggestionId: parsed.data.suggestionId, answerTouchId: r.touchId, actor: user.id,
+    }).catch(() => {})
   }
 
   return NextResponse.json(

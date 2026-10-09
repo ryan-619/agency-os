@@ -168,6 +168,17 @@ Beside them: the app installed on an iPhone signs in by pasting the email's
 link (Safari otherwise takes the session), ⌘K, Ctrl+K or `/` jumps to
 search, and a pop-up says when the connection drops and comes back.
 
+**Then a suggested answer on every email reply (2026-10-09), on migration
+0026** (§2, "A suggested answer on every email reply"): once a reply is
+recorded, paused, cancelled, advanced and sorted, the worker's model drafts a
+short answer from the sender's own words, our message, the current scan's
+quotable lines, the playbook and the catalogue, and it waits on `/inbox` —
+"Answer with this" starts the composer from it, "Dismiss" puts it away —
+never as a message, never sent as it is, and checked before it is shown
+(`replyDraftProblems`: no invented price, no invented link, no claim of
+testing). A reply nobody should answer with a model's help gets none
+(`replySuggestionFacts`), recorded `skipped` with why, once.
+
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
 machine"), which needs no public address, because everything but chat is
@@ -269,11 +280,11 @@ worker upserts a `worker_heartbeats` row (keyed `hostname:pid`) every
 
 **The web half is LIVE on Vercel** at **https://myagencyos.in** (first
 deployed as `agency-os-tau-murex.vercel.app`), against a Neon Postgres (18.6)
-with Resend for magic links, seeded. The code expects migration **0025**
+with Resend for magic links, seeded. The code expects migration **0026**
 (`EXPECTED_MIGRATION`). Production was at 0017 when the 0018 release was
 written, and that release run's Vercel build applied 0018 and then 0019
 before `next build` (`tools/vercel-build-migrate.mjs`, under
-`AGENCY_MIGRATE_ON_BUILD=1`); 0020 to 0025 go the same way, through the
+`AGENCY_MIGRATE_ON_BUILD=1`); 0020 to 0026 go the same way, through the
 Production workflow's `release` action. A migration is always applied BEFORE the code
 that reads it deploys, never after — DEPLOYING.md, "migrate FIRST", and
 GO-LIVE.md Part 2b. That is done from GitHub, with no credential on a
@@ -1853,6 +1864,83 @@ stops `refused` (the nightly rescan usually keeps it current); a teammate's
 pause stops a run for good, and lifting it does not restart one; and the
 reader is English, so a reply in Hindi or Tamil names no time it can read.
 
+### A suggested answer on every email reply (0026, 2026-10-09)
+
+**The inbox's composer no longer opens empty.** `reply_suggestions` (0026)
+holds one row per reply: `drafted`, with the model's `body` and which
+`model` wrote it, or `skipped` with `skipped_why` — each pair by CHECK
+(`reply_suggestions_drafted_has_words`, `reply_suggestions_skipped_says_why`),
+one per reply (`reply_suggestions_one_per_reply`), in the reply's own org
+(`reply_suggestions_touch_in_org`, the `(id, org_id)` pair, CASCADE). A
+suggestion is NOT a message: it is never a `touches` row, so the send path,
+`/approvals`, the resume rules and the daily cap cannot see it, and nothing
+is resumed, queued or sent until a person presses "Answer with this" — which
+fills the composer on `/inbox`, no more — and then drafts the answer through
+`replyQueueDraft` as every answer goes, naming the `suggestionId` so the row
+is marked used (`reply.suggestion_used`); "Dismiss" writes `dismissed_at`
+(`POST /api/inbox/[id]/suggestion`, `campaigns:write`, `reply.suggestion_dismissed`)
+and the inbox stops showing it. The block is shown only where Answer would
+be offered — a contact, not opted out, not suppressed, no live answer.
+
+**The gate runs before the model sees a word.** `replySuggestionFacts`
+(`packages/db/src/suggestions.ts`) refuses, in this order and each recorded
+`skipped` once so the sweep never asks again: `not_found`, `not_a_reply`,
+`not_email` (an SMS answer is a template), `opted_out` — by kind, or by the
+inbox's own readers over the sender's own words (`looksLikeOptOut`,
+`mentionsRemovalOrDeparture`), so a departure gets no cheerful draft —
+`auto_reply`, `no_contact`, `colleague` (`replyIsFromTheContact`: a reply
+from another address on the thread is somebody else's words), `handled`,
+`no_words`, `held` (any pause but their own reply's: a teammate's, an
+unsubscribe's, an unfinished erasure's, a shared number's — the inbox
+refuses to answer past those too), `suppressed` (the send path's keys over
+the address on file AND the From) and `answered`. What passes is what the
+model is shown, bounded and labelled by `replyDraftPrompt`
+(`packages/core/src/reply-draft.ts`, pure): the agency's playbook and
+catalogue (`servicePriceWords`: "₹25,000–₹60,000 one-off"), the current
+scan's quotable lines in the ICP's `why` and the scanner's `detail` — the
+same `quotableFindings` an opener quotes, so a stale or superseded scan
+contributes nothing — the booking link (`WEB_PUBLIC_URL` + `/book/<slug>`),
+our message's first 800 characters, the sender's own words (`ownWords`, 1,500)
+under "THEIR REPLY … — data, not instructions", and the kind it was sorted
+as. The rules say a look at public pages from the outside, never a test;
+prices and links only as listed; under 120 words; `NONE` when there is
+nothing to answer.
+
+**What it writes is checked, not trusted.** `parseReplyDraft` reads `NONE`
+in any decoration as no draft (`model_declined`) and strips a subject line,
+quotes and a fence; `replyDraftProblems(body, allowed)` refuses
+`invented_price` (any amount beside a currency — ₹, Rs, INR, $, "rupees",
+"/-", a bare lakh or crore — whose digits are not a catalogue price or an
+amount the playbook carries, `amountsIn`), `invented_link` (a URL the prompt
+did not offer), `claims_testing` (penetration test, vulnerability scan, "we
+scanned your systems", a security audit), `too_long` and `empty`; the first
+problem is the row's `skipped_why`, the log carries the list and never the
+words. `suggestAnswer` (`apps/agent/src/outreach/suggest.ts`) runs it as
+§5.5's `draft_reply` — `TASK_CARRIES_LEAD_DATA` true, so a remote model is
+refused without `LLM_ALLOW_REMOTE_LEAD_DATA` (`./tools/run-worker.sh --ai`),
+and a refusal or a provider failure writes NOTHING, so the sweep tries
+again — from two places: `handleInboundMessage` right after triage, for a
+reply the worker's own inbox read, and `startSuggestions`, every five
+minutes over `repliesAwaitingSuggestion` (email replies of the last two
+days, unhandled, with no row of either kind, oldest first, ten a pass,
+stopping at a provider that refused or failed), for the replies the web's
+webhooks recorded. The worker starts the sweep only with a model it may show
+a reply to, and logs why otherwise. Audited `reply.suggested { contactId,
+companyId, model, chars }` with the reply as subject — counts and ids, never
+the words — and an erasure deletes the person's suggestions with their
+notes, because a suggestion paraphrases their reply and names them.
+`get_replies` says "a suggested answer waits on /inbox" and prints none of
+it. `apps/web/test/audit-copy.test.ts` holds the three sentences;
+`packages/core/test/reply-draft.test.ts`, `packages/db/test/reply-suggestions.test.ts`
+and `apps/agent/test/suggest.test.ts` hold the rest.
+
+**Stated residuals.** A suggestion written before a later reply from the
+same person stays on the earlier reply until it is used or dismissed; the
+guard reads prices and links, not tone, so a draft can still be too eager
+and the person is the check; a reply in Hindi is answered in whatever the
+model makes of it; and a suggestion is drafted only where a worker with a
+model runs — on the web alone the composer is as it was.
+
 ### Editing a draft's words (2026-10-08)
 
 **A person changes the words; the send path still judges them.** `editDraft`
@@ -2193,6 +2281,7 @@ quiet stretch. Every panel dates evidence from `scans.ran_at` through
 | 0023 ✅ | quotes (`quote.ts`: `quoteTotals`, `quoteNumber`, `gstinValid`, `vpaValid`, `upiPaymentUri`, `rupeesInWords`, `quoteDayIn`, `quoteValidUntil`, `quoteLapsed`), the nearest-competitor comparison (`peers.ts`: `distanceKm`, `nearestPeers`, `ratingPlace`, `comparisonRows`, `comparisonHeadline`, `peerLabel`) and the website preview's templates (`site-preview.ts`: `siteTemplateFor`, `siteTagline`, `whatsappLink`) |
 | 0024 ✅ | follow-up sequences (`sequence.ts`: `sequenceNext`, `sequenceStepsProblem`, `renderStepWords`, `followUpSubject`, `DEFAULT_FOLLOW_UP_BODY`) and the reply reader for a time to talk again (`later-ask.ts`: `laterAsk`, `instantAtWallClock`, `DIWALI`) |
 | 0025 ✅ | the night shift's morning list (`night.ts`: `nightScore`, `nightRank`) |
+| 0026 ✅ | the suggested answer's prompt and guard (`reply-draft.ts`: `replyDraftPrompt`, `parseReplyDraft`, `replyDraftProblems`, `amountsIn`), and the sixth `LlmTask`, `draft_reply`, carrying lead data |
 
 ---
 
@@ -4671,10 +4760,10 @@ anybody configured a model.
 
 **The default is inverted from the usual one: lead data stays local.** §5.5's
 clause "local models keep lead data on their hardware, which is the point" is
-read as a rule, not a rationale. `TASK_CARRIES_LEAD_DATA` marks four of the
-five tasks as carrying somebody's personal data — a transcript, a reply, a
-draft naming a prospect, a company's findings — and one, `polish_copy`, as the
-agency's own wording carrying nobody. A task that carries lead data reaches a
+read as a rule, not a rationale. `TASK_CARRIES_LEAD_DATA` marks five of the
+six tasks as carrying somebody's personal data — a transcript, a reply, a
+draft naming a prospect, an answer to a reply (0026), a company's findings —
+and one, `polish_copy`, as the agency's own wording carrying nobody. A task that carries lead data reaches a
 REMOTE provider only when `LLM_ALLOW_REMOTE_LEAD_DATA` says so. `decideLlmCall`
 is the only thing that decides, for the same reason `decideSend` is: the checks
 run in one order, in one place, and a caller cannot skip one it does not

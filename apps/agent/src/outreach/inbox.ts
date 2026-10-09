@@ -65,6 +65,7 @@ import {
 } from '@agency/db'
 import { MAIL_SIGNAL_HEADERS, MAIL_SIGNAL_LIMITS, htmlToText, type LlmProvider } from '@agency/core'
 import { refineReplyKind } from './classify.js'
+import { suggestAnswer } from './suggest.js'
 import type { Logger } from '../logger.js'
 import { imapLoginFrom } from './mail-login.js'
 import { optOutAlarmFromEnvironment, optOutNotRecordedEvent, type OptOutAlarm } from '../notify.js'
@@ -88,6 +89,11 @@ export interface InboxDeps {
    */
   readonly llm?: LlmProvider | null
   readonly allowRemoteForLeadData?: boolean
+  /**
+   * The web app's origin (`WEB_PUBLIC_URL`), for the booking link a suggested
+   * answer may offer (0026). Null or absent offers none.
+   */
+  readonly webOrigin?: string | null
   /** For tests. Defaults to the wall clock. */
   readonly now?: () => Date
   /**
@@ -538,6 +544,26 @@ export async function handleInboundMessage(
         error: err instanceof Error ? err.name : 'UnknownError',
       })
     })
+    // A suggested answer (0026), after the kind is settled — the gate in
+    // front of it reads the kind. A reply that was recorded already has
+    // its row or its skip; a failure here costs a suggestion and nothing else.
+    if (!outcome.duplicate) {
+      await suggestAnswer(
+        {
+          db: deps.db,
+          log: deps.log,
+          llm: deps.llm,
+          allowRemoteForLeadData: deps.allowRemoteForLeadData ?? false,
+          webOrigin: deps.webOrigin ?? null,
+          ...(deps.now ? { now: deps.now } : {}),
+        },
+        { orgId: outcome.orgId, touchId: outcome.touchId },
+      ).catch((err: unknown) => {
+        deps.log.warn('suggesting an answer failed; the reply stands as recorded', {
+          error: err instanceof Error ? err.name : 'UnknownError',
+        })
+      })
+    }
   }
   return outcome
 }

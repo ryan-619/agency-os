@@ -681,6 +681,12 @@ export async function erasureErase(
       // (4) Notes about them, and tasks hanging off their messages. Notes
       // would cascade with the contact; deleted here so they can be counted.
       const touchIds = touches.map((t) => t.id)
+      // A suggested answer (0026) paraphrases their reply and is about them
+      // by name; it hangs off the message, which SET NULL keeps, so it is
+      // deleted here rather than left behind the placeholder.
+      if (touchIds.length) {
+        await tx.delete(schema.replySuggestions).where(inArray(schema.replySuggestions.touchId, touchIds))
+      }
       const tasks = touchIds.length
         ? await tx
             .delete(schema.tasks)

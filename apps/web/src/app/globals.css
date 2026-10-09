@@ -194,6 +194,15 @@ h2 { font-size: 15.5px; font-weight: 650; margin: 34px 0 12px; letter-spacing: -
   border-radius: var(--radius); padding: 13px 16px; font-size: 13.5px; color: var(--muted);
 }
 .note strong { color: var(--ink); font-weight: 600; }
+.suggested {
+  margin-top: 10px; padding: 12px 14px; border-radius: var(--radius);
+  border: 1px dashed color-mix(in srgb, var(--accent-2) 45%, var(--line));
+  background: color-mix(in srgb, var(--accent-2) 5%, var(--panel));
+}
+.suggested-head { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.suggested-head svg { width: 15px; height: 15px; color: var(--accent-2); }
+.suggested-body { margin: 8px 0 6px; max-height: none; background: transparent; border: 0; padding: 0; }
+.suggested .hint { margin: 0 0 8px; }
 .note ul { margin: 8px 0 0; padding-left: 18px; }
 .note li { margin: 3px 0; }
 

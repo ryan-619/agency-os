@@ -184,6 +184,9 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'reply.handled': { contactId: SUBJECT, replyKind: 'interested' },
   'reply.reclassified': { from: 'auto_reply', to: 'interested', paused: true, cancelledQueued: 1 },
   'reply.answer_drafted': { inboundTouchId: SUBJECT, touchId: SUBJECT, campaignId: SUBJECT, channel: 'email', resumed: true },
+  'reply.suggested': { contactId: SUBJECT, companyId: SUBJECT, model: 'anthropic/claude-haiku-4-5', chars: 412 },
+  'reply.suggestion_dismissed': { suggestionId: SUBJECT },
+  'reply.suggestion_used': { suggestionId: SUBJECT, answerTouchId: SUBJECT },
   // `authorUserId` is written only when the writer is not the author — the
   // agent's add_note, with actor `agent`.
   'note.added': { companyId: SUBJECT, noteId: SUBJECT, contactId: SUBJECT, authorUserId: ORG_USER },

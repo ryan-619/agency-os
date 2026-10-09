@@ -28,6 +28,7 @@ import { watchSmtpLogin, type MailLogin } from './outreach/mail-login.js'
 import { refineDraft } from './outreach/draft.js'
 import { startMorningBriefs } from './brief/scheduler.js'
 import { startSequences } from './sequences/scheduler.js'
+import { startSuggestions } from './outreach/suggest.js'
 import { startNightShift } from './night/scheduler.js'
 import { createAgentHttpServer, type StartTurnRequest, type TurnHandle } from './http/server.js'
 import { createDeferredEmitter, startTurn } from './chat/turn.js'
@@ -347,6 +348,8 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
    * DoveSoft for SMS (0019), whichever are configured. It runs when either
    * is, and leaves rows on the other channel exactly where they are.
    */
+  // Only the origin: a path or query in the variable is never part of a link.
+  const webOrigin = env.WEB_PUBLIC_URL ? new URL(env.WEB_PUBLIC_URL).origin : null
   const stops: Array<() => Promise<void>> = []
   const smtpProvider = senders.providers.find((p) => p.name === 'smtp')
   if (smtpProvider && env.SMTP_HOST) {
@@ -382,6 +385,7 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
         log,
         llm: triage,
         allowRemoteForLeadData: env.LLM_ALLOW_REMOTE_LEAD_DATA,
+        webOrigin,
         config: {
           host: env.IMAP_HOST,
           port: env.IMAP_PORT,
@@ -446,6 +450,23 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
    */
   const stopSequences = startSequences({ db, log, now: () => new Date() })
   stops.push(async () => stopSequences())
+  /**
+   * Suggested answers (0026): every five minutes, a short draft for each
+   * recent email reply with none — the ones the web's webhooks recorded, or
+   * that arrived while the model was away. Needs the triage model, and one
+   * that may read a reply: a remote model with lead data off would refuse
+   * every one, so no sweep starts then (the log says why).
+   */
+  if (triage && (triage.local || env.LLM_ALLOW_REMOTE_LEAD_DATA)) {
+    const stopSuggestions = startSuggestions({
+      db, log, llm: triage, allowRemoteForLeadData: env.LLM_ALLOW_REMOTE_LEAD_DATA, webOrigin, now: () => new Date(),
+    })
+    stops.push(async () => stopSuggestions())
+  } else if (triage) {
+    log.info('suggested answers: off — the model is remote and LLM_ALLOW_REMOTE_LEAD_DATA is not set (./tools/run-worker.sh --ai)')
+  } else {
+    log.info('suggested answers: off on this worker — no model (./tools/run-worker.sh --ai)')
+  }
   /**
    * The night shift (0025): once a night per org that switched it on, its saved
    * Google Maps searches, the new businesses filed, scanned and measured, and a
