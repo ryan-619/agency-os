@@ -1,7 +1,7 @@
 import { redirect } from 'next/navigation'
-import { STAGE_ROT_DAYS, can, dealIsOverdue, rottingState, untouchedLabel } from '@agency/core'
+import { STAGE_ROT_DAYS, can, dealHealth, dealIsOverdue, rottingState, untouchedLabel } from '@agency/core'
 import { eq } from 'drizzle-orm'
-import { dealsDue, listDealsForBoard, listProposals, schema, upcomingMeetings, type AgencyDb } from '@agency/db/queries'
+import { dealHealthFacts, dealsDue, listDealsForBoard, listProposals, schema, upcomingMeetings, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { PipelineBoard, type DealCard, type Stage } from '@/components/pipeline/board'
@@ -56,12 +56,27 @@ export default async function PipelinePage() {
     listProposals(db, user.orgId, 50),
   ])
 
+  // Why each open card needs a look (2026-10-09): the facts for the whole board, keyed by company.
+  const health = await dealHealthFacts(db, {
+    orgId: user.orgId, now, companyIds: deals.filter((d) => !d.closedAt).map((d) => d.companyId),
+  }).catch(() => new Map())
   const cards: DealCard[] = deals
     .filter((d) => !d.closedAt || d.closedAt.getTime() >= cutoff.getTime())
     .map((d) => {
       const lastChanged = d.updatedAt ?? d.createdAt
       const rot = d.closedAt ? null : rottingState(d.stage, lastChanged, now)
+      const facts = health.get(d.companyId)
+      const why = facts
+        ? dealHealth(
+            {
+              stage: d.stage, closed: d.closedAt !== null, untouched: rot ? { days: rot.days, rotten: rot.rotten } : null,
+              nextActionAt: d.nextActionAt, nextAction: d.nextAction, ...facts,
+            },
+            now,
+          )
+        : null
       return {
+        health: why && why.reasons.length > 0 ? why : null,
         id: d.id,
         stage: d.stage as Stage,
         companyId: d.companyId,

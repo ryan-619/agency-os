@@ -407,6 +407,10 @@ textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3
   border: 1px solid var(--line); border-radius: 6px; font-size: 12px;
   max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word;
 }
+.kcard-health { margin-top: 6px; font-size: 12px; line-height: 1.35; padding-left: 9px; border-left: 2px solid var(--line); color: var(--muted); }
+.kcard-health-act { border-left-color: var(--warn); color: var(--ink); }
+.kcard-health-watch { border-left-color: var(--accent-2); }
+.kcard-health-ok { border-left-color: var(--ok, #2f9e6a); }
 .page-fallback { max-width: 640px; margin: 10vh auto; padding: 0 16px; }
 .page-fallback code { font-family: var(--mono, ui-monospace, monospace); font-size: 12.5px; }
 .loading-page { max-width: 960px; margin: 28px auto; padding: 0 16px; display: grid; gap: 14px; }

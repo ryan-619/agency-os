@@ -69,6 +69,8 @@ export interface DealCard {
   readonly untouched: { readonly days: number; readonly rotten: boolean; readonly threshold: number } | null
   /** Core's wording for a rotten card ("untouched for 12 days"); null otherwise. */
   readonly rottenLabel: string | null
+  /** Why the card needs a look (2026-10-09): `dealHealth`'s level and reasons; null when it is fine or closed. */
+  readonly health?: { readonly level: 'ok' | 'watch' | 'act'; readonly reasons: readonly string[] } | null
   readonly ownerUserId: string | null
   /** Resolved for display — null when nobody has taken it. */
   readonly ownerEmail: string | null
@@ -459,7 +461,13 @@ export function PipelineBoard({
                     <div className="kcard-next muted">no next action</div>
                   ) : null}
                   {deal.lostReason ? <div className="kcard-next muted">lost: {deal.lostReason}</div> : null}
-                  {deal.untouched?.rotten && deal.rottenLabel ? (
+                  {deal.health ? (
+                    <div className={`kcard-health kcard-health-${deal.health.level}`} title={deal.health.reasons.join(' · ')}>
+                      {deal.health.reasons[0]}
+                      {deal.health.reasons.length > 1 ? <span className="muted"> +{deal.health.reasons.length - 1}</span> : null}
+                    </div>
+                  ) : null}
+                  {deal.untouched?.rotten && deal.rottenLabel && !deal.health ? (
                     <div
                       className="kcard-next"
                       style={{ color: 'var(--warn)' }}

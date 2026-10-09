@@ -219,6 +219,15 @@ Dashboard and Companies) and `app/loading.tsx` (the shape of a page, no
 spinner; the shimmer stops under reduced motion). Next 16's `error.tsx`
 takes `retry`, not `reset`.
 
+**Then why a deal needs a look (2026-10-09), on no migration**: each open
+card on `/pipeline` says its reasons — a reply waiting unanswered, a next
+action overdue, a quote lapsing or unanswered, a draft waiting for approval
+(`act`); untouched past the stage's threshold, no next action set, nothing
+sent yet (`watch`); a meeting on the books (`ok`) — from `dealHealth`
+(`packages/core/src/deal-health.ts`, pure) over facts `dealHealthFacts`
+gathers for the whole board in three queries, keyed by company. A reason is
+a fact with a date on it, never a prediction.
+
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
 machine"), which needs no public address, because everything but chat is
