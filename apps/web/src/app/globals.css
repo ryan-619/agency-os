@@ -1103,3 +1103,22 @@ h1 .action:hover, .button-like:hover { box-shadow: var(--shadow-sm); }
 @media (prefers-reduced-motion: reduce) {
   .toast-life { display: none; }
 }
+
+/* --- Signing in from the app on a phone (paste-signin-link.tsx) -------------- */
+.paste-link { margin: 18px 0 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius); background: color-mix(in srgb, var(--accent) 3%, var(--panel)); }
+.paste-link summary { cursor: pointer; font-size: 13.5px; font-weight: 600; color: var(--ink); list-style: revert; }
+.auth .paste-link p { margin: 10px 0; font-size: 13px; }
+.paste-link input {
+  width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--panel); color: var(--ink); font-size: 14px;
+}
+.paste-link .err { margin: 8px 0 0; }
+
+/* ⌘K / Ctrl K: the shortcut to the search box, shown inside it where a keyboard is likely (search-box.tsx). */
+.search-kbd {
+  position: absolute; right: 8px; top: 50%; transform: translateY(-50%); pointer-events: none;
+  padding: 1px 6px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg);
+  color: var(--muted); font: 500 11px/1.5 var(--font-sans); letter-spacing: .02em;
+}
+@media (hover: none), (max-width: 760px) { .search-kbd { display: none; } }
+.search-box:has(.search-kbd) input[type=search] { padding-right: 54px; }

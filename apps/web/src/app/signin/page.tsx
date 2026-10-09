@@ -3,6 +3,7 @@ import { AuthError } from 'next-auth'
 import { auth, signIn } from '@/auth'
 import { deployment } from '@/lib/deployment'
 import { SignInForm } from '@/components/signin-form'
+import { PasteSignInLink } from '@/components/paste-signin-link'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -78,6 +79,8 @@ export default async function SignIn({
             }
           }}
         />
+
+        <PasteSignInLink />
 
         <p className="fine">
           No password. The link is valid for 15 minutes and can be used once.
