@@ -29,6 +29,9 @@ import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
 import { isCheckViolation, isForeignKeyViolation, isUniqueViolation } from './pg-errors.js'
+import { instantAtWallClock } from '@agency/core'
+import { addSuppression } from './campaigns.js'
+import { auditSuppressionAdded } from './audit.js'
 
 export type TaskRow = typeof schema.tasks.$inferSelect
 
@@ -401,7 +404,7 @@ export async function tasksReopen(
   try {
     rows = await db
       .update(schema.tasks)
-      .set({ doneAt: null, doneBy: null })
+      .set({ doneAt: null, doneBy: null, outcome: null })
       .where(and(eq(schema.tasks.orgId, args.orgId), eq(schema.tasks.id, args.id), isNotNull(schema.tasks.doneAt)))
       .returning()
   } catch (err) {
@@ -680,4 +683,149 @@ export async function tasksApplyTemplate(
 /** Overdue exactly as `tasksCounts` counts it, for a page marking one row. */
 export function tasksIsOverdue(task: Pick<TaskRow, 'doneAt' | 'dueAt'>, now: Date): boolean {
   return task.doneAt === null && task.dueAt !== null && task.dueAt.getTime() < now.getTime()
+}
+
+// ---------------------------------------------------------------------------
+// What came of a call or a visit (0027)
+// ---------------------------------------------------------------------------
+
+export type TaskOutcome = 'reached' | 'no_answer' | 'busy' | 'wrong_number' | 'call_back' | 'not_interested' | 'asked_to_stop'
+export const TASK_OUTCOMES: readonly TaskOutcome[] = Object.freeze([
+  'reached', 'no_answer', 'busy', 'wrong_number', 'call_back', 'not_interested', 'asked_to_stop',
+] as const)
+export const TASK_OUTCOME_LABELS: Readonly<Record<TaskOutcome, string>> = {
+  reached: 'Reached them',
+  no_answer: 'No answer',
+  busy: 'Busy — try later',
+  wrong_number: 'Wrong number',
+  call_back: 'Call back on a day',
+  not_interested: 'Not interested',
+  asked_to_stop: 'Asked not to be called',
+}
+/** The hour a call-back task is due where the company is, as a reply that names a day is. */
+export const CALL_BACK_AT = '10:00'
+const CALL_BACK_MAX_DAYS = 366
+
+export type TaskOutcomeResult =
+  | { readonly ok: true; readonly task: TaskRow; readonly callBackTaskId: string | null; readonly suppressed: boolean }
+  | Fail<'not_found' | 'invalid' | 'already_done' | 'suppression_failed'>
+
+/**
+ * Complete a call or a visit with what came of it, in one transaction. A
+ * call back makes the next call task on the day agreed; asked to stop puts
+ * the company's number on the suppression list FIRST and refuses the
+ * outcome, rolled back, if that row cannot be written — a "done: asked to
+ * stop" with no suppression behind it would be the opt-out nobody recorded.
+ */
+export async function tasksRecordOutcome(
+  db: AgencyDb,
+  args: {
+    readonly orgId: string
+    readonly id: string
+    readonly byUserId: string
+    readonly actor: string
+    readonly outcome: TaskOutcome
+    /** For `call_back`: the day agreed, YYYY-MM-DD, today or later. */
+    readonly callBackOn?: string | null
+    readonly now?: Date
+  },
+): Promise<TaskOutcomeResult> {
+  const now = args.now ?? new Date()
+  if (!(TASK_OUTCOMES as readonly string[]).includes(args.outcome)) {
+    return { ok: false, reason: 'invalid', message: `An outcome is one of ${TASK_OUTCOMES.join(', ')}.` }
+  }
+  const [task] = await db
+    .select({ task: schema.tasks, company: { id: schema.companies.id, name: schema.companies.name, domain: schema.companies.domain, phone: schema.companies.phone, timeZone: schema.companies.timeZone } })
+    .from(schema.tasks)
+    .leftJoin(schema.companies, eq(schema.companies.id, schema.tasks.companyId))
+    .where(and(eq(schema.tasks.orgId, args.orgId), eq(schema.tasks.id, args.id)))
+    .limit(1)
+  if (!task) return { ok: false, reason: 'not_found', message: 'No such task.' }
+  if (task.task.kind !== 'call' && task.task.kind !== 'visit') {
+    return { ok: false, reason: 'invalid', message: 'Only a call or a visit has an outcome; tick any other task done.' }
+  }
+  if (task.task.doneAt) return { ok: false, reason: 'already_done', message: 'That task is already done.' }
+
+  let callBackAt: Date | null = null
+  if (args.outcome === 'call_back') {
+    const day = args.callBackOn ?? ''
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return { ok: false, reason: 'invalid', message: 'Say which day to call back, as YYYY-MM-DD.' }
+    const zone = task.company?.timeZone ?? 'Asia/Kolkata'
+    const at = instantAtWallClock(day, CALL_BACK_AT, zone)
+    if (!at) return { ok: false, reason: 'invalid', message: 'That day could not be read.' }
+    if (at.getTime() < now.getTime() - 86_400_000 || at.getTime() > now.getTime() + CALL_BACK_MAX_DAYS * 86_400_000) {
+      return { ok: false, reason: 'invalid', message: 'A call back is today or later, within a year.' }
+    }
+    callBackAt = at
+  }
+  if (args.outcome === 'asked_to_stop' && !task.company?.phone) {
+    return {
+      ok: false, reason: 'suppression_failed',
+      message: 'This company has no phone number on record, so the number they asked us to stop calling cannot be recorded here. Record it on /suppressions by hand, then tick the task done.',
+    }
+  }
+  if (!(await assignable(db, args.orgId, args.byUserId))) {
+    return { ok: false, reason: 'invalid', message: NOT_ON_TEAM }
+  }
+
+  return db.transaction(async (transaction) => {
+    const tx = transaction as unknown as AgencyDb
+    let suppressed = false
+    if (args.outcome === 'asked_to_stop' && task.company?.phone) {
+      // FIRST, and the outcome stands or falls with it (§2.1).
+      const reason = `asked on the phone, ${now.toISOString().slice(0, 10)}`
+      const r = await addSuppression(tx, { orgId: args.orgId, kind: 'phone', value: task.company.phone, reason, source: 'manual' })
+      if (!r.ok) {
+        throw new OutcomeRefused('suppression_failed', `${r.message} Record the number on /suppressions by hand, then tick the task done.`)
+      }
+      await appendAudit(tx, auditSuppressionAdded({ orgId: args.orgId, actor: args.actor, alreadyPresent: r.alreadyPresent, kind: 'phone', value: r.value, reason }))
+      suppressed = true
+    }
+
+    const [done] = await tx
+      .update(schema.tasks)
+      .set({ doneAt: now, doneBy: args.byUserId, outcome: args.outcome })
+      .where(and(eq(schema.tasks.orgId, args.orgId), eq(schema.tasks.id, args.id), isNull(schema.tasks.doneAt)))
+      .returning()
+    if (!done) throw new OutcomeRefused('already_done', 'That task was completed by somebody else a moment ago.')
+
+    let callBackTaskId: string | null = null
+    if (callBackAt && task.company) {
+      const name = [...String(task.company.name || task.company.domain)].slice(0, 60).join('')
+      const detail =
+        `Agreed on the phone on ${now.toISOString().slice(0, 10)}: call again on ${args.callBackOn} at ${CALL_BACK_AT} their time. ` +
+        'Read the company page before you call.'
+      for (const kind of ['call', 'todo'] as const) {
+        const made = await tasksCreate(tx, {
+          orgId: args.orgId, companyId: task.company.id, dealId: task.task.dealId, kind,
+          title: `Call ${name} again, as agreed on the phone`, detail, assigneeUserId: args.byUserId, dueAt: callBackAt,
+          createdBy: args.byUserId, actor: args.actor,
+        })
+        if (made.ok) {
+          callBackTaskId = made.task.id
+          break
+        }
+      }
+    }
+
+    await appendAudit(tx, {
+      orgId: args.orgId,
+      actor: args.actor,
+      action: 'task.outcome_recorded',
+      subjectType: 'task',
+      subjectId: args.id,
+      detail: { outcome: args.outcome, kind: task.task.kind, companyId: task.company?.id ?? null, callBackTaskId, suppressed },
+    })
+    return { ok: true as const, task: done, callBackTaskId, suppressed }
+  }).catch((err: unknown) => {
+    if (err instanceof OutcomeRefused) return { ok: false, reason: err.reason, message: err.message } as const
+    throw err
+  })
+}
+
+class OutcomeRefused extends Error {
+  constructor(readonly reason: 'suppression_failed' | 'already_done', message: string) {
+    super(message)
+    this.name = 'OutcomeRefused'
+  }
 }

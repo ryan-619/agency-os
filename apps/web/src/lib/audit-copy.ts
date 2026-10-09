@@ -739,6 +739,18 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     return `suggested an answer to a reply from a contact at ${c.co}${chars !== null ? ` (${chars} characters` : ''}${model ? `${chars !== null ? ', ' : ' ('}${model}` : ''}${chars !== null || model ? ')' : ''}; it waits on /inbox for a person, and nothing was sent`
   },
   'reply.suggestion_dismissed': (c) => `put away the suggested answer to a reply from a contact at ${c.co}`,
+  // --- what came of a call (0027) -------------------------------------------
+  'task.outcome_recorded': (c) => {
+    const outcome = word(c.d, 'outcome')
+    const kind = word(c.d, 'kind') ?? 'call'
+    const words: Record<string, string> = {
+      reached: 'reached them', no_answer: 'no answer', busy: 'they were busy', wrong_number: 'a wrong number',
+      call_back: 'they asked to be called back', not_interested: 'they were not interested', asked_to_stop: 'they asked not to be called',
+    }
+    return `recorded a ${kind === 'visit' ? 'visit' : 'call'} to ${c.co} as done: ${(outcome && words[outcome]) ?? 'an outcome'}${
+      flag(c.d, 'suppressed') ? ' — the number went on the suppression list first' : ''
+    }${word(c.d, 'callBackTaskId') ? '; the next call is a task on the day agreed' : ''}`
+  },
   // --- what changed (2026-10-09): a scan compared with the one before -------
   'evidence.changed': (c) => {
     const fixed = num(c.d, 'fixed') ?? 0

@@ -313,7 +313,8 @@ export const listTasks: AgencyToolSpec<typeof listTasksShape> = {
       domain ? ` about ${domain}` : '',
     ].join('')
     const lines = rows.map((t) => {
-      const state = t.doneAt ? `done ${when(t.doneAt)}` : tasksIsOverdue(t, now) ? 'OVERDUE' : 'open'
+      // A done call or visit says what came of it (0027), in its stored word.
+      const state = t.doneAt ? `done ${when(t.doneAt)}${t.outcome ? `, ${t.outcome.replace(/_/g, ' ')}` : ''}` : tasksIsOverdue(t, now) ? 'OVERDUE' : 'open'
       const due = t.dueAt ? `due ${when(t.dueAt)}` : 'no due date'
       const who = t.assigneeUserId ? t.assigneeName?.trim() || t.assigneeEmail || 'a former teammate' : 'unassigned'
       const about = t.companyDomain ? ` — ${t.companyDomain}` : ''
@@ -331,6 +332,7 @@ export const listTasks: AgencyToolSpec<typeof listTasksShape> = {
         dueAt: t.dueAt?.toISOString() ?? null,
         overdue: tasksIsOverdue(t, now),
         doneAt: t.doneAt?.toISOString() ?? null,
+        outcome: t.outcome ?? null,
       })),
       rows.length === 0 ? `No ${scope}.` : `${rows.length} ${scope}, soonest due first:\n${bounded(lines)}`,
     )

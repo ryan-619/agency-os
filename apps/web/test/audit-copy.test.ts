@@ -187,6 +187,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'reply.suggested': { contactId: SUBJECT, companyId: SUBJECT, model: 'anthropic/claude-haiku-4-5', chars: 412 },
   'reply.suggestion_dismissed': { suggestionId: SUBJECT },
   'reply.suggestion_used': { suggestionId: SUBJECT, answerTouchId: SUBJECT },
+  'task.outcome_recorded': { outcome: 'asked_to_stop', kind: 'call', companyId: SUBJECT, callBackTaskId: SUBJECT, suppressed: true },
   'evidence.changed': { scanId: SUBJECT, olderScanId: SUBJECT, fixed: 1, regressed: 2, keys: { fixed: ['csp'], regressed: ['hsts', 'tls'] }, taskId: SUBJECT },
   // `authorUserId` is written only when the writer is not the author — the
   // agent's add_note, with actor `agent`.

@@ -829,6 +829,10 @@ export const tasks = pgTable(
     /** RESTRICT: a done task names a person who stays identifiable. NOT NULL
      *  exactly when `doneAt` is. */
     doneBy: uuid('done_by'),
+    /** What came of a done call or visit (0027): 'reached' | 'no_answer' | 'busy' |
+     *  'wrong_number' | 'call_back' | 'not_interested' | 'asked_to_stop'. NULL on
+     *  every other task, by CHECK. */
+    outcome: text('outcome'),
     ...timestamps,
   },
   (t) => [

@@ -186,6 +186,13 @@ the one before it and, when a scored gap was fixed or opened, writes one
 open deal's owner; the dashboard's "What changed", `get_evidence_signals`
 and the morning brief read them. The `agency` server has sixty-eight tools.
 
+**Then call outcomes (2026-10-09), on migration 0027** (§2, "What came of a
+call"): a done call or visit says what happened — reached, no answer, busy,
+wrong number, call back, not interested, asked to stop — chosen on `/tasks`
+in place of a plain Done; "call back" makes the next call task on the day
+agreed, and "asked to stop" puts the number on the suppression list FIRST
+and refuses the outcome if that row cannot be written.
+
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
 machine"), which needs no public address, because everything but chat is
@@ -287,11 +294,11 @@ worker upserts a `worker_heartbeats` row (keyed `hostname:pid`) every
 
 **The web half is LIVE on Vercel** at **https://myagencyos.in** (first
 deployed as `agency-os-tau-murex.vercel.app`), against a Neon Postgres (18.6)
-with Resend for magic links, seeded. The code expects migration **0026**
+with Resend for magic links, seeded. The code expects migration **0027**
 (`EXPECTED_MIGRATION`). Production was at 0017 when the 0018 release was
 written, and that release run's Vercel build applied 0018 and then 0019
 before `next build` (`tools/vercel-build-migrate.mjs`, under
-`AGENCY_MIGRATE_ON_BUILD=1`); 0020 to 0026 go the same way, through the
+`AGENCY_MIGRATE_ON_BUILD=1`); 0020 to 0027 go the same way, through the
 Production workflow's `release` action. A migration is always applied BEFORE the code
 that reads it deploys, never after — DEPLOYING.md, "migrate FIRST", and
 GO-LIVE.md Part 2b. That is done from GitHub, with no credential on a
@@ -1993,6 +2000,40 @@ the same on the dashboard — the rescan cron's own audit row tells them
 apart; and a task is made on every changed scan of a company with an open
 deal, so a site that flaps between two readings makes a task a night until
 somebody closes the deal or the scan settles.
+
+### What came of a call (0027, 2026-10-09)
+
+**A done call or visit carries an outcome.** `tasks.outcome` is NULL on
+every task but a DONE call or visit (`tasks_outcome_is_a_done_call_or_visit`)
+and one of `TASK_OUTCOMES` (`tasks_outcome_is_known`): `reached`,
+`no_answer`, `busy`, `wrong_number`, `call_back`, `not_interested`,
+`asked_to_stop`. On `/tasks` a call or a visit offers "Done — what
+happened?" in place of Done (a to-do keeps Done), and `tasksRecordOutcome`
+(`packages/db/src/tasks.ts`) writes the completion and the outcome in ONE
+transaction, audited `task.outcome_recorded { outcome, companyId,
+callBackTaskId, suppressed }`, over an open call or visit only — a to-do, a
+LinkedIn step or a done task is refused with a sentence. Two outcomes do
+more than record. **Call back** takes the day agreed (`callBackOn`,
+YYYY-MM-DD, today or later, within a year) and makes the next call task —
+"Call <name> again, as agreed on the phone" — due 10:00 in the company's
+zone (`instantAtWallClock`, `Asia/Kolkata` with none), for the person who
+recorded it; a to-do where the number cannot be called. **Asked to stop**
+puts the company's phone on the suppression list FIRST, source `manual`
+with the reason "asked on the phone, <date>", audited `suppression.added`
+by the person — §2.1's rule for voice, a person's word recorded by a person
+— and when that row cannot be written (no number on record, a number that
+cannot be read, a fault) the outcome is REFUSED and rolled back with a
+sentence that says to record the number on `/suppressions` by hand, because
+a "done: asked to stop" with no suppression behind it is the opt-out nobody
+recorded. A number already on the list is fine (`alreadyPresent`). The
+tasks card and `list_tasks` show the outcome beside a done task.
+`packages/db/test/task-outcomes.test.ts` holds each path.
+
+**Stated residuals.** An outcome is about the NUMBER called: "asked to
+stop" suppresses the company's phone and pauses nobody by email, because
+they asked not to be called; a call back is a task, not a promise — the
+brief and today's actions show it on its day; and a visit's outcomes are
+the call's words, which read a little oddly for "busy".
 
 ### Editing a draft's words (2026-10-08)
 
