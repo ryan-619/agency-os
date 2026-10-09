@@ -739,6 +739,13 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     return `suggested an answer to a reply from a contact at ${c.co}${chars !== null ? ` (${chars} characters` : ''}${model ? `${chars !== null ? ', ' : ' ('}${model}` : ''}${chars !== null || model ? ')' : ''}; it waits on /inbox for a person, and nothing was sent`
   },
   'reply.suggestion_dismissed': (c) => `put away the suggested answer to a reply from a contact at ${c.co}`,
+  // --- research with sources (0028): claims and pages, never evidence ---------
+  'research.recorded': (c) => {
+    const n = num(c.d, 'recorded') ?? 0
+    const skipped = num(c.d, 'skipped') ?? 0
+    return `recorded ${n} research claim${n === 1 ? '' : 's'} with sources about ${c.co}${skipped ? ` (${skipped} already on file)` : ''} — research, never evidence`
+  },
+  'research.deleted': (c) => `removed a research claim about ${c.co}`,
   // --- Google's coordinates kept thirty days (2026-10-09) ---------------------
   'listing.coordinates_pruned': (c) => {
     const n = num(c.d, 'companies') ?? 0

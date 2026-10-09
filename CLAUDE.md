@@ -237,6 +237,15 @@ first state — `apps/web/src/lib/ask-link.ts`, pure, bounded to
 `ASK_MAX_CHARS`); the words name the record by domain and title and carry
 nothing about its people, and nothing is sent until the person presses Send.
 
+**Then research with sources (2026-10-09), on migration 0028** (§2,
+"Research with sources"): what the assistant finds out about a company —
+through a research connector, a search, a page it read — is recorded as
+claims each with the https page it came from (`record_research`, medium,
+at once; `get_research`, low), shown on the company page under "Research"
+with a link to each source and who recorded it, and said in `get_company`
+as a count. Research, never evidence: nothing here is observed by the
+scanner or quoted to anybody. The `agency` server has seventy tools.
+
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
 machine"), which needs no public address, because everything but chat is
@@ -338,11 +347,11 @@ worker upserts a `worker_heartbeats` row (keyed `hostname:pid`) every
 
 **The web half is LIVE on Vercel** at **https://myagencyos.in** (first
 deployed as `agency-os-tau-murex.vercel.app`), against a Neon Postgres (18.6)
-with Resend for magic links, seeded. The code expects migration **0027**
+with Resend for magic links, seeded. The code expects migration **0028**
 (`EXPECTED_MIGRATION`). Production was at 0017 when the 0018 release was
 written, and that release run's Vercel build applied 0018 and then 0019
 before `next build` (`tools/vercel-build-migrate.mjs`, under
-`AGENCY_MIGRATE_ON_BUILD=1`); 0020 to 0027 go the same way, through the
+`AGENCY_MIGRATE_ON_BUILD=1`); 0020 to 0028 go the same way, through the
 Production workflow's `release` action. A migration is always applied BEFORE the code
 that reads it deploys, never after — DEPLOYING.md, "migrate FIRST", and
 GO-LIVE.md Part 2b. That is done from GitHub, with no credential on a
@@ -1050,7 +1059,7 @@ recorded-session mode, so anything needing the SDK to be *defined* is also
 untestable — and a package that CANNOT import the SDK cannot drag it into the
 Next module graph, which CI builds with no secrets on purpose.
 
-Sixty-eight tools ship (`AGENCY_TOOL_NAMES`) — `get_evidence_signals` (low, a read) with what changed (2026-10-09), `get_whats_working` (low, a read) with the field tools, since 0025 `get_night_finds` (low, a read), since 0024 `set_campaign_steps` (high, `leaves_the_building`,
+Seventy tools ship (`AGENCY_TOOL_NAMES`) — `record_research` (medium, an internal write) and `get_research` (low) with research (0028), `get_evidence_signals` (low, a read) with what changed (2026-10-09), `get_whats_working` (low, a read) with the field tools, since 0025 `get_night_finds` (low, a read), since 0024 `set_campaign_steps` (high, `leaves_the_building`,
 carded: its steps are words that will reach people), since 0023 `create_quote` and `update_quote` (medium,
 internal writes), `get_quote` and `list_quotes` (low) and `create_share_link` (medium, an internal write: a link
 sends nothing), the opportunity finder's five since 2026-10-08
@@ -2081,6 +2090,48 @@ stop" suppresses the company's phone and pauses nobody by email, because
 they asked not to be called; a call back is a task, not a promise — the
 brief and today's actions show it on its day; and a visit's outcomes are
 the call's words, which read a little oddly for "busy".
+
+### Research with sources (0028, 2026-10-09)
+
+**A claim and the page it came from, never evidence.** `company_research`
+holds, per company in its own org (`company_research_company_in_org`, the
+`(id, org_id)` pair, CASCADE), a `claim` (1–500 characters by CHECK), the
+`source_url` it came from (`company_research_source_is_a_page`: https with
+a host, at most 2,048), an optional `source_title`, and `recorded_by` — a
+same-org user (SET NULL) or NULL for the agent — once per claim per page
+(`company_research_one_claim_per_source`). `packages/core/src/research.ts`
+holds the pure checks: `researchSourceProblem` (https, no credentials in
+the address, a domain with a dot — never an IP literal, `localhost` or a
+`.local`/`.internal`/`.corp`/`.test` name, so a link on the company page is
+always a page on the public web a teammate can open) and
+`researchClaimProblem` (a sentence, not a bare address, no U+0000).
+`researchRecord` (`packages/db/src/research.ts`) writes up to
+`RESEARCH_PER_CALL` (10) claims, skipping one already on file from the same
+page, and audits `research.recorded { companyId, recorded, skipped,
+recordedBy }` — counts, never the claims; `researchFor` reads them newest
+first with who recorded each; `researchDelete` is the recorder's, an
+owner's, or anybody's for a claim the agent recorded, because then nobody
+owns it (`research.deleted`; `DELETE /api/research/[id]`,
+`companies:write`).
+
+**Where it shows, and where it never does.** The company page's "Research"
+card lists each claim beside its source (the page's title or host, opening
+in a new tab with `noopener noreferrer nofollow`), who recorded it and when,
+under a sentence saying it is research and nothing here was observed by the
+scanner or is quoted to the company. `get_company` says how many claims
+are on file and that `get_research` reads them, apart from the scan's
+evidence; the prompt's EVIDENCE section tells the model that what it learns
+from a connector, a search or a page goes in `record_research`, each claim
+with its page, and is quoted to nobody. The send path, `quotableFindings`,
+the proposal, the brief and the audit page read none of it. `record_research`
+is medium (`writes_internal_state`, at once) and `get_research` low.
+`packages/core/test/research.test.ts` and `packages/db/test/research.test.ts`
+hold the checks, the dedupe, the deletion rule and the CHECKs.
+
+**Stated residuals.** A claim is the assistant's reading of a page, and the
+page may be wrong or stale — the card says to open the source before relying
+on it; and a source link is a page the recorder named, never fetched by this
+system, so a page that has since moved is a dead link, not a false claim.
 
 ### Editing a draft's words (2026-10-08)
 

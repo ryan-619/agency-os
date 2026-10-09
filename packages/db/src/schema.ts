@@ -1163,6 +1163,31 @@ export const replySuggestions = pgTable(
   (t) => [uniqueIndex('reply_suggestions_one_per_reply').on(t.touchId)],
 )
 
+/**
+ * Research about a company, with its source (0028): a claim and the page it
+ * came from, recorded by a person or the agent. Never evidence: nothing here
+ * is observed by the scanner or quoted in anything outbound.
+ */
+export const companyResearch = pgTable(
+  'company_research',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    /** Same-org composite FK to companies (id, org_id), CASCADE — owned by 0028. */
+    companyId: uuid('company_id').notNull(),
+    claim: text('claim').notNull(),
+    sourceUrl: text('source_url').notNull(),
+    sourceTitle: text('source_title'),
+    /** Same-org composite FK to users (id, org_id), SET NULL — owned by 0028. NULL: the agent. */
+    recordedBy: uuid('recorded_by'),
+    ...timestamps,
+  },
+  (t) => [
+    index('company_research_company_idx').on(t.companyId, t.createdAt),
+    uniqueIndex('company_research_one_claim_per_source').on(t.companyId, t.claim, t.sourceUrl),
+  ],
+)
+
 /** One row per org: whether the night shift runs, when in which zone, and the night it last ran. */
 export const nightShifts = pgTable('night_shifts', {
   id: id(),

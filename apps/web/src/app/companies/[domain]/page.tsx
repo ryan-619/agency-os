@@ -18,6 +18,7 @@ import { NotesSlot } from '@/components/company/notes'
 import { OpportunitiesSlot } from '@/components/company/opportunities'
 import { QuotesSlot } from '@/components/company/quotes'
 import { ShareSlot } from '@/components/company/share'
+import { ResearchSlot } from '@/components/company/research'
 import type { CompanySlotProps } from '@/components/company/slot'
 import { ContactsPanel } from '@/components/outreach/contacts'
 import { CompanyActions } from '@/components/pipeline/company-actions'
@@ -185,6 +186,7 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
       <CompanyEditSlot {...slot} />
       <OpportunitiesSlot {...slot} />
       <ShareSlot {...slot} />
+      <ResearchSlot {...slot} isOwner={user.role === 'owner'} />
       <QuotesSlot {...slot} />
 
       {isNoSiteDomain(company.domain) ? (

@@ -188,6 +188,10 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'reply.suggestion_dismissed': { suggestionId: SUBJECT },
   'reply.suggestion_used': { suggestionId: SUBJECT, answerTouchId: SUBJECT },
   'listing.coordinates_pruned': { companies: 3, olderThanDays: 30 },
+  'research.recorded': { companyId: SUBJECT, recorded: 3, skipped: 1, recordedBy: ORG_USER },
+  'research.deleted': { companyId: SUBJECT, researchId: SUBJECT },
+  'agent.record_research': { companyId: SUBJECT, recorded: 3, skipped: 0, turnId: SUBJECT },
+  'agent.get_research': { companyId: SUBJECT, returned: 3, turnId: SUBJECT },
   'task.outcome_recorded': { outcome: 'asked_to_stop', kind: 'call', companyId: SUBJECT, callBackTaskId: SUBJECT, suppressed: true },
   'evidence.changed': { scanId: SUBJECT, olderScanId: SUBJECT, fixed: 1, regressed: 2, keys: { fixed: ['csp'], regressed: ['hsts', 'tls'] }, taskId: SUBJECT },
   // `authorUserId` is written only when the writer is not the author — the

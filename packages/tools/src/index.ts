@@ -28,6 +28,7 @@ export { setCampaignSteps } from './sequences.js'
 export { runNightShift, type NightRunResult } from './night.js'
 export { getNightFinds } from './night-read.js'
 export { getEvidenceSignals } from './signals.js'
+export { getResearch, recordResearch } from './research.js'
 export { getWhatsWorking } from './insights.js'
 export { businessFromListing, placesSearchesToday } from './opportunities.js'
 
@@ -52,6 +53,7 @@ import { createShareLink } from './share.js'
 import { setCampaignSteps } from './sequences.js'
 import { getNightFinds } from './night-read.js'
 import { getEvidenceSignals } from './signals.js'
+import { getResearch, recordResearch } from './research.js'
 import { getWhatsWorking } from './insights.js'
 
 /**
@@ -135,6 +137,8 @@ export const AGENCY_TOOLS: readonly AgencyToolSpec[] = [
   setCampaignSteps,
   getNightFinds,
   getEvidenceSignals,
+  recordResearch,
+  getResearch,
   getWhatsWorking,
 ] as unknown as readonly AgencyToolSpec[]
 

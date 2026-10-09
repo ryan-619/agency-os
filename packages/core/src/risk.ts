@@ -192,6 +192,9 @@ export const AGENCY_TOOL_RISK = {
   set_campaign_steps: ['high', 'leaves_the_building', 'Sets a campaign’s follow-up messages, calls and visits for everyone it wrote to who has not replied.'],
   // The night shift (0025): what it found overnight, a read.
   get_night_finds: ['low', 'read_only', 'Reads what the night shift found overnight, best first.'],
+  // Research with sources (0028): a claim and the page it came from, never evidence; the read beside it.
+  record_research: ['medium', 'writes_internal_state', 'Records claims about a company with the pages they came from; research, never evidence. Nothing is sent.'],
+  get_research: ['low', 'read_only', 'Reads the research on file about a company, each claim with its source.'],
   // What changed (2026-10-09): a gap fixed or opened since the previous scan, from our own scans. A read.
   get_evidence_signals: ['low', 'read_only', 'Reads which companies’ sites changed since our previous scan: gaps fixed or opened.'],
   // What's working (2026-10-08): reply and win rates, and searches for more like what was won. A read.

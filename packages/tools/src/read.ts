@@ -13,6 +13,7 @@ import {
   parseIcpDefinition, staleAfterDaysOf, type IcpDefinition,
 } from '@agency/core'
 import {
+  researchCount,
   activeIcpProfile, companyList, findCompanyByDomain, latestScanWithFindings,
   type AgencyDb, type CompanyListRow,
 } from '@agency/db'
@@ -238,6 +239,11 @@ export const getCompany: AgencyToolSpec<typeof getCompanyShape> = {
 
     const found = await latestScanWithFindings(ctx.db, ctx.orgId, company.id)
     await ctx.audit('agent.get_company', { domain })
+    // Research on file (0028): said as a count and where to read it — apart from the scan, never with it.
+    const research = await researchCount(ctx.db, ctx.orgId, company.id).catch(() => 0)
+    const researchLine = research > 0
+      ? `${research} research claim${research === 1 ? '' : 's'} with sources on file (get_research reads them) — research, never evidence.`
+      : null
     // What the CRM records about it (0021): research, never an observation.
     const recorded = {
       country: company.country,
@@ -266,14 +272,14 @@ export const getCompany: AgencyToolSpec<typeof getCompanyShape> = {
     if (!found) {
       return ok(
         { domain, name: company.name, recorded, scanned: false, findings: [] },
-        `${domain} has never been scanned, so nothing has been observed about it. ${recordedLine}`,
+        `${domain} has never been scanned, so nothing has been observed about it. ${recordedLine}${researchLine ? ` ${researchLine}` : ''}`,
       )
     }
     if (!found.scan.ok) {
       return ok(
         { domain, name: company.name, recorded, scanned: true, reachedTheSite: false, error: found.scan.error, findings: [] },
         `The last scan of ${domain} never reached the site (${found.scan.error ?? 'no response'}). ` +
-          `Nothing was observed, so nothing can be claimed about their posture. ${recordedLine}`,
+          `Nothing was observed, so nothing can be claimed about their posture. ${recordedLine}${researchLine ? ` ${researchLine}` : ''}`,
       )
     }
 
@@ -338,6 +344,7 @@ export const getCompany: AgencyToolSpec<typeof getCompanyShape> = {
           `${payload.tier ? `, ${payload.tier}` : ''}` +
           `${payload.disqualifiedReason ? ` — disqualified: ${payload.disqualifiedReason}` : ''}`,
         recordedLine,
+        ...(researchLine ? [researchLine] : []),
         `Scanned ${payload.scanRanAt}.` +
           (stale
             ? ` This evidence is older than ${days} days and MUST be re-verified before it is quoted to anyone.`
