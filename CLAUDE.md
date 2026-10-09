@@ -201,6 +201,16 @@ other key as a labelled fact — nothing dropped — and the card keeps the
 whole JSON a click away ("The exact payload, as the tool would receive
 it"), because a reading is not the record. `apps/web/test/approval-card.test.ts`.
 
+**Then Google's coordinates kept thirty days (2026-10-09), on no
+migration**: the Places API's terms let a listing's latitude and longitude
+be cached for thirty days and no longer, so the daily digest cron clears a
+pair whose `listing_checked_at` is older than `COORDINATE_RETENTION_DAYS`
+(`pruneListingCoordinates`, `packages/db/src/listing-retention.ts`) —
+the rest of the listing stays, one `listing.coordinates_pruned` row per org
+that had any — and a business found on the map again gets fresh ones with
+the reading; until then `/visits` lists it apart and the audit page compares
+it by city, as both do for a company with none.
+
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
 machine"), which needs no public address, because everything but chat is

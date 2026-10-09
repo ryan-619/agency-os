@@ -739,6 +739,12 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     return `suggested an answer to a reply from a contact at ${c.co}${chars !== null ? ` (${chars} characters` : ''}${model ? `${chars !== null ? ', ' : ' ('}${model}` : ''}${chars !== null || model ? ')' : ''}; it waits on /inbox for a person, and nothing was sent`
   },
   'reply.suggestion_dismissed': (c) => `put away the suggested answer to a reply from a contact at ${c.co}`,
+  // --- Google's coordinates kept thirty days (2026-10-09) ---------------------
+  'listing.coordinates_pruned': (c) => {
+    const n = num(c.d, 'companies') ?? 0
+    const days = num(c.d, 'olderThanDays') ?? 30
+    return `cleared the map coordinates of ${n} compan${n === 1 ? 'y' : 'ies'} whose listing was read more than ${days} days ago — Google’s terms allow them to be kept that long; the rest of each listing stays`
+  },
   // --- what came of a call (0027) -------------------------------------------
   'task.outcome_recorded': (c) => {
     const outcome = word(c.d, 'outcome')

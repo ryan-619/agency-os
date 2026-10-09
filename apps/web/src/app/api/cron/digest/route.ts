@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { staleAfterDaysOf } from '@agency/core'
 import {
-  DIGEST_MAX_PAUSE_NOTICES, DIGEST_WINDOW_HOURS, activeIcpProfile, advanceSequences, appendAudit, certificateAlerts, digestCampaignPauses, digestCounts,
+  DIGEST_MAX_PAUSE_NOTICES, DIGEST_WINDOW_HOURS, activeIcpProfile, advanceSequences, appendAudit, certificateAlerts, digestCampaignPauses, pruneListingCoordinates, digestCounts,
   digestFacts, digestOnce, digestRecord, heartbeatReport, heartbeatReportedStatus, heartbeatSilentAfter, listOrgIds,
   readLatestHeartbeat, type AgencyDb, type DigestNotPosted, type DigestRecord,
 } from '@agency/db/queries'
@@ -221,6 +221,17 @@ export async function GET(request: Request): Promise<NextResponse> {
     }
   }
 
+  // Google's coordinates are kept thirty days (2026-10-09): a pair older than that is cleared, the listing kept.
+  let coordinates: { pruned: number; orgs: number } | { failed: string } | 'not_run' = 'not_run'
+  if (Date.now() - started < maxDuration * 1000 - ORG_BUDGET_MS) {
+    try {
+      coordinates = await pruneListingCoordinates(db, { now: new Date() })
+    } catch (err) {
+      coordinates = { failed: errorName(err) }
+      log.warn('cron digest could not prune listing coordinates', { route: 'cron.digest', error: errorName(err) })
+    }
+  }
+
   const failed = orgs.some((o) => 'failed' in o || 'notRun' in o)
   const outcome = failed ? 'failed' : !slack ? 'no_slack' : orgs.some((o) => 'why' in o) ? 'slack_failed' : 'ok'
   if (outcome === 'ok' || outcome === 'no_slack') log.info('cron digest finished', { route: 'cron.digest', outcome })
@@ -229,8 +240,8 @@ export async function GET(request: Request): Promise<NextResponse> {
 
   return NextResponse.json(
     slack
-      ? { posted: orgs.some((o) => 'posted' in o && o.posted), orgs, sequences, certificates }
-      : { posted: false, why: 'no_slack', orgs, sequences, certificates },
+      ? { posted: orgs.some((o) => 'posted' in o && o.posted), orgs, sequences, certificates, coordinates }
+      : { posted: false, why: 'no_slack', orgs, sequences, certificates, coordinates },
     { status: failed ? 500 : 200 },
   )
 }
