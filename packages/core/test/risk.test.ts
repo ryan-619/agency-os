@@ -11,7 +11,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   AGENCY_TOOL_NAMES, AGENCY_TOOL_RISK, PERMITTED_TOOLS,
-  classifyRisk, parseToolName, type Risk, type RiskRule,
+  classifyRisk, parseToolName, runsWithoutApproval, type Risk, type RiskRule,
 } from '../src/risk.js'
 
 const call = (toolName: string, input: Record<string, unknown> = {}) =>
@@ -172,10 +172,19 @@ describe('the registry cannot drift from what is reachable', () => {
     )
   })
 
-  it('has exactly one tool that leaves the building, and it is high', () => {
+  /**
+   * Two tools draft words for somebody outside the company: `queue_touch`,
+   * one message, and `enrol_contacts`, an opener per person. Both are high,
+   * so a person approves the call before any draft exists — and every draft
+   * still waits on /approvals before anything is sent.
+   */
+  it('has exactly four tools that leave the building, and all are high', () => {
     const leaving = AGENCY_TOOL_NAMES.filter((n) => AGENCY_TOOL_RISK[n][1] === 'leaves_the_building')
-    expect(leaving).toEqual(['queue_touch'])
-    expect(AGENCY_TOOL_RISK.queue_touch[0]).toBe('high')
+    // `edit_draft` (2026-10-08) rewrites words to somebody outside: a queued
+    // auto-send email would go with them unread, so it is carded like a draft.
+    // `set_campaign_steps` (0024) sets follow-up words for everyone a campaign wrote to.
+    expect(leaving).toEqual(['queue_touch', 'enrol_contacts', 'set_campaign_steps', 'edit_draft'])
+    for (const name of leaving) expect(AGENCY_TOOL_RISK[name][0], name).toBe('high')
   })
 
   /**
@@ -199,7 +208,71 @@ describe('the registry cannot drift from what is reachable', () => {
       expect(AGENCY_TOOL_RISK[name][1], name).toBe('writes_internal_state')
     }
     expect(reads.length + writes.length).toBe(14)
-    expect(AGENCY_TOOL_NAMES).toHaveLength(23)
+  })
+
+  /**
+   * The operator's tools (2026-10-06): what chat needs to run the CRM,
+   * campaigns, the pipeline and the worker. Reads are low; an internal write
+   * is medium; the scan of a few stale companies is low like `scan_company`;
+   * drafting openers and lifting a pause are high. None of the internal
+   * writes is low — every one of them still raises a card.
+   */
+  it('classifies the operator tools: reads low, internal writes medium, outreach and resume high', () => {
+    const reads = [
+      'list_contacts', 'list_campaigns', 'list_drafts', 'get_proposal', 'list_meetings',
+      'worker_status', 'recent_errors', 'queue_status',
+    ] as const
+    const writes = [
+      'add_company', 'update_company', 'import_companies', 'add_contact', 'update_contact', 'pause_contact',
+      'add_suppression', 'create_campaign', 'update_campaign', 'generate_proposal', 'reschedule_meeting',
+      'cancel_meeting', 'record_meeting_outcome', 'set_deal_owner', 'complete_task',
+    ] as const
+    for (const name of reads) {
+      expect(AGENCY_TOOL_RISK[name][0], name).toBe('low')
+      expect(AGENCY_TOOL_RISK[name][1], name).toBe('read_only')
+    }
+    for (const name of writes) {
+      expect(AGENCY_TOOL_RISK[name][0], name).toBe('medium')
+      expect(AGENCY_TOOL_RISK[name][1], name).toBe('writes_internal_state')
+    }
+    expect(AGENCY_TOOL_RISK.rescan_stale).toEqual([
+      'low', 'derived_write', AGENCY_TOOL_RISK.rescan_stale[2],
+    ])
+    expect(AGENCY_TOOL_RISK.enrol_contacts.slice(0, 2)).toEqual(['high', 'leaves_the_building'])
+    expect(AGENCY_TOOL_RISK.resume_contact.slice(0, 2)).toEqual(['high', 'reopens_outreach'])
+    expect(reads.length + writes.length + 3).toBe(26)
+    // The profiles (0021): a read, an internal write that stores an inactive
+    // profile, and the switch, which changes how every later scan is scored.
+    expect(AGENCY_TOOL_RISK.list_icps.slice(0, 2)).toEqual(['low', 'read_only'])
+    expect(AGENCY_TOOL_RISK.create_icp.slice(0, 2)).toEqual(['medium', 'writes_internal_state'])
+    expect(AGENCY_TOOL_RISK.activate_icp.slice(0, 2)).toEqual(['medium', 'changes_scoring'])
+    // Editing a draft (2026-10-08): a read and a carded rewrite.
+    expect(AGENCY_TOOL_RISK.get_draft.slice(0, 2)).toEqual(['low', 'read_only'])
+    expect(AGENCY_TOOL_RISK.edit_draft.slice(0, 2)).toEqual(['high', 'leaves_the_building'])
+    // Finding businesses and what they need (2026-10-08): four reads and one internal write.
+    for (const read of ['find_businesses', 'get_opportunities', 'list_services'] as const) {
+      expect(AGENCY_TOOL_RISK[read].slice(0, 2), read).toEqual(['low', 'read_only'])
+    }
+    expect(AGENCY_TOOL_RISK.audit_website.slice(0, 2)).toEqual(['low', 'derived_write'])
+    expect(AGENCY_TOOL_RISK.add_businesses.slice(0, 2)).toEqual(['medium', 'writes_internal_state'])
+    // Quotes (0023): two reads and two internal writes; sending one is a person's act on its page.
+    for (const read of ['get_quote', 'list_quotes'] as const) {
+      expect(AGENCY_TOOL_RISK[read].slice(0, 2), read).toEqual(['low', 'read_only'])
+    }
+    for (const write of ['create_quote', 'update_quote', 'create_share_link'] as const) {
+      expect(AGENCY_TOOL_RISK[write].slice(0, 2), write).toEqual(['medium', 'writes_internal_state'])
+    }
+    expect(AGENCY_TOOL_NAMES).toHaveLength(23 + 26 + 3 + 2 + 5 + 4 + 1 + 1 + 1 + 1 + 1 + 2)
+  })
+
+  it('never lets a write run without a person: every non-read tool but the scans is medium or high', () => {
+    // audit_website (2026-10-08) records what Google's PageSpeed measured, as a scan records what it read.
+    const scans = new Set(['scan_company', 'score_company', 'rescan_stale', 'audit_website'])
+    for (const name of AGENCY_TOOL_NAMES) {
+      const [risk, rule] = AGENCY_TOOL_RISK[name]
+      if (rule === 'read_only' || scans.has(name)) continue
+      expect(risk, name).not.toBe('low')
+    }
   })
 
   it('gives every registered tool an explanation a human could act on', () => {
@@ -208,5 +281,88 @@ describe('the registry cannot drift from what is reachable', () => {
       expect(explain.length, name).toBeGreaterThan(20)
       expect(explain.endsWith('.'), name).toBe(true)
     }
+  })
+})
+
+/**
+ * Which calls run without a person deciding first (operator decision,
+ * 2026-10-06: internal writes run at once). The line is drawn by RULE, and
+ * these tests walk every agency tool through the REAL classifier, so a tool
+ * added or reclassified later lands on a side of the line somebody chose.
+ */
+describe('runsWithoutApproval', () => {
+  const verdictFor = (name: string) => call(`mcp__agency__${name}`)
+
+  it('runs every read, derived write and internal write at once', () => {
+    for (const name of AGENCY_TOOL_NAMES) {
+      const v = verdictFor(name)
+      if (['read_only', 'derived_write', 'writes_internal_state'].includes(v.rule)) {
+        expect(runsWithoutApproval(v), name).toBe(true)
+      }
+    }
+  })
+
+  /**
+   * The tripwire. Adding a tool that reaches a person — or reclassifying one —
+   * changes this list, and this test then fails until somebody decides on
+   * purpose which side of the line it belongs on.
+   */
+  it('keeps a card on exactly the agency tools that reach a person, lift a pause or change how scans are scored', () => {
+    const carded = AGENCY_TOOL_NAMES.filter((name) => !runsWithoutApproval(verdictFor(name))).sort()
+    expect(carded).toEqual(['activate_icp', 'edit_draft', 'enrol_contacts', 'queue_touch', 'resume_contact', 'set_campaign_steps'])
+  })
+
+  /**
+   * The one internal write that can open outreach rather than record it:
+   * a campaign set active again releases messages a person approved and
+   * then held by pausing it. Read from the call's input, so the tripwire
+   * above — which asks with none — does not list it.
+   */
+  it('keeps a card on update_campaign only when it sets a campaign active', () => {
+    const active = call('mcp__agency__update_campaign', { campaignId: 'c-1', status: 'active' })
+    expect(active).toMatchObject({ risk: 'high', rule: 'reopens_outreach', refuse: false })
+    expect(runsWithoutApproval(active)).toBe(false)
+    for (const input of [
+      { campaignId: 'c-1', status: 'paused' },
+      { campaignId: 'c-1', status: 'done' },
+      { campaignId: 'c-1', name: 'Q4 follow-ups' },
+      { campaignId: 'c-1', dailyCap: 10, quietStart: '20:00' },
+    ]) {
+      const v = call('mcp__agency__update_campaign', input)
+      expect(v.rule, JSON.stringify(input)).toBe('writes_internal_state')
+      expect(runsWithoutApproval(v), JSON.stringify(input)).toBe(true)
+    }
+    // Setting a NEW campaign active opens nothing: it holds no messages, and
+    // filling it is enrol_contacts, which keeps its card.
+    expect(runsWithoutApproval(call('mcp__agency__create_campaign', { name: 'New', channel: 'email', status: 'active' }))).toBe(true)
+  })
+
+  it('runs the two internal writes that can only STOP outreach', () => {
+    // Protective writes. Slowing an agent down from recording "leave me
+    // alone" is the wrong direction to be cautious in.
+    expect(runsWithoutApproval(verdictFor('add_suppression'))).toBe(true)
+    expect(runsWithoutApproval(verdictFor('pause_contact'))).toBe(true)
+  })
+
+  it('keeps a card on any third-party connector tool, whatever it is called', () => {
+    for (const name of ['mcp__zapier__send_email', 'mcp__hubspot__create_note', 'mcp__deepwiki__ask_question']) {
+      const v = call(name)
+      expect(v.rule).toBe('connector_unreviewed')
+      expect(runsWithoutApproval(v), name).toBe(false)
+    }
+  })
+
+  it('keeps a card on delegation, which writes nothing itself but spends', () => {
+    const v = call('Agent', { description: 'research', prompt: 'look into acme', subagent_type: 'researcher' })
+    expect(v.rule).toBe('delegation')
+    expect(runsWithoutApproval(v)).toBe(false)
+  })
+
+  it('never runs a refused call, even one that names an internal-write rule', () => {
+    expect(runsWithoutApproval({ risk: 'medium', rule: 'writes_internal_state', explain: 'x', refuse: true })).toBe(false)
+    // And the real refusals the classifier makes stay refused.
+    expect(runsWithoutApproval(call('Bash', { command: 'ls' }))).toBe(false)
+    expect(runsWithoutApproval(call('mcp__agency__queue_touch', { channel: 'sms', body: 'hi' }))).toBe(false)
+    expect(runsWithoutApproval(call('mcp__agency__not_a_real_tool'))).toBe(false)
   })
 })

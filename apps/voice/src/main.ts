@@ -11,7 +11,7 @@
  */
 import { Pool } from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
-import { schema, type AgencyDb } from '@agency/db'
+import { pgConnectionString, schema, type AgencyDb } from '@agency/db'
 import { loadEnv } from './env.js'
 import { createLogger } from './logger.js'
 import { llmFromEnv, startVoiceService } from './index.js'
@@ -21,7 +21,7 @@ async function main(): Promise<void> {
   const log = createLogger(env.LOG_LEVEL)
 
   const pool = new Pool({
-    connectionString: env.DATABASE_URL,
+    connectionString: pgConnectionString(env.DATABASE_URL),
     max: env.DATABASE_POOL_MAX,
     connectionTimeoutMillis: 10_000,
   })

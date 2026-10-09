@@ -1,7 +1,11 @@
 'use client'
 
 import { useState } from 'react'
+import { ListChecks } from 'lucide-react'
+import { EmptyState } from '../empty-state'
 import { When } from '@/components/when'
+import { toast } from '../toast/toast'
+import { ToastOn } from '../toast/toast-on'
 
 /**
  * Tasks as a person works them: tick one off, hand it to somebody, move its
@@ -32,7 +36,21 @@ export interface TaskItem {
   readonly doneAt: string | null
   /** Decided on the server, from the same rule `tasksCounts` uses. */
   readonly overdue: boolean
+  /** What came of a done call or visit (0027); absent on every other task. */
+  readonly outcome?: string | null
 }
+
+/** The outcomes a call or a visit can end with (0027), as /tasks offers them — held equal to the database's by a test. */
+export const OUTCOME_OPTIONS: readonly { readonly value: string; readonly label: string }[] = [
+  { value: 'reached', label: 'Reached them' },
+  { value: 'no_answer', label: 'No answer' },
+  { value: 'busy', label: 'Busy — try later' },
+  { value: 'wrong_number', label: 'Wrong number' },
+  { value: 'call_back', label: 'Call back on a day…' },
+  { value: 'not_interested', label: 'Not interested' },
+  { value: 'asked_to_stop', label: 'Asked not to be called' },
+]
+const OUTCOME_WORDS: Readonly<Record<string, string>> = Object.fromEntries(OUTCOME_OPTIONS.map((o) => [o.value, o.label.replace(/…$/, '')]))
 
 export interface TeamMember {
   readonly id: string
@@ -43,6 +61,9 @@ const KIND_LABEL: Readonly<Record<string, string>> = {
   kickoff: 'kickoff',
   renewal: 'renewal',
   linkedin_send: 'LinkedIn step',
+  // 0022: a person's acts — a call from their own phone, a visit on foot.
+  call: 'call',
+  visit: 'visit',
 }
 
 /** The end of a picked day, in the browser's zone, as an instant. */
@@ -50,6 +71,31 @@ function endOfLocalDay(day: string): string | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return null
   const at = new Date(`${day}T23:59:00`)
   return Number.isNaN(at.getTime()) ? null : at.toISOString()
+}
+
+/**
+ * What a toast says once a task change has landed. Never the assignee's
+ * label: a teammate with no name on record is labelled by their address.
+ */
+function taskChangeWords(body: Record<string, unknown>): string {
+  switch (body.action) {
+    case 'done':
+      return 'Task done.'
+    case 'reopen':
+      return 'Task reopened.'
+    case 'due':
+      return body.dueAt ? 'Due date set.' : 'Due date cleared.'
+    case 'assign':
+      return body.assigneeUserId ? 'Task assigned.' : 'Task unassigned.'
+    case 'outcome':
+      return body.outcome === 'asked_to_stop'
+        ? 'Done — the number is on the suppression list.'
+        : body.outcome === 'call_back'
+          ? 'Done — the next call is a task on that day.'
+          : 'Done.'
+    default:
+      return 'Saved.'
+  }
 }
 
 async function send(
@@ -93,10 +139,11 @@ export function TaskList({
       setError(r.error)
       return
     }
+    toast.success(taskChangeWords(body))
     window.location.reload()
   }
 
-  if (tasks.length === 0) return <p className="muted" style={{ fontSize: 13 }}>{empty}</p>
+  if (tasks.length === 0) return <EmptyState icon={ListChecks} title={empty.replace(/\.$/, '')} compact />
 
   return (
     <div>
@@ -113,6 +160,30 @@ export function TaskList({
                   <button type="button" className="linkish" disabled={busy} onClick={() => void patch(t.id, { action: 'reopen' })}>
                     Reopen
                   </button>
+                ) : t.kind === 'call' || t.kind === 'visit' ? (
+                  <select
+                    aria-label="Done — what happened?"
+                    disabled={busy}
+                    value=""
+                    style={{ fontSize: 12, padding: '3px 6px' }}
+                    onChange={(e) => {
+                      const outcome = e.target.value
+                      if (!outcome) return
+                      if (outcome === 'call_back') {
+                        const day = window.prompt('Call back on which day? (YYYY-MM-DD)')
+                        if (!day) return
+                        void patch(t.id, { action: 'outcome', outcome, callBackOn: day.trim() })
+                        return
+                      }
+                      if (outcome === 'asked_to_stop' && !window.confirm('They asked not to be called: the number goes on the suppression list first. Continue?')) return
+                      void patch(t.id, { action: 'outcome', outcome })
+                    }}
+                  >
+                    <option value="">Done — what happened?</option>
+                    {OUTCOME_OPTIONS.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
                 ) : (
                   <button
                     type="button"
@@ -131,6 +202,7 @@ export function TaskList({
             <div style={{ flex: '1 1 auto', minWidth: 0 }}>
               <span className={done ? 'task-done' : undefined}>{t.title}</span>
               {KIND_LABEL[t.kind] ? <span className="tag">{KIND_LABEL[t.kind]}</span> : null}
+              {t.outcome ? <span className="tag">{OUTCOME_WORDS[t.outcome] ?? t.outcome}</span> : null}
               {showCompany && t.companyDomain ? (
                 <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>
                   <a href={`/companies/${encodeURIComponent(t.companyDomain)}`}>{t.companyName ?? t.companyDomain}</a>
@@ -214,6 +286,7 @@ export function NewTaskForm({
   const [detail, setDetail] = useState('')
   const [assignee, setAssignee] = useState(team.some((m) => m.id === currentUserId) ? currentUserId : '')
   const [day, setDay] = useState('')
+  const [kind, setKind] = useState<'todo' | 'call' | 'visit'>('todo')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -243,12 +316,14 @@ export function NewTaskForm({
       companyId: companyId ?? null,
       assigneeUserId: assignee || null,
       dueAt,
+      kind,
     })
     setBusy(false)
     if (!r.ok) {
       setError(r.error)
       return
     }
+    toast.success('Task added.')
     window.location.reload()
   }
 
@@ -264,6 +339,17 @@ export function NewTaskForm({
         <textarea value={detail} rows={2} onChange={(e) => setDetail(e.target.value)} />
       </label>
       <div className="two-up">
+        <label>
+          Kind
+          <select value={kind} onChange={(e) => setKind(e.target.value as 'todo' | 'call' | 'visit')}>
+            <option value="todo">To-do</option>
+            {companyId ? <option value="call">Call — from your own phone</option> : null}
+            {companyId ? <option value="visit">Visit — in person</option> : null}
+          </select>
+          {kind === 'call' ? (
+            <span className="hint">The system places no call. Check the number is not on the DND registry before calling.</span>
+          ) : null}
+        </label>
         <label>
           Assigned to
           <select value={assignee} onChange={(e) => setAssignee(e.target.value)}>
@@ -333,7 +419,7 @@ export function TemplateButtons({
   return (
     <div style={{ marginTop: 14 }}>
       {error ? <div className="err-line" role="alert">{error}</div> : null}
-      {done ? <div className="ok-line">{done}</div> : null}
+      <ToastOn message={done} />
       {rows.map(([template, label, copy, state]) => (
         <div key={template} className="row-actions" style={{ marginTop: 8, alignItems: 'center' }}>
           <button

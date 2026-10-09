@@ -178,15 +178,22 @@ const schema = z.object({
    *
    * Optional: a deployment without an agent worker still has a working CRM,
    * and the chat panel says so rather than erroring.
+   *
+   * Read LOOSELY here, and validated by `agentConfigFrom` in
+   * `lib/agent-config.ts`: this parse is all-or-nothing, and a malformed value
+   * for this one chat-only variable made every page, the one-click
+   * unsubscribe and every inbound webhook answer 500 (review round 15). A bad
+   * value now turns chat off and is named on /settings/deployment.
    */
-  AGENT_URL: z.string().url().optional(),
+  AGENT_URL: z.preprocess(blankIsUnset, z.string().optional()),
   /**
    * Proves to the worker that this request came from the web app. It is NOT
    * what proves who the human is — the worker re-derives the principal from
    * the database — so the worst a stolen token does is let someone address a
    * conversation that already exists and already belongs to the user it names.
+   * Its length is checked by `agentConfigFrom`, for the reason above.
    */
-  AGENT_INTERNAL_TOKEN: z.string().min(32).optional(),
+  AGENT_INTERNAL_TOKEN: z.preprocess(blankIsUnset, z.string().optional()),
 
   /**
    * Proves an inbound-email webhook (§8.4's "or the provider webhook") came
@@ -271,6 +278,23 @@ const schema = z.object({
 
 export type Env = z.infer<typeof schema>
 
+/**
+ * What `env()` throws. Its NAME is what /api/health reports, so a deployment
+ * whose configuration does not parse says `config: invalid` rather than
+ * `database: unreachable` — the health check blamed the database for a
+ * malformed AGENT_URL, which pointed the person reading it the wrong way
+ * (review round 15). The message lists the failing variables by name, never
+ * a value, and reaches the platform's log only.
+ */
+export class InvalidEnvironmentError extends Error {
+  override readonly name = 'InvalidEnvironmentError'
+  readonly variables: readonly string[]
+  constructor(variables: readonly string[], problems: string) {
+    super(`Invalid environment configuration:\n${problems}`)
+    this.variables = variables
+  }
+}
+
 function load(): Env {
   const parsed = schema.safeParse(process.env)
   if (!parsed.success) {
@@ -278,7 +302,8 @@ function load(): Env {
     const problems = parsed.error.issues
       .map((i) => `  ${i.path.join('.') || '(root)'}: ${i.message}`)
       .join('\n')
-    throw new Error(`Invalid environment configuration:\n${problems}`)
+    const variables = [...new Set(parsed.error.issues.map((i) => i.path.join('.') || '(root)'))]
+    throw new InvalidEnvironmentError(variables, problems)
   }
   return parsed.data
 }

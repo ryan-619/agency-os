@@ -14,7 +14,7 @@
  */
 import { relations, sql } from 'drizzle-orm'
 import {
-  boolean, index, integer, jsonb, numeric, pgTable, primaryKey, text,
+  boolean, date, doublePrecision, index, integer, jsonb, numeric, pgTable, primaryKey, smallint, text,
   time, timestamp, uniqueIndex, uuid, bigint,
 } from 'drizzle-orm/pg-core'
 
@@ -134,7 +134,11 @@ export const icpProfiles = pgTable(
     active: boolean('active').notNull().default(true),
     ...timestamps,
   },
-  (t) => [uniqueIndex('icp_profiles_org_name_key').on(t.orgId, t.name)],
+  (t) => [
+    uniqueIndex('icp_profiles_org_name_key').on(t.orgId, t.name),
+    // 0021: one active profile per org; `activate_icp` swaps it in one transaction.
+    uniqueIndex('icp_profiles_one_active_per_org').on(t.orgId).where(sql`active`),
+  ],
 )
 
 export const companies = pgTable(
@@ -148,15 +152,45 @@ export const companies = pgTable(
     /** IANA zone for the company's main office. A FALLBACK for a contact who
      *  has none — never derived from `country`, which is not a timezone (0010). */
     timeZone: text('time_zone'),
+    /** Funding stage, one of `COMPANY_STAGES` (application-checked; 0021 explains why not a CHECK). */
     stage: text('stage'),
+    /** A claim from research, never a scan observation: shown with `headcountSource` (0021). */
     headcount: integer('headcount'),
     title: text('title'),
-    /** 'apollo' | 'manual' | 'import' | 'agent' */
+    /** What the company is, from research (0021): bounded, and never a finding. */
+    industry: text('industry'),
+    city: text('city'),
+    description: text('description'),
+    /** Where the headcount came from — a URL or a short note. Never without a headcount (0021). */
+    headcountSource: text('headcount_source'),
+    /** The listing's main line, E.164 by CHECK (0022). A business's number, never a person's contact record. */
+    phone: text('phone'),
+    /** As the listing gives it (0022). */
+    address: text('address'),
+    /** Google Maps place id: one company per place in an org (0022). */
+    googlePlaceId: text('google_place_id'),
+    googleMapsUrl: text('google_maps_url'),
+    /** 0.0–5.0, as the listing showed it when read. */
+    googleRating: numeric('google_rating', { precision: 2, scale: 1 }),
+    googleReviewCount: integer('google_review_count'),
+    /** The listing's primary type, e.g. `dentist`. */
+    googleCategory: text('google_category'),
+    /** The website the LISTING names — maybe a Facebook page or a directory entry, never assumed to be theirs. */
+    listingWebsite: text('listing_website'),
+    /** When the listing facts were read; a listing fact is never stored without it (0022). */
+    listingCheckedAt: timestamp('listing_checked_at', { withTimezone: true }),
+    /** Google's coordinates for the listing (0023); a pair, dated by `listingCheckedAt`. */
+    latitude: doublePrecision('latitude'),
+    longitude: doublePrecision('longitude'),
+    /** 'apollo' | 'manual' | 'import' | 'agent' | 'inbound' | 'google_maps' */
     source: text('source').notNull().default('manual'),
     firstSeenAt: timestamp('first_seen_at', { withTimezone: true }).notNull().defaultNow(),
     ...timestamps,
   },
-  (t) => [uniqueIndex('companies_org_domain_key').on(t.orgId, t.domain)],
+  (t) => [
+    uniqueIndex('companies_org_domain_key').on(t.orgId, t.domain),
+    uniqueIndex('companies_org_place_key').on(t.orgId, t.googlePlaceId).where(sql`google_place_id IS NOT NULL`),
+  ],
 )
 
 export const scans = pgTable(
@@ -795,6 +829,10 @@ export const tasks = pgTable(
     /** RESTRICT: a done task names a person who stays identifiable. NOT NULL
      *  exactly when `doneAt` is. */
     doneBy: uuid('done_by'),
+    /** What came of a done call or visit (0027): 'reached' | 'no_answer' | 'busy' |
+     *  'wrong_number' | 'call_back' | 'not_interested' | 'asked_to_stop'. NULL on
+     *  every other task, by CHECK. */
+    outcome: text('outcome'),
     ...timestamps,
   },
   (t) => [
@@ -847,6 +885,342 @@ export const proposalShares = pgTable(
  * scrubs it. A row is that registration, copied in by a person or from the
  * DLT portal's CSV export; `packages/core/src/dlt.ts` reads its body.
  */
+/**
+ * What the AI is told about the agency, and its morning brief (0020). One
+ * row per org, written from Settings → Assistant. The playbook is appended to
+ * the AI's instructions on every turn as a description, never a rule; the
+ * brief is one unattended turn a day at `briefAt` in `briefTimeZone`, in
+ * `briefUserId`'s name, claimed for the zone's own date (`briefLastRunOn`).
+ */
+export const assistantSettings = pgTable(
+  'assistant_settings',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    /** At most 20,000 characters, by CHECK. */
+    playbook: text('playbook').notNull().default(''),
+    /** SET NULL (playbook_updated_by); same-org composite FK, owned by the migration. */
+    playbookUpdatedBy: uuid('playbook_updated_by'),
+    /** When the playbook was last saved — `updated_at` moves on every write, the daily claim's included. */
+    playbookUpdatedAt: timestamp('playbook_updated_at', { withTimezone: true }),
+    briefEnabled: boolean('brief_enabled').notNull().default(false),
+    /** SET NULL (brief_user_id); same-org composite FK, owned by the migration. */
+    briefUserId: uuid('brief_user_id'),
+    /** HH:MM, by CHECK, read in `briefTimeZone`. */
+    briefAt: text('brief_at').notNull().default('08:30'),
+    briefTimeZone: text('brief_time_zone').notNull().default('Asia/Kolkata'),
+    /** The zone's own date of the last brief, as 'YYYY-MM-DD'. */
+    briefLastRunOn: date('brief_last_run_on', { mode: 'string' }),
+    /** "Run it now": started by the worker's next look whatever the clock says, cleared by its claim. */
+    briefRequestedAt: timestamp('brief_requested_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex('assistant_settings_one_per_org').on(t.orgId)],
+)
+
+/**
+ * What the agency sells (0022): a name, a price range and the NEEDS it answers
+ * (`NEED_KEYS` in packages/core). Prices are whole units of `currency`.
+ */
+export const services = pgTable(
+  'services',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    description: text('description'),
+    needs: text('needs').array().notNull().default(sql`'{}'::text[]`),
+    priceFrom: integer('price_from'),
+    priceTo: integer('price_to'),
+    currency: text('currency').notNull().default('INR'),
+    /** 'one_off' | 'monthly' | 'yearly' | 'hourly' | 'daily' */
+    priceUnit: text('price_unit').notNull().default('one_off'),
+    active: boolean('active').notNull().default(true),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex('services_org_name_key').on(t.orgId, sql`lower(btrim(${t.name}))`)],
+)
+
+/**
+ * What Google's PageSpeed Insights measured of a company's homepage (0022).
+ * A failed audit carries its reason and no score, by CHECK.
+ */
+export const siteAudits = pgTable(
+  'site_audits',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    /** CASCADE; same-org composite FK (company_id, org_id), owned by the migration. */
+    companyId: uuid('company_id').notNull(),
+    /** 'pagespeed' */
+    source: text('source').notNull().default('pagespeed'),
+    /** 'mobile' | 'desktop' */
+    strategy: text('strategy').notNull(),
+    url: text('url').notNull(),
+    ranAt: timestamp('ran_at', { withTimezone: true }).notNull().defaultNow(),
+    ok: boolean('ok').notNull(),
+    error: text('error'),
+    performance: integer('performance'),
+    accessibility: integer('accessibility'),
+    bestPractices: integer('best_practices'),
+    seo: integer('seo'),
+    lcpMs: integer('lcp_ms'),
+    cls: numeric('cls', { precision: 6, scale: 3 }),
+    tbtMs: integer('tbt_ms'),
+    fcpMs: integer('fcp_ms'),
+    /** The field data's overall category: 'FAST' | 'AVERAGE' | 'SLOW'; null when Google has none. */
+    fieldCategory: text('field_category'),
+    ...timestamps,
+  },
+  (t) => [index('site_audits_company_ran_idx').on(t.companyId, t.ranAt)],
+)
+
+/**
+ * The agency's own profile (0023): what a quote prints about the seller —
+ * legal name, address, GSTIN and the GST it charges (only with a GSTIN, by
+ * CHECK), the UPI ID an advance is paid to, validity and terms, and a
+ * brochure link. One row per org.
+ */
+export const orgProfiles = pgTable('org_profiles', {
+  id: id(),
+  orgId: uuid('org_id').notNull().unique().references(() => orgs.id, { onDelete: 'cascade' }),
+  legalName: text('legal_name'),
+  address: text('address'),
+  phone: text('phone'),
+  email: text('email'),
+  website: text('website'),
+  gstin: text('gstin'),
+  gstRate: numeric('gst_rate', { precision: 5, scale: 2 }).notNull().default('0'),
+  upiVpa: text('upi_vpa'),
+  upiPayee: text('upi_payee'),
+  advancePercent: smallint('advance_percent').notNull().default(50),
+  quoteValidityDays: smallint('quote_validity_days').notNull().default(15),
+  quoteTerms: text('quote_terms'),
+  brochureUrl: text('brochure_url'),
+  /** Composite FK (updated_by, org_id) → users, SET NULL — in the migration. */
+  updatedBy: uuid('updated_by'),
+  ...timestamps,
+})
+
+/**
+ * A priced offer of the agency's own services (0023): line items, totals the
+ * database holds to `total = subtotal + tax`, the needs it answers with their
+ * dated evidence, and — once sent — the seller as it was then.
+ */
+export const quotes = pgTable(
+  'quotes',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    /** Composite FK (company_id, org_id) → companies, CASCADE — in the migration. */
+    companyId: uuid('company_id').notNull(),
+    /** Composite FK (contact_id, org_id) → contacts, SET NULL — in the migration. */
+    contactId: uuid('contact_id'),
+    number: text('number').notNull(),
+    title: text('title').notNull(),
+    intro: text('intro'),
+    items: jsonb('items').notNull().default(sql`'[]'::jsonb`),
+    currency: text('currency').notNull().default('INR'),
+    subtotal: bigint('subtotal', { mode: 'number' }).notNull().default(0),
+    taxRate: numeric('tax_rate', { precision: 5, scale: 2 }).notNull().default('0'),
+    taxAmount: bigint('tax_amount', { mode: 'number' }).notNull().default(0),
+    total: bigint('total', { mode: 'number' }).notNull().default(0),
+    advancePercent: smallint('advance_percent').notNull().default(0),
+    advanceAmount: bigint('advance_amount', { mode: 'number' }).notNull().default(0),
+    needs: jsonb('needs').notNull().default(sql`'[]'::jsonb`),
+    terms: text('terms'),
+    /** YYYY-MM-DD, the last day it may be accepted, in India's day. */
+    validUntil: date('valid_until').notNull(),
+    seller: jsonb('seller'),
+    /** 'draft' | 'sent' | 'accepted' | 'declined' | 'withdrawn' */
+    status: text('status').notNull().default('draft'),
+    sentAt: timestamp('sent_at', { withTimezone: true }),
+    acceptedAt: timestamp('accepted_at', { withTimezone: true }),
+    acceptedByName: text('accepted_by_name'),
+    declinedAt: timestamp('declined_at', { withTimezone: true }),
+    declineReason: text('decline_reason'),
+    /** Composite FK (created_by, org_id) → users, SET NULL — in the migration. */
+    createdBy: uuid('created_by'),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('quotes_org_number_key').on(t.orgId, t.number),
+    index('quotes_company_created_idx').on(t.companyId, t.createdAt),
+  ],
+)
+
+/**
+ * A link a business opens (0023): its quote, its audit page or a preview of
+ * the website the agency would build. Only the token's sha256 is stored.
+ */
+export const shareLinks = pgTable(
+  'share_links',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    /** 'quote' | 'report' | 'preview' */
+    kind: text('kind').notNull(),
+    /** Composite FK (company_id, org_id) → companies, CASCADE — in the migration. */
+    companyId: uuid('company_id').notNull(),
+    quoteId: uuid('quote_id').references(() => quotes.id, { onDelete: 'cascade' }),
+    tokenHash: text('token_hash').notNull().unique(),
+    /** Composite FK (created_by, org_id) → users, SET NULL — in the migration. */
+    createdBy: uuid('created_by'),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    viewCount: integer('view_count').notNull().default(0),
+    firstViewedAt: timestamp('first_viewed_at', { withTimezone: true }),
+    lastViewedAt: timestamp('last_viewed_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [
+    index('share_links_company_created_idx').on(t.companyId, t.createdAt),
+    index('share_links_quote_idx').on(t.quoteId).where(sql`quote_id IS NOT NULL`),
+  ],
+)
+
+// ---------------------------------------------------------------------------
+// Follow-up sequences (0024)
+// ---------------------------------------------------------------------------
+
+/** A campaign's steps after its opener: another message on its channel, a call or a visit. */
+export const campaignSteps = pgTable(
+  'campaign_steps',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    /** Composite FK (campaign_id, org_id) → campaigns, CASCADE — in the migration. */
+    campaignId: uuid('campaign_id').notNull(),
+    /** 2 onwards: the opener is step 1, written by enrolment. */
+    position: smallint('position').notNull(),
+    /** 'message' | 'call' | 'visit' */
+    kind: text('kind').notNull(),
+    /** Days after the step before: after its message was sent, or its task made. */
+    afterDays: smallint('after_days').notNull(),
+    subject: text('subject'),
+    /** A message's words, with {first_name}, {company} and {agency}; NULL for a call or a visit. */
+    body: text('body'),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex('campaign_steps_position_key').on(t.campaignId, t.position)],
+)
+
+/** One person's way through a campaign's steps; stopped the moment they reply. */
+export const sequenceRuns = pgTable(
+  'sequence_runs',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    /** Composite FK (campaign_id, org_id) → campaigns, CASCADE — in the migration. */
+    campaignId: uuid('campaign_id').notNull(),
+    /** Composite FK (contact_id, org_id) → contacts, CASCADE — in the migration. */
+    contactId: uuid('contact_id').notNull(),
+    /** When the opener went; a reply after it stops the run. */
+    startedAt: timestamp('started_at', { withTimezone: true }).notNull(),
+    nextPosition: smallint('next_position').notNull().default(2),
+    /** When the step before was taken: its message sent, or its task made. */
+    anchorAt: timestamp('anchor_at', { withTimezone: true }).notNull(),
+    /** Composite FK (waiting_touch_id, org_id) → touches, SET NULL — in the migration. */
+    waitingTouchId: uuid('waiting_touch_id'),
+    stoppedAt: timestamp('stopped_at', { withTimezone: true }),
+    /** 'replied' | 'paused' | 'refused' | 'deal_closed' | 'campaign_ended' | 'finished' */
+    stopReason: text('stop_reason'),
+    ...timestamps,
+  },
+  (t) => [
+    uniqueIndex('sequence_runs_campaign_contact_key').on(t.campaignId, t.contactId),
+    index('sequence_runs_live_idx').on(t.orgId, t.anchorAt).where(sql`stopped_at IS NULL`),
+  ],
+)
+
+// ---------------------------------------------------------------------------
+// The night shift (0025)
+// ---------------------------------------------------------------------------
+
+/**
+ * A suggested answer to an email reply (0026): the model's words, waiting on
+ * /inbox for a person to read, change and send through the answer path.
+ * Never a message — nothing reads it but the inbox. One per reply; a reply
+ * the readers refuse is recorded `skipped` with why, and never asked again.
+ */
+export const replySuggestions = pgTable(
+  'reply_suggestions',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    /** Same-org composite FK to touches (id, org_id), CASCADE — owned by 0026. */
+    touchId: uuid('touch_id').notNull(),
+    /** 'drafted' | 'skipped' */
+    status: text('status').notNull(),
+    body: text('body'),
+    model: text('model'),
+    skippedWhy: text('skipped_why'),
+    usedAt: timestamp('used_at', { withTimezone: true }),
+    dismissedAt: timestamp('dismissed_at', { withTimezone: true }),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex('reply_suggestions_one_per_reply').on(t.touchId)],
+)
+
+/**
+ * Research about a company, with its source (0028): a claim and the page it
+ * came from, recorded by a person or the agent. Never evidence: nothing here
+ * is observed by the scanner or quoted in anything outbound.
+ */
+export const companyResearch = pgTable(
+  'company_research',
+  {
+    id: id(),
+    orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+    /** Same-org composite FK to companies (id, org_id), CASCADE — owned by 0028. */
+    companyId: uuid('company_id').notNull(),
+    claim: text('claim').notNull(),
+    sourceUrl: text('source_url').notNull(),
+    sourceTitle: text('source_title'),
+    /** Same-org composite FK to users (id, org_id), SET NULL — owned by 0028. NULL: the agent. */
+    recordedBy: uuid('recorded_by'),
+    ...timestamps,
+  },
+  (t) => [
+    index('company_research_company_idx').on(t.companyId, t.createdAt),
+    uniqueIndex('company_research_one_claim_per_source').on(t.companyId, t.claim, t.sourceUrl),
+  ],
+)
+
+/** One row per org: whether the night shift runs, when in which zone, and the night it last ran. */
+export const nightShifts = pgTable('night_shifts', {
+  id: id(),
+  orgId: uuid('org_id').notNull().unique().references(() => orgs.id, { onDelete: 'cascade' }),
+  enabled: boolean('enabled').notNull().default(false),
+  /** HH:MM, by CHECK. */
+  runAt: text('run_at').notNull().default('02:00'),
+  timeZone: text('time_zone').notNull().default('Asia/Kolkata'),
+  /** The zone's date of the last run (its claim). */
+  lastRunOn: date('last_run_on'),
+  /** "Run it now": due at the next look; cleared by the claim. */
+  requestedAt: timestamp('requested_at', { withTimezone: true }),
+  /** Composite FK (updated_by, org_id) → users, SET NULL — in the migration. */
+  updatedBy: uuid('updated_by'),
+  ...timestamps,
+})
+
+/** A saved Google Maps search the night shift runs. */
+export const nightSearches = pgTable('night_searches', {
+  id: id(),
+  orgId: uuid('org_id').notNull().references(() => orgs.id, { onDelete: 'cascade' }),
+  query: text('query').notNull(),
+  /** Two letters Google searches from; NULL is India. */
+  region: text('region'),
+  /** The city the businesses found are filed under. */
+  city: text('city'),
+  active: boolean('active').notNull().default(true),
+  lastRunAt: timestamp('last_run_at', { withTimezone: true }),
+  /** Composite FK (created_by, org_id) → users, SET NULL — in the migration. */
+  createdBy: uuid('created_by'),
+  ...timestamps,
+})
+
 export const messageTemplates = pgTable(
   'message_templates',
   {

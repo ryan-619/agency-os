@@ -117,6 +117,32 @@ const API_REFUSALS: Readonly<
   },
 }
 
+/**
+ * The one `invalid_request` a person can do something about.
+ *
+ * "Prompt is too long" is the API saying the thread, the system prompt and
+ * the tool descriptions no longer fit the model's context together — not a
+ * malformed request, so "this is a bug" sent people looking for one. Seen on
+ * the live site on 2026-10-07, when a connector with 98 tools was added: the
+ * CLI compacted the thread and retried, and the retry was refused too, so a
+ * new thread is the first thing to try and the connector's tool list the
+ * second. Matched on the API's own words, read and never shown.
+ */
+const PROMPT_TOO_LONG: ChatEventBody = {
+  kind: 'error',
+  code: 'sdk_error',
+  retryable: false,
+  message:
+    'This conversation no longer fits what the model can read at once — the thread, its instructions and ' +
+    'the tools it carries together. Nothing was done. Start a new thread to carry on. If a new thread ' +
+    'fails the same way, a connector is offering too many tools: in Settings → Connectors, turn off the ' +
+    'ones nobody uses.',
+}
+
+function tooLong(blocks: readonly ContentBlock[]): boolean {
+  return blocks.some((b) => b?.type === 'text' && typeof b.text === 'string' && /prompt is too long/i.test(b.text))
+}
+
 interface ContentBlock {
   readonly type?: string
   readonly text?: string
@@ -173,6 +199,7 @@ export function mapSdkMessage(msg: SDKMessage, ctx: MapContext): ChatEventBody[]
       // agent speaking — the reader gets a sentence naming who has to do what.
       const refusal = (msg as { error?: string }).error
       if (refusal) {
+        if (refusal === 'invalid_request' && tooLong(blocks)) return [PROMPT_TOO_LONG]
         const known = API_REFUSALS[refusal]
         return [
           {

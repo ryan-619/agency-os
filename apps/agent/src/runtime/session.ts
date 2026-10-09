@@ -16,12 +16,12 @@
 import { randomUUID } from 'node:crypto'
 import { and, eq, isNull } from 'drizzle-orm'
 import type { McpServerConfig, Options } from '@anthropic-ai/claude-agent-sdk'
-import { parseIcpDefinition, type ChatEventBody, type Principal } from '@agency/core'
+import { parseIcpDefinition, type ChatEventBody, type Draft, type Principal } from '@agency/core'
 import {
   activeIcpProfile, appendAudit, enabledAgentDefs, ensureApproval, expireApproval, readApproval,
-  schema, type AgencyDb, type ApprovalRow,
+  readPlaybook, schema, type AgencyDb, type ApprovalRow,
 } from '@agency/db'
-import type { ToolContext } from '@agency/tools'
+import type { OpsContext, PageSpeedClient, PlacesClient, ToolContext } from '@agency/tools'
 import { makeCanUseTool } from '../gate/can-use-tool.js'
 import { createLedger } from '../gate/ledger.js'
 import { makePostToolUse, makePreToolUse, HOOK_TIMEOUT_SECONDS } from '../gate/pre-tool-use.js'
@@ -86,6 +86,32 @@ export interface SessionDeps {
   readonly turnTimeoutMs: number
   readonly cwd: string
   readonly now: () => Date
+  /**
+   * The worker's view of itself — its health, its recent warnings and errors,
+   * the scanner bound to the nightly rescan's timeouts — for the ops tools
+   * (packages/tools/src/ops.ts). Built once by `startWorker` and handed to
+   * every turn's tool context. Optional: a turn without it runs every tool,
+   * and the ops tools say the worker's own view is not available.
+   */
+  readonly ops?: OpsContext | undefined
+  /**
+   * The worker's model polishing an opener (`refineDraft`), handed to every
+   * turn's tool context when a model is configured (LLM_PROVIDER). Absent,
+   * enrolment drafts keep the template.
+   */
+  readonly refineOpener?: ((draft: Draft, signal: AbortSignal) => Promise<Draft>) | undefined
+  /**
+   * Agency tools the SDK cannot describe to the model, decided once at boot
+   * (`agencyToolsToOmit`) and left out of every turn's server — because one
+   * such tool in the server takes every other tool's listing down with it.
+   */
+  readonly omitTools?: ReadonlySet<string> | undefined
+  /** Google Maps search for `find_businesses`, built once at boot; absent without a key. */
+  readonly places?: PlacesClient | undefined
+  /** Google PageSpeed for `audit_website`, built once at boot. */
+  readonly pagespeed?: PageSpeedClient | undefined
+  /** The web app's origin (`WEB_PUBLIC_URL`), for a link a tool prints in full; absent without one. */
+  readonly webOrigin?: string | undefined
 }
 
 export interface TurnRuntime {
@@ -120,6 +146,11 @@ export async function buildTurnRuntime(
     readonly principal: Principal
     readonly resume: string | null
     readonly emit: (event: ChatEventBody) => void
+    /**
+     * Nobody is watching this turn — the morning brief. The gate declines,
+     * at once and with no card, anything that would need a person.
+     */
+    readonly unattended?: boolean
   },
 ): Promise<TurnRuntime> {
   const turnId = randomUUID()
@@ -168,11 +199,19 @@ export async function buildTurnRuntime(
    * Both builders SKIP a row they cannot use rather than throwing: one broken
    * connector must not take the whole chat down.
    */
-  const [connectors, agentRows] = await Promise.all([
+  const [connectors, agentRows, playbook] = await Promise.all([
     buildMcpServers(deps.db, args.orgId, deps.secretsKey, deps.log),
     enabledAgentDefs(deps.db, args.orgId),
+    // The agency's own words (Settings → Assistant), read fresh like the
+    // rest. A read that fails costs the turn its playbook, never the turn.
+    readPlaybook(deps.db, args.orgId).catch((err: unknown) => {
+      deps.log.warn('could not read the playbook; this turn runs without it', {
+        error: err instanceof Error ? err.name : 'UnknownError',
+      })
+      return ''
+    }),
   ])
-  const subagents = buildAgents(agentRows, deps.log)
+  const subagents = buildAgents(agentRows, deps.log, playbook)
   if (Object.keys(connectors.servers).length > 0 || Object.keys(subagents.agents).length > 0) {
     deps.log.info('runtime assembled from the database', {
       // Names and transports only. A connector URL can carry a token in a
@@ -182,6 +221,7 @@ export async function buildTurnRuntime(
       ...(connectors.skipped.length > 0 ? { skippedConnectors: connectors.skipped } : {}),
       // Tool NAMES — what the gate will refuse this turn, and nothing else.
       ...(connectors.disabledTools.size > 0 ? { disabledTools: [...connectors.disabledTools] } : {}),
+      ...(connectors.readsWithoutCard.size > 0 ? { readsWithoutCard: [...connectors.readsWithoutCard] } : {}),
       ...(subagents.skipped.length > 0 ? { skippedSubagents: subagents.skipped } : {}),
     })
   }
@@ -207,11 +247,13 @@ export async function buildTurnRuntime(
     // refused from the very next message, the same promise §6 makes for a
     // server that is turned on.
     disabledTools: connectors.disabledTools,
+    readsWithoutCard: connectors.readsWithoutCard,
     audit,
     emit: args.emit,
     markGated: () => {},
     halted: deps.halt.halted,
     log: deps.log,
+    unattended: args.unattended === true,
   })
 
   const toolContext = (): ToolContext => ({
@@ -223,6 +265,14 @@ export async function buildTurnRuntime(
     turnId,
     now: deps.now,
     audit,
+    // The worker's own view, the same object for every turn; never the model's to supply.
+    ...(deps.ops ? { ops: deps.ops } : {}),
+    // The worker's model for openers, when one is configured; the template stands otherwise.
+    ...(deps.refineOpener ? { refineOpener: deps.refineOpener } : {}),
+    // Google, the same clients for every turn; never the model's to supply.
+    ...(deps.places ? { places: deps.places } : {}),
+    ...(deps.pagespeed ? { pagespeed: deps.pagespeed } : {}),
+    ...(deps.webOrigin ? { webOrigin: deps.webOrigin } : {}),
   })
 
   const mcpServer = createAgencyMcpServer({
@@ -241,6 +291,7 @@ export async function buildTurnRuntime(
       })
     },
     log: deps.log,
+    omit: deps.omitTools,
   })
 
   // The same set both rings refuse: the hook denies first, and canUseTool
@@ -270,11 +321,21 @@ export async function buildTurnRuntime(
       PreToolUse: [{ hooks: [makePreToolUse(hookDeps)], timeout: HOOK_TIMEOUT_SECONDS }],
       PostToolUse: [{ hooks: [makePostToolUse(hookDeps)], timeout: HOOK_TIMEOUT_SECONDS }],
     },
-    systemPrompt: systemPrompt(args.orgName, icpLabel),
+    systemPrompt: systemPrompt(
+      args.orgName,
+      icpLabel,
+      playbook,
+      // The research servers an owner let run without a card, by name, so the
+      // model knows which searches cost nobody a click (2026-10-07).
+      [...connectors.readsWithoutCard].map((entry) => entry.slice('mcp__'.length, -'__*'.length)),
+    ),
     cwd: deps.cwd,
     abortController: abort,
     maxTurns: deps.maxTurns,
     maxBudgetUsd: deps.maxBudgetUsd,
+    // The tools the gate refuses are not described to the model either: a
+    // server with dozens of tools turned off filled the context (2026-10-07).
+    disabledConnectorTools: connectors.disabledTools,
     env: childEnv(deps.credential),
     ...(args.resume ? { resume: args.resume } : {}),
     ...(deps.model ? { model: deps.model } : {}),

@@ -218,7 +218,7 @@ routes: `GET|POST /api/templates`, `PATCH /api/templates/[id]` and `POST
 ### The agent half — needs the worker process
 
 Chat at `/chat` streams over SSE from `apps/agent`. The agent gets
-twenty-three typed tools from the in-process `agency` MCP server:
+forty-nine typed tools from the in-process `agency` MCP server:
 
 ```
 get_icp  get_company  search_companies  scan_company  score_company
@@ -227,12 +227,22 @@ check_send  get_consent  get_replies  classify_reply
 get_scan_history  get_evidence_changes  get_stale_companies
 get_pipeline_metrics  get_company_timeline  get_compliance_summary  search_crm
 add_note  create_task  list_tasks
+list_contacts  add_company  update_company  import_companies  add_contact
+update_contact  pause_contact  resume_contact  add_suppression
+list_campaigns  create_campaign  update_campaign  enrol_contacts  list_drafts
+generate_proposal  get_proposal  list_meetings  reschedule_meeting
+cancel_meeting  record_meeting_outcome  set_deal_owner  complete_task
+worker_status  recent_errors  queue_status  rescan_stale
 ```
 
-Seventeen only read; five write internal state and say nothing was sent
-(`update_deal`, `book_meeting`, `classify_reply`, `add_note`, `create_task`);
-`queue_touch` is the draft path — it parks a message on a human rather than
-sending. High-risk tools block on the approval queue via `canUseTool`; a
+Twenty-six are low — reads, and the three scans — and run at once; twenty
+write internal state, ask a person first and say nothing was sent; three
+are high: `queue_touch` and `enrol_contacts`, the draft paths, which park
+messages on a human rather than sending, and `resume_contact`, which lets
+campaigns write to somebody again. The last four of the list stand in for a
+terminal: the worker's heartbeat and health, its recent warnings, the
+outbound queue, and a re-scan of a few stale companies (CLAUDE.md §2, "The
+operator's tools"). High-risk tools block on the approval queue via `canUseTool`; a
 third-party MCP tool nobody has reviewed asks a person **every** time, and an
 owner can turn any connector tool OFF — a deny in both gate rings, never an
 allow. A catalog server's send tools start off.

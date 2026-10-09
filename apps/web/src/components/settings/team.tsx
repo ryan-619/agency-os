@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { toast } from '../toast/toast'
 import { When } from '@/components/when'
 
 /**
@@ -59,6 +60,7 @@ export function TeamPanel({
         setGrantError(body.error ?? 'That did not work.')
         return
       }
+      toast.afterReload('Access granted. No mail was sent: they sign in from the sign-in page.')
       window.location.reload()
     } catch {
       setGrantError('The request did not complete. Try again.')
@@ -81,6 +83,15 @@ export function TeamPanel({
         setErrors((e) => ({ ...e, [m.id]: out.error ?? 'That did not work.' }))
         return
       }
+      toast.afterReload(
+        body.action === 'revoke'
+          ? 'Access revoked. Their sessions were signed out.'
+          : body.action === 'restore'
+            ? 'Access restored.'
+            : body.role === 'owner'
+              ? 'Made an owner.'
+              : 'Made a member.',
+      )
       window.location.reload()
     } catch {
       setErrors((e) => ({ ...e, [m.id]: 'The request did not complete. Try again.' }))

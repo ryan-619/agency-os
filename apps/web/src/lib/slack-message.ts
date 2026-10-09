@@ -50,6 +50,14 @@ export type NotificationEvent =
       replyKind: ReplyKind
       paused: boolean
       suppressed: boolean
+      /**
+       * False when the reply came from another address than the contact it
+       * was filed under — a colleague replying all to our message (review
+       * round 8). Their words, and their stop, are not the contact's, so the
+       * message says "somebody else on the thread" and never "they". Absent,
+       * the message is what it always was. A boolean, never the address.
+       */
+      fromIsContact?: false
     }
   | { kind: 'booking'; orgId: string; meetingId: string; companyDomain: string; needsReview: boolean }
   | { kind: 'deal_closed'; orgId: string; dealId: string; companyDomain: string; stage: 'won' | 'lost' }
@@ -151,6 +159,27 @@ export function slackMessage(event: NotificationEvent, origin: string): SlackPay
 
   switch (event.kind) {
     case 'reply': {
+      if (event.fromIsContact === false) {
+        // A colleague's reply, filed under the contact our message went to:
+        // whoever is told to act must not act on the contact (review round 8).
+        lines.push(
+          `Reply from ${displayDomain(event.companyDomain)} — ${
+            event.replyKind === 'opted_out'
+              ? 'somebody else on the thread asked to stop'
+              : `${REPLY_WORDS[event.replyKind]}, from somebody else on the thread`
+          }.`,
+        )
+        if (event.suppressed) {
+          lines.push(
+            'The sender’s address is on the suppression list — do not answer them. The contact it was filed under did not ask to stop: do not suppress them.',
+          )
+        } else if (event.paused) {
+          lines.push('The contact it was filed under is paused, as any reply pauses them, until a person decides.')
+        }
+        lines.push(`touch ${event.touchId} · filed under contact ${event.contactId} · sent by somebody other than the contact`)
+        lines.push(companyLink(event.companyDomain, '/inbox'))
+        break
+      }
       lines.push(`Reply from ${displayDomain(event.companyDomain)} — ${REPLY_WORDS[event.replyKind]}.`)
       if (event.suppressed) {
         lines.push('They asked to stop — do not answer. The address is on the suppression list.')

@@ -40,7 +40,12 @@
  *    suppression could not be written is audited and logged by
  *    `handleInboundEmail`; this file then raises the same Slack alarm the
  *    web routes raise (`notify.ts`), awaited, before anything else is done
- *    with the reply.
+ *    with the reply. And a stop whose recording THREW — nothing stored,
+ *    left unseen to retry — takes the webhooks' loud path on its first
+ *    failure: the contact paused, a `contact.opt_out_not_recorded` row and
+ *    the awaited alarm, once per message however often it is retried
+ *    (`stopNotRecorded`). Before review round 6 it was retried and then
+ *    abandoned with log lines only.
  *
  * ## What the mail says about itself
  *
@@ -53,10 +58,16 @@
  */
 import { ImapFlow } from 'imapflow'
 import { simpleParser, type HeaderValue, type SimpleParserOptions } from 'mailparser'
-import { handleInboundEmail, type AgencyDb, type InboundOutcome } from '@agency/db'
+import {
+  appendAudit, handleInboundEmail, keepingRolledBackOptOut, pauseContact, pauseContactOverriding, rolledBackOptOutAlarm,
+  rolledBackOptOutAudit, rolledBackOptOutPause, rolledBackSenderHolds, type AgencyDb, type InboundLog, type InboundOutcome,
+  type RolledBackOptOut,
+} from '@agency/db'
 import { MAIL_SIGNAL_HEADERS, MAIL_SIGNAL_LIMITS, htmlToText, type LlmProvider } from '@agency/core'
 import { refineReplyKind } from './classify.js'
+import { suggestAnswer } from './suggest.js'
 import type { Logger } from '../logger.js'
+import { imapLoginFrom } from './mail-login.js'
 import { optOutAlarmFromEnvironment, optOutNotRecordedEvent, type OptOutAlarm } from '../notify.js'
 
 export interface InboxConfig {
@@ -78,6 +89,11 @@ export interface InboxDeps {
    */
   readonly llm?: LlmProvider | null
   readonly allowRemoteForLeadData?: boolean
+  /**
+   * The web app's origin (`WEB_PUBLIC_URL`), for the booking link a suggested
+   * answer may offer (0026). Null or absent offers none.
+   */
+  readonly webOrigin?: string | null
   /** For tests. Defaults to the wall clock. */
   readonly now?: () => Date
   /**
@@ -92,14 +108,36 @@ export interface InboxDeps {
   readonly connect?: (config: InboxConfig) => InboxClient
   /** For tests: the idle-time drains' timing. Defaults to `DRAIN_TIMING`. */
   readonly timing?: DrainTiming
+  /**
+   * Each session's outcome as a login state (`mail-login.ts`): `ok` when the
+   * mailbox is open, `refused` or `unreachable` when a session failed. The
+   * worker carries it on its heartbeat, so the dashboard can say the
+   * mailbox refused the login rather than leave it to the log.
+   */
+  readonly onLogin?: (state: 'ok' | 'refused' | 'unreachable') => void
 }
+
+/**
+ * Per UID, how far the loud path for a stop that could not be recorded has
+ * got: present once the alarm was raised, `written` once the pause and the
+ * audit row were both attempted without a fault. A retry of the same
+ * message raises no second alarm, and tries again only what did not land.
+ */
+export type UnrecordedStops = Map<string, { readonly written: boolean }>
 
 /**
  * What handling one message needs: the inbox's settings without the mailbox.
  * Here a missing `optOutAlarm` means none — `startInbox` is what resolves it
  * from the environment, once, and hands it in.
  */
-export type InboundMessageDeps = Omit<InboxDeps, 'config' | 'connect' | 'timing'>
+export type InboundMessageDeps = Omit<InboxDeps, 'config' | 'connect' | 'timing'> & {
+  /**
+   * The inbox's memory of stops already said out loud (`UnrecordedStops`),
+   * beside its failure count. Left out — a caller handling one message with
+   * no inbox around it — every failure takes the loud path.
+   */
+  readonly unrecordedStops?: UnrecordedStops
+}
 
 /**
  * The part of an IMAP client the inbox uses. `ImapFlow` is one; a test
@@ -116,6 +154,7 @@ export interface InboxClient {
   fetchOne(uid: string, query: { source: true }, options: { uid: true }): Promise<{ source?: Buffer } | false>
   messageFlagsAdd(uid: string, flags: string[], options: { uid: true }): Promise<unknown>
   on(event: 'exists', listener: () => void): unknown
+  on(event: 'error', listener: (err: Error) => void): unknown
   off(event: 'exists', listener: () => void): unknown
 }
 
@@ -298,6 +337,117 @@ function headerText(value: HeaderValue | undefined): string | null {
 }
 
 /**
+ * Where `recordInboundReply` writes when nobody hands it a log: stderr, one
+ * JSON line, in its own shape. The inbox hands it a log now — to keep the
+ * rolled-back line — and forwards every line here, so where they are read
+ * does not change.
+ */
+const recorderLines: InboundLog = {
+  error: (message, fields) => {
+    console.error(JSON.stringify({ level: 'error', message, ...fields, at: new Date().toISOString() }))
+  },
+}
+
+/**
+ * §2.1's Phase 4 obligation for a "stop" whose recording threw: the loud
+ * path the two webhooks take for the same fault
+ * (apps/web/src/app/api/inbound/email/fault.ts), in the same shapes
+ * (packages/db's `inbound-fault.ts`), so /audit and the Slack channel
+ * cannot tell which process noticed.
+ *
+ * `recordInboundReply` rolled the whole reply back, so the message stays
+ * unseen and the drain retries it — and until a retry lands nothing holds
+ * the contact: the sender reads them as clear, and their approved
+ * follow-up goes on the next tick. A retry may fail the same way five
+ * times and be abandoned. So on the FIRST failure: the contact paused over
+ * any earlier reason (`pauseContactOverriding`, `opt-out not recorded:
+ * reply <ISO> (record_failed)`, a pause no answer and no Resume lifts), a
+ * `contact.opt_out_not_recorded` row — what /compliance and the digest
+ * count, and what keeps /inbox from drafting to them — and the alarm,
+ * awaited. Each write is tried on its own, because the database may be the
+ * thing that failed; one that threw is tried again on the message's next
+ * failure, and the alarm is raised once (`UnrecordedStops`). Never throws.
+ *
+ * A stop from somebody other than the contact it was filed under — a
+ * colleague replying all to our message (review round 7) — holds that
+ * contact only as any reply would (`pauseContact`, `replied <ISO>`), and
+ * the row and the alarm say whose address to record: holding the contact
+ * as an opt-out nobody recorded locked out somebody who never asked, for
+ * good, even once the retry suppressed the colleague (inbound-fault.ts).
+ * The colleague is held instead, when they are a contact here (review
+ * round 8): each the recorder found at their address, named on its line by
+ * id, is paused as the opt-out nobody recorded and audited as theirs
+ * (`rolledBackSenderHolds`), under the same retry-on-next-failure rule.
+ */
+async function stopNotRecorded(
+  placed: RolledBackOptOut,
+  uid: number | string,
+  err: unknown,
+  deps: InboundMessageDeps,
+): Promise<void> {
+  const key = String(uid)
+  const before = deps.unrecordedStops?.get(key)
+  if (before?.written) return
+  const now = deps.now ? deps.now() : new Date()
+  const pause = rolledBackOptOutPause(placed, now)
+  let paused = false
+  let written = true
+  try {
+    paused = pause.overriding
+      ? await pauseContactOverriding(deps.db, placed.orgId, placed.contactId, pause.reason, now)
+      : await pauseContact(deps.db, placed.orgId, placed.contactId, pause.reason, now)
+  } catch {
+    written = false
+  }
+  let audited = true
+  try {
+    await appendAudit(deps.db, rolledBackOptOutAudit(placed))
+  } catch {
+    audited = false
+    written = false
+  }
+  // The sender of a colleague's stop, when they are contacts here: held as
+  // the one who asked, each write on its own.
+  const holds = rolledBackSenderHolds(placed, now)
+  let sendersHeld = 0
+  let sendersAudited = 0
+  for (const hold of holds) {
+    try {
+      if (await pauseContactOverriding(deps.db, placed.orgId, hold.contactId, hold.reason, now)) sendersHeld++
+    } catch {
+      written = false
+    }
+    try {
+      await appendAudit(deps.db, hold.audit)
+      sendersAudited++
+    } catch {
+      written = false
+    }
+  }
+  const alarm = before ? 'already_raised' : deps.optOutAlarm ? 'raised' : 'off'
+  // Ids and the fault's CLASS: its message quotes the address and the words.
+  deps.log.error('OPT-OUT NOT RECORDED — a reply that asked to stop could not be recorded; it stays unseen and is retried, otherwise follow up by hand', {
+    uid,
+    error: err instanceof Error ? err.name : 'UnknownError',
+    orgId: placed.orgId,
+    contactId: placed.contactId,
+    // False: a colleague's stop, filed under that contact.
+    fromIsContact: placed.fromIsContact,
+    paused,
+    audited,
+    // The contacts who ARE that colleague, held as the one who asked.
+    ...(placed.fromIsContact ? {} : { senders: holds.length, sendersHeld, sendersAudited }),
+    alarm,
+  })
+  deps.unrecordedStops?.set(key, { written })
+  if (!before && deps.optOutAlarm) {
+    await deps.optOutAlarm(rolledBackOptOutAlarm(placed)).catch((e: unknown) => {
+      deps.log.warn('opt-out alarm failed', { error: e instanceof Error ? e.name : 'UnknownError' })
+    })
+  }
+}
+
+/**
  * One raw message, from parse to every consequence: the record (and with it
  * the pause, the suppression, the deal — `handleInboundEmail`), the log
  * line, the alarm for an opt-out that could not be recorded, and the
@@ -308,7 +458,9 @@ function headerText(value: HeaderValue | undefined): string | null {
  * `UnreadableInboundMessage` when `parseInbound` throws, and whatever
  * `handleInboundEmail` throws — the caller's per-message try owns both, and
  * tells them apart: the first never reads, the second may record on a retry.
- * The alarm and the triage never throw out of here.
+ * The alarm and the triage never throw out of here, and neither does the
+ * loud path a stop takes when `handleInboundEmail` throws: it runs before
+ * the fault is rethrown, so the drain still counts and retries it.
  */
 export async function handleInboundMessage(
   source: Buffer | string,
@@ -325,7 +477,18 @@ export async function handleInboundMessage(
     deps.log.info('inbound mail had no readable sender; skipped', { uid })
     return null
   }
-  const outcome = await handleInboundEmail(deps.db, { ...mail, ...(deps.now ? { now: deps.now() } : {}) })
+  // The recorder's lines go where they always went (`recorderLines`), and a
+  // stop it rolled back is kept: that line is the one place a fault leaves
+  // the org and the contact it was filing under.
+  const recorder = keepingRolledBackOptOut(recorderLines)
+  let outcome: InboundOutcome
+  try {
+    outcome = await handleInboundEmail(deps.db, { ...mail, log: recorder, ...(deps.now ? { now: deps.now() } : {}) })
+  } catch (err) {
+    const placed = recorder.rolledBack()
+    if (placed) await stopNotRecorded(placed, uid, err, deps)
+    throw err
+  }
   if (outcome.matched === 'none' && outcome.bounce) {
     // A delivery report tied to a message this system sent. Ids and
     // the report's status code: the address is in the row, not here.
@@ -381,6 +544,26 @@ export async function handleInboundMessage(
         error: err instanceof Error ? err.name : 'UnknownError',
       })
     })
+    // A suggested answer (0026), after the kind is settled — the gate in
+    // front of it reads the kind. A reply that was recorded already has
+    // its row or its skip; a failure here costs a suggestion and nothing else.
+    if (!outcome.duplicate) {
+      await suggestAnswer(
+        {
+          db: deps.db,
+          log: deps.log,
+          llm: deps.llm,
+          allowRemoteForLeadData: deps.allowRemoteForLeadData ?? false,
+          webOrigin: deps.webOrigin ?? null,
+          ...(deps.now ? { now: deps.now } : {}),
+        },
+        { orgId: outcome.orgId, touchId: outcome.touchId },
+      ).catch((err: unknown) => {
+        deps.log.warn('suggesting an answer failed; the reply stands as recorded', {
+          error: err instanceof Error ? err.name : 'UnknownError',
+        })
+      })
+    }
   }
   return outcome
 }
@@ -394,6 +577,11 @@ export interface DrainDeps {
    * a reconnect; a drain deletes a UID's entry once the message is settled.
    */
   readonly attempts: Map<number, number>
+  /**
+   * The stops already said out loud (`UnrecordedStops`), which `handle`
+   * reads; forgotten with the count once the message is settled.
+   */
+  readonly unrecordedStops?: UnrecordedStops
   readonly stopped?: () => boolean
 }
 
@@ -437,25 +625,31 @@ export async function drainUnseen(
 
   let charged: number | null = null
   let leftUnseen = false
+  // A message is settled — handled, unreadable or abandoned: what the inbox
+  // remembers about it goes.
+  const settle = (uid: number): void => {
+    deps.attempts.delete(uid)
+    deps.unrecordedStops?.delete(String(uid))
+  }
   for (const uid of uids) {
     if (deps.stopped?.()) break
     let seen = true
     try {
       const msg = await c.fetchOne(String(uid), { source: true }, { uid: true })
       if (msg && msg.source) await deps.handle(msg.source, uid)
-      deps.attempts.delete(uid)
+      settle(uid)
     } catch (err) {
       if (err instanceof UnreadableInboundMessage) {
         // It will not parse next time either.
         deps.log.error('could not read an inbound message; marked seen', { uid, error: err.message })
-        deps.attempts.delete(uid)
+        settle(uid)
       } else {
         const error = err instanceof Error ? err.name : 'UnknownError'
         const counts: boolean = charged === null
         const attempts: number = (deps.attempts.get(uid) ?? 0) + (counts ? 1 : 0)
         if (counts) charged = attempts
         if (attempts >= INBOUND_MAX_ATTEMPTS) {
-          deps.attempts.delete(uid)
+          settle(uid)
           deps.log.error('INBOUND MESSAGE ABANDONED — handle it by hand', { uid, error })
         } else {
           if (counts) deps.attempts.set(uid, attempts)
@@ -478,6 +672,49 @@ export async function drainUnseen(
 }
 
 /**
+ * Why a connection failed, in words that name no value: the error's code
+ * (`ENOTFOUND`, `ECONNREFUSED`, imapflow's `NoConnection`), the server's
+ * bracketed response code (`AUTHENTICATIONFAILED`), and a hint for the two
+ * a person can fix. Never the message, which can quote the host, the user or
+ * what the server said back. "Error" alone was every line a mistyped host or
+ * a refused password ever produced, for as long as the worker ran.
+ */
+export function imapFailure(err: unknown): { reason?: string; hint?: string } {
+  if (typeof err !== 'object' || err === null) return {}
+  const e = err as { code?: unknown; serverResponseCode?: unknown; authenticationFailed?: unknown }
+  const token = (v: unknown): string | undefined =>
+    typeof v === 'string' && /^[A-Za-z][A-Za-z0-9_]{1,39}$/.test(v) ? v : undefined
+  const reason =
+    e.authenticationFailed === true ? 'authentication_failed' : (token(e.serverResponseCode) ?? token(e.code))
+  if (reason === undefined) return {}
+  if (reason === 'authentication_failed' || reason === 'AUTHENTICATIONFAILED') {
+    return {
+      reason,
+      hint: 'the mailbox refused IMAP_USER or IMAP_PASSWORD — Google needs the whole address and an app password',
+    }
+  }
+  // macOS answers ENOTFOUND for every name while the machine is offline, and
+  // EAI_AGAIN is a resolver that did not answer in time: neither proves the
+  // host is wrong, and a laptop reconnecting after sleep must not be told it
+  // is (review round 15).
+  if (reason === 'ENOTFOUND') {
+    return {
+      reason,
+      hint: 'IMAP_HOST did not resolve — check it is a server name, e.g. imap.gmail.com, and that this machine is online',
+    }
+  }
+  if (reason === 'EAI_AGAIN') {
+    return { reason, hint: 'a DNS lookup timed out — this machine may be offline; it is retried' }
+  }
+  // imapflow's own code for a socket that went quiet: what a laptop's
+  // connection does across a sleep. Nothing to fix.
+  if (reason === 'ETIMEOUT') {
+    return { reason, hint: 'the connection went quiet — this machine may have slept or lost its network; it is retried' }
+  }
+  return { reason }
+}
+
+/**
  * Listen for replies until stopped.
  *
  * Returns a stop function. The loop inside reconnects forever with back-off;
@@ -488,12 +725,15 @@ export function startInbox(deps: InboxDeps): () => Promise<void> {
   let client: InboxClient | null = null
   let backoff = RECONNECT_MIN_MS
   const timing = deps.timing ?? DRAIN_TIMING
-  // Per UID, across drains and reconnects (`drainUnseen`).
+  // Per UID, across drains and reconnects (`drainUnseen`): the failures, and
+  // the stops among them already said out loud (`stopNotRecorded`).
   const attempts = new Map<number, number>()
+  const unrecordedStops: UnrecordedStops = new Map()
   // Resolved once, at start: the boot log says whether the alarm is on.
   const handling: InboundMessageDeps = {
     ...deps,
     optOutAlarm: deps.optOutAlarm !== undefined ? deps.optOutAlarm : optOutAlarmFromEnvironment({ db: deps.db, log: deps.log }),
+    unrecordedStops,
   }
   const connect =
     deps.connect ??
@@ -516,8 +756,11 @@ export function startInbox(deps: InboxDeps): () => Promise<void> {
         backoff = RECONNECT_MIN_MS
       } catch (err) {
         if (stopped) break
+        const failure = imapFailure(err)
+        deps.onLogin?.(imapLoginFrom(failure))
         deps.log.warn('inbox connection dropped; reconnecting', {
           error: err instanceof Error ? err.name : 'UnknownError',
+          ...failure,
           inMs: backoff,
         })
         await new Promise<void>((r) => setTimeout(r, backoff))
@@ -529,6 +772,27 @@ export function startInbox(deps: InboxDeps): () => Promise<void> {
   const session = async (): Promise<void> => {
     const c = connect(deps.config)
     client = c
+    // imapflow reports a connection it lost — a socket that went quiet while
+    // the machine slept, a reset — as an 'error' EVENT, and closes itself on
+    // the next tick. Node throws an 'error' event nobody listens for out of
+    // the process, so a minute without a network stopped the worker
+    // (ETIMEOUT), and with it the sender and chat. Heard, the close ends the
+    // command in flight, the session ends, and the loop reconnects with
+    // back-off — naming what dropped the connection, not the "Connection not
+    // available" the close turns it into. Never taken off: an event from a
+    // client this session has finished with must not stop the process either.
+    let dropped: Error | null = null
+    c.on('error', (err) => {
+      dropped ??= err
+    })
+    try {
+      await serve(c)
+    } catch (err) {
+      throw dropped ?? err
+    }
+  }
+
+  const serve = async (c: InboxClient): Promise<void> => {
     // `idle()` resolves only when IDLE ends, and imapflow ends it only to
     // run another command — an EXISTS for new mail is an event, not an end.
     // So a wake is a NOOP, which breaks the IDLE, and `woken` remembers one
@@ -543,6 +807,7 @@ export function startInbox(deps: InboxDeps): () => Promise<void> {
     const lock = await c.getMailboxLock(deps.config.mailbox)
     try {
       deps.log.info('inbox connected', { mailbox: deps.config.mailbox })
+      deps.onLogin?.('ok')
 
       // Anything unseen at connect time is handled first: replies that
       // arrived while the worker was down are the ones most in need of a
@@ -554,6 +819,7 @@ export function startInbox(deps: InboxDeps): () => Promise<void> {
           log: deps.log,
           handle: (source, uid) => handleInboundMessage(source, uid, handling),
           attempts,
+          unrecordedStops,
           stopped: () => stopped,
         }, timing)
         if (stopped) break

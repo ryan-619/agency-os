@@ -6,10 +6,12 @@ import {
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { ChatPanel } from '@/components/chat/panel'
+import { askDraftFrom } from '@/lib/ask-link'
 import { ChatThreads, type ThreadView } from '@/components/chat/threads'
 import { blocksFromTranscript } from '@/components/chat/reducer'
 import { getDb } from '@/lib/db'
-import { agentConfigured } from '@/lib/agent'
+import { agentConfig } from '@/lib/agent'
+import { agentMisconfiguredSentence } from '@/lib/agent-config'
 
 /**
  * One chat thread, and the list of the others (PROMPT.md §8.1).
@@ -29,11 +31,18 @@ import { agentConfigured } from '@/lib/agent'
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
 
-export default async function ChatThreadPage({ params }: { params: Promise<{ sessionId: string }> }) {
+export default async function ChatThreadPage({
+  params, searchParams,
+}: {
+  params: Promise<{ sessionId: string }>
+  searchParams: Promise<{ ask?: string | string[] }>
+}) {
   const session = await auth()
   if (!session?.user) redirect('/signin')
   const user = session.user
   const { sessionId } = await params
+  // Words a record page sent along (2026-10-09): typed into the composer, never sent.
+  const initialDraft = askDraftFrom((await searchParams).ask)
 
   const db = getDb() as unknown as AgencyDb
   const thread = await chatReadOwnSession(db, user.orgId, user.id, sessionId)
@@ -79,13 +88,17 @@ export default async function ChatThreadPage({ params }: { params: Promise<{ ses
   }
 
   const principal = { id: user.id, orgId: user.orgId, role: user.role }
+  const agent = agentConfig()
 
   return (
     <Shell user={user} current="chat" signOut={signOutAction}>
       <h1>Chat</h1>
       <p className="lede">
-        The agent reads the CRM and can scan a company&apos;s public pages. It cannot send
-        anything: a draft goes to the approval queue and waits for a person.
+        The agent works the CRM for you: it reads it, scans companies&apos; public pages,
+        and changes the team&apos;s own records — companies, people, deals, meetings, notes,
+        tasks and campaigns — as you ask. It cannot send anything: a message to somebody
+        outside is a draft that waits on Approvals, and lifting a pause or a connector call
+        asks a person first.
       </p>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 20, alignItems: 'flex-start' }}>
         <div style={{ flex: '0 0 220px', minWidth: 0 }}>
@@ -101,7 +114,9 @@ export default async function ChatThreadPage({ params }: { params: Promise<{ ses
           <ChatPanel
             key={thread.id}
             sessionId={thread.id}
-            agentAvailable={agentConfigured()}
+            initialDraft={initialDraft}
+            agentAvailable={agent.state === 'configured'}
+            agentMisconfigured={agent.state === 'misconfigured' ? agentMisconfiguredSentence(agent.variables) : undefined}
             archived={thread.archived}
             canDecide={can(principal, 'approvals:decide')}
             initialBlocks={initialBlocks}

@@ -142,6 +142,48 @@ export function heartbeatSms(row: { readonly detail: unknown } | null): Heartbea
   return sms === 'on' || sms === 'off' ? sms : null
 }
 
+/**
+ * Whether the worker writes the morning brief (0020), from `detail.brief` —
+ * `on` where it has a model, as chat needs. Null for no row, and for a row
+ * that does not say: a worker started before 0020 writes none, whatever its
+ * chat says, and the Assistant page says to restart it.
+ */
+export function heartbeatBrief(row: { readonly detail: unknown } | null): 'on' | 'off' | null {
+  const detail = row?.detail
+  const brief =
+    typeof detail === 'object' && detail !== null && 'brief' in detail ? (detail as { brief: unknown }).brief : null
+  return brief === 'on' || brief === 'off' ? brief : null
+}
+
+/**
+ * Whether this worker runs the night shift (0025): `detail.night`, `on` when
+ * it holds the Google key Places needs, `off` without. Null for no row and
+ * for a worker from before 0025, which never ran one.
+ */
+export function heartbeatNight(row: { readonly detail: unknown } | null): 'on' | 'off' | null {
+  const detail = row?.detail
+  const night =
+    typeof detail === 'object' && detail !== null && 'night' in detail ? (detail as { night: unknown }).night : null
+  return night === 'on' || night === 'off' ? night : null
+}
+
+/**
+ * Whether a mailbox accepted the worker's login (`apps/agent/src/outreach/
+ * mail-login.ts`), from `detail.smtpLogin` or `detail.imapLogin`. Null for no
+ * row, a worker with no such mailbox, and a worker from before the check —
+ * none of which says anything about a login.
+ */
+export type HeartbeatMailLogin = 'unchecked' | 'ok' | 'refused' | 'unreachable'
+
+export function heartbeatMailLogin(
+  row: { readonly detail: unknown } | null,
+  key: 'smtpLogin' | 'imapLogin',
+): HeartbeatMailLogin | null {
+  const detail = row?.detail
+  const v = typeof detail === 'object' && detail !== null && key in detail ? (detail as Record<string, unknown>)[key] : null
+  return v === 'unchecked' || v === 'ok' || v === 'refused' || v === 'unreachable' ? v : null
+}
+
 export interface HeartbeatReport {
   /** This web deployment is configured to reach a worker (`deployment().worker`). */
   readonly configured: boolean
@@ -152,6 +194,10 @@ export interface HeartbeatReport {
   readonly chat: string | null
   /** SMS through DoveSoft (`heartbeatSms`); null when the row does not say. */
   readonly sms: HeartbeatSms | null
+  /** The outgoing mailbox's login (`heartbeatMailLogin`); null when the row does not say. */
+  readonly smtpLogin: HeartbeatMailLogin | null
+  /** The reply mailbox's login; null when the row does not say. */
+  readonly imapLogin: HeartbeatMailLogin | null
   /**
    * `not_configured` only when there is no row AND no worker is configured —
    * a deployment that never meant to run one. A configured deployment with
@@ -186,6 +232,8 @@ export function heartbeatReport(
     outreach: row?.outreach ?? null,
     chat: row?.chat ?? null,
     sms: heartbeatSms(row),
+    smtpLogin: heartbeatMailLogin(row, 'smtpLogin'),
+    imapLogin: heartbeatMailLogin(row, 'imapLogin'),
     status: observed === 'never' && !configured ? 'not_configured' : observed,
     // Configured, a stopped worker is silent however long ago it stopped:
     // somebody meant one to be running. An age that cannot be read is not a week.

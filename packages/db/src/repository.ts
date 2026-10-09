@@ -15,6 +15,7 @@ import {
   type IcpDefinition, type ScoreResult, type SiteProfile,
 } from '@agency/core'
 import * as schema from './schema.js'
+import { noteEvidenceChange, type EvidenceChangeNote } from './evidence-signals.js'
 
 export { parseCompanySeeds } from './csv.js'
 
@@ -132,6 +133,13 @@ export interface RecordScanOutput {
   readonly unobservedCount: number
   /** Rows written `scored = false`: observed context, never part of the score. */
   readonly informationalCount: number
+  /**
+   * What changed since the previous successful scan (2026-10-09): the scored
+   * signals fixed and regressed, and the task made where a deal is open —
+   * null when there was no earlier successful scan, nothing changed, or the
+   * note could not be written (the scan still was).
+   */
+  readonly changed: EvidenceChangeNote | null
 }
 
 /**
@@ -153,7 +161,17 @@ export interface RecordScanOutput {
 export async function recordScan(db: AgencyDb, input: RecordScanInput): Promise<RecordScanOutput> {
   const { orgId, companyId, icpProfile, raw, profile } = input
   const icp = icpProfile.definition
-  const result = scoreCompany(profile, icp)
+  // What the CRM records about the company — its country and headcount — is
+  // judged against the profile's targeting too (0021): a recorded headcount
+  // over the profile's maximum is its `enterprise_scale` disqualifier. Read
+  // here, beside the score it decides, so no caller can score against one
+  // record and stamp another.
+  const [company] = await db
+    .select({ country: schema.companies.country, headcount: schema.companies.headcount })
+    .from(schema.companies)
+    .where(and(eq(schema.companies.orgId, orgId), eq(schema.companies.id, companyId)))
+    .limit(1)
+  const result = scoreCompany(profile, icp, company ?? undefined)
 
   return db.transaction(async (tx) => {
     const [scan] = await tx
@@ -216,10 +234,26 @@ export async function recordScan(db: AgencyDb, input: RecordScanInput): Promise<
 
     if (!score) throw new Error('failed to insert score')
 
+    // What changed since the previous successful scan (2026-10-09): one
+    // audit row, and a task where a deal is open. Best-effort inside the
+    // transaction's own savepoint, because a scan that was recorded must not
+    // be rolled back for a line about it.
+    let changed: EvidenceChangeNote | null = null
+    if (profile.fetchOk) {
+      try {
+        changed = await tx.transaction((sp) =>
+          noteEvidenceChange(sp as unknown as AgencyDb, { orgId, companyId, scanId: scan.id, icp }),
+        )
+      } catch {
+        changed = null
+      }
+    }
+
     return {
       scanId: scan.id,
       scoreId: score.id,
       result,
+      changed,
       findingsWritten: findingRows.length,
       observedCount: findingRows.filter((f) => f.scored && f.observed).length,
       unobservedCount: findingRows.filter((f) => f.scored && !f.observed).length,
@@ -286,6 +320,11 @@ export interface CompanyListRow {
   readonly companyId: string
   readonly domain: string
   readonly name: string | null
+  /** As recorded (0021): research, not observations. */
+  readonly country: string | null
+  readonly headcount: number | null
+  readonly industry: string | null
+  readonly city: string | null
   readonly score: number | null
   readonly tier: string | null
   readonly qualified: boolean
@@ -314,6 +353,10 @@ export async function companyList(db: AgencyDb, orgId: string): Promise<CompanyL
       id: schema.companies.id,
       domain: schema.companies.domain,
       name: schema.companies.name,
+      country: schema.companies.country,
+      headcount: schema.companies.headcount,
+      industry: schema.companies.industry,
+      city: schema.companies.city,
     })
     .from(schema.companies)
     .where(eq(schema.companies.orgId, orgId))
@@ -366,6 +409,10 @@ export async function companyList(db: AgencyDb, orgId: string): Promise<CompanyL
       companyId: c.id,
       domain: c.domain,
       name: c.name,
+      country: c.country,
+      headcount: c.headcount,
+      industry: c.industry,
+      city: c.city,
       score: s?.score ?? null,
       tier: s?.tier ?? null,
       qualified: s?.qualified ?? false,

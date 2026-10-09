@@ -8,7 +8,8 @@
 #
 #   Sending, reply detection, stuck-send recovery, the approval sweeper and
 #   the expired-sign-in-token sweep are all this worker talking OUTBOUND to
-#   Postgres and SMTP. None of them needs anything to reach this machine.
+#   Postgres, SMTP, IMAP and DoveSoft. None of them needs anything to reach
+#   this machine.
 #
 #   Only CHAT is inbound — the web app calling /internal/turns — and that is
 #   the one feature that needs AGENT_URL, a tunnel, and a public address.
@@ -16,46 +17,883 @@
 # So run this and the live site gains everything except the chat panel, with
 # no port open, no tunnel, and nothing on this laptop reachable from the
 # internet. Chat is a separate decision with separate consequences; see
-# DEPLOYING.md.
+# DEPLOYING.md. Answer yes to the CHAT question and this script starts an
+# ngrok tunnel to the worker's API port (bearer-token gated) on your ngrok
+# static domain, and runs the worker with your Anthropic API key — every
+# chat turn your teammates take is billed to that key.
 #
-# "Everything except chat" is conditional on the SMTP and IMAP prompts below.
-# The worker treats those variables as optional and boots happily without
-# them, doing only the recovery jobs — so skipping the prompts gives you a
-# worker that runs, reports itself healthy, and never sends anything.
+#   ./tools/run-worker.sh                 run (asks, or reads what you saved)
+#   ./tools/run-worker.sh --reconfigure   ask every question again
+#   ./tools/run-worker.sh --imap          ask only reply detection's questions
+#                                         again (a new app password), then run
+#   ./tools/run-worker.sh --secrets-key   ask only for SECRETS_KEY — the key
+#                                         connector credentials are encrypted
+#                                         with, Vercel's value — then run
+#   ./tools/run-worker.sh --ai            ask only whether a model sorts replies
+#                                         and polishes openers, then run
+#   ./tools/run-worker.sh --slack         ask only for the Slack webhook URL the
+#                                         opt-out alarm posts to, then run
+#   ./tools/run-worker.sh --smtp          ask only the outgoing mailbox's questions
+#                                         (e.g. Google Workspace instead of
+#                                         Resend for cold outreach), then run
+#   ./tools/run-worker.sh --gmail         one Google Workspace mailbox for BOTH
+#                                         sending and replies: its address and
+#                                         one app password, then run
+#   ./tools/run-worker.sh --google        ask only for the Google API key that
+#                                         finds businesses on Google Maps and
+#                                         measures sites with PageSpeed, then run
+#   ./tools/run-worker.sh --forget        delete the saved answers and stop
 #
-#   ./tools/run-worker.sh
-#
-# The connection string is read from a hidden prompt into this process and
-# nowhere else — no file, no argument list, no shell history (§2.3), the same
-# way tools/remote-setup.sh does it.
+# Every credential is read at a HIDDEN prompt into this process's environment
+# — never a file in the repo, an argument list (where `ps` shows it to every
+# user on the machine) or shell history (§2.3). On a Mac the answers can be
+# kept in the login Keychain, so the next run asks nothing: the Keychain is
+# encrypted at rest and unlocked by your login, and each value goes to
+# `security` on its STDIN, base64-encoded, never on its command line. On
+# anything else, or if you decline, every run asks again.
 
 set -euo pipefail
+# The script's own absolute path, before the cd below: caffeinate re-runs it.
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 cd "$(dirname "$0")/.."
 
-export PATH=/usr/local/bin:$PATH
+# Appended, not prepended: a Terminal tab already has Node first on PATH, and
+# this only finds it when the script is started from somewhere that has not
+# (Homebrew's two prefixes and the nodejs.org installer's).
+export PATH="$PATH:/usr/local/bin:/opt/homebrew/bin"
 
-# Opening it is the test; `[ -r /dev/tty ]` only reads the permission bits and
-# passes in places where the open then fails.
-if ! { exec 3<>/dev/tty; } 2>/dev/null; then
-  echo "This script needs a terminal — it asks for the connection string at a" >&2
-  echo "hidden prompt so the credential never reaches a file, a log, an argument" >&2
-  echo "list or shell history (§2.3). Run it in a Terminal tab." >&2
-  exit 1
-fi
-
-printf 'Production DATABASE_URL (direct/unpooled): ' >&3
-read -r -s DB <&3
-printf '\n' >&3
-
-if [ -z "${DB:-}" ]; then
-  echo "Nothing entered. Stopping." >&2
-  exit 1
-fi
-case "$DB" in
-  postgres://*|postgresql://*) ;;
-  *) echo "That does not look like a postgres:// connection string. Stopping." >&2; exit 1 ;;
+MODE=run
+case "${1:-}" in
+  '') ;;
+  --reconfigure) MODE=reconfigure ;;
+  --imap) MODE=imap ;;
+  --secrets-key) MODE=secrets-key ;;
+  --ai) MODE=ai ;;
+  --slack) MODE=slack ;;
+  --google) MODE=google ;;
+  --smtp) MODE=smtp ;;
+  --gmail) MODE=gmail ;;
+  --forget) MODE=forget ;;
+  *) echo "usage: $0 [--reconfigure | --imap | --smtp | --gmail | --secrets-key | --ai | --slack | --google | --forget]" >&2; exit 2 ;;
 esac
-case "$DB" in
+
+# ── The Keychain (macOS only) ──────────────────────────────────────────────
+#
+# One generic-password item per variable, under one service name. Values are
+# base64 so that `security -i`'s command parser never has to quote anything,
+# and they reach it on stdin: `printf` is a shell builtin, so the value is in
+# no process's argv at any point.
+SERVICE="agency-os-worker"
+SAVED_NAMES=(DATABASE_URL SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASSWORD MAIL_FROM
+  DOVESOFT_API_KEY DOVESOFT_ENTITY_ID IMAP_HOST IMAP_USER IMAP_PASSWORD
+  WEB_PUBLIC_URL UNSUBSCRIBE_SECRET SLACK_WEBHOOK_URL
+  CHAT_URL ANTHROPIC_API_KEY AGENT_INTERNAL_TOKEN SECRETS_KEY
+  LLM_PROVIDER LLM_MODEL LLM_ALLOW_REMOTE_LEAD_DATA GOOGLE_API_KEY)
+
+have_keychain() { [ "$(uname -s)" = Darwin ] && command -v security >/dev/null 2>&1; }
+
+kc_get() {
+  local b64
+  b64=$(security find-generic-password -s "$SERVICE" -a "$1" -w 2>/dev/null) || return 1
+  [ -n "$b64" ] || return 1
+  printf '%s' "$b64" | openssl base64 -d -A
+}
+
+kc_put() {
+  local b64
+  b64=$(printf '%s' "$2" | openssl base64 -A)
+  printf 'add-generic-password -U -s %s -a %s -w %s\n' "$SERVICE" "$1" "$b64" | security -i >/dev/null 2>&1
+}
+
+kc_del() { security delete-generic-password -s "$SERVICE" -a "$1" >/dev/null 2>&1 || true; }
+
+if [ "$MODE" = forget ]; then
+  if ! have_keychain; then echo "Nothing is saved outside a Mac's Keychain; nothing to forget."; exit 0; fi
+  for n in "${SAVED_NAMES[@]}"; do kc_del "$n"; done
+  echo "The saved answers are gone from the Keychain. The next run asks again."
+  exit 0
+fi
+
+# ── Nothing from the calling shell stands in for an answer ───────────────────
+# Every value below is one saved in the Keychain or typed at a prompt. An
+# ANTHROPIC_API_KEY or AGENT_INTERNAL_TOKEN already exported in the shell was
+# used when Enter was pressed, billed every teammate's chat turn to a key
+# nobody chose here, and was then saved under this service (review round 15).
+# Cleared before the build too, which must hold no credential at all.
+for n in "${SAVED_NAMES[@]}"; do unset "$n"; done
+
+# ── Before anything is asked: can this checkout run the worker at all? ───────
+NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)
+if [ "$NODE_MAJOR" -lt 22 ]; then
+  echo "This needs Node.js 22 or newer (found: $(node -v 2>/dev/null || echo none))." >&2
+  echo "Install it from https://nodejs.org (the LTS), then run this again." >&2
+  exit 1
+fi
+if [ ! -d node_modules ]; then
+  echo "Run 'npm ci' in this folder first, then run this again." >&2
+  exit 1
+fi
+# The lockfile's TypeScript and tsx, by path — never through npx, which
+# installs and runs whatever the registry holds under that name when no
+# local one exists (assuming --yes with no terminal), and the worker below
+# runs with every production credential in its environment (review round 9,
+# [9]; tools/production.sh does the same). Both are development
+# dependencies, so an install with --omit=dev, or under NODE_ENV=production,
+# leaves them out.
+for tool in tsc tsx; do
+  if [ ! -x "node_modules/.bin/$tool" ]; then
+    echo "This checkout has no node_modules/.bin/$tool, which the worker is built and run with." >&2
+    echo "Run 'npm ci' in this folder (it installs the development tools too), then run this again." >&2
+    exit 1
+  fi
+done
+
+# ── One worker per machine ─────────────────────────────────────────────────
+# A run stops any ngrok tunnel on the worker's API port before it opens its
+# own (below), so a SECOND run typed in another window while a worker was up
+# stopped the live worker's tunnel — and then died on the ports that worker
+# holds, leaving it running with no tunnel and chat on the site down. So a run
+# refuses first, before it builds, asks or touches anything, while either of
+# the worker's ports answers. --forget changes only the Keychain, and may run
+# beside a worker. The probe is a subshell: a failed connect cannot end this one.
+if [ "$MODE" != forget ]; then
+  for port in "${AGENT_PORT:-3001}" "$(( ${AGENT_PORT:-3001} + 1 ))"; do
+    if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+      echo "Port $port on this machine is already in use — a worker is most likely running here already." >&2
+      echo "Stop it first (Ctrl-C in its window), then run this again. Nothing was changed." >&2
+      exit 1
+    fi
+  done
+fi
+
+# Keep the Mac awake while the worker runs. Mail queued while the lid was
+# shut is not lost — it goes, re-checked against every rule, when the worker
+# next runs — but it goes late. -i (no idle sleep) and -s (no system sleep on
+# power); the display may still sleep. Closing the lid on battery still
+# sleeps the machine.
+if [ "$(uname -s)" = Darwin ] && command -v caffeinate >/dev/null 2>&1 && [ -z "${AGENCY_CAFFEINATED:-}" ]; then
+  # ${1+"$@"}, not "$@": macOS's bash 3.2 calls an empty "$@" unbound under set -u.
+  AGENCY_CAFFEINATED=1 exec caffeinate -is "$SELF" ${1+"$@"}
+fi
+
+# ── Build, before any answer is read or asked ────────────────────────────────
+# The packages run as compiled JavaScript (packages/*/dist): build them, or a
+# fresh checkout or a `git pull` runs stale code — or fails to start at all.
+# Here, before a single credential is in this process's environment, so the
+# build and everything it runs see none of them (review round 9, [9]).
+echo "Building the packages…"
+node_modules/.bin/tsc --build
+
+# ── Read what was saved, or ask ──────────────────────────────────────────────
+LOADED="no"
+# --imap, --smtp, --gmail, --secrets-key, --ai, --slack and --google read them too: each asks its own question over them.
+if { [ "$MODE" = run ] || [ "$MODE" = imap ] || [ "$MODE" = smtp ] || [ "$MODE" = gmail ] || [ "$MODE" = secrets-key ] \
+  || [ "$MODE" = ai ] || [ "$MODE" = slack ] || [ "$MODE" = google ]; } \
+  && have_keychain && kc_get DATABASE_URL >/dev/null; then
+  for n in "${SAVED_NAMES[@]}"; do
+    if v=$(kc_get "$n"); then export "$n=$v"; fi
+  done
+  unset v
+  LOADED="yes"
+  echo "Using the answers saved in your Keychain ('$0 --reconfigure' to change them)."
+fi
+
+ask_open() {
+  # Opening it is the test; `[ -r /dev/tty ]` only reads the permission bits and
+  # passes in places where the open then fails.
+  if ! { exec 3<>/dev/tty; } 2>/dev/null; then
+    echo "This script needs a terminal — it asks for credentials at a hidden" >&2
+    echo "prompt so they never reach a file, a log, an argument list or shell" >&2
+    echo "history (§2.3). Run it in a Terminal tab." >&2
+    exit 1
+  fi
+}
+
+# A server name, asked until it is one: an address typed where the server
+# goes ("you@example.com") is a mailbox no worker can ever connect to, and it
+# reconnects every five minutes for ever with nothing on screen saying why.
+ask_host() {
+  local prompt=$1 default=$2 v
+  while :; do
+    printf '  %s [%s]: ' "$prompt" "$default" >&3
+    read -r v <&3
+    v="${v:-$default}"
+    if [[ "$v" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; then
+      printf '%s' "$v"
+      return 0
+    fi
+    printf '    That is not a server name (it should look like %s). Try again.\n' "$default" >&3
+  done
+}
+
+# Reply detection's three answers. Enter keeps what is already set — a saved
+# answer, under --imap; asked from scratch nothing is, and the prompts read as
+# they always did. Gmail and Google Workspace sign in with the WHOLE address:
+# a bare name is refused by the server on every reconnect.
+ask_imap() {
+  local v
+  IMAP_HOST=$(ask_host 'IMAP host' "${IMAP_HOST:-imap.gmail.com}"); export IMAP_HOST
+  while :; do
+    if [ -n "${IMAP_USER:-}" ]; then
+      printf '  IMAP username [%s]: ' "$IMAP_USER" >&3
+    else
+      printf '  IMAP username (the whole mailbox address, e.g. hello@myagencyos.in): ' >&3
+    fi
+    read -r v <&3
+    v="${v:-${IMAP_USER:-}}"
+    case "$IMAP_HOST:$v" in
+      imap.gmail.com:*@*.* | imap.gmail.com: ) break ;;
+      imap.gmail.com:*) printf '    Google needs the whole address, e.g. %s@yourdomain. Try again.\n' "$v" >&3 ;;
+      *) break ;;
+    esac
+  done
+  [ -n "$v" ] && export IMAP_USER="$v"
+  if [ -n "${IMAP_PASSWORD:-}" ]; then
+    printf '  IMAP password (hidden — a Google APP password; Enter keeps the saved one): ' >&3
+  else
+    printf '  IMAP password (hidden — a Google APP password, not the account one): ' >&3
+  fi
+  read -r -s v <&3; printf '\n' >&3
+  # Google shows an app password as four groups of four letters, and a copy
+  # of it carries the spaces; the password itself has none. Any other server
+  # gets exactly what was typed.
+  if [ "$IMAP_HOST" = imap.gmail.com ]; then v="${v// /}"; fi
+  [ -n "$v" ] && export IMAP_PASSWORD="$v"
+  v=""
+}
+
+if [ "$LOADED" = no ]; then
+  ask_open
+
+  printf 'Production DATABASE_URL (Neon, direct/unpooled — hidden): ' >&3
+  read -r -s V <&3; printf '\n' >&3
+  [ -n "${V:-}" ] || { echo "Nothing entered. Stopping." >&2; exit 1; }
+  export DATABASE_URL="$V"; unset V
+
+  # ── Sending ──────────────────────────────────────────────────────────────
+  # The worker treats every one of these as OPTIONAL and boots cleanly
+  # without them, doing only the recovery jobs (apps/agent/src/worker.ts:
+  # the mailbox on `SMTP_HOST && MAIL_FROM`, DoveSoft on `DOVESOFT_API_KEY &&
+  # DOVESOFT_ENTITY_ID`, the inbox on `IMAP_HOST && IMAP_USER &&
+  # IMAP_PASSWORD`). Skipping them gives a worker that reports itself healthy
+  # and never sends; the summary below says so.
+  printf 'Configure SENDING email now? Without it, approved mail waits in the queue. [y/N]: ' >&3
+  read -r ANSWER <&3
+  case "$ANSWER" in
+    [yY]*)
+      SMTP_HOST=$(ask_host 'SMTP host' smtp.resend.com); export SMTP_HOST
+      printf '  SMTP port [465]: ' >&3;                           read -r V <&3; export SMTP_PORT="${V:-465}"
+      printf '  SMTP username [resend]: ' >&3;                    read -r V <&3; export SMTP_USER="${V:-resend}"
+      printf '  SMTP password (Resend: an API key — hidden): ' >&3; read -r -s V <&3; printf '\n' >&3
+      [ -n "${V:-}" ] && export SMTP_PASSWORD="$V"
+      printf '  From address (e.g. Your Name <hello@myagencyos.in>): ' >&3; read -r V <&3
+      [ -n "${V:-}" ] && export MAIL_FROM="$V"
+      unset V
+      ;;
+  esac
+
+  printf 'Configure SMS through DoveSoft now? Without it, approved texts wait in the queue. [y/N]: ' >&3
+  read -r ANSWER <&3
+  case "$ANSWER" in
+    [yY]*)
+      printf '  DoveSoft API key (hidden): ' >&3;               read -r -s V <&3; printf '\n' >&3
+      [ -n "${V:-}" ] && export DOVESOFT_API_KEY="$V"
+      printf '  DLT principal entity id (PE ID, digits): ' >&3; read -r V <&3
+      [ -n "${V:-}" ] && export DOVESOFT_ENTITY_ID="$V"
+      unset V
+      ;;
+  esac
+
+  printf 'Configure REPLY DETECTION now? Without it, nobody is marked as having replied. [y/N]: ' >&3
+  read -r ANSWER <&3
+  case "$ANSWER" in
+    [yY]*)
+      ask_imap
+      ;;
+  esac
+
+  # ── Links in mail, and the alarm ─────────────────────────────────────────
+  # The worker adds List-Unsubscribe headers only with BOTH WEB_PUBLIC_URL and
+  # UNSUBSCRIBE_SECRET, and the web app verifies the link with ITS copy of the
+  # secret — so the two must hold the same value. A link minted under any
+  # other value is refused with a 404: a one-click unsubscribe from a mail
+  # client shows the person nothing, and nothing is recorded (review round 9,
+  # [2] and [7]). So this script never makes one up on a key press. Enter
+  # keeps the secret saved here before, or sends no unsubscribe header at all
+  # — the worker then mails without one, and a "stop" reply is still read. A
+  # new secret is made only when asked for by name, and only where it can be
+  # both put on the clipboard (for Vercel) and saved (for the next run),
+  # because Vercel keeps it Sensitive and can never show it back, and the
+  # Keychain holds it base64-encoded.
+  printf 'Public address of the web app [https://myagencyos.in]: ' >&3
+  read -r V <&3; export WEB_PUBLIC_URL="${V:-https://myagencyos.in}"; unset V
+
+  SAVED_UNSUBSCRIBE=""
+  if have_keychain; then SAVED_UNSUBSCRIBE=$(kc_get UNSUBSCRIBE_SECRET) || SAVED_UNSUBSCRIBE=""; fi
+  CAN_MAKE=no
+  if have_keychain && command -v pbcopy >/dev/null 2>&1; then CAN_MAKE=yes; fi
+  # The name of a new secret this run put on the clipboard, and not yet
+  # replaced: a second one must not overwrite it before it is in Vercel.
+  ON_CLIPBOARD=""
+
+  # What Enter means: the saved secret where there is one, else no header.
+  keep_or_none() {
+    if [ -n "$SAVED_UNSUBSCRIBE" ]; then
+      export UNSUBSCRIBE_SECRET="$SAVED_UNSUBSCRIBE"
+      printf '  Kept the UNSUBSCRIBE_SECRET saved in your Keychain.\n' >&3
+    else
+      unset UNSUBSCRIBE_SECRET
+      printf '  No UNSUBSCRIBE_SECRET: mail goes WITHOUT a one-click unsubscribe header,\n' >&3
+      printf '  and a "stop" reply is still read. Run with --reconfigure to add one.\n' >&3
+    fi
+  }
+
+  # A new secret: on the clipboard first, then saved at once — not only if
+  # the answers are remembered below, or the next run would load the old one
+  # while Vercel holds this — and used only if both worked.
+  make_new() {
+    printf '  A NEW secret means every unsubscribe link already mailed under the old one\n' >&3
+    printf '  stops working, and no link mailed by this worker works until Vercel holds\n' >&3
+    printf '  the same new value. Make one only if Vercel has none, or you are replacing it.\n' >&3
+    printf '  Make a new UNSUBSCRIBE_SECRET? [y/N]: ' >&3
+    read -r ANSWER <&3
+    case "$ANSWER" in
+      [yY]*) ;;
+      *) keep_or_none; return 0 ;;
+    esac
+    local fresh
+    fresh=$(openssl rand -hex 32)
+    if ! printf '%s' "$fresh" | pbcopy; then
+      printf '  Could not put a new secret on the clipboard, so none was made.\n' >&3
+      keep_or_none; return 0
+    fi
+    # Read back, not trusted: `security -i` can answer 0 for a command it refused.
+    if ! kc_put UNSUBSCRIBE_SECRET "$fresh" || [ "$(kc_get UNSUBSCRIBE_SECRET || true)" != "$fresh" ]; then
+      printf '' | pbcopy || true
+      printf '  Could not save a new secret in your Keychain, so none was made.\n' >&3
+      keep_or_none; return 0
+    fi
+    export UNSUBSCRIBE_SECRET="$fresh"
+    SAVED_UNSUBSCRIBE="$fresh"
+    ON_CLIPBOARD=UNSUBSCRIBE_SECRET
+    printf '  A new secret is on your clipboard (it is not shown) and saved in your Keychain.\n' >&3
+    printf '  Paste it into Vercel → Settings → Environment Variables → UNSUBSCRIBE_SECRET\n' >&3
+    printf '  (Production), then redeploy. Until the site has the same value, every link\n' >&3
+    printf '  this worker mails is refused, and the site logs OPT-OUT NOT RECORDED.\n' >&3
+  }
+
+  if [ -n "${SMTP_HOST:-}" ]; then
+    printf 'One-click unsubscribe needs the UNSUBSCRIBE_SECRET Vercel holds — the same value on both.\n' >&3
+    if [ -n "$SAVED_UNSUBSCRIBE" ]; then
+      printf '  Enter keeps the one saved in your Keychain; or paste Vercel'"'"'s (hidden)' >&3
+    else
+      printf '  Paste Vercel'"'"'s (hidden), or press Enter to send WITHOUT an unsubscribe header' >&3
+    fi
+    if [ "$CAN_MAKE" = yes ]; then printf ';\n  or type new to make one: ' >&3; else printf ': ' >&3; fi
+    read -r -s V <&3; printf '\n' >&3
+    case "${V:-}" in
+      '') keep_or_none ;;
+      new | NEW | New)
+        if [ "$CAN_MAKE" = yes ]; then
+          make_new
+        else
+          # Off a Mac nothing could keep it: shown nowhere, saved nowhere, and
+          # Vercel would never get the value the worker mails under.
+          printf '  A new secret is made only on a Mac, where it goes on the clipboard and into\n' >&3
+          printf '  the Keychain. Paste the value Vercel holds instead, or leave it unset.\n' >&3
+          keep_or_none
+        fi
+        ;;
+      *) export UNSUBSCRIBE_SECRET="$V" ;;
+    esac
+    unset V
+  elif [ -n "$SAVED_UNSUBSCRIBE" ]; then
+    # Sending is off this time; carry the saved secret over all the same, so
+    # remembering these answers does not delete the one value Vercel can
+    # never show back. The worker adds no header without a mailbox.
+    export UNSUBSCRIBE_SECRET="$SAVED_UNSUBSCRIBE"
+  fi
+
+  printf 'Slack webhook URL for the opt-out alarm (hidden; Enter to skip): ' >&3
+  read -r -s V <&3; printf '\n' >&3
+  [ -n "${V:-}" ] && export SLACK_WEBHOOK_URL="$V"
+  unset V
+
+  # ── Chat (optional): the one inbound route ───────────────────────────────
+  # The live site's chat panel calls the worker's API port, so chat needs a
+  # public address: an ngrok tunnel on the operator's free STATIC domain,
+  # which never changes, so Vercel's AGENT_URL is set once. Three values make
+  # it: the domain (not a secret), the Anthropic API key every turn is billed
+  # to, and AGENT_INTERNAL_TOKEN, the bearer the site presents and which
+  # Vercel must hold too. The token is made here, never typed: on the
+  # clipboard for Vercel and saved at once, the unsubscribe secret's rule.
+  # ngrok's own authtoken is ngrok's — `ngrok config add-authtoken` keeps it
+  # in ngrok's config, and it is never asked for or passed here.
+  SAVED_CHAT_TOKEN=""; SAVED_CHAT_KEY=""
+  if have_keychain; then
+    SAVED_CHAT_TOKEN=$(kc_get AGENT_INTERNAL_TOKEN) || SAVED_CHAT_TOKEN=""
+    SAVED_CHAT_KEY=$(kc_get ANTHROPIC_API_KEY) || SAVED_CHAT_KEY=""
+  fi
+  unset CHAT_URL
+  printf 'Turn on CHAT on the live site, through an ngrok tunnel to this Mac? [y/N]: ' >&3
+  read -r ANSWER <&3
+  case "$ANSWER" in
+    [yY]*)
+      printf '  Your ngrok static domain (dashboard.ngrok.com → Domains, e.g. calm-otter-42.ngrok-free.app): ' >&3
+      read -r V <&3
+      V="${V#https://}"; V="${V#http://}"; V="${V%%/*}"
+      if [[ "$V" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$ ]]; then
+        export CHAT_URL="https://$V"
+      else
+        printf '  That is not a domain name, so chat stays off. Run with --reconfigure to try again.\n' >&3
+      fi
+      unset V
+      ;;
+  esac
+  if [ -n "${CHAT_URL:-}" ]; then
+    if [ -n "$SAVED_CHAT_KEY" ]; then
+      printf '  Anthropic API key (hidden; Enter keeps the saved one): ' >&3
+    else
+      printf '  Anthropic API key, from console.anthropic.com (hidden): ' >&3
+    fi
+    read -r -s V <&3; printf '\n' >&3
+    if [ -n "${V:-}" ]; then export ANTHROPIC_API_KEY="$V"
+    elif [ -n "$SAVED_CHAT_KEY" ]; then export ANTHROPIC_API_KEY="$SAVED_CHAT_KEY"
+    fi
+    unset V
+    # A new secret this run put on the clipboard is pasted before another
+    # replaces it there.
+    wait_for_clipboard() {
+      if [ -n "$ON_CLIPBOARD" ]; then
+        printf '  The new %s is still on your clipboard. Paste it into Vercel first,\n' "$ON_CLIPBOARD" >&3
+        printf '  then press Enter: ' >&3
+        read -r _ <&3
+      fi
+    }
+    vercel_needs() {
+      printf '  In Vercel → Settings → Environment Variables (Production), set:\n' >&3
+      printf '    AGENT_INTERNAL_TOKEN = paste the clipboard (mark it Sensitive)\n' >&3
+      printf '    AGENT_URL            = %s\n' "$CHAT_URL" >&3
+      printf '  then redeploy. Press Enter once both are saved: ' >&3
+      read -r _ <&3
+    }
+    make_chat_token() {
+      wait_for_clipboard
+      local fresh
+      fresh=$(openssl rand -hex 32)
+      if printf '%s' "$fresh" | pbcopy \
+        && kc_put AGENT_INTERNAL_TOKEN "$fresh" && [ "$(kc_get AGENT_INTERNAL_TOKEN || true)" = "$fresh" ]; then
+        export AGENT_INTERNAL_TOKEN="$fresh"
+        ON_CLIPBOARD=AGENT_INTERNAL_TOKEN
+        printf '  A new AGENT_INTERNAL_TOKEN is on your clipboard (it is not shown) and saved in your Keychain.\n' >&3
+        vercel_needs
+      else
+        printf '' | pbcopy || true
+        printf '  Could not put a token on the clipboard and in your Keychain, so chat stays off.\n' >&3
+        unset AGENT_INTERNAL_TOKEN
+      fi
+    }
+    if [ -n "$SAVED_CHAT_TOKEN" ] && [ "$CAN_MAKE" = yes ]; then
+      # Vercel keeps the token Sensitive and never shows it back, so the
+      # Keychain's copy is the only one a person can put back in step: Enter
+      # keeps it, `copy` puts it on the clipboard again, `new` replaces it
+      # (review round 15 — a kept token Vercel did not hold could be neither).
+      export AGENT_INTERNAL_TOKEN="$SAVED_CHAT_TOKEN"
+      printf '  AGENT_INTERNAL_TOKEN: Enter keeps the one saved in your Keychain (Vercel must hold the same one);\n' >&3
+      printf '  type copy to put it on the clipboard again, or new to make a new one: ' >&3
+      read -r V <&3
+      case "${V:-}" in
+        copy | COPY | Copy)
+          wait_for_clipboard
+          if printf '%s' "$SAVED_CHAT_TOKEN" | pbcopy; then
+            ON_CLIPBOARD=AGENT_INTERNAL_TOKEN
+            printf '  The saved AGENT_INTERNAL_TOKEN is on your clipboard (it is not shown).\n' >&3
+            vercel_needs
+          else
+            printf '  Could not put it on the clipboard; the saved token is kept as it is.\n' >&3
+          fi
+          ;;
+        new | NEW | New) make_chat_token ;;
+        *)
+          printf '  Kept. Vercel must hold the same token, and AGENT_URL = %s (Production);\n' "$CHAT_URL" >&3
+          printf '  if either says anything else, type copy next time, or change AGENT_URL there and redeploy.\n' >&3
+          ;;
+      esac
+      unset V
+    elif [ "$CAN_MAKE" = yes ]; then
+      make_chat_token
+    else
+      printf '  Paste the AGENT_INTERNAL_TOKEN Vercel holds (hidden; Enter leaves chat off): ' >&3
+      read -r -s V <&3; printf '\n' >&3
+      if [ ${#V} -ge 32 ]; then
+        export AGENT_INTERNAL_TOKEN="$V"
+      elif [ -n "${V:-}" ]; then
+        # The worker refuses a shorter one at boot, and so does the site.
+        printf '  That is shorter than 32 characters, so it is not the token; chat stays off.\n' >&3
+      fi
+      unset V
+    fi
+  else
+    # Chat off this time; carry what was saved over all the same, so
+    # remembering these answers does not delete the two values that can never
+    # be shown back — Vercel keeps the token Sensitive, and Anthropic shows a
+    # key once. The worker is not handed the key while chat is off (below).
+    [ -n "$SAVED_CHAT_TOKEN" ] && export AGENT_INTERNAL_TOKEN="$SAVED_CHAT_TOKEN"
+    [ -n "$SAVED_CHAT_KEY" ] && export ANTHROPIC_API_KEY="$SAVED_CHAT_KEY"
+  fi
+
+  # SECRETS_KEY is asked only by --secrets-key, so a saved one is carried
+  # over: the save below deletes every saved name before it writes, and
+  # Vercel shows the value back to nobody.
+  if have_keychain; then
+    SAVED_SECRETS_KEY=$(kc_get SECRETS_KEY) || SAVED_SECRETS_KEY=""
+    [ -n "$SAVED_SECRETS_KEY" ] && export SECRETS_KEY="$SAVED_SECRETS_KEY"
+    unset SAVED_SECRETS_KEY
+    # The model choice --ai made, and the Google key --google took, for the same reason.
+    for n in LLM_PROVIDER LLM_MODEL LLM_ALLOW_REMOTE_LEAD_DATA GOOGLE_API_KEY; do
+      if v=$(kc_get "$n"); then export "$n=$v"; fi
+    done
+    unset v
+  fi
+  if have_keychain; then
+    printf 'Remember these answers in your Keychain, so the next run asks nothing? [Y/n]: ' >&3
+    read -r ANSWER <&3
+    case "$ANSWER" in
+      [nN]*)
+        # Not remembering these leaves whatever was saved before in place,
+        # and a run without --reconfigure reads THAT — say so, loudest where
+        # it is an unsubscribe secret other than the one this run mails under.
+        if kc_get DATABASE_URL >/dev/null; then
+          printf '  The answers saved before stay in your Keychain, and the next run without\n' >&3
+          printf '  --reconfigure uses them, not these ('"'"'%s --forget'"'"' deletes them).\n' "$0" >&3
+          if [ "${UNSUBSCRIBE_SECRET:-}" != "$(kc_get UNSUBSCRIBE_SECRET || true)" ]; then
+            printf '  WARNING: that includes a different UNSUBSCRIBE_SECRET from this run'"'"'s, so\n' >&3
+            printf '  the unsubscribe links of one run or the other will not verify on the site.\n' >&3
+          fi
+        fi
+        ;;
+      *)
+        for n in "${SAVED_NAMES[@]}"; do
+          kc_del "$n"
+          if [ -n "${!n:-}" ]; then
+            kc_put "$n" "${!n}" || echo "  Could not save $n in the Keychain; the next run will ask for it." >&2
+          fi
+        done
+        printf '  Saved under "%s" in your login Keychain.\n' "$SERVICE" >&3
+        ;;
+    esac
+  fi
+  exec 3>&-
+fi
+
+# ── --imap: reply detection's questions alone, over the saved answers ────────
+# A new Google app password should not mean typing every other answer again —
+# the database string and the SMTP key included. Only the three IMAP answers
+# are asked, and only they are saved; with nothing saved yet, every question
+# above was asked instead.
+if [ "$MODE" = imap ] && [ "$LOADED" = yes ]; then
+  ask_open
+  printf 'Reply detection only — every other saved answer is kept.\n' >&3
+  ask_imap
+  IMAP_SAVED=yes
+  for n in IMAP_HOST IMAP_USER IMAP_PASSWORD; do
+    [ -n "${!n:-}" ] || continue
+    kc_put "$n" "${!n}" || true
+    # `security -i` can answer 0 for a write it refused: read it back.
+    if [ "$(kc_get "$n" || true)" != "${!n}" ]; then
+      IMAP_SAVED=no
+      echo "  Could not save $n in the Keychain: this run uses what you typed, the next one what was saved before." >&2
+    fi
+  done
+  [ "$IMAP_SAVED" = yes ] && printf '  Saved in your Keychain; the next run uses them too.\n' >&3
+  exec 3>&-
+fi
+
+# ── --smtp: the mailbox approved mail goes out through, alone ────────────────
+# Cold outreach belongs in a real mailbox — Google Workspace: smtp.gmail.com,
+# port 465, the mailbox's whole address and a Google APP password (the one
+# reply detection already uses works) — not a transactional service. Resend's
+# acceptable-use policy forbids unsolicited outreach, and the web app's
+# sign-in links ride on the Resend account. Only these five answers are asked
+# and saved; with nothing saved yet, every question above was asked instead.
+if [ "$MODE" = smtp ] && [ "$LOADED" = yes ]; then
+  ask_open
+  printf 'Sending only — every other saved answer is kept.\n' >&3
+  SMTP_HOST_WAS="${SMTP_HOST:-}"
+  SMTP_HOST=$(ask_host 'SMTP host' "${SMTP_HOST:-smtp.gmail.com}"); export SMTP_HOST
+  printf '  SMTP port [%s]: ' "${SMTP_PORT:-465}" >&3; read -r V <&3; export SMTP_PORT="${V:-${SMTP_PORT:-465}}"
+  SMTP_USER_DEFAULT="${SMTP_USER:-${IMAP_USER:-}}"
+  if [ "$SMTP_HOST" = smtp.gmail.com ]; then
+    # Google's username is the mailbox's whole address. A saved value that is
+    # not one — Resend's `resend`, or an app password typed at this prompt
+    # (2026-10-08) — is never offered, and so never printed again.
+    case "$SMTP_USER_DEFAULT" in *@*.*) ;; *) SMTP_USER_DEFAULT="${IMAP_USER:-}" ;; esac
+    case "$SMTP_USER_DEFAULT" in *@*.*) ;; *) SMTP_USER_DEFAULT="" ;; esac
+    while :; do
+      printf '  SMTP username [%s]: ' "$SMTP_USER_DEFAULT" >&3; read -r V <&3
+      V="${V:-$SMTP_USER_DEFAULT}"
+      case "$V" in
+        *[[:space:]]*|'') ;;
+        ?*@?*.?*) break ;;
+      esac
+      printf '    Google needs the whole address here, e.g. hello@myagencyos.in. The app password is the NEXT question, and it is hidden. Try again.\n' >&3
+    done
+    export SMTP_USER="$V"
+  else
+    printf '  SMTP username [%s]: ' "$SMTP_USER_DEFAULT" >&3; read -r V <&3; export SMTP_USER="${V:-$SMTP_USER_DEFAULT}"
+  fi
+  printf '  SMTP password (hidden — for Google an APP password; Enter keeps the saved one): ' >&3
+  read -r -s V <&3; printf '\n' >&3
+  # Enter keeps a saved password only for the server it was saved for: the
+  # Resend key kept for smtp.gmail.com fails every send at the first login,
+  # and nothing at all leaves the worker with a mailbox it cannot open.
+  while [ -z "${V:-}" ] && { [ -z "${SMTP_PASSWORD:-}" ] || { [ -n "$SMTP_HOST_WAS" ] && [ "$SMTP_HOST_WAS" != "$SMTP_HOST" ]; }; }; do
+    if [ -n "${SMTP_PASSWORD:-}" ]; then
+      printf '  The saved password is for %s, not %s. SMTP password (hidden): ' "$SMTP_HOST_WAS" "$SMTP_HOST" >&3
+    else
+      printf '  No password is saved. SMTP password (hidden): ' >&3
+    fi
+    read -r -s V <&3; printf '\n' >&3
+  done
+  # Google shows an app password in four groups of four; the password has no spaces.
+  [ "$SMTP_HOST" = smtp.gmail.com ] && V="${V//[[:space:]]/}"
+  [ -n "${V:-}" ] && export SMTP_PASSWORD="$V"
+  printf '  From address [%s]: ' "${MAIL_FROM:-}" >&3; read -r V <&3
+  [ -n "${V:-}" ] && export MAIL_FROM="$V"
+  V=""
+  unset SMTP_USER_DEFAULT SMTP_HOST_WAS
+  SMTP_SAVED=yes
+  for n in SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASSWORD MAIL_FROM; do
+    [ -n "${!n:-}" ] || continue
+    kc_put "$n" "${!n}" || true
+    # `security -i` can answer 0 for a write it refused: read it back.
+    if [ "$(kc_get "$n" || true)" != "${!n}" ]; then
+      SMTP_SAVED=no
+      echo "  Could not save $n in the Keychain: this run uses what you typed, the next one what was saved before." >&2
+    fi
+  done
+  [ "$SMTP_SAVED" = yes ] && printf '  Saved in your Keychain; the next run uses it too.\n' >&3
+  exec 3>&-
+fi
+
+# ── --gmail: one Google Workspace mailbox for sending AND replies ────────────
+# The two halves are one Google mailbox — smtp.gmail.com to send, imap.gmail.com
+# to read — and one app password opens both. Set up one at a time, a person
+# typed an address as a host and an app password at the username prompt, which
+# is not hidden, so it was printed on screen (2026-10-08). So: the address,
+# checked as an address, and the app password, hidden, once. The From line is
+# kept when it is this address's, and set to the address when it is not, since
+# Google rewrites a From it has not been told the account may use.
+if [ "$MODE" = gmail ] && [ "$LOADED" = yes ]; then
+  ask_open
+  printf 'One Google Workspace mailbox for sending and replies — every other saved answer is kept.\n' >&3
+  GMAIL_ADDRESS="${IMAP_USER:-}"
+  case "$GMAIL_ADDRESS" in *@*.*) ;; *) GMAIL_ADDRESS="${SMTP_USER:-}" ;; esac
+  case "$GMAIL_ADDRESS" in *[[:space:]]*) GMAIL_ADDRESS="" ;; *@*.*) ;; *) GMAIL_ADDRESS="" ;; esac
+  while :; do
+    printf '  Google address — the whole mailbox address [%s]: ' "$GMAIL_ADDRESS" >&3; read -r V <&3
+    V="${V:-$GMAIL_ADDRESS}"
+    case "$V" in
+      *[[:space:]]*|'') ;;
+      ?*@?*.?*) break ;;
+    esac
+    printf '    That is not an address. Type the whole address, e.g. hello@myagencyos.in — the app password is the NEXT question, and it is hidden. Try again.\n' >&3
+  done
+  GMAIL_ADDRESS="$V"
+  while :; do
+    printf '  App password for %s (hidden — the 16 letters from myaccount.google.com/apppasswords): ' "$GMAIL_ADDRESS" >&3
+    read -r -s V <&3; printf '\n' >&3
+    # Google shows it in four groups of four; the password itself has no spaces.
+    V="${V//[[:space:]]/}"
+    case "$V" in
+      '') printf '    Nothing was entered. Paste the app password. Try again.\n' >&3 ;;
+      *@*) printf '    That is the address, not the app password. Try again.\n' >&3 ;;
+      *) break ;;
+    esac
+  done
+  export IMAP_HOST=imap.gmail.com IMAP_USER="$GMAIL_ADDRESS" IMAP_PASSWORD="$V"
+  export SMTP_HOST=smtp.gmail.com SMTP_PORT=465 SMTP_USER="$GMAIL_ADDRESS" SMTP_PASSWORD="$V"
+  V=""
+  FROM_LOWER=$(printf '%s' "${MAIL_FROM:-}" | tr '[:upper:]' '[:lower:]')
+  ADDRESS_LOWER=$(printf '%s' "$GMAIL_ADDRESS" | tr '[:upper:]' '[:lower:]')
+  case "$FROM_LOWER" in
+    *"$ADDRESS_LOWER"*) ;;
+    *) export MAIL_FROM="$GMAIL_ADDRESS" ;;
+  esac
+  unset FROM_LOWER ADDRESS_LOWER
+  printf '  Mail goes out as: %s\n' "$MAIL_FROM" >&3
+  GMAIL_SAVED=yes
+  for n in IMAP_HOST IMAP_USER IMAP_PASSWORD SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASSWORD MAIL_FROM; do
+    kc_put "$n" "${!n}" || true
+    # `security -i` can answer 0 for a write it refused: read it back.
+    if [ "$(kc_get "$n" || true)" != "${!n}" ]; then
+      GMAIL_SAVED=no
+      echo "  Could not save $n in the Keychain: this run uses what you typed, the next one what was saved before." >&2
+    fi
+  done
+  [ "$GMAIL_SAVED" = yes ] && printf '  Saved in your Keychain; the next run uses them too.\n' >&3
+  unset GMAIL_ADDRESS GMAIL_SAVED
+  exec 3>&-
+fi
+
+# ── --secrets-key: the key connector credentials are encrypted with ─────────
+# The web app encrypts a connector's credential with SECRETS_KEY when an owner
+# stores it, and the worker decrypts it at the start of each message, so the
+# two must hold the SAME value: without it here, every connector that needs a
+# key is skipped with "SECRETS_KEY is not set". Set it in Vercel first, then
+# paste the same value here. Asked alone, over the saved answers; with
+# nothing saved, every question above was asked first.
+if [ "$MODE" = secrets-key ]; then
+  ask_open
+  while :; do
+    if [ -n "${SECRETS_KEY:-}" ]; then
+      printf 'SECRETS_KEY — paste the value Vercel holds (hidden; Enter keeps the saved one): ' >&3
+    else
+      printf 'SECRETS_KEY — paste the value Vercel holds (hidden; Enter leaves it unset): ' >&3
+    fi
+    read -r -s V <&3; printf '\n' >&3
+    V="${V//[[:space:]]/}"
+    [ -n "$V" ] || break
+    # Exactly what the worker's masterKey() accepts: base64 of 32 bytes.
+    # printf is a builtin, so the value reaches openssl on its stdin only.
+    if [ "$(printf '%s' "$V" | openssl base64 -d -A 2>/dev/null | wc -c | tr -d ' ')" = 32 ]; then
+      export SECRETS_KEY="$V"
+      break
+    fi
+    printf '  That is not a key: it must be base64 of 32 bytes, as `openssl rand -base64 32` makes. Try again.\n' >&3
+  done
+  V=""
+  if [ -n "${SECRETS_KEY:-}" ] && have_keychain; then
+    kc_put SECRETS_KEY "$SECRETS_KEY" || true
+    # `security -i` can answer 0 for a write it refused: read it back.
+    if [ "$(kc_get SECRETS_KEY || true)" = "$SECRETS_KEY" ]; then
+      printf '  Saved in your Keychain; the next run uses it too.\n' >&3
+    else
+      echo "  Could not save SECRETS_KEY in the Keychain: this run uses it, the next one does not." >&2
+    fi
+  fi
+  exec 3>&-
+fi
+
+# ── --google: the key for finding businesses and measuring their sites ─────
+# One Google API key with the Places API (New) and the PageSpeed Insights API
+# enabled. Maps searches cost money past Google's free tier, and the worker
+# caps them per day (PLACES_DAILY_SEARCHES). Asked hidden, checked for the
+# shape of a Google key, kept in the Keychain; "none" removes a saved one.
+if [ "$MODE" = google ]; then
+  ask_open
+  while :; do
+    printf 'Google API key (hidden; Enter keeps the saved one, "none" removes it): ' >&3
+    read -r -s V <&3; printf '\n' >&3
+    V="${V//[[:space:]]/}"
+    [ -n "$V" ] || break
+    if [ "$V" = none ]; then
+      unset GOOGLE_API_KEY
+      have_keychain && kc_del GOOGLE_API_KEY
+      printf '  Removed: no Google Maps search, and PageSpeed runs keyless at a small quota.\n' >&3
+      break
+    fi
+    if [[ "$V" =~ ^AIza[0-9A-Za-z_-]{35}$ ]]; then
+      export GOOGLE_API_KEY="$V"
+      if have_keychain; then
+        kc_put GOOGLE_API_KEY "$V" || true
+        if [ "$(kc_get GOOGLE_API_KEY || true)" = "$V" ]; then
+          printf '  Saved in your Keychain; the next run uses it too.\n' >&3
+        else
+          echo "  Could not save the Google key in the Keychain: this run uses it, the next one does not." >&2
+        fi
+      fi
+      break
+    fi
+    printf '  That is not a Google API key: it starts AIza and is 39 characters. Try again.\n' >&3
+  done
+  V=""
+  exec 3>&-
+fi
+
+# ── --slack: where the opt-out alarm is posted ─────────────────────────────
+# The worker's one Slack message is the alarm for an opt-out it could not
+# record (apps/agent/src/notify.ts). The URL IS the credential, so it is asked
+# hidden, checked for the one shape the worker accepts (https on
+# hooks.slack.com), and kept in the Keychain. "none" removes a saved one.
+if [ "$MODE" = slack ]; then
+  ask_open
+  while :; do
+    printf 'Slack webhook URL (hidden; Enter keeps the saved one, "none" removes it): ' >&3
+    read -r -s V <&3; printf '\n' >&3
+    V="${V//[[:space:]]/}"
+    [ -n "$V" ] || break
+    if [ "$V" = none ]; then
+      unset SLACK_WEBHOOK_URL
+      have_keychain && kc_del SLACK_WEBHOOK_URL
+      printf '  Removed: the opt-out alarm is off.\n' >&3
+      break
+    fi
+    case "$V" in
+      https://hooks.slack.com/*)
+        export SLACK_WEBHOOK_URL="$V"
+        if have_keychain; then
+          kc_put SLACK_WEBHOOK_URL "$V" || true
+          if [ "$(kc_get SLACK_WEBHOOK_URL || true)" = "$V" ]; then
+            printf '  Saved in your Keychain; the next run uses it too.\n' >&3
+          else
+            echo "  Could not save the Slack URL in the Keychain: this run uses it, the next one does not." >&2
+          fi
+        fi
+        break
+        ;;
+      *) printf '  That is not a Slack incoming webhook: it starts https://hooks.slack.com/. Try again.\n' >&3 ;;
+    esac
+  done
+  V=""
+  exec 3>&-
+fi
+
+# ── --ai: a model sorting replies and polishing openers ───────────────────────
+# §5.5's single-shot model, for the two jobs the worker can hand it: reading a
+# reply's kind (interested, not now, wrong person, out of office) and
+# tightening an opener chat drafts — keeping every observed claim, or the
+# template stands. Both send a named person's words or a company's findings to
+# Anthropic, which is why it is a question and never a default: yes saves
+# LLM_PROVIDER=anthropic with LLM_ALLOW_REMOTE_LEAD_DATA=true, no removes them.
+# It uses the Anthropic key, which only a run with chat on hands the worker.
+if [ "$MODE" = ai ]; then
+  ask_open
+  printf 'Let a model sort replies and polish openers? A reply'"'"'s text and a company'"'"'s findings go to\n' >&3
+  printf 'Anthropic on your API key, as chat already sends your CRM. [y/N]: ' >&3
+  read -r ANSWER <&3
+  case "$ANSWER" in
+    [yY]*)
+      export LLM_PROVIDER=anthropic LLM_MODEL="${LLM_MODEL:-claude-haiku-4-5}" LLM_ALLOW_REMOTE_LEAD_DATA=true
+      AI_SAVED=yes
+      if have_keychain; then
+        for n in LLM_PROVIDER LLM_MODEL LLM_ALLOW_REMOTE_LEAD_DATA; do
+          kc_put "$n" "${!n}" || true
+          if [ "$(kc_get "$n" || true)" != "${!n}" ]; then
+            AI_SAVED=no
+            echo "  Could not save $n in the Keychain: this run uses it, the next one does not." >&2
+          fi
+        done
+      fi
+      [ "$AI_SAVED" = yes ] && printf '  Saved; the next run uses it too.\n' >&3
+      ;;
+    *)
+      unset LLM_PROVIDER LLM_MODEL LLM_ALLOW_REMOTE_LEAD_DATA
+      if have_keychain; then
+        for n in LLM_PROVIDER LLM_MODEL LLM_ALLOW_REMOTE_LEAD_DATA; do kc_del "$n"; done
+      fi
+      printf '  Off: replies keep the keyword reading and openers the template.\n' >&3
+      ;;
+  esac
+  exec 3>&-
+fi
+
+# ── Check what was given ─────────────────────────────────────────────────────
+case "${DATABASE_URL:-}" in
+  postgres://*|postgresql://*) ;;
+  *) echo "DATABASE_URL does not look like a postgres:// connection string. Stopping." >&2; exit 1 ;;
+esac
+case "$DATABASE_URL" in
   *-pooler.*)
     echo >&2
     echo "That is the POOLED endpoint (its host contains '-pooler')." >&2
@@ -68,144 +906,178 @@ case "$DB" in
     ;;
 esac
 
-# Required by the worker's schema, and with no tunnel nothing ever presents it:
-# the web app only sends this header when it calls /internal/*, which it cannot
-# reach. A fresh random value per run is therefore correct — it is a shared
-# secret with nobody. If you later expose chat, set the SAME value here and in
-# Vercel, and this line is what you replace.
-TOKEN="$(openssl rand -base64 32)"
+# 465 is implicit TLS; 587 and the rest are STARTTLS.
+if [ -n "${SMTP_HOST:-}" ]; then
+  if [ "${SMTP_PORT:-587}" = 465 ]; then export SMTP_SECURE=true; else export SMTP_SECURE=false; fi
+fi
+if [ -n "${IMAP_HOST:-}" ]; then export IMAP_PORT=993 IMAP_SECURE=true; fi
 
-# ── Sending and reply detection ────────────────────────────────────────────
-#
-# These prompts exist because the worker treats every one of these variables as
-# OPTIONAL and boots cleanly without them. apps/agent/src/worker.ts gives the
-# sender a mail provider on `SMTP_HOST && MAIL_FROM` and an SMS provider on
-# `DOVESOFT_API_KEY && DOVESOFT_ENTITY_ID` (0019), and starts the inbox on
-# `IMAP_HOST && IMAP_USER && IMAP_PASSWORD`; unset, none is started,
-# `outreachModeFrom` returns 'disabled', and the worker runs happily doing only
-# the recovery jobs.
-#
-# That is a quiet failure with a loud banner in front of it: this script used
-# to promise "send queued outreach, detect replies" while passing the child
-# exactly four variables, none of them these. Approved messages would sit in
-# the queue forever and replies would never be read, with nothing anywhere
-# saying why.
-#
-# Sourcing the repo's .env would be worse than leaving it out: it points SMTP
-# at the local mailpit sink on port 1025, so production outreach would go to a
-# laptop instead of to a real inbox, and it has no IMAP settings at all.
-#
-# Passwords are read with `read -s` and EXPORTED rather than passed as
-# `env VAR=value cmd`, which would put them in the child's argv where `ps`
-# shows them to every user on the machine (§2.3).
+# Without the mailbox's two halves, sending is off: say so here rather than
+# letting a worker that never sends report itself healthy.
+SENDING=no;   [ -n "${SMTP_HOST:-}" ] && [ -n "${MAIL_FROM:-}" ] && SENDING=yes
+SMS=no;       [ -n "${DOVESOFT_API_KEY:-}" ] && [ -n "${DOVESOFT_ENTITY_ID:-}" ] && SMS=yes
+RECEIVING=no; [ -n "${IMAP_HOST:-}" ] && [ -n "${IMAP_USER:-}" ] && [ -n "${IMAP_PASSWORD:-}" ] && RECEIVING=yes
 
-SENDING="no"
-RECEIVING="no"
-
-printf 'Configure SENDING now? Without it, approved mail waits in the queue. [y/N]: ' >&3
-read -r ANSWER <&3
-case "$ANSWER" in
-  [yY]*)
-    printf '  SMTP host (e.g. smtp.resend.com): ' >&3;       read -r V_SMTP_HOST <&3
-    printf '  SMTP port [587]: ' >&3;                        read -r V_SMTP_PORT <&3
-    printf '  SMTP username (Resend uses "resend"): ' >&3;   read -r V_SMTP_USER <&3
-    printf '  SMTP password (hidden): ' >&3;                 read -r -s V_SMTP_PASSWORD <&3; printf '\n' >&3
-    printf '  From address (e.g. You <hello@outreach.example.com>): ' >&3
-    read -r V_MAIL_FROM <&3
-    if [ -n "$V_SMTP_HOST" ] && [ -n "$V_MAIL_FROM" ]; then
-      export SMTP_HOST="$V_SMTP_HOST"
-      export SMTP_PORT="${V_SMTP_PORT:-587}"
-      export SMTP_SECURE="false"     # 587 is STARTTLS; 465 would be true
-      [ -n "${V_SMTP_USER:-}" ]     && export SMTP_USER="$V_SMTP_USER"
-      [ -n "${V_SMTP_PASSWORD:-}" ] && export SMTP_PASSWORD="$V_SMTP_PASSWORD"
-      export MAIL_FROM="$V_MAIL_FROM"
-      SENDING="yes"
-    else
-      echo "  Host and From are both required for sending; leaving it off." >&2
+# ── Chat: the tunnel, before the summary says it is on ───────────────────────
+# The worker's API is the port after its health port (apps/agent/src/
+# worker.ts). Only that port is tunnelled: it answers /internal/* to the
+# bearer alone, and /livez and /readyz, which say nothing usable.
+API_PORT=$(( ${AGENT_PORT:-3001} + 1 ))
+# A tunnel an earlier run left on this worker's port — one whose watcher
+# (below) did not get to stop it — is stopped first, whatever its domain:
+# with chat off it would publish a port whose token nobody holds, and with
+# chat on it holds the domain, which ngrok will not open twice. Anchored to
+# the start of the command line, so it matches ngrok itself and never a
+# shell, an editor or a script whose own command line merely mentions it.
+if pkill -f "^([^ ]*/)?ngrok http 127\.0\.0\.1:$API_PORT( |\$)" >/dev/null 2>&1; then
+  echo "Stopped an ngrok tunnel an earlier run left on this worker's port."
+fi
+CHAT=no; CHAT_WHY=""; NGROK_PID=""
+if [ -n "${CHAT_URL:-}" ]; then
+  if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+    CHAT_WHY="no Anthropic API key was given ('$0 --reconfigure' to add one)"
+  elif [ -z "${AGENT_INTERNAL_TOKEN:-}" ]; then
+    CHAT_WHY="no AGENT_INTERNAL_TOKEN ('$0 --reconfigure' to make one)"
+  elif ! command -v ngrok >/dev/null 2>&1; then
+    CHAT_WHY="ngrok is not installed: 'brew install ngrok', then 'ngrok config add-authtoken <your token>' once"
+  else
+    CHAT_HOST="${CHAT_URL#https://}"
+    NGROK_LOG="$(mktemp -t agency-ngrok.XXXXXX)"
+    # From an EMPTY environment: everything this script exported — the
+    # database URL, the mail passwords, the Anthropic key — would otherwise
+    # be inherited by a third party's binary. ngrok needs only PATH, and HOME
+    # for its own config, where its authtoken lives.
+    #
+    # --inspect=false: ngrok's request inspector is on by default, and keeps
+    # every request it forwards — the bearer in its Authorization header, the
+    # chat text, the answers that carry lead data — on 127.0.0.1:4040, where
+    # anything on this Mac can read and replay it with no authentication
+    # (review round 15). The log records what ngrok did, never a request.
+    env -i PATH="$PATH" HOME="$HOME" USER="${USER:-}" \
+      ngrok http "127.0.0.1:$API_PORT" --url="$CHAT_URL" --inspect=false \
+      --log=stdout --log-format=logfmt --log-level=info >"$NGROK_LOG" 2>&1 &
+    NGROK_PID=$!
+    # ON only once ngrok says the tunnel on THIS domain started. A process
+    # that has not exited proves nothing: ngrok that cannot reach or sign in
+    # to its edge retries for ever, and "the live site reaches this Mac"
+    # would be false while the worker was handed the key (review round 15).
+    for _ in $(seq 1 "${AGENCY_TUNNEL_WAIT_SECONDS:-20}"); do
+      kill -0 "$NGROK_PID" 2>/dev/null || break
+      if awk -v want="url=$CHAT_URL" \
+        '/lvl=info/ { for (i = 1; i <= NF; i++) if ($i == want) found = 1 } END { exit !found }' "$NGROK_LOG"; then
+        CHAT=yes
+        break
+      fi
+      sleep 1
+    done
+    if [ "$CHAT" != yes ]; then
+      kill "$NGROK_PID" 2>/dev/null || true
+      NGROK_PID=""
+      echo "ngrok did not open $CHAT_HOST — the last lines it wrote:" >&2
+      tail -n 5 "$NGROK_LOG" >&2 || true
+      CHAT_WHY="ngrok could not open $CHAT_HOST (is 'ngrok config add-authtoken' done, and is it your domain?)"
     fi
-    unset V_SMTP_PASSWORD
-    ;;
-esac
-
-SMS="no"
-printf 'Configure SMS through DoveSoft now? Without it, approved texts wait in the queue. [y/N]: ' >&3
-read -r ANSWER <&3
-case "$ANSWER" in
-  [yY]*)
-    # The key is a credential: read hidden, exported, never echoed (§2.3).
-    printf '  DoveSoft API key (hidden): ' >&3;               read -r -s V_DOVESOFT_KEY <&3; printf '\n' >&3
-    printf '  DLT principal entity id (PE ID, digits): ' >&3; read -r V_DOVESOFT_ENTITY <&3
-    if [ -n "${V_DOVESOFT_KEY:-}" ] && [ -n "${V_DOVESOFT_ENTITY:-}" ]; then
-      export DOVESOFT_API_KEY="$V_DOVESOFT_KEY"
-      export DOVESOFT_ENTITY_ID="$V_DOVESOFT_ENTITY"
-      SMS="yes"
-    else
-      echo "  The key and the entity id are both required; leaving SMS off." >&2
-    fi
-    unset V_DOVESOFT_KEY
-    ;;
-esac
-
-printf 'Configure REPLY DETECTION now? Without it, nobody is marked as having replied. [y/N]: ' >&3
-read -r ANSWER <&3
-case "$ANSWER" in
-  [yY]*)
-    printf '  IMAP host [imap.gmail.com]: ' >&3;   read -r V_IMAP_HOST <&3
-    printf '  IMAP username (the mailbox): ' >&3;  read -r V_IMAP_USER <&3
-    printf '  IMAP password (hidden — a Gmail APP password, not the account one): ' >&3
-    read -r -s V_IMAP_PASSWORD <&3; printf '\n' >&3
-    if [ -n "${V_IMAP_USER:-}" ] && [ -n "${V_IMAP_PASSWORD:-}" ]; then
-      export IMAP_HOST="${V_IMAP_HOST:-imap.gmail.com}"
-      export IMAP_PORT="993"
-      export IMAP_SECURE="true"
-      export IMAP_USER="$V_IMAP_USER"
-      export IMAP_PASSWORD="$V_IMAP_PASSWORD"
-      RECEIVING="yes"
-    else
-      echo "  Username and password are both required; leaving reply detection off." >&2
-    fi
-    unset V_IMAP_PASSWORD
-    ;;
-esac
+  fi
+fi
 
 echo
 echo "── What this worker will and will not do ──────────────────────────"
 echo "  always:   recover stuck sends, expire approvals, sweep expired"
-echo "            sign-in links"
-if [ "$SENDING" = "yes" ]; then
-  echo "  sending:  ON  — queued outreach will be sent via $SMTP_HOST"
+echo "            sign-in links, and write the heartbeat the site reads"
+if [ "$SENDING" = yes ]; then
+  echo "  sending:  ON  — approved outreach goes via $SMTP_HOST as $MAIL_FROM"
+  if [ -n "${UNSUBSCRIBE_SECRET:-}" ] && [ -n "${WEB_PUBLIC_URL:-}" ]; then
+    echo "            with a one-click unsubscribe link to $WEB_PUBLIC_URL"
+  else
+    echo "            WITHOUT an unsubscribe header (no UNSUBSCRIBE_SECRET)"
+  fi
 else
   echo "  sending:  OFF — approved mail WAITS in the queue. Nothing is lost,"
   echo "            and every §2.1 rule is re-checked when it does send."
 fi
-if [ "$SMS" = "yes" ]; then
+if [ "$SMS" = yes ]; then
   echo "  sms:      ON  — approved texts go through DoveSoft, each from a"
   echo "            registered DLT template, to a contact who opted in"
 else
   echo "  sms:      OFF — approved texts WAIT in the queue."
 fi
-if [ "$RECEIVING" = "yes" ]; then
-  echo "  replies:  ON  — polling $IMAP_USER over IMAP"
+if [ "$RECEIVING" = yes ]; then
+  echo "  replies:  ON  — reading $IMAP_USER over IMAP"
 else
   echo "  replies:  OFF — replies are not read, so no contact is marked as"
   echo "            having replied and no sequence is paused by one."
 fi
-echo "  chat:     OFF — no model credential and no inbound route. The site"
-echo "            says 'no worker connected' on the chat panel, which is true"
-echo "            and better than a spinner that never resolves."
+if [ -n "${SLACK_WEBHOOK_URL:-}" ]; then
+  echo "  alarm:    ON  — an opt-out that cannot be recorded is posted to Slack"
+fi
+if [ -n "${GOOGLE_API_KEY:-}" ]; then
+  echo "  google:   ON  — finds businesses on Google Maps (up to ${PLACES_DAILY_SEARCHES:-30} searches a day)"
+  echo "            and measures sites with PageSpeed"
+else
+  echo "  google:   OFF — no Google Maps search; PageSpeed runs keyless at a small quota."
+  echo "            '$0 --google' adds a key"
+fi
+if [ -n "${SECRETS_KEY:-}" ]; then
+  echo "  keys:     ON  — connectors that need a key can decrypt it (SECRETS_KEY;"
+  echo "            Vercel must hold the same value)"
+else
+  echo "  keys:     OFF — only connectors that need no key work; '$0 --secrets-key'"
+  echo "            takes the SECRETS_KEY Vercel holds"
+fi
+if [ "${LLM_PROVIDER:-}" = anthropic ] && [ "$CHAT" = yes ]; then
+  echo "  ai:       ON  — a model sorts replies and polishes openers (${LLM_MODEL:-default model})"
+elif [ "${LLM_PROVIDER:-}" = anthropic ]; then
+  echo "  ai:       OFF — it uses the Anthropic key, which only a run with chat on hands the worker"
+else
+  echo "  ai:       OFF — replies are read by keyword and openers keep the template; '$0 --ai'"
+fi
+if [ "$CHAT" = yes ]; then
+  echo "  chat:     ON  — the live site reaches this Mac at $CHAT_URL (ngrok),"
+  echo "            and every turn is billed to your Anthropic API key. Vercel needs"
+  echo "            AGENT_URL=$CHAT_URL and the same AGENT_INTERNAL_TOKEN."
+elif [ -n "${CHAT_URL:-}" ]; then
+  echo "  chat:     OFF — $CHAT_WHY."
+else
+  echo "  chat:     OFF — no inbound route, so the site cannot reach this Mac."
+  echo "            If AGENT_URL is still set in Vercel from a run with chat on,"
+  echo "            the site's chat panel offers chat and says the worker is not"
+  echo "            responding; remove AGENT_URL there (and redeploy) to switch"
+  echo "            chat off on the site, or run again with chat on."
+fi
 echo
-echo "  The worker also logs its own verdict as 'outreach: <mode>' and"
-echo "  'sms: dovesoft on|off' at boot."
-echo "  If that says 'disabled' while this says ON, trust the worker."
-echo
-echo "  Nothing on this machine is exposed. Closing this tab stops the worker;"
-echo "  queued mail simply waits for the next run rather than being lost."
+echo "  The worker logs its own verdict as 'outreach: <mode>' and"
+echo "  'sms: dovesoft on|off' at boot. If that disagrees with this, trust it."
+echo "  Closing this window stops it; queued mail waits for the next run."
 echo
 
-exec 3>&-
-
-DATABASE_URL="$DB" \
-  AGENT_INTERNAL_TOKEN="$TOKEN" \
+# AGENT_INTERNAL_TOKEN is required by the worker's schema. With chat on it is
+# the saved one Vercel holds; with no tunnel nothing ever presents it — the
+# web app only sends it when it calls /internal/*, which it cannot reach — so
+# a fresh random value per run is correct, a shared secret with nobody. And
+# with chat off the worker is not handed an Anthropic key at all.
+if [ "$CHAT" = yes ]; then
+  WORKER_TOKEN="$AGENT_INTERNAL_TOKEN"
+  # Haiku unless told otherwise: about an eighth of the default model's price.
+  export AGENT_MODEL="${AGENT_MODEL:-claude-haiku-4-5}"
+else
+  WORKER_TOKEN="$(openssl rand -base64 32)"
+  unset ANTHROPIC_API_KEY
+  # Without the key an Anthropic model is named and unreachable; say nothing to the worker.
+  [ "${LLM_PROVIDER:-}" = anthropic ] && unset LLM_PROVIDER LLM_MODEL LLM_ALLOW_REMOTE_LEAD_DATA
+fi
+# ngrok must not outlive the worker, and the exec below leaves nothing here to
+# stop it: a worker that refuses to boot or crashes left the tunnel holding
+# the domain, out of reach of Ctrl-C and of closing the window (review round
+# 15). exec keeps this PID, so the watcher waits on the worker itself and
+# stops ngrok within two seconds of its exit, however it exits. It ignores
+# the hang-up a closed window sends, and runs from an empty environment, so
+# it holds no credential; its argv is two process ids.
+if [ -n "$NGROK_PID" ]; then
+  env -i PATH="$PATH" /bin/bash -c \
+    'trap "" HUP INT; while kill -0 "$1" 2>/dev/null; do sleep 2; done; kill "$2" 2>/dev/null || true' \
+    agency-tunnel-watch "$$" "$NGROK_PID" </dev/null >/dev/null 2>&1 &
+fi
+AGENT_INTERNAL_TOKEN="$WORKER_TOKEN" \
   NODE_ENV=production \
   AGENT_BIND=127.0.0.1 \
-  npx tsx apps/agent/src/index.ts
+  exec node_modules/.bin/tsx apps/agent/src/index.ts

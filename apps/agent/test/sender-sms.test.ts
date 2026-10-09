@@ -170,6 +170,57 @@ describe('the sender tick with DoveSoft', () => {
     expect((await reread(mail.id)).providerId).toBe('<mail-1@agency.test>')
   })
 
+  /**
+   * Review round 5, findings [1], [2] and [3]. A promotional SMS to an Indian number read in New
+   * York in December may go only from 10:00 to 10:30 there (15:00–15:30 UTC), where TRAI's band and
+   * the recipient's own 10:00–21:00 meet. The tick put every quiet-hours deferral back an hour later,
+   * so a first try at 14:35 UTC came back at 15:35, 16:35, … and missed that half hour for days.
+   */
+  describe('a promotional SMS and its band', () => {
+    const PROMO_BODY = 'Hi {#var#}, our autumn review slots are open. Reply STOP to opt out.'
+
+    /** A promotional SMS drafted and approved at `at`, to Priya read in `zone`. */
+    const approvedPromo = async (zone: string, at: Date): Promise<TouchRow> => {
+      await db.update(schema.contacts).set({ timeZone: zone }).where(eq(schema.contacts.id, contactId))
+      const [template] = await db
+        .insert(schema.messageTemplates)
+        .values({ orgId, channel: 'sms', externalId: '1107160000000099999', senderId: 'ACMEIN', category: 'promotional', body: PROMO_BODY })
+        .returning({ id: schema.messageTemplates.id })
+      const d = await smsDraft(db, { orgId, contactId, campaignId: smsCampaignId, templateId: template!.id, vars: ['Priya'], createdBy: userId, now: at })
+      if (!d.ok) throw new Error(d.message)
+      const a = await approveDraft(db, { orgId, touchId: d.touchId, contactId, campaignId: smsCampaignId, approvedBy: userId, now: at })
+      if (!a.ok) throw new Error(a.reason)
+      return a.touch
+    }
+
+    it('waits for the minute the band opens, and goes inside its half hour', async () => {
+      const first = new Date('2026-12-01T14:35:00.000Z') // 09:35 in New York, 20:05 in India
+      const t = await approvedPromo('America/New_York', first)
+      const ds = dovesoft()
+      const tick = (at: Date) => runSenderTick({ db, provider: [ds.provider], log: silent, batch: 20, now: () => at })
+
+      expect(await tick(first)).toMatchObject({ picked: 1, deferred: 1, sent: 0 })
+      const opens = new Date('2026-12-01T15:00:00.000Z') // 10:00 in New York, 20:30 in India
+      expect(await reread(t.id)).toMatchObject({ status: 'approved', refusalCode: null, scheduledFor: opens })
+      expect(ds.calls).toHaveLength(0)
+
+      expect(await tick(new Date(opens.getTime() + 7_500))).toMatchObject({ picked: 1, sent: 1 })
+      expect(await reread(t.id)).toMatchObject({ status: 'sent', providerId: 'DS-77' })
+      expect(ds.calls).toHaveLength(1)
+    })
+
+    it('refuses a band that never opens as itself, terminally, and never calls DoveSoft', async () => {
+      // Denver all year: 10:00–21:00 there never meets 10:00–21:00 in India.
+      const at = new Date('2026-12-01T17:00:00.000Z')
+      const t = await approvedPromo('America/Denver', at)
+      const ds = dovesoft()
+      const s = await runSenderTick({ db, provider: [ds.provider], log: silent, batch: 20, now: () => at })
+      expect(s).toMatchObject({ picked: 1, refused: 1, deferred: 0, sent: 0 })
+      expect(await reread(t.id)).toMatchObject({ status: 'refused', refusalCode: 'band_never_opens', scheduledFor: null })
+      expect(ds.calls).toHaveLength(0)
+    })
+  })
+
   describe('when DoveSoft is not configured', () => {
     it('never claims an SMS row, and still sends the email beside it', async () => {
       const text = await approvedSms()

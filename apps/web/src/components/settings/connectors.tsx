@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { When } from '@/components/when'
+import { toast } from '../toast/toast'
 import { ConnectorCatalog, type FormPrefill } from './connector-catalog'
 import type { BrowserPreset } from './connector-presets'
 
@@ -56,6 +57,12 @@ export interface ConnectorView {
   readonly summary: string
   /** Tool names only. */
   readonly disabledTools: DisabledToolsView
+  /**
+   * The owner's "runs without asking" switch for a read-only research server
+   * (connector-reads, 2026-10-07): whether this server may have it at all,
+   * and whether it is on. Derived from the row as the worker's gate derives it.
+   */
+  readonly reads: { readonly eligible: boolean; readonly on: boolean }
 }
 
 /**
@@ -83,8 +90,12 @@ function storableToolName(name: string): boolean {
   return name.length <= 120 && /^(?!.*__)[A-Za-z0-9][A-Za-z0-9_-]*$/.test(name)
 }
 
-/** The schema's `.max(64)`: how many names one server's list may hold. */
-const MAX_DISABLED = 64
+/**
+ * `CONNECTOR_DISABLED_TOOLS_MAX` in `@agency/db`: how many names one server's
+ * list may hold. A copy, because this is a client module and the db package
+ * is not; `connector-tools-cap.test.ts` keeps the two equal.
+ */
+const MAX_DISABLED = 256
 
 type Probe = { tools: readonly { name: string; description: string }[]; message: string; ok: boolean }
 
@@ -263,6 +274,7 @@ export function ConnectorsPanel({
               {c.lastError ? <div className="err-line">{c.lastError}</div> : null}
               {error ? <div className="err-line">{error}</div> : null}
               <DisabledLine off={off} canWrite={canWrite} />
+              {c.reads.eligible ? <ReadsSwitch connector={c} canWrite={canWrite} /> : null}
 
               {probe ? (
                 <div className={probe.ok ? 'probe ok' : 'probe'}>
@@ -349,6 +361,71 @@ export function ConnectorsPanel({
  * What is refused on this server, said on the card whether or not anyone has
  * run Test connection in this visit — the gate enforces it either way.
  */
+/**
+ * "Runs without asking" — an owner's switch on a server the catalog marks
+ * read-only (Exa, Firecrawl, Tavily, Jina and the documentation servers).
+ * Off by default: every call asks a person. On: the agent may search and read
+ * with it at once, and every call is still recorded in /audit. The route
+ * refuses it for any other server; this only offers it where it can be saved.
+ */
+function ReadsSwitch({ connector, canWrite }: { connector: ConnectorView; canWrite: boolean }) {
+  const [on, setOn] = useState(connector.reads.on)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const save = async (next: boolean): Promise<void> => {
+    setBusy(true)
+    setError('')
+    try {
+      const res = await fetch(`/api/connectors/${connector.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ readsWithoutCard: next }),
+      })
+      const body = (await res.json().catch(() => ({}))) as { error?: string; readsWithoutCard?: boolean }
+      if (!res.ok) {
+        setError(body.error ?? 'That did not work.')
+        return
+      }
+      setOn(body.readsWithoutCard === true)
+      toast.success(
+        body.readsWithoutCard === true
+          ? `Saved. The ${connector.name} connector runs without asking from the next message on; every call is still recorded in /audit.`
+          : `Saved. The ${connector.name} connector asks a person on every call from the next message on.`,
+      )
+    } catch {
+      setError('The request did not complete. Try again.')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div style={{ fontSize: 12.5, marginTop: 6 }}>
+      {canWrite ? (
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input
+            type="checkbox"
+            checked={on}
+            disabled={busy}
+            onChange={(e) => void save(e.target.checked)}
+            style={{ width: 'auto' }}
+          />
+          <span>
+            <strong>Runs without asking</strong> — this server only searches and reads public pages, so the AI may
+            use it without an approval card. Every call is still recorded in /audit.
+          </span>
+        </label>
+      ) : (
+        <span className="muted">
+          {on
+            ? 'Runs without asking: it only searches and reads public pages, and every call is recorded in /audit.'
+            : 'Asks a person on every call. An owner can let it run without asking — it only searches and reads.'}
+        </span>
+      )}
+      {error ? <div className="err-line">{error}</div> : null}
+    </div>
+  )
+}
+
 function DisabledLine({ off, canWrite }: { off: DisabledToolsView; canWrite: boolean }) {
   const names = (tools: readonly string[]) =>
     tools.map((t, i) => (
@@ -422,10 +499,8 @@ function ToolChecks({
   )
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [saved, setSaved] = useState(false)
 
   const toggle = (name: string): void => {
-    setSaved(false)
     setTicked((current) => {
       const next = new Set(current)
       if (next.has(name)) next.delete(name)
@@ -449,7 +524,10 @@ function ToolChecks({
         return
       }
       onSaved(body.disabledTools)
-      setSaved(true)
+      toast.success(
+        `Saved. ${ticked.size === 0 ? 'No tool is disabled' : `${ticked.size} disabled`} from the next message on; ` +
+          `the connector stays ${connector.enabled ? 'enabled' : 'disabled'}.`,
+      )
     } catch {
       setError('The request did not complete. Try again.')
     } finally {
@@ -501,8 +579,10 @@ function ToolChecks({
         </div>
       ) : null}
       <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-        Disabled tools are refused before anyone is asked. Every other tool on this server still asks a
-        person every time.
+        Disabled tools are refused before anyone is asked, and are not described to the assistant at all.
+        Every other tool on this server still asks a person every time — and is described to the assistant
+        in every message, so leave on only the ones you use: a server with dozens of tools on can fill what
+        the model reads at once, and chat then stops answering.
       </div>
       {ticked.size > MAX_DISABLED ? (
         <div className="err-line">
@@ -516,12 +596,6 @@ function ToolChecks({
           {busy ? 'Saving…' : 'Save disabled tools'}
         </button>
       </div>
-      {saved ? (
-        <div className="ok-line">
-          Saved. {ticked.size === 0 ? 'No tool is disabled' : `${ticked.size} disabled`} from the next message on;
-          the connector stays {connector.enabled ? 'enabled' : 'disabled'}.
-        </div>
-      ) : null}
     </>
   )
 }

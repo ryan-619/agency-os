@@ -3,6 +3,7 @@ import { AuthError } from 'next-auth'
 import { auth, signIn } from '@/auth'
 import { deployment } from '@/lib/deployment'
 import { SignInForm } from '@/components/signin-form'
+import { PasteSignInLink } from '@/components/paste-signin-link'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -27,7 +28,13 @@ export default async function SignIn({
   return (
     <div className="auth-wrap">
       <div className="auth">
-        <h1>Agency OS</h1>
+        <svg className="auth-mark" viewBox="0 0 512 512" aria-hidden="true">
+          <rect width="512" height="512" rx="112" fill="#111827" />
+          <path d="M256 96 416 416H344L256 232 168 416H96Z" fill="#ffffff" />
+          <path d="M211 320H301L322 364H190Z" fill="#ffffff" />
+          <circle cx="404" cy="124" r="36" fill="#22c55e" />
+        </svg>
+        <h1 data-split>Agency OS</h1>
         <p>Internal tool. Sign in with your team address.</p>
 
         {error ? <p className="err">Sign-in failed. Try again.</p> : null}
@@ -72,6 +79,8 @@ export default async function SignIn({
             }
           }}
         />
+
+        <PasteSignInLink />
 
         <p className="fine">
           No password. The link is valid for 15 minutes and can be used once.

@@ -59,6 +59,10 @@ export function createSmtpProvider(config: SmtpConfig): MessageProvider {
   return {
     name: 'smtp',
     channels: ['email'],
+    // nodemailer's verify(): connect, greet, authenticate, quit. Nothing is sent.
+    async verify() {
+      await get().verify()
+    },
     async send(message) {
       // Headers are passed through as the send path built them. `In-Reply-To`
       // and `References` are ALSO set through nodemailer's own fields, which

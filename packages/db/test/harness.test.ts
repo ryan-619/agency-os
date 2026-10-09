@@ -52,9 +52,36 @@ describe('the migrated-database harness', () => {
     for (const expected of ['orgs', 'users', 'companies', 'deals', 'touches', 'calls', 'suppressions']) {
       expect(names, expected).toContain(expected)
     }
-    // 0019's table and column, the most recent things a migration added.
-    // This assertion has to name the NEWEST: a snapshot built from an older
-    // set of migrations would still carry every earlier one.
+    // 0025's tables, the most recent things a migration added. This
+    // assertion has to name the NEWEST: a snapshot built from an older set
+    // of migrations would still carry every earlier one.
+    expect(names).toContain('night_shifts')
+    expect(names).toContain('night_searches')
+    // 0024's, as further lines.
+    expect(names).toContain('campaign_steps')
+    expect(names).toContain('sequence_runs')
+    // 0023's, as further lines.
+    expect(names).toContain('quotes')
+    expect(names).toContain('share_links')
+    expect(names).toContain('org_profiles')
+    const companyCols = await test.driver.select<{ column_name: string }>(
+      "select column_name from information_schema.columns where table_name = 'companies'",
+    )
+    expect(companyCols.map((c) => c.column_name)).toContain('latitude')
+    // 0022's, as further lines.
+    expect(names).toContain('services')
+    expect(names).toContain('site_audits')
+    expect(companyCols.map((c) => c.column_name)).toContain('google_place_id')
+    expect(companyCols.map((c) => c.column_name)).toContain('listing_checked_at')
+    // 0021's column and index, as further lines.
+    expect(companyCols.map((c) => c.column_name)).toContain('headcount_source')
+    const indexes = await test.driver.select<{ indexname: string }>(
+      "select indexname from pg_indexes where tablename = 'icp_profiles'",
+    )
+    expect(indexes.map((i) => i.indexname)).toContain('icp_profiles_one_active_per_org')
+    // 0020's table, as a further line.
+    expect(names).toContain('assistant_settings')
+    // 0019's table and columns, as further lines.
     expect(names).toContain('message_templates')
     const cols = await test.driver.select<{ column_name: string }>(
       "select column_name from information_schema.columns where table_name = 'touches'",

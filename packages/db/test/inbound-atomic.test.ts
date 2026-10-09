@@ -20,7 +20,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
-import { handleInboundEmail, pauseReasonClass, schema, type AgencyDb, type InboundLog } from '../src/index.js'
+import {
+  addSuppression, contactResumeByHand, handleInboundEmail, pauseReasonClass, replyQueueDraft, schema, type AgencyDb,
+  type InboundLog,
+} from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
 import { failOnce, throughTransactions } from './fault-db.js'
 
@@ -187,13 +190,40 @@ describe('an inbound reply, a fault, and the retry', () => {
     await expect(handleInboundEmail(db, mail('Stop'))).rejects.toThrow()
     expect(lines).toHaveLength(1)
     expect(lines[0]!.message).toContain('OPT-OUT NOT RECORDED')
-    expect(lines[0]!.fields).toMatchObject({ contactId, orgId, why: 'Error' })
+    // The message it answered, by id: what the email webhook names in the
+    // alarm it raises for a stop it could not record.
+    const [answered] = await db.select({ id: schema.touches.id }).from(schema.touches).where(eq(schema.touches.providerId, OUR_ID))
+    expect(lines[0]!.fields).toMatchObject({ contactId, orgId, why: 'Error', inReplyTo: answered!.id })
     expect(JSON.stringify(lines)).not.toContain('priya@rentman.io')
     expect(JSON.stringify(lines)).not.toContain('Stop')
 
     lines.length = 0
     await failOnce(test.pg, { table: 'contacts', event: 'UPDATE' })
     await expect(handleInboundEmail(db, mail('Yes, send pricing', '<yes-1@rentman.io>'))).rejects.toThrow()
+    expect(lines).toEqual([])
+  })
+
+  /**
+   * Review round 5: Postgres refuses U+0000 in text, and only the SMS path
+   * replaced it. An email reply carrying one — mailparser keeps a NUL
+   * decoded from quoted-printable `=00` — failed its INSERT on every retry,
+   * on IMAP, Resend and the generic webhook alike: a "stop" recorded
+   * nowhere, the person unpaused, their approved follow-up still going.
+   * Replaced in `recordInboundReply`, once, for every channel.
+   */
+  it.each([
+    { by: 'the message it answers', references: [OUR_ID], matched: 'message' },
+    { by: 'the address alone', references: [], matched: 'contact' },
+  ])('records an email reply carrying U+0000, matched by $by, with the character kept visible', async ({ references, matched }) => {
+    const words = 'Please unsubscribe me.\n\nJo Bloggs\u0000 +44 7700 900123'
+    const r = await handleInboundEmail(db, { ...mail(words, '<nul-1@rentman.io>'), subject: 'Re: A gap\u0000', references })
+    expect(r).toMatchObject({ matched, duplicate: false, paused: true, suppressed: true, replyKind: 'opted_out', optOutNotRecorded: false })
+    const s = await state()
+    expect(s.pausedReason).toBe(`replied ${NOON.toISOString()}`)
+    expect(s.followUp).toEqual({ status: 'refused', refusalCode: 'consent_revoked' })
+    expect(s.suppressions).toEqual([{ kind: 'email', value: 'priya@rentman.io', source: 'reply' }])
+    const [row] = s.inbound
+    expect(row).toMatchObject({ body: 'Please unsubscribe me.\n\nJo Bloggs\uFFFD +44 7700 900123', subject: 'Re: A gap\uFFFD' })
     expect(lines).toEqual([])
   })
 
@@ -252,6 +282,84 @@ describe('an inbound reply, a fault, and the retry', () => {
       expect(s.suppressions).toHaveLength(1)
       expect(await db.select().from(schema.deals)).toEqual([])
       expect(s.audit.find((a) => a.action === 'contact.replied')?.detail).toMatchObject({ deal: null })
+    })
+  })
+  /**
+   * Review round 7, [7]. `handleInboundEmail` files a reply matched by
+   * References under the contact OUR message went to, whoever answered —
+   * here Priya, while her colleague Sam replied all asking to be taken off.
+   * Sam's opt-out is Sam's. When it could not be recorded, Priya was held as
+   * an opt-out nobody recorded: a pause no Resume lifts, and a row the inbox
+   * reads however old — locked out for good, though she never asked.
+   */
+  describe('a stop from somebody else in the thread', () => {
+    const SAM = 'sam@rentman.io'
+    const fromSam = (text = 'Please remove me from your list.', messageId = '<sam-1@rentman.io>') => ({
+      ...mail(text, messageId),
+      from: SAM,
+    })
+    const owner = async () => (await db.select({ id: schema.users.id }).from(schema.users))[0]!.id
+
+    it('says on the rolled-back line whether the reply came from the contact it was filing under', async () => {
+      await failOnce(test.pg, { table: 'touches', event: 'INSERT', when: "NEW.direction = 'in'" })
+      await expect(handleInboundEmail(db, fromSam())).rejects.toThrow()
+      expect(lines).toHaveLength(1)
+      expect(lines[0]!.fields).toMatchObject({ orgId, contactId, fromIsContact: false })
+
+      lines.length = 0
+      await failOnce(test.pg, { table: 'touches', event: 'INSERT', when: "NEW.direction = 'in'" })
+      await expect(handleInboundEmail(db, mail('Stop', '<stop-2@rentman.io>'))).rejects.toThrow()
+      expect(lines[0]!.fields).toMatchObject({ orgId, contactId, fromIsContact: true })
+      // An id-free boolean: still no address in the line.
+      expect(JSON.stringify(lines)).not.toContain('@rentman.io')
+    })
+
+    it('holds the contact only as a reply when the suppression of the sender is refused, and audits the reply', async () => {
+      await failOnce(test.pg, { table: 'suppressions', event: 'INSERT' })
+      const r = await handleInboundEmail(db, fromSam())
+      if (r.matched === 'none') throw new Error(r.why)
+      expect(r).toMatchObject({ contactId, suppressed: false, replyKind: 'opted_out', optOutNotRecorded: true })
+
+      const s = await state()
+      // Paused as the reply pauses anybody — never as Priya's own opt-out.
+      expect(s.pausedReason).toBe(`replied ${NOON.toISOString()}`)
+      expect(s.followUp).toEqual({ status: 'refused', refusalCode: 'consent_revoked' })
+      const row = s.audit.find((a) => a.action === 'contact.opt_out_not_recorded')
+      expect(row).toMatchObject({
+        subjectType: 'touch',
+        subjectId: r.touchId,
+        detail: { touchId: r.touchId, channel: 'email', why: 'Error', fromIsContact: false, filedUnder: contactId },
+      })
+      expect(row!.detail).not.toHaveProperty('contactId')
+      expect(lines).toEqual([
+        { message: 'OPT-OUT NOT RECORDED — follow up by hand', fields: expect.objectContaining({ fromIsContact: false }) },
+      ])
+
+      // Sam's opted-out reply still stands unrecorded, so Priya is held —
+      // until a person records Sam's address. Then she is a person's to
+      // resume, as any reply's pause is.
+      const resume = async () =>
+        contactResumeByHand(db, { orgId, contact: { id: contactId }, expectedReason: s.pausedReason, actor: await owner() })
+      expect(await resume()).toMatchObject({ ok: false, reason: 'opt_out_not_recorded' })
+      expect(await addSuppression(db, { orgId, kind: 'email', value: SAM, reason: 'asked by reply', source: 'manual' }))
+        .toMatchObject({ ok: true })
+      expect(await resume()).toEqual({ ok: true })
+    })
+
+    it('answers a later reply of the contact’s own once the sender is recorded', async () => {
+      await failOnce(test.pg, { table: 'suppressions', event: 'INSERT' })
+      await handleInboundEmail(db, fromSam())
+      await addSuppression(db, { orgId, kind: 'email', value: SAM, reason: 'asked by reply', source: 'manual' })
+      const later = new Date(NOON.getTime() + 20 * 86_400_000)
+      const own = await handleInboundEmail(db, {
+        ...mail('Sorry for the delay — yes, let us talk next week.', '<priya-2@rentman.io>'), now: later,
+      })
+      if (own.matched === 'none') throw new Error(own.why)
+      const answer = await replyQueueDraft(db, {
+        orgId, inboundTouchId: own.touchId, subject: 'Re: A gap on your security page', body: 'Great — Tuesday?',
+        actor: await owner(), now: new Date(later.getTime() + 60_000),
+      })
+      expect(answer).toMatchObject({ ok: true })
     })
   })
 })

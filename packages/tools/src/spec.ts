@@ -32,8 +32,8 @@
  *    window full of one table.
  */
 import type { ZodObject, ZodRawShape, infer as ZodInfer } from 'zod'
-import type { AgencyToolName, Principal } from '@agency/core'
-import type { AgencyDb } from '@agency/db'
+import type { AgencyToolName, Draft, IcpDefinition, Principal, SiteProfile } from '@agency/core'
+import type { AgencyDb, SiteAuditResult } from '@agency/db'
 
 /** What a tool is allowed to know. Assembled by the worker, per turn. */
 export interface ToolContext {
@@ -45,7 +45,150 @@ export interface ToolContext {
   readonly now: () => Date
   /** §5.4: approval decides, the audit log remembers. */
   readonly audit: (action: string, detail: Record<string, unknown>) => Promise<void>
+  /**
+   * The worker's own view of itself, for the ops tools (ops.ts) — what chat
+   * offers in place of a terminal. Present when the worker runs the turn;
+   * absent anywhere else, and every tool that reads it still answers what it
+   * can from the database and says the worker's own view is not available.
+   */
+  readonly ops?: OpsContext
+  /**
+   * Polishes an opener before it is drafted — the worker's model when one is
+   * configured (§5.5's `draft_outreach`, through `refineDraft`, which keeps
+   * every observed claim or hands the words back unchanged). Absent, the
+   * template stands. The signal ends the model call when the tool's time
+   * budget runs out.
+   */
+  readonly refineOpener?: (draft: Draft, signal: AbortSignal) => Promise<Draft>
+  /**
+   * Google Maps search (2026-10-08), built once at boot when the worker holds
+   * GOOGLE_API_KEY. Absent, `find_businesses` says how to switch it on.
+   */
+  readonly places?: PlacesClient
+  /** Google PageSpeed Insights, built once at boot; works keyless at a low quota. */
+  readonly pagespeed?: PageSpeedClient
+  /**
+   * The web app's own origin (`WEB_PUBLIC_URL`), for a link a tool prints in
+   * full (`create_share_link`). Absent, the tool prints the path and says so.
+   */
+  readonly webOrigin?: string
 }
+
+// ---------------------------------------------------------------------------
+// Google, as the opportunity tools see it (2026-10-08)
+// ---------------------------------------------------------------------------
+
+/** One business as its Google Maps listing describes it. */
+export interface PlaceListing {
+  readonly placeId: string
+  readonly name: string
+  readonly address: string | null
+  /** As Google gives it, e.g. "+91 80 4123 4567". */
+  readonly phone: string | null
+  /** The website the listing names — maybe a Facebook page or a directory entry. */
+  readonly website: string | null
+  readonly rating: number | null
+  readonly reviews: number | null
+  /** The primary type, e.g. `dentist`. */
+  readonly category: string | null
+  readonly mapsUrl: string | null
+  readonly status: 'operational' | 'closed_temporarily' | 'closed_permanently' | null
+  /** Where the listing puts it (0023): for the audit page's nearest competitors. Optional, so an older reading is one. */
+  readonly location?: { readonly lat: number; readonly lng: number } | null
+}
+
+export interface PlacesClient {
+  /** Searches allowed per org per UTC day — each costs the agency money past Google's free tier. */
+  readonly dailyLimit: number
+  search(
+    args: { readonly query: string; readonly pageToken?: string; readonly regionCode?: string },
+    signal?: AbortSignal,
+  ): Promise<{ readonly places: readonly PlaceListing[]; readonly nextPageToken: string | null }>
+}
+
+export interface PageSpeedClient {
+  /**
+   * Measure one page from Google's side. A page Lighthouse could not load is
+   * an `ok: false` result with its reason — never a throw, never a score. A
+   * throw is the SERVICE failing (quota, key, network), and records nothing.
+   */
+  run(
+    args: { readonly url: string; readonly strategy: 'mobile' | 'desktop' },
+    signal?: AbortSignal,
+  ): Promise<SiteAuditResult>
+}
+
+
+// ---------------------------------------------------------------------------
+// The worker, as the ops tools see it (2026-10-06)
+// ---------------------------------------------------------------------------
+
+/**
+ * The worker's health, from the same object `/readyz` answers from
+ * (`healthInputs()` in apps/agent/src/worker.ts). Configuration facts and
+ * instants only — never a host, a URL, an address or a credential (§2.3).
+ */
+export interface OpsHealth {
+  /** The gate's latched halt: a tool ran that was never authorised. A halted runtime refuses every turn. */
+  readonly halted: boolean
+  /** The single-worker advisory lock: held, lost (`false`), or not yet taken (`null`). */
+  readonly lockHeld: boolean | null
+  /** The MAILBOX, in `/readyz`'s vocabulary. Says nothing about SMS. */
+  readonly outreach: 'disabled' | 'send-only' | 'send-and-receive' | 'receive-only'
+  /** SMS through DoveSoft: on with both DOVESOFT_API_KEY and DOVESOFT_ENTITY_ID where the worker runs. */
+  readonly sms: 'on' | 'off'
+  /** Whether the worker can reach a model. Never which credential. */
+  readonly chat: 'enabled' | 'disabled'
+  /** Stamped after the single-worker lock, like everything else at boot. */
+  readonly bootedAt: Date
+  /** The package version when the worker was started through npm; null under `node dist/index.js`. */
+  readonly version: string | null
+  /** When this worker's heartbeat last REACHED the database, or null when none has. */
+  readonly heartbeatWrittenAt: Date | null
+}
+
+/**
+ * One kind of warning or error the worker logged: the line's message, its
+ * level, how often and when — and its `error` field only when that is an
+ * error CLASS or an upper-case CODE. No other field and no other value is
+ * ever kept, because a field can carry an id, a host or a reason (§2.3).
+ */
+export interface OpsLogEntry {
+  readonly level: 'warn' | 'error'
+  readonly msg: string
+  readonly count: number
+  readonly firstAt: Date
+  readonly lastAt: Date
+  readonly error?: string
+}
+
+/**
+ * The scanner `rescan_stale` calls: `scanDomain`, bound by the worker to the
+ * nightly rescan's tighter timeouts. A test passes a fake, so no test
+ * touches the network.
+ */
+export type OpsScan = (
+  domain: string,
+  definition: IcpDefinition,
+  opts: { readonly company?: string },
+) => Promise<{ readonly raw: unknown; readonly profile: SiteProfile }>
+
+export interface OpsContext {
+  /** Read fresh on every call: the halt, the lock and the heartbeat move while the worker runs. */
+  health(): OpsHealth
+  /** The worker's recent warnings and errors, most recently seen first. */
+  recentLog(): readonly OpsLogEntry[]
+  readonly scan?: OpsScan
+}
+
+/**
+ * What one tool call may spend on the clock before it answers. The adapter
+ * gives every call a hard 30 s (`TOOL_TIMEOUT_MS` in apps/agent's
+ * mcp/agency.ts), and a call cut off there tells the model nothing — so a
+ * tool that waits on the network answers inside this budget and says what
+ * is still running. apps/agent's tests hold it below the adapter's limit.
+ */
+export const TOOL_TIME_BUDGET_MS = 25_000
 
 export type ToolErrorCode =
   | 'not_found'

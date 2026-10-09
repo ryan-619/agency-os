@@ -21,6 +21,7 @@ const SEND_CODES = {
   paused: true,
   quiet_hours: true,
   unknown_timezone: true,
+  band_never_opens: true,
   daily_cap: true,
   campaign_inactive: true,
   needs_approval: true,
@@ -61,6 +62,16 @@ describe('refusalWords', () => {
     // A pause is not the person's no, and is not called one.
     expect(refusalWords('paused')).toBe('contact paused')
     expect(refusalWords('paused')).not.toMatch(/declin/)
+  })
+
+  /**
+   * Review round 5, finding [2]: a band that never opens was stored as `unknown_timezone`, so every
+   * screen reading the code said "no timezone on the contact" of a contact whose zone is Denver.
+   */
+  it('calls a band that never opens what it is, never a missing timezone', () => {
+    expect(refusalWords('band_never_opens')).toBe('promotional band never opens for them')
+    expect(refusalWords('band_never_opens')).not.toMatch(/timezone/)
+    expect(refusalWords('unknown_timezone')).toBe('no timezone on the contact')
   })
 
   it('makes an unknown code readable rather than hiding it', () => {

@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { toast } from '../toast/toast'
 
 /**
  * Editing a person, and recording what they said about a channel (§2.1).
@@ -101,6 +102,7 @@ function DetailsForm({ contact, onCancel }: { contact: EditableContact; onCancel
       setError(err)
       return
     }
+    toast.success('Saved.')
     window.location.reload()
   }
 
@@ -187,6 +189,7 @@ function ConsentForm({
       setError(err)
       return
     }
+    toast.success(effective === 'granted' ? `Consent recorded for ${channel}.` : `Refusal recorded for ${channel}.`)
     window.location.reload()
   }
 
@@ -200,6 +203,7 @@ function ConsentForm({
       setError(err)
       return
     }
+    toast.success(`Refusal lifted for ${channel}. They are back to never asked.`)
     window.location.reload()
   }
 

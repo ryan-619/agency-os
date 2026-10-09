@@ -23,6 +23,10 @@ function row(over: Partial<CompanyListItem> & { domain: string }): CompanyListIt
   return {
     companyId: `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`,
     name: null,
+    country: null,
+    headcount: null,
+    industry: null,
+    city: null,
     score: null,
     tier: null,
     qualified: false,

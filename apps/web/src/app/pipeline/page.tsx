@@ -1,7 +1,7 @@
 import { redirect } from 'next/navigation'
-import { STAGE_ROT_DAYS, can, dealIsOverdue, rottingState, untouchedLabel } from '@agency/core'
+import { STAGE_ROT_DAYS, can, dealHealth, dealIsOverdue, rottingState, untouchedLabel } from '@agency/core'
 import { eq } from 'drizzle-orm'
-import { dealsDue, listDealsForBoard, listProposals, schema, upcomingMeetings, type AgencyDb } from '@agency/db/queries'
+import { dealHealthFacts, dealsDue, listDealsForBoard, listProposals, schema, upcomingMeetings, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { PipelineBoard, type DealCard, type Stage } from '@/components/pipeline/board'
@@ -9,6 +9,8 @@ import { When } from '@/components/when'
 import { deployment } from '@/lib/deployment'
 import { getDb } from '@/lib/db'
 import { inZone } from '@/lib/format'
+import { CalendarCheck, CalendarClock, SquareKanban } from 'lucide-react'
+import { EmptyState } from '@/components/empty-state'
 
 /**
  * The pipeline (PROMPT.md §8.6).
@@ -54,12 +56,27 @@ export default async function PipelinePage() {
     listProposals(db, user.orgId, 50),
   ])
 
+  // Why each open card needs a look (2026-10-09): the facts for the whole board, keyed by company.
+  const health = await dealHealthFacts(db, {
+    orgId: user.orgId, now, companyIds: deals.filter((d) => !d.closedAt).map((d) => d.companyId),
+  }).catch(() => new Map())
   const cards: DealCard[] = deals
     .filter((d) => !d.closedAt || d.closedAt.getTime() >= cutoff.getTime())
     .map((d) => {
       const lastChanged = d.updatedAt ?? d.createdAt
       const rot = d.closedAt ? null : rottingState(d.stage, lastChanged, now)
+      const facts = health.get(d.companyId)
+      const why = facts
+        ? dealHealth(
+            {
+              stage: d.stage, closed: d.closedAt !== null, untouched: rot ? { days: rot.days, rotten: rot.rotten } : null,
+              nextActionAt: d.nextActionAt, nextAction: d.nextAction, ...facts,
+            },
+            now,
+          )
+        : null
       return {
+        health: why && why.reasons.length > 0 ? why : null,
         id: d.id,
         stage: d.stage as Stage,
         companyId: d.companyId,
@@ -109,10 +126,10 @@ export default async function PipelinePage() {
 
       <h2>Due today, or overdue</h2>
       {due.length === 0 ? (
-        <p className="muted">
-          Nothing due. A due date is set on a card, and it is the end of the day it names; this lists every
-          open deal due within the next twenty-four hours or already past it.
-        </p>
+        <EmptyState icon={CalendarCheck} title="Nothing due" compact>
+          A due date is set on a card, and it is the end of the day it names; this lists every open deal due within
+          the next twenty-four hours or already past it.
+        </EmptyState>
       ) : (
         <table>
           <thead>
@@ -139,11 +156,27 @@ export default async function PipelinePage() {
       )}
 
       <h2>Board</h2>
-      <PipelineBoard deals={cards} canWrite={can(principal, 'deals:write')} team={team} rotDays={STAGE_ROT_DAYS} />
+      {cards.length === 0 ? (
+        <EmptyState
+          icon={SquareKanban}
+          title="No deals yet"
+          actions={[
+            { href: '/companies', label: 'Companies' },
+            { href: '/campaigns', label: 'Campaigns', secondary: true },
+          ]}
+        >
+          A card appears once something happens to a company — a message goes, a reply comes, a meeting is booked — or
+          when somebody starts a deal from the company’s page.
+        </EmptyState>
+      ) : (
+        <PipelineBoard deals={cards} canWrite={can(principal, 'deals:write')} team={team} rotDays={STAGE_ROT_DAYS} />
+      )}
 
       <h2>Meetings coming up</h2>
       {meetings.length === 0 ? (
-        <p className="muted">Nothing booked. A meeting is recorded from a company&apos;s page, by the agent, or through the booking link.</p>
+        <EmptyState icon={CalendarClock} title="Nothing booked" compact>
+          A meeting is recorded from a company&apos;s page, by the agent, or through the booking link.
+        </EmptyState>
       ) : (
         <table>
           <thead>

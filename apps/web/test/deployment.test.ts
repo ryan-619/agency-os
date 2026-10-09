@@ -61,6 +61,23 @@ describe('flagsFrom', () => {
     expect(flagsFrom({ ...BARE, AGENT_URL: 'http://127.0.0.1:3002', AGENT_INTERNAL_TOKEN: 't'.repeat(32) }).worker).toBe(true)
   })
 
+  /**
+   * A value that cannot be used is not a worker, and is named. On 2026-10-02
+   * an AGENT_URL saved without its scheme failed env() for every route; it is
+   * judged by agentConfigFrom now, as the chat route judges it (round 15).
+   */
+  it('reads a malformed worker address or token as no worker, and names the variable', () => {
+    const noScheme = flagsFrom({ ...BARE, AGENT_URL: 'calm-otter-42.ngrok-free.app', AGENT_INTERNAL_TOKEN: 't'.repeat(64) })
+    expect(noScheme.worker).toBe(false)
+    expect(noScheme.agentMisconfigured).toEqual(['AGENT_URL'])
+    const short = flagsFrom({ ...BARE, AGENT_URL: 'https://calm-otter-42.ngrok-free.app', AGENT_INTERNAL_TOKEN: 'short' })
+    expect(short.worker).toBe(false)
+    expect(short.agentMisconfigured).toEqual(['AGENT_INTERNAL_TOKEN'])
+    const fine = flagsFrom({ ...BARE, AGENT_URL: 'https://calm-otter-42.ngrok-free.app/', AGENT_INTERNAL_TOKEN: 't'.repeat(64) })
+    expect(fine.worker).toBe(true)
+    expect(fine.agentMisconfigured).toBeUndefined()
+  })
+
   it.each(['mailpit', 'localhost', '127.0.0.1', 'host.docker.internal', ' MAILPIT '])(
     'knows %s is a local sink',
     (host) => {
@@ -218,6 +235,21 @@ describe('dovesoftFacts', () => {
     expect(off).toContain('recorded nowhere')
     expect(off).toContain('OPT-OUT NOT RECORDED')
     expect(off).not.toContain('can be recorded only in an org where a contact holds the number')
+  })
+
+  /**
+   * Review round 10, [6]: since round 9 such a STOP is answered 200 when the
+   * push carried no message id — its retry could not be told from a new text
+   * (`handleDoveSoftMo`) — and the sentence still said it "is answered 500",
+   * which reads as "DoveSoft retries it". DEPLOYING.md's own wording.
+   */
+  it('says a STOP from a number nobody holds is answered 200 when the push carried no message id', () => {
+    const off = dovesoftFacts(base).sentences[1] ?? ''
+    expect(off).toContain(
+      'it is answered 500 so DoveSoft retries — 200 when the push carried no message id, since its retry could not be ' +
+        'told from a new text — and logged OPT-OUT NOT RECORDED, for a person to record by hand',
+    )
+    expect(off).not.toContain('it is answered 500 and logged')
   })
 
   /** Half of all base64 secrets carry a `+`, which a query string reads as a space. */

@@ -4,8 +4,11 @@ import { CompanyEditForm } from './edit-form'
 import type { CompanySlotProps } from './slot'
 
 /**
- * A company's own record — name, country, timezone — under its page's lede,
- * with an edit control for anyone who may write companies.
+ * A company's own record — name, country, timezone, and since 0021 what it
+ * is: industry, city, stage, headcount with its source, a line on what it
+ * does — under its page's lede, with an edit control for anyone who may write
+ * companies. What it is comes from research (the agent's or a person's), never
+ * from a scan, and the line says so.
  *
  * The timezone is shown with what it is FOR: quiet hours are checked in it for
  * every contact here who has no zone of their own, and when neither is set the
@@ -28,6 +31,21 @@ export async function CompanyEditSlot(props: CompanySlotProps): Promise<React.Re
           <> — used for the {people} here with no zone of their own</>
         ) : null}
       </div>
+      {company.industry || company.city || company.stage || company.headcount !== null || company.description ? (
+        <div className="muted" style={{ marginTop: 2 }}>
+          {[
+            company.industry,
+            company.city,
+            company.stage ? `stage ${company.stage}` : null,
+            company.headcount !== null ? `~${company.headcount.toLocaleString('en')} staff` : null,
+          ]
+            .filter(Boolean)
+            .join(' · ')}
+          {company.headcountSource ? <> (headcount per {company.headcountSource})</> : null}
+          {company.description ? <div style={{ color: 'var(--ink)', marginTop: 2 }}>{company.description}</div> : null}
+          <span style={{ fontSize: 11.5 }}> — recorded from research, not observed by a scan.</span>
+        </div>
+      ) : null}
       {!company.timeZone && contactsWithoutZone > 0 ? (
         <div className="err-line">
           {people} here {contactsWithoutZone === 1 ? 'has' : 'have'} no zone of their own either, so nothing can be sent
@@ -40,6 +58,12 @@ export async function CompanyEditSlot(props: CompanySlotProps): Promise<React.Re
           name={company.name}
           country={company.country}
           timeZone={company.timeZone}
+          industry={company.industry}
+          city={company.city}
+          stage={company.stage}
+          headcount={company.headcount}
+          headcountSource={company.headcountSource}
+          description={company.description}
         />
       ) : null}
     </div>

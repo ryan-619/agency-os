@@ -4,27 +4,41 @@ import { Pool } from 'pg'
 import { drizzle } from 'drizzle-orm/node-postgres'
 import {
   appendAudit, appendChatMessage, cancelPendingApprovals, clearTurnRunning,
-  createSmtpProvider, ensureChatSessionTitle, markTurnRunning, masterKey, readConnector, schema,
+  createSmtpProvider, ensureChatSessionTitle, markTurnRunning, masterKey, pgConnectionString, readConnector, schema,
   sessionCostUsd, setSdkSessionId, usd, type AgencyDb, type MessageProvider,
 } from '@agency/db'
-import type { Channel } from '@agency/core'
+import type { Channel, Draft } from '@agency/core'
+import type { OpsContext, PageSpeedClient, PlacesClient } from '@agency/tools'
 import type { AgentCredential } from './runtime/options.js'
 import type { Env } from './env.js'
 import type { Logger } from './logger.js'
 import { answerHealth, startHealthServer, type HealthInputs } from './health.js'
 import { acquireWorkerLock, type WorkerLock } from './boot/singleton.js'
 import { reconcileAfterRestart, recoverStuckSends, sweepExpired } from './boot/reconcile.js'
-import { lastHeartbeatAt, startHeartbeat } from './boot/heartbeat.js'
+import { lastHeartbeatAt, startHeartbeat, workerVersion } from './boot/heartbeat.js'
+import { watchIdleConnections } from './boot/pool-errors.js'
+import { createRecentLog, recordingLogger } from './ops/recent-log.js'
+import { opsContextFrom, withRescanTimeouts } from './ops/context.js'
 import { startSender, WORKER_SEND_CHANNELS } from './outreach/sender.js'
 import { createDoveSoftProvider, doveSoftConfigFrom } from './outreach/dovesoft.js'
 import { outreachOptions } from './outreach/options.js'
 import { providerFrom } from '@agency/llm'
 import { startInbox } from './outreach/inbox.js'
+import { watchSmtpLogin, type MailLogin } from './outreach/mail-login.js'
+import { refineDraft } from './outreach/draft.js'
+import { startMorningBriefs } from './brief/scheduler.js'
+import { startSequences } from './sequences/scheduler.js'
+import { startSuggestions } from './outreach/suggest.js'
+import { startNightShift } from './night/scheduler.js'
 import { createAgentHttpServer, type StartTurnRequest, type TurnHandle } from './http/server.js'
 import { createDeferredEmitter, startTurn } from './chat/turn.js'
 import { buildTurnRuntime, createHalt, resolvePrincipal, type RuntimeHalt } from './runtime/session.js'
 import { probeConnector } from './runtime/probe.js'
 import { inspectSkillsRoot } from './runtime/skills.js'
+import { agencyToolsToOmit } from './mcp/agency.js'
+import { placesClient } from './google/places.js'
+import { pageSpeedClient } from './google/pagespeed.js'
+import { faultFields } from './log-fields.js'
 
 export interface WorkerDeps {
   /** Already validated — `loadEnv()` in `index.ts`, or a test's own. */
@@ -72,7 +86,15 @@ export interface RunningWorker {
  * serving a conversation whose previous turn is still marked as running.
  */
 export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
-  const { env, log } = deps
+  const { env } = deps
+  /**
+   * Every warn and error line this worker writes is also noted, as a kind
+   * and a count, for chat's `recent_errors` — the terminal this product does
+   * not have (§12). The line itself is written exactly as before; what is
+   * noted keeps no field value but an error's class or code (§2.3).
+   */
+  const recentLog = createRecentLog()
+  const log = recordingLogger(deps.log, recentLog)
 
   let pool: Pool | null = null
   // Nothing below exists yet, which is the point: /livez answers immediately
@@ -130,10 +152,40 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
     (provider) => log.warn('a triage model is named but its credential is missing', { provider }),
   )
 
+  /**
+   * The same model polishing the openers chat drafts (`enrol_contacts`),
+   * through `refineDraft`, which keeps every observed claim or hands the
+   * template back. Undefined without a model: the template stands.
+   */
+  const refineOpener = triage
+    ? (draft: Draft, signal: AbortSignal): Promise<Draft> =>
+        refineDraft({ log, llm: triage, allowRemoteForLeadData: env.LLM_ALLOW_REMOTE_LEAD_DATA, draft, signal })
+    : undefined
+
+  /**
+   * Google, for the opportunity tools (2026-10-08): Maps search only with a
+   * key, capped per org per day; PageSpeed always, keyless at Google's small
+   * shared quota until a key raises it. Said at boot by name, never the key.
+   */
+  const places = env.GOOGLE_API_KEY
+    ? placesClient({ apiKey: env.GOOGLE_API_KEY, dailyLimit: env.PLACES_DAILY_SEARCHES })
+    : undefined
+  const pagespeed = pageSpeedClient({ apiKey: env.GOOGLE_API_KEY ?? null })
+  log.info(
+    `google maps search: ${places ? 'on' : 'off'}`,
+    places ? { dailySearches: env.PLACES_DAILY_SEARCHES } : { missing: ['GOOGLE_API_KEY'] },
+  )
+
   const outreachMode = outreachModeFrom(env)
   // Decided once, and said once (`sms: dovesoft on|off`), before the sender
   // starts; the heartbeat row carries the same answer.
   const senders = senderProvidersFrom(env, log)
+  // Whether the mailboxes accept this worker's logins (`mail-login.ts`), on
+  // the heartbeat so the dashboard can say a refused one: the outgoing login
+  // is tried at boot and every half hour until it works, and each inbox
+  // session says how it went.
+  let smtpLogin: MailLogin = 'unchecked'
+  let imapLogin: MailLogin = 'unchecked'
   const healthInputs = (): HealthInputs => ({
     pool,
     halted: halt?.halted() ?? false,
@@ -144,19 +196,20 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
   })
   const health = await startHealthServer(env.AGENT_PORT, healthInputs, log)
 
-  pool = new Pool({ connectionString: env.DATABASE_URL, max: env.DATABASE_POOL_MAX })
+  // `sslmode=require` spelled as the `verify-full` pg already treats it as (pgConnectionString).
+  const databaseUrl = pgConnectionString(env.DATABASE_URL)
+  pool = new Pool({ connectionString: databaseUrl, max: env.DATABASE_POOL_MAX })
+  watchIdleConnections(pool, log)
   const db = drizzle(pool, { schema }) as unknown as AgencyDb
 
   try {
     await pool.query('SELECT 1')
     log.info('database reachable')
   } catch (err) {
-    log.error('database unreachable at startup', {
-      error: err instanceof Error ? err.name : 'UnknownError',
-    })
+    log.error('database unreachable at startup', faultFields(err))
   }
 
-  lock = await acquireWorkerLock({ connectionString: env.DATABASE_URL, log })
+  lock = await acquireWorkerLock({ connectionString: databaseUrl, log })
   // Stamped AFTER the lock. Everything before this instant is the outgoing
   // worker's — including a message it claimed during the seconds this one
   // spent waiting for the lock, which a stamp taken at process start would
@@ -172,6 +225,21 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
 
   halt = createHalt(log)
   const running = new Map<string, TurnHandle>()
+
+  /**
+   * The worker's view of itself for chat's ops tools (packages/tools/src/ops.ts):
+   * read from `healthInputs()`, the object /readyz and the heartbeat answer
+   * from, so the three cannot disagree. Built after the lock, with the boot
+   * instant the heartbeat stamps; the scanner it carries is bound to the
+   * nightly rescan's timeouts.
+   */
+  const ops: OpsContext = opsContextFrom({
+    health: healthInputs,
+    sms: senders.sms,
+    bootedAt: bootAt,
+    version: workerVersion(),
+    recentLog,
+  })
 
   /**
    * Resolved ONCE, here, rather than on every turn.
@@ -195,6 +263,15 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
     reason: skills.reason,
     ...(skills.names.length > 0 ? { names: skills.names } : {}),
   })
+
+  /**
+   * Whether the model can be shown every agency tool, asked once the way the
+   * CLI asks (mcp/agency.ts). A tool it cannot be shown is left out of every
+   * turn, loudly — left in, it empties the whole agency server, and chat
+   * carries on with the connectors alone and no error anywhere (2026-10-07).
+   * Only a worker that runs turns needs to know.
+   */
+  const omitTools: ReadonlySet<string> = credential ? await agencyToolsToOmit(log) : new Set()
 
   let secretsKey: Buffer | null = null
   if (env.SECRETS_KEY) {
@@ -254,7 +331,7 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
       return true
     },
     startTurn: (req) =>
-      beginTurn({ req, db, env, log, halt, running, secretsKey, skills, credential }),
+      beginTurn({ req, db, env, log, halt, running, secretsKey, skills, credential, ops, refineOpener, omitTools, places, pagespeed }),
   })
 
   const apiPort = env.AGENT_PORT + 1
@@ -271,7 +348,20 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
    * DoveSoft for SMS (0019), whichever are configured. It runs when either
    * is, and leaves rows on the other channel exactly where they are.
    */
+  // Only the origin: a path or query in the variable is never part of a link.
+  const webOrigin = env.WEB_PUBLIC_URL ? new URL(env.WEB_PUBLIC_URL).origin : null
   const stops: Array<() => Promise<void>> = []
+  const smtpProvider = senders.providers.find((p) => p.name === 'smtp')
+  if (smtpProvider && env.SMTP_HOST) {
+    const stopWatch = watchSmtpLogin(smtpProvider, {
+      host: env.SMTP_HOST,
+      log,
+      onState: (state) => {
+        smtpLogin = state
+      },
+    })
+    stops.push(async () => stopWatch())
+  }
   if (senders.providers.length > 0) {
     // The required settings are named here; the optional ones — whatever a
     // later feature derives from the environment — arrive through the spread,
@@ -295,6 +385,7 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
         log,
         llm: triage,
         allowRemoteForLeadData: env.LLM_ALLOW_REMOTE_LEAD_DATA,
+        webOrigin,
         config: {
           host: env.IMAP_HOST,
           port: env.IMAP_PORT,
@@ -302,6 +393,9 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
           user: env.IMAP_USER,
           password: env.IMAP_PASSWORD,
           mailbox: env.IMAP_MAILBOX,
+        },
+        onLogin: (state) => {
+          imapLogin = state
         },
       }),
     )
@@ -329,11 +423,91 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
         return {
           outreach: now.outreach,
           chat: now.chatEnabled ? 'enabled' : 'disabled',
-          detail: { halted: now.halted, lockHeld: now.lockHeld, sms: senders.sms },
+          // `brief`: whether this worker writes the morning brief (0020) — it
+          // needs a model, as chat does — so the Assistant page can say so.
+          detail: {
+            halted: now.halted,
+            lockHeld: now.lockHeld,
+            sms: senders.sms,
+            brief: credential ? 'on' : 'off',
+            // Whether it runs the night shift (0025): Places is its search, so it needs GOOGLE_API_KEY.
+            night: places ? 'on' : 'off',
+            // Only for a mailbox this worker has: absent means not configured.
+            ...(smtpProvider ? { smtpLogin } : {}),
+            ...(env.IMAP_HOST && env.IMAP_USER && env.IMAP_PASSWORD ? { imapLogin } : {}),
+          },
         }
       },
     }),
   )
+
+  /**
+   * Follow-up sequences (0024): every five minutes, the next step for each
+   * person a campaign with steps has written to — a draft for /approvals, a
+   * call or a visit task — until they reply. No model needed; after the lock,
+   * like the sender, and claimed step by step, so the web's daily cron
+   * advancing the same runs takes each step once.
+   */
+  const stopSequences = startSequences({ db, log, now: () => new Date() })
+  stops.push(async () => stopSequences())
+  /**
+   * Suggested answers (0026): every five minutes, a short draft for each
+   * recent email reply with none — the ones the web's webhooks recorded, or
+   * that arrived while the model was away. Needs the triage model, and one
+   * that may read a reply: a remote model with lead data off would refuse
+   * every one, so no sweep starts then (the log says why).
+   */
+  if (triage && (triage.local || env.LLM_ALLOW_REMOTE_LEAD_DATA)) {
+    const stopSuggestions = startSuggestions({
+      db, log, llm: triage, allowRemoteForLeadData: env.LLM_ALLOW_REMOTE_LEAD_DATA, webOrigin, now: () => new Date(),
+    })
+    stops.push(async () => stopSuggestions())
+  } else if (triage) {
+    log.info('suggested answers: off — the model is remote and LLM_ALLOW_REMOTE_LEAD_DATA is not set (./tools/run-worker.sh --ai)')
+  } else {
+    log.info('suggested answers: off on this worker — no model (./tools/run-worker.sh --ai)')
+  }
+  /**
+   * The night shift (0025): once a night per org that switched it on, its saved
+   * Google Maps searches, the new businesses filed, scanned and measured, and a
+   * morning list. Places is the search, so only a worker with GOOGLE_API_KEY
+   * runs it; scans take the nightly rescan's timeouts.
+   */
+  if (places) {
+    const stopNights = startNightShift({ db, log, now: () => new Date(), places, pagespeed, scan: withRescanTimeouts() })
+    stops.push(async () => stopNights())
+  } else {
+    log.info('night shift: off on this worker — it searches Google Maps, which needs GOOGLE_API_KEY (./tools/run-worker.sh --google)')
+  }
+  /**
+   * The morning brief (0020): one unattended turn a day per org that switched
+   * it on, through the same `beginTurn` as chat — with `unattended`, so the
+   * gate declines anything that would need a person. It needs a model, so a
+   * worker with chat off starts none.
+   */
+  if (credential) {
+    const stopBriefs = startMorningBriefs({
+      db,
+      log,
+      now: () => new Date(),
+      start: async (req) => {
+        const begun = await beginTurn({
+          req: { ...req, deep: false, unattended: true },
+          db, env, log, halt, running, secretsKey, skills, credential, ops, refineOpener, omitTools, places, pagespeed,
+        })
+        if (!begun.ok) return { ok: false, message: begun.message }
+        // Nobody reads this stream: the turn writes its own messages as it
+        // goes, and draining it is what lets the turn's events be released.
+        const finished = (async () => {
+          for await (const _ of begun.turn.events()) {
+            // drained
+          }
+        })()
+        return { ok: true, finished }
+      },
+    })
+    stops.push(async () => stopBriefs())
+  }
 
   log.info('agent worker started', {
     nodeEnv: env.NODE_ENV,
@@ -345,6 +519,7 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
     outreach: outreachMode,
     sms: senders.sms,
     triage: triage ? `${triage.name} (${triage.local ? 'local' : 'REMOTE'})` : 'deterministic',
+    morningBrief: credential ? 'on' : 'off (no model)',
   })
 
   const heldLock = lock
@@ -402,8 +577,18 @@ async function beginTurn(args: {
   skills: { settingSources: readonly 'project'[]; skills?: 'all' }
   /** Decided once at boot; null when nothing can reach a model. */
   credential: AgentCredential | null
+  /** The worker's view of itself, for the ops tools — the same object every turn. */
+  ops: OpsContext
+  /** The worker's model polishing openers, built once at boot; undefined without one. */
+  refineOpener: ((draft: Draft, signal: AbortSignal) => Promise<Draft>) | undefined
+  /** Agency tools the model cannot be shown, decided once at boot; empty when every one can. */
+  omitTools: ReadonlySet<string>
+  /** Google Maps search, built once at boot with GOOGLE_API_KEY; undefined without one. */
+  places: PlacesClient | undefined
+  /** Google PageSpeed, built once at boot. */
+  pagespeed: PageSpeedClient | undefined
 }): Promise<{ ok: true; turn: TurnHandle } | { ok: false; status: number; message: string }> {
-  const { req, db, env, log, halt, running, secretsKey, skills, credential } = args
+  const { req, db, env, log, halt, running, secretsKey, skills, credential, ops, refineOpener, omitTools, places, pagespeed } = args
 
   if (!credential) return { ok: false, status: 503, message: 'chat_disabled' }
   if (halt.halted()) return { ok: false, status: 503, message: 'runtime_halted' }
@@ -423,7 +608,7 @@ async function beginTurn(args: {
       halt,
       credential,
       ...(env.CLAUDE_CODE_PATH ? { claudeCodePath: env.CLAUDE_CODE_PATH } : {}),
-      model: env.AGENT_MODEL,
+      model: modelForTurn(env, req.deep),
       maxTurns: env.AGENT_MAX_TURNS,
       maxBudgetUsd: env.AGENT_MAX_BUDGET_USD,
       approvalTtlMs: env.APPROVAL_TTL_MINUTES * 60_000,
@@ -433,6 +618,13 @@ async function beginTurn(args: {
       skills,
       cwd: process.cwd(),
       now: () => new Date(),
+      ops,
+      refineOpener,
+      omitTools,
+      places,
+      pagespeed,
+      // Only the origin: a path or query in the variable is never part of a link.
+      ...(env.WEB_PUBLIC_URL ? { webOrigin: new URL(env.WEB_PUBLIC_URL).origin } : {}),
     },
     {
       orgId: who.orgId,
@@ -441,6 +633,7 @@ async function beginTurn(args: {
       principal: who.principal,
       resume: who.sdkSessionId,
       emit: (body) => gateEmitter.emit(body),
+      unattended: req.unattended === true,
     },
   )
 
@@ -614,6 +807,15 @@ export function senderProvidersFrom(
 }
 
 /** What the mailbox configuration adds up to, for the boot log and /readyz. */
+/**
+ * The model a turn runs on: AGENT_MODEL, or AGENT_DEEP_MODEL for a turn the
+ * person asked to "think harder" — that one turn only, since the stronger
+ * model costs several times as much.
+ */
+export function modelForTurn(env: Pick<Env, 'AGENT_MODEL' | 'AGENT_DEEP_MODEL'>, deep: boolean): string | undefined {
+  return deep ? env.AGENT_DEEP_MODEL : env.AGENT_MODEL
+}
+
 function outreachModeFrom(env: Env): HealthInputs['outreach'] {
   const send = Boolean(env.SMTP_HOST && env.MAIL_FROM)
   const receive = Boolean(env.IMAP_HOST && env.IMAP_USER && env.IMAP_PASSWORD)

@@ -15,12 +15,14 @@ import { activeProfilesNote, icpView, type IcpView } from '@/lib/icp-view'
  * definition it was computed from, and every finding carries the weight that
  * definition gave it. Editing in place would change what every number on
  * every company page means without changing any of them. A changed ICP is a
- * new profile and a re-scan — not built — never an UPDATE.
+ * new profile and a re-scan, never an UPDATE — and since 0021 that is built,
+ * in chat: `create_icp` derives a new profile (stored inactive), and
+ * `activate_icp`, approved by a person on a card, switches to it.
  *
- * Every profile the org has is listed, not just the active one. `active` has
- * no partial-unique index and the scanner reads the first active row with no
- * ORDER BY, so two active rows are a choice nobody made; hiding one would
- * hide that.
+ * Every profile the org has is listed, not just the active one. Until 0021
+ * `active` had no partial-unique index and the scanner reads the first active
+ * row with no ORDER BY, so two active rows were a choice nobody made; 0021's
+ * index allows one, and the page still says so if more than one is active.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -50,8 +52,10 @@ export default async function IcpPage() {
         <strong>There is no edit control here, on purpose.</strong> Every stored score names the definition it
         was computed from, and every finding carries the weight this definition gave it. Editing a definition in
         place would change what each of those numbers means without changing any of them — a 62 that qualified
-        at 45 silently becomes a different claim at 65. A changed ICP has to be a new profile, with the old one
-        kept for the scores that name it, and a re-scan. That is not built.
+        at 45 silently becomes a different claim at 65. So a changed ICP is a new profile, with the old one kept
+        for the scores that name it: ask in Chat — &ldquo;create a profile for SaaS companies in India with 10 to
+        500 staff&rdquo; — and the agent derives one from the active profile. Switching to it waits for a
+        person&rsquo;s approval, and each company is re-scanned under it before its next proposal.
       </div>
 
       {warning ? (
@@ -162,7 +166,10 @@ function Definition({ v }: { v: IcpView }) {
                 <td>{d.why}</td>
                 <td style={{ width: 150 }}>
                   {d.applied ? (
-                    <span className="tag on">applied by the scorer</span>
+                    <>
+                      <span className="tag on">applied by the scorer</span>
+                      {d.when ? <div className="muted" style={{ fontSize: 11.5 }}>{d.when}</div> : null}
+                    </>
                   ) : (
                     <span className="tag warn">checked by nothing</span>
                   )}

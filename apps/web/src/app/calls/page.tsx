@@ -4,6 +4,8 @@ import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { When } from '@/components/when'
 import { getDb } from '@/lib/db'
+import { Phone } from 'lucide-react'
+import { EmptyState } from '@/components/empty-state'
 
 /**
  * Calls (PROMPT.md §8.5).
@@ -64,14 +66,14 @@ export default async function CallsPage() {
       ) : null}
 
       {calls.length === 0 ? (
-        <div className="note">
-          <strong>No calls yet.</strong>
-          <p style={{ margin: '8px 0 0' }}>
-            Voice runs in a separate service (<code>apps/voice</code>) holding a WebSocket to Twilio&apos;s
-            ConversationRelay — it cannot run on a serverless host, so it is not part of this deployment.
-            It also should not be switched on until A2P 10DLC registration has cleared.
+        <EmptyState icon={Phone} title="No calls yet" actions={[{ href: '/tasks', label: 'Your call tasks', secondary: true }]}>
+          <p>
+            This page lists calls the voice service answered. Voice runs in a separate service (<code>apps/voice</code>)
+            holding a WebSocket to Twilio&apos;s ConversationRelay — it cannot run on a serverless host, so it is not part of
+            this deployment. It also should not be switched on until A2P 10DLC registration has cleared.
           </p>
-        </div>
+          <p>Calls your team makes from their own phones are tasks.</p>
+        </EmptyState>
       ) : (
         <table>
           <thead>

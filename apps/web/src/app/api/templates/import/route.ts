@@ -1,7 +1,9 @@
 import { NextResponse } from 'next/server'
-import { templatesImportDltCsv, type AgencyDb } from '@agency/db/queries'
+import type { AgencyDb } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
+import { log } from '@/lib/logger'
+import { templateImportAnswer } from '../outcome'
 import { NOT_UTF8, TEMPLATE_IMPORT_MAX_BYTES, decodeUtf8, mayWriteTemplates } from '../rules'
 
 /**
@@ -16,7 +18,10 @@ import { NOT_UTF8, TEMPLATE_IMPORT_MAX_BYTES, decodeUtf8, mayWriteTemplates } fr
  * imported, already present, skipped (not approved on the portal, or a
  * repeat), or refused with the sentence that says why — so the page can
  * show the outcome of every line, and a re-import of the same file changes
- * nothing. A file it cannot read as a whole is a 400 with its sentence.
+ * nothing. A file it cannot read as a whole is a 400 with its sentence, and
+ * a database fault part-way is a 500 saying that lines before it may be
+ * recorded and a re-import is safe, with a log line naming the fault's class
+ * only (`templateImportAnswer`, `../outcome.ts`; review round 9).
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -44,13 +49,6 @@ export async function POST(request: Request): Promise<NextResponse> {
     return NextResponse.json({ error: 'Nothing to import — choose the export, or paste its rows header first.' }, { status: 400 })
   }
 
-  const r = await templatesImportDltCsv(getDb() as unknown as AgencyDb, user.orgId, text, { createdBy: user.id })
-  if (!r.ok) return NextResponse.json({ error: r.message }, { status: 400 })
-  return NextResponse.json({
-    imported: r.imported,
-    alreadyPresent: r.alreadyPresent,
-    skipped: r.skipped,
-    refused: r.refused,
-    lines: r.lines,
-  })
+  const answer = await templateImportAnswer(getDb() as unknown as AgencyDb, { orgId: user.orgId, text, createdBy: user.id }, log)
+  return NextResponse.json(answer.body, { status: answer.status })
 }

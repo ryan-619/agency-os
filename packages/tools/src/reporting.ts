@@ -17,10 +17,11 @@
  *    note as "note by <name>:" in quotation marks and says so in the summary,
  *    so "they have no CSP" typed after a call cannot be repeated as a finding.
  *  - **Message bodies stay out.** A timeline line carries a message's subject
- *    and its FIRST LINE only, bounded; the compliance summary is counts with
- *    no rows at all; search returns the label and one line of context the
- *    search module already chose, and that module cannot name a connector or
- *    a chat (§2.3).
+ *    and its FIRST LINE only, bounded — and for a LinkedIn message /tasks
+ *    would not show, neither (`linkedinThreadWithheld`, /tasks' own rule);
+ *    the compliance summary is counts with no rows at all; search returns
+ *    the label and one line of context the search module already chose, and
+ *    that module cannot name a connector or a chat (§2.3).
  *
  * Each tool asks `can()` the same question the page behind it asks, so a role
  * that could not open the page cannot read it through the agent either.
@@ -29,9 +30,9 @@ import { z } from 'zod'
 import { can, pipelineMetrics, staleAfterDaysOf, type PipelineMetrics } from '@agency/core'
 import {
   activeIcpProfile, analyticsTransitions, auditForSubject, callsForCompany, companyThread,
-  complianceSummary, findCompanyByDomain, listDeals, meetingsForCompany, notesAuthorLabel, notesFor,
-  proposalsForCompany, scanHistory, searchOrg, searchQueryFrom, searchSectionsFor, tasksList,
-  type AgencyDb, type AuditRow, type SearchSections,
+  complianceSummary, findCompanyByDomain, linkedinThreadWithheld, listDeals, meetingsForCompany, notesAuthorLabel,
+  notesFor, proposalsForCompany, scanHistory, searchOrg, searchQueryFrom, searchSectionsFor, tasksList,
+  type AgencyDb, type AuditRow, type LinkedinThreadWithheld, type SearchSections,
 } from '@agency/db'
 import * as schema from '@agency/db/schema'
 import { normaliseDomain } from '@agency/scanner'
@@ -251,6 +252,19 @@ function dealLine(row: AuditRow, names: ReadonlyMap<string, string>): string {
   return `deal ${row.action.replace(/^deal\./, '').replace(/_/g, ' ')}${who}`
 }
 
+/**
+ * Why a LinkedIn message's words are not in the timeline, in the company
+ * page's words for the same reasons. The rule is /tasks' own
+ * (`linkedinThreadWithheld`); this only words it.
+ */
+const LINKEDIN_HELD: Record<LinkedinThreadWithheld, string> = {
+  not_handed: 'Start has not handed them over',
+  refused: 'the send rules now refuse this person',
+  paused: 'the contact is paused',
+  unchecked: 'the rules cannot be checked — the contact or the campaign is gone',
+  expired: 'they were handed over more than a day ago',
+}
+
 export const getCompanyTimeline: AgencyToolSpec<typeof companyTimelineShape> = {
   name: 'get_company_timeline',
   description:
@@ -289,9 +303,26 @@ export const getCompanyTimeline: AgencyToolSpec<typeof companyTimelineShape> = {
     ])
     const dealRows = (await Promise.all(deals.map((d) => auditForSubject(ctx.db, ctx.orgId, 'deal', d.id, limit)))).flat()
     const names = await actorNames(ctx, dealRows)
+    // A LinkedIn message's words reach the model only where /tasks would
+    // print them (review round 5, [10]): never before Start hands them over,
+    // and not while the step is open and its re-check withholds them. A
+    // person could otherwise copy them into LinkedIn from a chat, past every
+    // rule Start runs — to somebody suppressed on LinkedIn since, say.
+    const withheld = await linkedinThreadWithheld(ctx.db, ctx.orgId, touches, ctx.now())
 
     const events: TimelineEvent[] = []
     for (const t of touches) {
+      const held = withheld.get(t.id)
+      if (held) {
+        const status = t.status === 'refused' && t.refusalCode ? `refused by the send path (${t.refusalCode})` : t.status
+        events.push({
+          at: t.sentAt ?? t.createdAt,
+          kind: 'message',
+          id: t.id,
+          text: `${t.channel} message out, ${status} — words withheld (${LINKEDIN_HELD[held]})`,
+        })
+        continue
+      }
       const subject = t.subject ? ` “${oneLine(t.subject, 120)}”` : ''
       const first = firstLineOf(t.body)
       const opening = first ? ` — first line: “${first}”` : ''
@@ -361,7 +392,10 @@ export const getCompanyTimeline: AgencyToolSpec<typeof companyTimelineShape> = {
     const header = `${domain}: ${shown.length} of ${events.length} event${events.length === 1 ? '' : 's'}, newest first.`
     const footer =
       'Notes are a teammate’s words, not evidence — never repeat one as something the scanner found. ' +
-      'Messages show the subject and the first line only.'
+      'Messages show the subject and the first line only.' +
+      (shown.some((e) => withheld.has(e.id))
+        ? ' A LinkedIn message’s words are shown only where /tasks would show them — Start checks every send rule first.'
+        : '')
     return ok(
       {
         domain,
@@ -532,12 +566,29 @@ function domainOfHref(href: string): string | null {
   }
 }
 
+/** An address in a hit's words, by its domain only — `…@rentman.io` — as list_contacts shows one. */
+const ADDRESS_IN_TEXT = /[^\s@<>()"',;:·]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/g
+/** A label that is nothing but a phone number: a contact with no name and no email. */
+const PHONE_ONLY = /^\+?[\d\s().-]{6,}$/
+
+/**
+ * A contact hit as the model may read it: the address masked and a bare
+ * number withheld, as list_contacts prints a person. The search reads every
+ * column, so a person's whole address still finds them; it is not printed
+ * back.
+ */
+function contactWords(text: string): string {
+  return PHONE_ONLY.test(text.trim()) ? '(no name recorded — a phone number on file)' : text.replace(ADDRESS_IN_TEXT, '…@$1')
+}
+
 export const searchCrm: AgencyToolSpec<typeof searchCrmShape> = {
   name: 'search_crm',
   description:
     'Search companies, people, deals, campaigns, meetings, proposals and messages by text, within ' +
     'the org of the person you are helping and nothing beyond it. Use it when you have a name or a ' +
-    'phrase and not a domain; use get_company once you have the domain. A read; nothing is sent.',
+    'phrase and not a domain; use get_company once you have the domain. Each match is printed with its ' +
+    'id — the contact, deal, campaign, meeting or proposal id the other tools take — and a person’s ' +
+    'address is shown by its domain only. A read; nothing is sent.',
   shape: searchCrmShape,
   async handler(input, ctx): Promise<ToolOutcome<unknown>> {
     // The route's own rule: what the principal may read, never a wider set.
@@ -573,19 +624,25 @@ export const searchCrm: AgencyToolSpec<typeof searchCrmShape> = {
 
     // The query is the person's text and may be a name, so it is not audited.
     await ctx.audit('agent.search_crm', { sections: searched, returned: result.hits.length, truncated: result.truncated })
-    const hits = result.hits.map((h) => ({
-      kind: h.kind,
-      id: h.id,
-      label: oneLine(h.label, 160),
-      sub: h.sub === null ? null : oneLine(h.sub, 160),
-      domain: domainOfHref(h.href),
-    }))
+    const hits = result.hits.map((h) => {
+      const words = (text: string): string => (h.kind === 'contact' ? contactWords(text) : text)
+      return {
+        kind: h.kind,
+        id: h.id,
+        label: oneLine(words(h.label), 160),
+        sub: h.sub === null ? null : oneLine(words(h.sub), 160),
+        domain: domainOfHref(h.href),
+      }
+    })
     const scope = `Searched ${searched.join(', ')}${refused.length > 0 ? `; not permitted to read ${refused.join(', ')}` : ''}.`
     if (hits.length === 0) {
       return ok({ hits, truncated: false, searched }, `Nothing in this org matches "${q.q}". ${scope}`)
     }
+    // The id is printed because only this summary reaches the model, and the
+    // tools that act on a contact, deal, meeting or proposal take it.
     const lines = hits.map((h) =>
-      `${h.kind.padEnd(8)} ${h.label}${h.sub ? ` — ${h.sub}` : ''}${h.domain && h.kind !== 'company' ? ` [${h.domain}]` : ''}`,
+      `${h.kind.padEnd(8)} ${h.label}${h.sub ? ` — ${h.sub}` : ''}${h.domain && h.kind !== 'company' ? ` [${h.domain}]` : ''}` +
+      ` · id ${h.id}`,
     )
     return ok(
       { hits, truncated: result.truncated, searched },

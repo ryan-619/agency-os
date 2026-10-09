@@ -1,6 +1,7 @@
 import { drizzle, type NodePgDatabase } from 'drizzle-orm/node-postgres'
 import { Pool } from 'pg'
 import * as schema from '@agency/db/schema'
+import { pgConnectionString } from '@agency/db/queries'
 import { env } from '@/lib/env'
 
 /**
@@ -27,7 +28,8 @@ function pool(): Pool {
   // One pool per process. Stashed on globalThis so Next's dev server does not
   // leak a pool on every hot reload.
   globalForDb.__agencyPool ??= new Pool({
-    connectionString: env().DATABASE_URL,
+    // `sslmode=require` spelled as the `verify-full` pg already treats it as.
+    connectionString: pgConnectionString(env().DATABASE_URL),
     max: env().DATABASE_POOL_MAX,
     /**
      * pg-pool treats an unset `connectionTimeoutMillis` as "wait forever". On

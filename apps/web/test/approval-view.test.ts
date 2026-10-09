@@ -9,11 +9,13 @@
  * never one keypress: `a` arms, Enter on the same card approves, anything
  * else disarms (§2.4 — a stray key must never be an outbound message).
  */
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { TEMPLATE_CHANNELS, type SendFacts, type SendRefusalCode } from '@agency/core'
 import { decideGathered } from '@agency/db/queries'
 import { describe, expect, it } from 'vitest'
 import {
-  ANSWER_EVIDENCE_NOTE, APPROVE_DOES_NOT_SEND, DEFERRED_CODES, EVIDENCE_LINES_SHOWN, MISSING_EVIDENCE_NOTE,
+  ANSWER_EVIDENCE_NOTE, APPROVE_DOES_NOT_SEND, DEFERRED_CODES, EMAIL_APPROVED, EVIDENCE_LINES_SHOWN, MISSING_EVIDENCE_NOTE,
   LINKEDIN_APPROVED, LINKEDIN_APPROVE_FOOTNOTE, NO_WORKER_FOOTNOTE, OTHER_CAMPAIGN_NOTE, STALE_EVIDENCE_NOTE,
   addressedByLabel, addressedByOf, approvability, approveBlock, approveFootnote, approvedMessage, campaignToCheck,
   candidateLine, queueNoSenderNote,
@@ -38,6 +40,7 @@ const SEND_CODES = {
   paused: false,
   quiet_hours: true,
   unknown_timezone: true,
+  band_never_opens: true,
   daily_cap: true,
   campaign_inactive: true,
   needs_approval: true,
@@ -83,6 +86,11 @@ describe('the per-candidate decision', () => {
     expect([...DEFERRED_CODES].sort()).toEqual(['campaign_inactive', 'daily_cap', 'quiet_hours'])
     for (const code of DEFERRED_CODES) expect(candidateLine(refusal(code, true))).toContain('hold it')
     expect(candidateLine(refusal('unknown_timezone', true))).toContain('the worker will refuse it')
+    // A band that never opens is terminal at the tick, not held (review round 5).
+    expect(DEFERRED_CODES.has('band_never_opens')).toBe(false)
+    expect(candidateLine(refusal('band_never_opens', true))).toBe(
+      'promotional band never opens for them — fix this first, or the worker will refuse it',
+    )
     expect(candidateLine(refusal('unparseable_recipient', true))).toContain('the worker will refuse it')
   })
 
@@ -226,6 +234,83 @@ describe('a draft whose scan a newer one superseded', () => {
     expect(other.evidenceSuperseded).toBeUndefined()
     expect(approveBlock(other)).toContain('nobody may approve past a pause')
     expect(decisionView({ allowed: true, code: 'send_now' })).not.toHaveProperty('evidenceSuperseded')
+  })
+})
+
+/**
+ * Review round 10, [2]: a shared number's holder whose own pause — a
+ * teammate's — stood instead of the hold. The rule beside the card said "a
+ * person resumes them there", and the block "the rule below says what lifts
+ * it", while Resume refuses until the number is recorded. `previewSend`'s
+ * facts carry the gate's answer, `sharedNumberHold`; the page hands them to
+ * `decisionView`, and the sentence comes from the real `decideGathered`.
+ */
+describe('a paused holder of a shared number whose STOP could not be recorded', () => {
+  const FACTS: SendFacts = {
+    channel: 'email',
+    recipient: 'bina@acme.example',
+    suppressed: false,
+    consent: null,
+    paused: true,
+    pausedFor: 'manual',
+    evidenceStale: false,
+    template: null,
+    recipientTimeZone: 'Asia/Kolkata',
+    quietStart: '21:00',
+    quietEnd: '08:00',
+    sentToday: 0,
+    dailyCap: 25,
+    campaignStatus: 'active',
+    autoSend: false,
+    approvedByHuman: true,
+    now: new Date('2026-09-30T06:30:00Z'),
+  }
+  const view = (sharedNumberHold: boolean): CandidateDecision => {
+    const d = decideGathered({ facts: FACTS, evidenceAged: false, evidenceSuperseded: false, sharedNumberHold })
+    if (d.allowed) throw new Error('a paused contact must be refused')
+    expect(d.code).toBe('paused')
+    return decisionView(d, { sharedNumberHold })
+  }
+
+  it('says in the block and the rule beside it that the number is recorded before they can be resumed', () => {
+    const d = view(true)
+    expect(d.sharedNumberHold).toBe(true)
+    expect(d.reason).toMatch(/until a person resumes them there\. .*Resume is refused until the number is recorded on \/suppressions\.$/)
+    expect(approveBlock(d)).toBe(
+      'Approving is pointless: contact paused, and nobody may approve past a pause — the worker would refuse it. ' +
+        'A text from a number they share asked to stop and could not be recorded — they may not have sent it — so ' +
+        'they cannot be resumed until the number is recorded on /suppressions. The rule below says what lifts it; ' +
+        'the draft can wait here until then, or choose someone else.',
+    )
+    expect(approveBlock(d)).not.toMatch(/they asked to stop|deny/i)
+    expect(approveBlock(d, 'sms')).toContain('cannot be resumed until the number is recorded on /suppressions. The rule below')
+    expect(approveBlock(d, 'sms')).not.toContain('choose someone else')
+  })
+
+  // Review round 13: a reply's own pause names /inbox as a way out, and
+  // /inbox refuses that answer while the number is unrecorded.
+  it('names neither /inbox nor Resume as a way out of a reply’s pause while the number is unrecorded', () => {
+    const d = decideGathered({ facts: { ...FACTS, pausedFor: 'replied' }, evidenceAged: false, evidenceSuperseded: false, sharedNumberHold: true })
+    if (d.allowed) throw new Error('a paused contact must be refused')
+    expect(d.reason).not.toContain('which resumes them')
+    expect(d.reason).toContain('neither answering their reply from /inbox nor Resume on /contacts lifts the pause until the number is recorded on /suppressions')
+    const plain = decideGathered({ facts: { ...FACTS, pausedFor: 'replied' }, evidenceAged: false, evidenceSuperseded: false, sharedNumberHold: false })
+    if (plain.allowed) throw new Error('a paused contact must be refused')
+    expect(plain.reason).toContain('answers the reply from /inbox (which resumes them)')
+  })
+
+  it('says nothing of the kind for any other pause, or a fact the page did not pass', () => {
+    const d = view(false)
+    expect(d).not.toHaveProperty('sharedNumberHold')
+    expect(d.reason).not.toMatch(/suppressions/)
+    expect(approveBlock(d)).toBe(approveBlock(refusal('paused', false)))
+    // Only on a pause: the fact means nothing beside another refusal.
+    expect(decisionView({ allowed: false, code: 'suppressed', reason: 'x', humanCanResolve: false }, { sharedNumberHold: true })).not.toHaveProperty('sharedNumberHold')
+  })
+
+  it('is handed the preview’s facts by the page', () => {
+    const page = readFileSync(fileURLToPath(new URL('../src/app/approvals/page.tsx', import.meta.url)), 'utf8')
+    expect(page).toContain('decisionView(preview.decision, preview.facts)')
   })
 })
 
@@ -488,7 +573,22 @@ describe('a LinkedIn draft', () => {
 
   it('keeps the email words for email', () => {
     expect(approveFootnote(null, 'email')).toBe(APPROVE_DOES_NOT_SEND)
-    expect(approvedMessage('email', null)).toContain('The worker will send it on its next pass')
+    expect(approvedMessage('email', null)).toBe(EMAIL_APPROVED)
+  })
+
+  /**
+   * AGENT_URL is configuration: it says where chat goes. The documented
+   * laptop worker is reached for chat and asked separately whether to send,
+   * so "The worker will send it on its next pass" promised a send a worker
+   * with its mailbox off never makes (review round 15).
+   */
+  it('says an approved email goes from a worker that sends email, and where that is shown', () => {
+    const said = approvedMessage('email', null)
+    expect(said).not.toContain('The worker will send it on its next pass')
+    expect(said).toContain('a worker that sends email')
+    expect(said).toContain('SMTP_HOST and MAIL_FROM')
+    expect(said).toContain('the dashboard’s worker line says whether yours does')
+    expect(said).toContain('If it lands in quiet hours it waits for morning.')
   })
 
   it('shows the no-worker note above the queue only while a draft on it is one a worker would send', () => {
@@ -738,8 +838,44 @@ describe('what approving an SMS says', () => {
   })
 
   it('leaves the email and LinkedIn words as they were', () => {
-    expect(approvedMessage('email', null)).toContain('The worker will send it on its next pass')
+    expect(approvedMessage('email', null)).toBe(EMAIL_APPROVED)
     expect(approvedMessage('email', null)).not.toContain('DoveSoft')
     expect(approvedMessage('linkedin', null)).toBe(LINKEDIN_APPROVED)
+  })
+})
+
+/**
+ * Editing a draft's words (2026-10-08). The browser restates `editDraft`'s
+ * limits, the route is gated like a decision and sends the words the editor
+ * loaded, and an open edit blocks approval by button and by key.
+ */
+describe('editing a draft on /approvals', async () => {
+  const view = await import('../src/lib/approval-view')
+  const db = await import('@agency/db/queries')
+
+  it('holds the browser’s limits equal to the database’s', () => {
+    expect(view.EDIT_SUBJECT_MAX).toBe(db.DRAFT_SUBJECT_MAX)
+    expect(view.EDIT_BODY_MAX).toBe(db.DRAFT_BODY_MAX)
+  })
+
+  it('offers editing on email and LinkedIn only — a text is a registered template', () => {
+    expect(view.wordsEditable('email')).toBe(true)
+    expect(view.wordsEditable('linkedin')).toBe(true)
+    for (const channel of TEMPLATE_CHANNELS) expect(view.wordsEditable(channel)).toBe(false)
+  })
+
+  it('refuses approval while an edit is open, saying why', () => {
+    const base = { canDecide: true, settled: false, busy: false, contactId: 'c', campaignId: 'k', block: null }
+    expect(view.approvability(base)).toEqual({ ok: true })
+    expect(view.approvability({ ...base, editing: true })).toEqual({ ok: false, why: view.EDITING_BLOCKS_APPROVAL })
+  })
+
+  it('gates the route like a decision and sends the words the editor loaded', () => {
+    const route = readFileSync(fileURLToPath(new URL('../src/app/api/touches/[id]/route.ts', import.meta.url)), 'utf8')
+    expect(route).toMatch(/assertCan\([^)]*'approvals:decide'\)/)
+    expect(route).toMatch(/expected: \{ subject: expected\.subject, body: expected\.body \}/)
+    const card = readFileSync(fileURLToPath(new URL('../src/components/outreach/drafts.tsx', import.meta.url)), 'utf8')
+    expect(card).toMatch(/expectedSubject: before\.subject/)
+    expect(card).toMatch(/editing: editing\[d\.id\] !== undefined/)
   })
 })

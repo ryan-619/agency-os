@@ -18,7 +18,7 @@
 import { z } from 'zod'
 import { and, eq, sql } from 'drizzle-orm'
 import { normaliseEmail, type PauseReasonClass } from '@agency/core'
-import { consentLedgerFor, findCompanyByDomain, previewSend, type ConsentLedger } from '@agency/db'
+import { consentLedgerFor, findCompanyByDomain, isSharedNumberOptOutPause, previewSend, type ConsentLedger } from '@agency/db'
 import * as schema from '@agency/db/schema'
 import { normaliseDomain } from '@agency/scanner'
 import { bounded, fail, ok, type AgencyToolSpec, type ToolContext, type ToolOutcome } from './spec.js'
@@ -56,27 +56,53 @@ const STANDING_WORDS: Record<ConsentLedger['suppression']['email'], string> = {
  * a thing to resume: the fix is to record the opt-out, or finish the
  * erasure. Only a reply pause is called "not a refusal" — any other is
  * quoted with its reason, because it may be exactly that.
+ *
+ * `sharedNumberHold` is previewSend's fact (review round 10, [2]): they hold
+ * a number whose STOP could not be recorded, and their own pause stood
+ * instead of the hold, so Resume refuses it until the number is recorded —
+ * whatever its class says. Said after the class's own words — except for a
+ * reply's pause, whose /inbox promise `replyQueueDraft` refuses then too,
+ * where the words go in place of that promise (review round 13).
  */
-function pauseWords(pausedFor: PauseReasonClass, reason: string | null, channel: string): string {
+function pauseWords(pausedFor: PauseReasonClass, reason: string | null, channel: string, sharedNumberHold = false): string {
   const why = (reason ?? 'no reason recorded').slice(0, 200)
   const noApprove = 'Approving a draft does not lift a pause.'
+  const held = sharedNumberHold ? ` ${SHARED_NUMBER_HOLD_WORDS}` : ''
   switch (pausedFor) {
     case 'replied':
+      // Held for a shared number too (review round 13): /inbox refuses the
+      // answer as Resume refuses the pause, so neither is offered.
+      if (sharedNumberHold) {
+        return (
+          `paused: they replied (${why}); every campaign stops for them. This is not a refusal of ${channel}. ` +
+          `get_replies shows what they said. ${SHARED_NUMBER_HOLD_REPLIED_WORDS}`
+        )
+      }
       return (
         `paused: they replied (${why}); every campaign stops for them until a person answers from /inbox ` +
         `(which resumes them) or resumes them on /contacts. This is not a refusal of ${channel}. ` +
-        'get_replies shows what they said.'
+        `get_replies shows what they said.`
       )
     case 'manual':
       return (
         `paused by a teammate (${why}): every campaign stops for them until a person resumes them on /contacts. ` +
-        `Answering a reply from /inbox does not lift this pause. ${noApprove}`
+        `Answering a reply from /inbox does not lift this pause. ${noApprove}${held}`
       )
     case 'unsubscribed':
       return (
-        `paused: they unsubscribed (${why}). That is their opt-out — do not suggest resuming them. ${noApprove}`
+        `paused: they unsubscribed (${why}). That is their opt-out — do not suggest resuming them. ${noApprove}${held}`
       )
     case 'opt_out_not_recorded':
+      // A shared number's holder (review round 8): a text from a number they
+      // share asked to stop, maybe not theirs, and recording the NUMBER is
+      // what lets a person lift it — never "they asked to stop".
+      if (isSharedNumberOptOutPause(reason)) {
+        return (
+          `paused: a text from a phone number they share with another contact asked to stop, and it could not be ` +
+          `recorded (${why}). It may not have been them. A person records the number on /suppressions; then the ` +
+          `pause can be lifted on /contacts. Until then do not suggest resuming them. ${noApprove}`
+        )
+      }
       return (
         `paused: they asked to stop, and the opt-out could not be recorded (${why}), so there is no suppression ` +
         'row yet. A person must first record the opt-out by hand on /suppressions — do not suggest resuming ' +
@@ -90,10 +116,30 @@ function pauseWords(pausedFor: PauseReasonClass, reason: string | null, channel:
     case 'other':
       return (
         `paused (${why}): every campaign stops for them until a person reads why on /contacts and resumes them ` +
-        `there if that is right. ${noApprove}`
+        `there if that is right. ${noApprove}${held}`
       )
   }
 }
+
+/**
+ * A shared number's holder whose own pause stood (review round 10, [2]):
+ * what Resume waits for, never that they asked. The /contacts ledger, the
+ * paused block on /approvals and the send path's own sentence say the same.
+ */
+const SHARED_NUMBER_HOLD_WORDS =
+  'They also hold a phone number a text came from that asked to stop, and it could not be recorded — it may not ' +
+  'have been them — so Resume is refused until a person records the number on /suppressions; do not suggest ' +
+  'resuming them before that.'
+
+/**
+ * The same for a holder paused by their own reply (review round 13):
+ * answering it from /inbox would resume them, and /inbox refuses that
+ * answer until the number is recorded, as Resume refuses the pause.
+ */
+const SHARED_NUMBER_HOLD_REPLIED_WORDS =
+  'They also hold a phone number a text came from that asked to stop, and it could not be recorded — it may not ' +
+  'have been them — so neither answering their reply from /inbox nor Resume on /contacts lifts the pause until a ' +
+  'person records the number on /suppressions; do not suggest either before that.'
 
 /** The campaign by name, in this org. Names are unique per org (`campaigns_org_name_key`). */
 async function campaignNamed(ctx: ToolContext, name: string) {
@@ -184,10 +230,13 @@ export const checkSend: AgencyToolSpec<typeof checkSendShape> = {
     const summary = decision.allowed
       ? `send_now: every rule passes for ${email} under "${campaign.name}" right now. ${approval} Nothing was queued.`
       : pauseIsTheReason
-        ? `${pauseWords(facts.pausedFor ?? 'other', facts.pausedReason, campaign.channel)} Nothing was queued.`
+        ? `${pauseWords(facts.pausedFor ?? 'other', facts.pausedReason, campaign.channel, facts.sharedNumberHold)} Nothing was queued.`
         : `${decision.code}: ${decision.reason.replace(/[.\s]+$/, '')}. ` +
           (decision.humanCanResolve ? 'A person could resolve this. ' : 'Nobody may approve past this. ') +
           (facts.paused ? `They are also paused (${(facts.pausedReason ?? 'no reason recorded').slice(0, 200)}). ` : '') +
+          (facts.sharedNumberHold
+            ? `${facts.pausedFor === 'replied' ? SHARED_NUMBER_HOLD_REPLIED_WORDS : SHARED_NUMBER_HOLD_WORDS} `
+            : '') +
           'Nothing was queued.'
 
     return ok(
@@ -209,6 +258,7 @@ export const checkSend: AgencyToolSpec<typeof checkSendShape> = {
           paused: facts.paused,
           pausedReason: facts.pausedReason,
           pausedFor: facts.pausedFor,
+          sharedNumberHold: facts.sharedNumberHold,
           evidenceStale: facts.evidenceStale,
           recipientTimeZone: facts.recipientTimeZone,
           zoneFrom: facts.zoneFrom,
@@ -265,7 +315,15 @@ export const getConsent: AgencyToolSpec<typeof getConsentShape> = {
 
     const s = ledger.suppression
     const lines = [
-      `${email} at ${contact.domain}${contact.pausedAt ? ' — paused: nothing is sent to them until a person resumes them' : ''}`,
+      `${email} at ${contact.domain}${
+        !contact.pausedAt
+          ? ''
+          : ledger.sharedNumberHold
+            ? ' — paused: nothing is sent to them, and they cannot be resumed until a person records a phone number ' +
+              'they share on /suppressions — a text from it asked to stop and could not be recorded, and it may not ' +
+              'have been them'
+            : ' — paused: nothing is sent to them until a person resumes them'
+      }`,
       'Consent (absence is no):',
       ...ledger.channels.map((c) => `  ${c.channel}: ${consentWords(c)}`),
       'Suppression list:',
@@ -283,6 +341,7 @@ export const getConsent: AgencyToolSpec<typeof getConsentShape> = {
         contactId: contact.id,
         domain: contact.domain,
         paused: contact.pausedAt !== null,
+        sharedNumberHold: ledger.sharedNumberHold,
         channels: ledger.channels.map((c) => ({
           channel: c.channel,
           state: c.state,

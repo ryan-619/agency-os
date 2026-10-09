@@ -132,8 +132,46 @@ const { Client } = require("pg");
     tpl.rows.length
       ? tpl.rows[0].data_type + ", nullable=" + tpl.rows[0].is_nullable + "   <- 0019 is applied"
       : "MISSING   <- 0019 is NOT applied, do not deploy");
-  const t19 = await c.query(`select to_regclass('message_templates') is not null as present`);
+  // A parameter, never a quoted literal: this script is one single-quoted
+  // bash string, so a quote here ends it, and the SQL arrived unquoted.
+  const t19 = await c.query("select to_regclass($1) is not null as present", ["message_templates"]);
   console.log("  0019 table: message_templates" + (t19.rows[0].present ? "" : " MISSING"));
+
+  // 0020: Settings → Assistant reads assistant_settings, and so does the
+  // morning-brief check the worker runs every minute.
+  const t20 = await c.query("select to_regclass($1) is not null as present", ["assistant_settings"]);
+  console.log("  0020 table: assistant_settings" +
+    (t20.rows[0].present ? "   <- 0020 is applied" : " MISSING   <- 0020 is NOT applied, do not deploy"));
+
+  // 0021: what a company is recorded as (industry, city, the source of its
+  // headcount) and one active ICP per org.
+  const c21 = await c.query(`
+    select 1 from information_schema.columns
+     where table_schema = current_schema() and table_name = $1 and column_name = $2`, ["companies", "headcount_source"]);
+  console.log("  companies.headcount_source:" +
+    (c21.rows.length ? "   <- 0021 is applied" : " MISSING   <- 0021 is NOT applied, do not deploy"));
+
+  // 0022: business listings, the services catalogue, PageSpeed audits and
+  // call and visit tasks. The opportunity read and Settings → Services need it.
+  const t22 = await c.query("select to_regclass($1) is not null as present", ["services"]);
+  console.log("  0022 table: services" +
+    (t22.rows[0].present ? "   <- 0022 is applied" : " MISSING   <- 0022 is NOT applied, do not deploy"));
+
+  // 0023: quotes, the agency profile, share links and coordinates. Quotes,
+  // Settings → Business profile and the audit and preview pages need it.
+  const t23 = await c.query("select to_regclass($1) is not null as present", ["quotes"]);
+  console.log("  0023 table: quotes" +
+    (t23.rows[0].present ? "     <- 0023 is applied" : " MISSING   <- 0023 is NOT applied, do not deploy"));
+
+  // 0024: follow-up sequences. The campaign steps and the advancer need it.
+  const t24 = await c.query("select to_regclass($1) is not null as present", ["sequence_runs"]);
+  console.log("  0024 table: sequence_runs" +
+    (t24.rows[0].present ? " <- 0024 is applied" : " MISSING   <- 0024 is NOT applied, do not deploy"));
+
+  // 0025: the night shift. Settings → Night shift and the nightly run of the worker need it.
+  const t25 = await c.query("select to_regclass($1) is not null as present", ["night_searches"]);
+  console.log("  0025 table: night_searches" +
+    (t25.rows[0].present ? " <- 0025 is applied" : " MISSING   <- 0025 is NOT applied, do not deploy"));
 
   // A count and an age, like the users count below: never a row. /api/health
   // already publishes the same age as worker.ageSeconds.

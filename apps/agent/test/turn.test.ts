@@ -226,6 +226,38 @@ describe('mapping SDK messages to wire events', () => {
     expect((events[0] as { message: string }).message).toMatch(matches)
   })
 
+  /**
+   * Seen on the live site on 2026-10-07: a connector with 98 tools took every
+   * request past the model's context, and the person was told "This is a
+   * bug" — of a request that was too big, which a new thread or fewer
+   * connector tools fixes.
+   */
+  it('says what to do when the API answers that the prompt is too long', () => {
+    const refused = {
+      type: 'assistant', parent_tool_use_id: null, uuid: 'u', session_id: 's',
+      error: 'invalid_request',
+      message: { id: 'm', content: [{ type: 'text', text: 'Prompt is too long' }] },
+    } as unknown as SDKMessage
+    const events = mapSdkMessage(refused, ctx)
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ kind: 'error', code: 'sdk_error', retryable: false })
+    const message = (events[0] as { message: string }).message
+    expect(message).toMatch(/new thread/i)
+    expect(message).toMatch(/Settings → Connectors/)
+    expect(message).not.toMatch(/bug/i)
+    expect(JSON.stringify(events)).not.toContain('Prompt is too long')
+  })
+
+  it('still calls any other rejected request a bug', () => {
+    const refused = {
+      type: 'assistant', parent_tool_use_id: null, uuid: 'u', session_id: 's',
+      error: 'invalid_request',
+      message: { id: 'm', content: [{ type: 'text', text: 'tools.3.custom.name: String should match pattern' }] },
+    } as unknown as SDKMessage
+    const [event] = mapSdkMessage(refused, ctx)
+    expect((event as { message: string }).message).toMatch(/bug/i)
+  })
+
   it('does not render the API’s diagnostic as if the agent had said it', () => {
     const refused = {
       type: 'assistant', parent_tool_use_id: null, uuid: 'u', session_id: 's',

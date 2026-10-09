@@ -580,15 +580,32 @@ export async function removeSuppression(
   return rows[0] ?? null
 }
 
-/** Contacts currently paused, for the screen that explains why nothing is going out. */
+/**
+ * Contacts currently paused, for the screen that explains why nothing is
+ * going out — with who they are: the name, and the phone beside the email.
+ * A shared number's holder is told to record "the number" there, and one
+ * imported with a phone and no email was a bare id on that screen, beside a
+ * note pointing at a number it did not show (review round 10, [7]).
+ */
 export async function pausedContacts(
   db: AgencyDb,
   orgId: string,
-): Promise<{ id: string; email: string | null; pausedAt: Date | null; pausedReason: string | null }[]> {
+): Promise<{
+  id: string
+  firstName: string | null
+  lastName: string | null
+  email: string | null
+  phone: string | null
+  pausedAt: Date | null
+  pausedReason: string | null
+}[]> {
   return db
     .select({
       id: schema.contacts.id,
+      firstName: schema.contacts.firstName,
+      lastName: schema.contacts.lastName,
       email: schema.contacts.email,
+      phone: schema.contacts.phone,
       pausedAt: schema.contacts.pausedAt,
       pausedReason: schema.contacts.pausedReason,
     })

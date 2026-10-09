@@ -9,6 +9,7 @@
  *
  * Pure. No I/O, no framework, no database (§3).
  */
+import { countryCode, countryName } from './country.js'
 import { orderedSignals, type IcpDefinition, type SignalKey } from './icp.js'
 
 /** One signal as the scanner saw it. Mirrors the Python `observations` entry. */
@@ -135,7 +136,91 @@ function disqualify(domain: string, profile: SiteProfile, reason: string): Score
   }
 }
 
-export function scoreCompany(profile: SiteProfile, icp: IcpDefinition): ScoreResult {
+/**
+ * What the CRM records about a company that a profile's firmographics can
+ * judge (0021). Research, never a scan observation — so it is passed in by
+ * whoever holds the company row, and unknown is simply absent.
+ */
+export interface CompanyFirmographics {
+  readonly country?: string | null
+  readonly headcount?: number | null
+}
+
+/** A profile's targeting, read defensively from its free-form `firmographics` block. */
+export interface IcpTargeting {
+  /** ISO 3166-1 alpha-2 codes, `UK` read as `GB`. Empty means every market. */
+  readonly geos: readonly string[]
+  readonly headcountMin: number | null
+  readonly headcountMax: number | null
+  readonly stages: readonly string[]
+}
+
+const positiveOrNull = (v: unknown): number | null =>
+  typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null
+
+export function icpTargeting(icp: IcpDefinition): IcpTargeting {
+  const f = (icp.firmographics ?? {}) as {
+    geos?: unknown
+    headcount?: { min?: unknown; max?: unknown } | null
+    stage?: unknown
+  }
+  const geos = Array.isArray(f.geos)
+    ? [...new Set(f.geos.map((g) => (typeof g === 'string' ? countryCode(g) : null)).filter((g): g is string => g !== null))]
+    : []
+  const headcount = f.headcount && typeof f.headcount === 'object' ? f.headcount : {}
+  const stages = Array.isArray(f.stage) ? f.stage.filter((x): x is string => typeof x === 'string') : []
+  return { geos, headcountMin: positiveOrNull(headcount.min), headcountMax: positiveOrNull(headcount.max), stages }
+}
+
+/** The disqualifier keys judged from the CRM's record of a company rather than from a scan. */
+export const FIRMOGRAPHIC_DISQUALIFIERS = ['enterprise_scale', 'too_small', 'outside_geos'] as const
+export type FirmographicDisqualifier = (typeof FIRMOGRAPHIC_DISQUALIFIERS)[number]
+
+/**
+ * The firmographic disqualifier a profile applies to what is recorded about a
+ * company, or null. Each needs BOTH halves: the profile must name the
+ * disqualifier and its bound, and the company must have the fact on record. An
+ * unknown headcount or a country that cannot be read is never a mismatch —
+ * §2.2's rule restated for research: what was not established is not claimed.
+ * The reason carries the recorded value, because it is research and the person
+ * reading it should be able to check it.
+ */
+export function firmographicDisqualifier(
+  icp: IcpDefinition,
+  firmographics: CompanyFirmographics | undefined,
+): { readonly key: FirmographicDisqualifier; readonly reason: string } | null {
+  if (!firmographics) return null
+  const t = icpTargeting(icp)
+  const headcount = positiveOrNull(firmographics.headcount)
+  const reasons = icp.disqualifiers as Readonly<Record<string, string | undefined>>
+  if (headcount !== null) {
+    const big = reasons.enterprise_scale
+    if (big && t.headcountMax !== null && headcount > t.headcountMax) {
+      return { key: 'enterprise_scale', reason: `${big} (headcount on record: ${headcount.toLocaleString('en')})` }
+    }
+    const small = reasons.too_small
+    if (small && t.headcountMin !== null && headcount < t.headcountMin) {
+      return { key: 'too_small', reason: `${small} (headcount on record: ${headcount.toLocaleString('en')})` }
+    }
+  }
+  const outside = reasons.outside_geos
+  const code = countryCode(firmographics.country)
+  if (outside && t.geos.length > 0 && code !== null && !t.geos.includes(code)) {
+    return { key: 'outside_geos', reason: `${outside} (country on record: ${countryName(code)})` }
+  }
+  return null
+}
+
+/**
+ * Score one company. `firmographics` is what the CRM records about it (0021);
+ * without it — the parity test, a caller holding no company row — scoring is
+ * the Python engine's, line for line.
+ */
+export function scoreCompany(
+  profile: SiteProfile,
+  icp: IcpDefinition,
+  firmographics?: CompanyFirmographics,
+): ScoreResult {
   const domain = profile.domain ?? ''
 
   // --- disqualifiers, before any scoring effort -----------------------------
@@ -153,6 +238,11 @@ export function scoreCompany(profile: SiteProfile, icp: IcpDefinition): ScoreRes
   if (!profile.hasLoginSurface) {
     return disqualify(domain, profile, icp.disqualifiers.no_public_product ?? 'no public product')
   }
+  // After the scan's own disqualifiers, so a site nobody reached is still
+  // "unreachable" first: the CRM's record of the company — its size and its
+  // market — against the profile's targeting, when both are known (0021).
+  const firmographic = firmographicDisqualifier(icp, firmographics)
+  if (firmographic) return disqualify(domain, profile, firmographic.reason)
 
   // --- score only what was actually observed --------------------------------
   let raw = 0

@@ -16,6 +16,8 @@ import {
 } from '@/lib/approval-view'
 import { ApprovalQueue } from '@/components/chat/queue'
 import { DraftQueue, type DraftView } from '@/components/outreach/drafts'
+import { BadgeCheck, Hand } from 'lucide-react'
+import { EmptyState } from '@/components/empty-state'
 
 /**
  * The approval queue (PROMPT.md §2.4, §5.4).
@@ -191,7 +193,7 @@ export default async function ApprovalsPage() {
       const preview = await previewSend(db, {
         orgId: user.orgId, contactId: w.contactId, campaignId: w.campaignId, now, writtenAt: w.writtenAt,
       })
-      return [k, preview.ok ? decisionView(preview.decision) : uncheckedDecision(preview.message)] as const
+      return [k, preview.ok ? decisionView(preview.decision, preview.facts) : uncheckedDecision(preview.message)] as const
     } catch (err) {
       // Named, never the driver's message (it can carry the DSN — §2.3).
       const name = err instanceof Error ? err.name : 'UnknownError'
@@ -372,7 +374,18 @@ export default async function ApprovalsPage() {
 
       <h2 style={{ fontSize: 15, margin: '18px 0 8px' }}>Messages to approve</h2>
       {draftViews.length === 0 ? (
-        <p className="muted" style={{ fontSize: 13 }}>No drafts are waiting.</p>
+        <EmptyState
+          icon={BadgeCheck}
+          title="No drafts are waiting"
+          compact
+          actions={[
+            { href: '/campaigns', label: 'Campaigns' },
+            { href: '/inbox', label: 'Inbox', secondary: true },
+          ]}
+        >
+          A draft lands here when a campaign enrols somebody or takes its next step, when Chat drafts a message, or when
+          somebody answers a reply from the inbox.
+        </EmptyState>
       ) : (
         <>
           <p className="muted" style={{ fontSize: 13, margin: '0 0 8px' }}>
@@ -391,10 +404,9 @@ export default async function ApprovalsPage() {
 
       <h2 style={{ fontSize: 15, margin: '22px 0 8px' }}>Tools waiting on you</h2>
       {rows.length === 0 ? (
-        <p className="muted" style={{ fontSize: 13 }}>
-          No conversation is parked. When the agent tries to do something that leaves the building
-          mid-conversation, it waits here for your answer.
-        </p>
+        <EmptyState icon={Hand} title="No conversation is parked" compact>
+          When the agent tries to do something that leaves the building mid-conversation, it waits here for your answer.
+        </EmptyState>
       ) : (
         <ApprovalQueue
           canDecide={decidable}

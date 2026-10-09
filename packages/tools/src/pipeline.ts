@@ -8,13 +8,15 @@
  *
  * Risk, from `AGENCY_TOOL_RISK`: `get_pipeline` is low (a read); the other
  * two are medium — they change internal state, nothing leaves the building —
- * so the gate raises a card and a person decides, without the turn parking
- * for long. `book_meeting` RECORDS a meeting and moves the deal. It does not
+ * and run at once: `runsWithoutApproval` in packages/core lets internal
+ * writes through without a card (operator decision, 2026-10-06), granted
+ * single-use and audited like a read. `book_meeting` RECORDS a meeting and moves the deal. It does not
  * send an invitation and it does not touch a calendar: the calendar is a
  * connector (§8.6), reached like any other connector, through the gate.
  */
 import { z } from 'zod'
-import { DEAL_STAGES, type DealStage } from '@agency/db'
+import { DEAL_STAGES, dealHealthFacts, type DealStage } from '@agency/db'
+import { dealHealth, rottingState } from '@agency/core'
 import {
   advanceDeal, createMeeting, findCompanyByDomain, openDealFor, setDealStage, type AgencyDb,
 } from '@agency/db'
@@ -22,6 +24,7 @@ import { normaliseDomain } from '@agency/scanner'
 import * as schema from '@agency/db/schema'
 import { and, asc, eq, isNull } from 'drizzle-orm'
 import { bounded, fail, ok, type AgencyToolSpec, type ToolOutcome } from './spec.js'
+import { instantFrom } from './instant.js'
 
 // ---------------------------------------------------------------------------
 // get_pipeline
@@ -43,6 +46,7 @@ export const getPipeline: AgencyToolSpec<typeof pipelineShape> = {
     const rows = await ctx.db
       .select({
         dealId: schema.deals.id,
+        companyId: schema.deals.companyId,
         domain: schema.companies.domain,
         name: schema.companies.name,
         stage: schema.deals.stage,
@@ -65,10 +69,28 @@ export const getPipeline: AgencyToolSpec<typeof pipelineShape> = {
       .limit(input.limit ?? 50)
 
     await ctx.audit('agent.get_pipeline', { stage: input.stage ?? null, returned: rows.length })
-    const lines = rows.map(
-      (r) =>
-        `${r.stage.padEnd(9)} ${r.domain}${r.name ? ` (${r.name})` : ''}${r.nextAction ? ` — next: ${r.nextAction}` : ''}`,
-    )
+    // Why each deal needs a look (2026-10-09): the board's own reading, from the same facts.
+    const now = ctx.now()
+    const facts = await dealHealthFacts(ctx.db, { orgId: ctx.orgId, companyIds: rows.map((r) => r.companyId), now }).catch(() => new Map())
+    const healthOf = (r: (typeof rows)[number]) => {
+      const f = facts.get(r.companyId)
+      if (!f) return null
+      const rot = rottingState(r.stage, r.updatedAt ?? r.createdAt, now)
+      return dealHealth(
+        { stage: r.stage, closed: false, untouched: rot ? { days: rot.days, rotten: rot.rotten } : null, nextActionAt: r.nextActionAt, nextAction: r.nextAction, ...f },
+        now,
+      )
+    }
+    const lines = rows.map((r) => {
+      const h = healthOf(r)
+      const look = h && h.reasons.length > 0 ? ` · ${h.level === 'act' ? 'needs a person' : h.level === 'watch' ? 'drifting' : 'on track'}: ${h.reasons.join('; ')}` : ''
+      // The id is printed because only this summary reaches the model, and
+      // set_deal_owner names a deal by it.
+      return (
+        `${r.stage.padEnd(9)} ${r.domain}${r.name ? ` (${r.name})` : ''}${r.nextAction ? ` — next: ${r.nextAction}` : ''}` +
+        `${look} · deal ${r.dealId}`
+      )
+    })
     return ok(
       rows.map((r) => ({
         dealId: r.dealId,
@@ -79,6 +101,7 @@ export const getPipeline: AgencyToolSpec<typeof pipelineShape> = {
         nextActionAt: r.nextActionAt?.toISOString() ?? null,
         valueCents: r.valueCents,
         lastTouched: (r.updatedAt ?? r.createdAt).toISOString(),
+        health: healthOf(r),
       })),
       rows.length === 0
         ? 'No open deals. Nothing has been sent to anyone yet, or everything is closed.'
@@ -162,7 +185,7 @@ export const updateDeal: AgencyToolSpec<typeof updateDealShape> = {
       { dealId: deal.id, domain, stage: deal.stage, nextAction: deal.nextAction, closed: deal.closedAt !== null },
       `${domain}: stage ${deal.stage}${deal.nextAction ? `, next: ${deal.nextAction}` : ''}${
         deal.closedAt ? ' (closed)' : ''
-      }.`,
+      } (deal ${deal.id}).`,
     )
   },
 }
@@ -193,14 +216,13 @@ export const bookMeeting: AgencyToolSpec<typeof bookMeetingShape> = {
     const company = await findCompanyByDomain(ctx.db, ctx.orgId, domain)
     if (!company) return fail('not_found', `No company with domain "${domain}" is in the CRM.`)
 
-    // Insist on the ISO shape before parsing: V8's `new Date()` accepts a
-    // surprising range of strings ("Thursday at 2" among them) and turns them
-    // into a real, wrong instant.
-    const startsAt = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/.test(input.startsAt)
-      ? new Date(input.startsAt)
-      : new Date(Number.NaN)
-    if (Number.isNaN(startsAt.getTime())) {
-      return fail('invalid_state', `"${input.startsAt}" is not an ISO 8601 instant like 2026-09-18T14:00:00Z.`)
+    // Insist on the ISO shape, and on a date that exists, before parsing:
+    // V8's `new Date()` accepts a surprising range of strings ("Thursday at
+    // 2" among them) and rolls 30 February to 2 March, each a real, wrong
+    // instant (instant.ts).
+    const startsAt = instantFrom(input.startsAt)
+    if (startsAt === null) {
+      return fail('invalid_state', `"${input.startsAt}" is not an ISO 8601 instant like 2026-09-18T14:00:00Z, on a date that exists.`)
     }
 
     let contactId: string | null = null
@@ -237,7 +259,8 @@ export const bookMeeting: AgencyToolSpec<typeof bookMeetingShape> = {
     })
     return ok(
       { meetingId: result.meeting.id, domain, startsAt: startsAt.toISOString(), timeZone: input.timeZone, deal: result.deal },
-      `Recorded a meeting with ${domain} at ${startsAt.toISOString()} (${input.timeZone}). The deal is at ` +
+      `Recorded meeting ${result.meeting.id} with ${domain} at ${startsAt.toISOString()} (${input.timeZone}). ` +
+        'reschedule_meeting, cancel_meeting and record_meeting_outcome name it by that id. The deal is at ' +
         `"${result.deal.split(':')[1]}". No invitation was sent.`,
     )
   },

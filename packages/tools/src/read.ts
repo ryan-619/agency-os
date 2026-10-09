@@ -9,10 +9,11 @@
  */
 import { z } from 'zod'
 import {
-  INFORMATIONAL_SIGNALS, informationalStatus, isStale, orderedSignals,
+  INFORMATIONAL_SIGNALS, countryCode, countryName, icpTargeting, informationalStatus, isPresenceSignal, isStale, orderedSignals,
   parseIcpDefinition, staleAfterDaysOf, type IcpDefinition,
 } from '@agency/core'
 import {
+  researchCount,
   activeIcpProfile, companyList, findCompanyByDomain, latestScanWithFindings,
   type AgencyDb, type CompanyListRow,
 } from '@agency/db'
@@ -60,6 +61,15 @@ export const getIcp: AgencyToolSpec<Record<string, never>> = {
     // not preserve key order, so walking the object hands the model a
     // different weighting order than the one the scorer uses.
     const signals = orderedSignals(icp).map(([key, s]) => ({ key, weight: s.weight, why: s.why }))
+    const t = icpTargeting(icp)
+    const size =
+      t.headcountMin !== null && t.headcountMax !== null
+        ? `${t.headcountMin}–${t.headcountMax} staff`
+        : t.headcountMax !== null
+          ? `up to ${t.headcountMax} staff`
+          : t.headcountMin !== null
+            ? `${t.headcountMin}+ staff`
+            : 'any size'
     return ok(
       {
         label: icp.label,
@@ -68,9 +78,15 @@ export const getIcp: AgencyToolSpec<Record<string, never>> = {
         signals,
         disqualifiers: icp.disqualifiers,
         staleAfterDays: staleDays(icp),
+        targeting: t,
       },
       bounded([
         `ICP: ${icp.label}`,
+        `Targets: markets ${t.geos.length ? t.geos.map(countryName).join(', ') : 'every market'}; ${size}` +
+          `${t.stages.length ? `; stages ${t.stages.join(', ')}` : ''}. The signals below read the same in every ` +
+          'market; size and market count in a score only through the firmographic disqualifiers (enterprise_scale, ' +
+          'too_small, outside_geos) when the company’s headcount or country is recorded.',
+        'Other profiles, or a new one for another market or size band: list_icps, create_icp.',
         `Qualifies at ${icp.scoring.qualify_at}/100. Findings older than ${staleDays(icp)} days must be re-verified.`,
         `Tiers: ${icp.scoring.tiers.map((t) => `${t.name} at ${t.floor}+`).join(', ')}`,
         'Signals, heaviest first:',
@@ -93,6 +109,10 @@ const searchShape = {
   qualifiedOnly: z.boolean().optional(),
   neverScanned: z.boolean().optional().describe('Only companies with no scan at all.'),
   staleOnly: z.boolean().optional().describe('Only companies whose newest scan has aged out.'),
+  country: z.string().max(60).optional().describe('Only companies recorded in this country — a name or a two-letter code, e.g. "India" or "IN".'),
+  industry: z.string().max(80).optional().describe('Only companies whose recorded industry contains this, e.g. "fintech".'),
+  headcountMin: z.number().int().min(1).optional().describe('Only companies with a recorded headcount of at least this.'),
+  headcountMax: z.number().int().min(1).optional().describe('Only companies with a recorded headcount of at most this.'),
   sort: z.enum(['score_desc', 'domain']).optional(),
   limit: z.number().int().min(1).max(100).optional(),
 }
@@ -116,6 +136,11 @@ export const searchCompanies: AgencyToolSpec<typeof searchShape> = {
     const decorated = all.map((c: CompanyListRow) => ({
       domain: c.domain,
       name: c.name,
+      country: c.country,
+      countryCode: countryCode(c.country),
+      headcount: c.headcount,
+      industry: c.industry,
+      city: c.city,
       score: c.score,
       tier: c.tier,
       qualified: c.qualified,
@@ -134,6 +159,17 @@ export const searchCompanies: AgencyToolSpec<typeof searchShape> = {
     if (input.qualifiedOnly) rows = rows.filter((r) => r.qualified)
     if (input.neverScanned) rows = rows.filter((r) => r.neverScanned)
     if (input.staleOnly) rows = rows.filter((r) => r.stale && !r.neverScanned)
+    if (input.country !== undefined) {
+      const code = countryCode(input.country)
+      if (!code) return fail('invalid_state', `"${input.country.slice(0, 60)}" is not a country this system can read. Use a name or a two-letter code.`)
+      rows = rows.filter((r) => r.countryCode === code)
+    }
+    if (input.industry) {
+      const want = input.industry.trim().toLowerCase()
+      rows = rows.filter((r) => (r.industry ?? '').toLowerCase().includes(want))
+    }
+    if (input.headcountMin !== undefined) rows = rows.filter((r) => r.headcount !== null && r.headcount >= input.headcountMin!)
+    if (input.headcountMax !== undefined) rows = rows.filter((r) => r.headcount !== null && r.headcount <= input.headcountMax!)
 
     rows =
       input.sort === 'domain'
@@ -149,7 +185,13 @@ export const searchCompanies: AgencyToolSpec<typeof searchShape> = {
       const label = r.disqualifiedReason
         ? `disqualified — ${r.disqualifiedReason}`
         : r.tier || (r.neverScanned ? 'never scanned' : 'below threshold')
-      return `${score}  ${r.domain.padEnd(28)} ${label}${r.stale && !r.neverScanned ? '  [stale]' : ''}`
+      const facts = [r.countryCode, r.headcount !== null ? `~${r.headcount} staff` : null, r.industry]
+        .filter((f): f is string => Boolean(f))
+        .join(' · ')
+      return (
+        `${score}  ${r.domain.padEnd(28)} ${label}${r.stale && !r.neverScanned ? '  [stale]' : ''}` +
+        (facts ? `  [${facts}]` : '')
+      )
     })
 
     return ok(
@@ -197,18 +239,47 @@ export const getCompany: AgencyToolSpec<typeof getCompanyShape> = {
 
     const found = await latestScanWithFindings(ctx.db, ctx.orgId, company.id)
     await ctx.audit('agent.get_company', { domain })
+    // Research on file (0028): said as a count and where to read it — apart from the scan, never with it.
+    const research = await researchCount(ctx.db, ctx.orgId, company.id).catch(() => 0)
+    const researchLine = research > 0
+      ? `${research} research claim${research === 1 ? '' : 's'} with sources on file (get_research reads them) — research, never evidence.`
+      : null
+    // What the CRM records about it (0021): research, never an observation.
+    const recorded = {
+      country: company.country,
+      city: company.city,
+      industry: company.industry,
+      stage: company.stage,
+      headcount: company.headcount,
+      headcountSource: company.headcountSource,
+      description: company.description,
+    }
+    const recordedLine = (() => {
+      const parts = [
+        company.industry ? `industry ${company.industry}` : null,
+        company.city || company.country ? `in ${[company.city, company.country].filter(Boolean).join(', ')}` : null,
+        company.stage ? `stage ${company.stage}` : null,
+        company.headcount !== null
+          ? `~${company.headcount} staff${company.headcountSource ? ` (per ${company.headcountSource.slice(0, 120)})` : ''}`
+          : null,
+      ].filter((p): p is string => p !== null)
+      const what = company.description ? ` What it does: ${company.description.slice(0, 300)}` : ''
+      return parts.length === 0 && !what
+        ? 'Recorded about it: nothing beyond its domain — update_company records its industry, size and city.'
+        : `Recorded about it (research, not scan evidence): ${parts.join('; ') || '—'}.${what}`
+    })()
 
     if (!found) {
       return ok(
-        { domain, name: company.name, scanned: false, findings: [] },
-        `${domain} has never been scanned, so nothing has been observed about it.`,
+        { domain, name: company.name, recorded, scanned: false, findings: [] },
+        `${domain} has never been scanned, so nothing has been observed about it. ${recordedLine}${researchLine ? ` ${researchLine}` : ''}`,
       )
     }
     if (!found.scan.ok) {
       return ok(
-        { domain, name: company.name, scanned: true, reachedTheSite: false, error: found.scan.error, findings: [] },
+        { domain, name: company.name, recorded, scanned: true, reachedTheSite: false, error: found.scan.error, findings: [] },
         `The last scan of ${domain} never reached the site (${found.scan.error ?? 'no response'}). ` +
-          'Nothing was observed, so nothing can be claimed about their posture.',
+          `Nothing was observed, so nothing can be claimed about their posture. ${recordedLine}${researchLine ? ` ${researchLine}` : ''}`,
       )
     }
 
@@ -238,9 +309,13 @@ export const getCompany: AgencyToolSpec<typeof getCompanyShape> = {
         detail: f.detail,
       }))
 
+    const presence = informational.filter((i) => isPresenceSignal(i.key))
+    const securityContext = informational.filter((i) => !isPresenceSignal(i.key))
+
     const payload = {
       domain,
       name: company.name,
+      recorded,
       scanned: true,
       reachedTheSite: true,
       scanRanAt: found.scan.ranAt.toISOString(),
@@ -268,6 +343,8 @@ export const getCompany: AgencyToolSpec<typeof getCompanyShape> = {
         `${domain}${company.name ? ` (${company.name})` : ''} — ${payload.score ?? '-'}/100` +
           `${payload.tier ? `, ${payload.tier}` : ''}` +
           `${payload.disqualifiedReason ? ` — disqualified: ${payload.disqualifiedReason}` : ''}`,
+        recordedLine,
+        ...(researchLine ? [researchLine] : []),
         `Scanned ${payload.scanRanAt}.` +
           (stale
             ? ` This evidence is older than ${days} days and MUST be re-verified before it is quoted to anyone.`
@@ -279,11 +356,22 @@ export const getCompany: AgencyToolSpec<typeof getCompanyShape> = {
         ...gaps.map((f) => `  ${String(f.weight).padStart(2)}  ${f.signalKey} — ${f.detail || 'absent'}`),
         'Already in place:',
         `  ${inPlace.map((f) => f.signalKey).join(', ') || 'none'}`,
-        ...(informational.length > 0
+        // Website presence (2026-10-08): what a visitor, a phone and a search
+        // engine find on the homepage. Observations of THIS scan, so quotable
+        // when pitching a website service — never as a security finding, and
+        // only while this evidence is current.
+        ...(presence.length > 0
           ? [
-              `Also observed, not scored (${informational.length}) — context only; not part of the score, ` +
+              `Website presence (${presence.length}) — observed on the homepage in this scan; may be quoted when ` +
+                'pitching a website, search or online-growth service, dated by this scan, and only while it is current:',
+              ...presence.map((i) => `  ${i.key} [${i.status}] — ${i.detail || i.label}`),
+            ]
+          : []),
+        ...(securityContext.length > 0
+          ? [
+              `Also observed, not scored (${securityContext.length}) — context only; not part of the score, ` +
                 'and never to be presented as a finding or quoted in outreach:',
-              ...informational.map((i) => `  ${i.key} [${i.status}] — ${i.detail || i.label}`),
+              ...securityContext.map((i) => `  ${i.key} [${i.status}] — ${i.detail || i.label}`),
             ]
           : []),
       ]),

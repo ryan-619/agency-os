@@ -169,6 +169,24 @@ export async function GET(request: Request): Promise<NextResponse> {
       { status: strict && disagrees ? 503 : 200 },
     )
   } catch (err) {
+    // A configuration that does not parse is not a database fault: env()
+    // threw before any connection was tried, and "database: unreachable"
+    // sent the person reading it to the database for a malformed AGENT_URL
+    // (review round 15). The class only, as below; the variables are named
+    // in the platform's runtime log, never here.
+    if (err instanceof Error && err.name === 'InvalidEnvironmentError') {
+      return NextResponse.json(
+        {
+          status: 'degraded',
+          service: 'web',
+          config: 'invalid',
+          database: 'not_checked',
+          error: err.name,
+          worker: null,
+        },
+        { status: 503 },
+      )
+    }
     // The driver error can contain the connection string, so only the class
     // of failure is reported (§2.3).
     return NextResponse.json(

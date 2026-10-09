@@ -107,7 +107,7 @@ export default async function SharedProposalPage({ params }: { params: Promise<{
 /** The sign-in card, widened for a document when there is one; nothing of the app around it. */
 function Frame({ wide = false, children }: { wide?: boolean; children: React.ReactNode }) {
   return (
-    <div className="auth-wrap">
+    <div className="auth-wrap" data-read-progress={wide ? '' : undefined}>
       <div className={wide ? 'auth buyer' : 'auth'}>{children}</div>
     </div>
   )

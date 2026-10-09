@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation'
-import { can } from '@agency/core'
+import { can, isNoSiteDomain } from '@agency/core'
 import { exportsOpenDealStages, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
@@ -9,6 +9,8 @@ import {
 } from '@/lib/company-list'
 import { getDb } from '@/lib/db'
 import { listCompaniesForOrg, icpForOrg } from '@/lib/queries'
+import { Building, SearchX } from 'lucide-react'
+import { EmptyState } from '@/components/empty-state'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -77,7 +79,8 @@ export default async function Companies({
   // The counts describe the whole pipeline; "shown" is what the filters left.
   const scanned = all.filter((r) => r.score !== null)
   const qualified = scanned.filter((r) => r.qualified)
-  const unscanned = all.filter((r) => r.lastScanAt === null)
+  // A business with no website (0022) has nothing to scan, so it is not "never scanned".
+  const unscanned = all.filter((r) => r.lastScanAt === null && !isNoSiteDomain(r.domain))
 
   // The tiers on offer are the ones the list can show, so no option is a view
   // that is always empty. A tier in the URL that no row has is kept, so the
@@ -171,6 +174,7 @@ export default async function Companies({
         {qs ? <a href="/companies" style={{ fontSize: 13 }}>Clear</a> : null}
       </form>
 
+      {shown.length > 0 ? (
       <table>
         <thead>
           <tr>
@@ -185,8 +189,9 @@ export default async function Companies({
         <tbody>
           {shown.map((r) => (
             <tr key={r.companyId}>
-              <td><a href={`/companies/${r.domain}`}>{r.name ?? r.domain}</a></td>
-              <td className="mono">{r.domain}</td>
+              <td><a href={`/companies/${encodeURIComponent(r.domain)}`}>{r.name ?? r.domain}</a></td>
+              {/* A business with no website keeps a placeholder (0022); say so, not the placeholder. */}
+              <td className={isNoSiteDomain(r.domain) ? 'muted' : 'mono'}>{isNoSiteDomain(r.domain) ? 'no website' : r.domain}</td>
               <td className="mono" style={{ textAlign: 'right' }}>
                 {/* Never scanned means no number — not a zero that reads as a result. */}
                 {r.score === null ? <span className="muted">—</span> : r.score}
@@ -195,7 +200,7 @@ export default async function Companies({
                 {r.disqualifiedReason ? (
                   <span className="pill" title={r.disqualifiedReason}>disqualified</span>
                 ) : r.score === null ? (
-                  <span className="muted">not scanned</span>
+                  <span className="muted">{isNoSiteDomain(r.domain) ? 'nothing to scan' : 'not scanned'}</span>
                 ) : (
                   <span className={tierClass(r.tier, r.qualified)}>{r.tier || 'below threshold'}</span>
                 )}
@@ -213,15 +218,22 @@ export default async function Companies({
           ))}
         </tbody>
       </table>
+      ) : null}
 
       {all.length === 0 ? (
-        <p className="muted" style={{ marginTop: 16 }}>
-          No companies yet. <a href="/companies/import">Import a list</a> to start.
-        </p>
+        <EmptyState
+          icon={Building}
+          title="No companies yet"
+          actions={[
+            { href: '/companies/import', label: 'Import a list' },
+            { href: '/chat', label: 'Ask Chat to find businesses', secondary: true },
+          ]}
+        >
+          Every scan, person, deal and quote hangs off a company. Bring in a list of websites, or ask Chat to find
+          businesses on the map that need what you sell.
+        </EmptyState>
       ) : filtered && shown.length === 0 ? (
-        <p className="muted" style={{ marginTop: 16 }}>
-          No company matches these filters. <a href="/companies">Clear them</a>.
-        </p>
+        <EmptyState icon={SearchX} title="No company matches these filters" compact actions={[{ href: '/companies', label: 'Clear the filters', secondary: true }]} />
       ) : null}
 
       {unscanned.length ? (

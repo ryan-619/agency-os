@@ -36,6 +36,8 @@ export type RiskRule =
   | 'derived_write'
   | 'writes_internal_state'
   | 'leaves_the_building'
+  | 'reopens_outreach'
+  | 'changes_scoring'
   | 'delegation'
   | 'connector_unreviewed'
 
@@ -147,6 +149,81 @@ export const AGENCY_TOOL_RISK = {
   create_task: ['medium', 'writes_internal_state', 'Creates a task for a teammate with an optional due date. Nothing is sent.'],
   // reporting-and-task-tools
   list_tasks: ['low', 'read_only', 'Reads open tasks, optionally one person’s or one company’s.'],
+
+  // --- the operator's CRM, campaign, pipeline and ops tools (2026-10-06).
+  //     Reads are low; internal writes are medium, and run without a card
+  //     (`runsWithoutApproval`). Drafting openers to people outside the
+  //     company is high, as `queue_touch` is, and so is lifting a pause —
+  //     a person's, or a campaign's (`update_campaign` setting one active,
+  //     read from its input in `classifyRisk`). Grouped by the file that
+  //     implements them.
+  // records.ts — companies and contacts
+  list_contacts: ['low', 'read_only', 'Reads the people recorded at a company, with how each may be reached.'],
+  add_company: ['medium', 'writes_internal_state', 'Adds a company to the CRM by its domain. Nothing is scanned or sent until asked.'],
+  update_company: ['medium', 'writes_internal_state', 'Changes a company’s name, country or time zone in the CRM. Nothing leaves the building.'],
+  import_companies: ['medium', 'writes_internal_state', 'Adds a list of companies to the CRM by domain, leaving any already there alone. Nothing is sent.'],
+  add_contact: ['medium', 'writes_internal_state', 'Adds a person at a company to the CRM. It records no consent, and nothing is sent.'],
+  update_contact: ['medium', 'writes_internal_state', 'Changes a person’s details under the rules a teammate editing them meets. Nothing is sent.'],
+  pause_contact: ['medium', 'writes_internal_state', 'Holds a person from every campaign. It only ever stops messages; nothing is sent.'],
+  resume_contact: ['high', 'reopens_outreach', 'Lifts a person’s pause, so campaigns may write to them again — a person decides that.'],
+  add_suppression: ['medium', 'writes_internal_state', 'Puts an address, domain, number or profile on the suppression list. It only ever stops messages.'],
+  // campaigns.ts — campaigns and drafts
+  list_campaigns: ['low', 'read_only', 'Reads the campaigns: channel, status, daily cap, quiet hours and what each holds.'],
+  create_campaign: ['medium', 'writes_internal_state', 'Creates a supervised email or LinkedIn campaign; every message in it waits for a person’s approval.'],
+  update_campaign: ['medium', 'writes_internal_state', 'Renames, re-caps, pauses or reactivates a supervised campaign. It never turns auto-send on.'],
+  enrol_contacts: ['high', 'leaves_the_building', 'Drafts openers to people outside the company into a supervised campaign; each still waits on /approvals before anything is sent.'],
+  list_drafts: ['low', 'read_only', 'Reads the messages waiting for approval, with what the send rules would say of each.'],
+  // Finding businesses and what they need (2026-10-08). The Maps search costs money per
+  // call and is capped per day, but it only reads; the audit is a derived write like a scan.
+  find_businesses: ['low', 'read_only', 'Searches Google Maps for businesses and reads what each listing shows; it adds nothing.'],
+  add_businesses: ['medium', 'writes_internal_state', 'Files businesses found on Google Maps in the CRM with their listing details. Nobody is contacted.'],
+  audit_website: ['low', 'derived_write', 'Asks Google PageSpeed to measure a company homepage from Google’s side and records what it measured.'],
+  get_opportunities: ['low', 'read_only', 'Reads what a business needs, with dated evidence, and the services that answer it.'],
+  list_services: ['low', 'read_only', 'Reads the agency’s services catalogue with prices and the needs each answers.'],
+  // Quotes (0023): a draft is the agency's own record; marking it sent, its link and the
+  // buyer's answer are a person's acts on the quote page, and no tool does them.
+  create_quote: ['medium', 'writes_internal_state', 'Raises a draft quote of the agency’s services for a company; nothing is sent.'],
+  get_quote: ['low', 'read_only', 'Reads a quote: its lines, totals with GST, advance, validity and status.'],
+  update_quote: ['medium', 'writes_internal_state', 'Changes a draft quote’s lines, prices or terms; a sent one becomes a draft again. Nothing is sent.'],
+  list_quotes: ['low', 'read_only', 'Lists quotes with their numbers, status and totals.'],
+  // A business's own pages (2026-10-08): making the link sends nothing — a person pastes it, or drafts the email for /approvals.
+  create_share_link: ['medium', 'writes_internal_state', 'Makes a link to a business’s audit page or website preview; nothing is sent.'],
+  // Follow-up sequences (0024): steps are words that will reach people — drafted, or sent unread on auto-send.
+  set_campaign_steps: ['high', 'leaves_the_building', 'Sets a campaign’s follow-up messages, calls and visits for everyone it wrote to who has not replied.'],
+  // The night shift (0025): what it found overnight, a read.
+  get_night_finds: ['low', 'read_only', 'Reads what the night shift found overnight, best first.'],
+  // Research with sources (0028): a claim and the page it came from, never evidence; the read beside it.
+  record_research: ['medium', 'writes_internal_state', 'Records claims about a company with the pages they came from; research, never evidence. Nothing is sent.'],
+  get_research: ['low', 'read_only', 'Reads the research on file about a company, each claim with its source.'],
+  // What changed (2026-10-09): a gap fixed or opened since the previous scan, from our own scans. A read.
+  get_evidence_signals: ['low', 'read_only', 'Reads which companies’ sites changed since our previous scan: gaps fixed or opened.'],
+  // What's working (2026-10-08): reply and win rates, and searches for more like what was won. A read.
+  get_whats_working: ['low', 'read_only', 'Reads who replied and what was won, by kind, city and campaign.'],
+  // Editing a draft's words (2026-10-08). The read shows an EMAIL draft whole; the edit
+  // rewrites one and keeps its card: a queued auto-send email goes out with the new
+  // words unread by anybody, and every other draft still waits on /approvals.
+  get_draft: ['low', 'read_only', 'Reads the whole subject and body of one email draft that has not gone yet.'],
+  edit_draft: ['high', 'leaves_the_building', 'Rewrites the words of an email to someone outside the company that has not gone yet; an approved one goes back to /approvals.'],
+  // proposals.ts — proposals, meetings, deals and tasks
+  generate_proposal: ['medium', 'writes_internal_state', 'Writes a draft proposal from the company’s latest scan for the team. It refuses stale evidence, and nothing is sent.'],
+  get_proposal: ['low', 'read_only', 'Reads a proposal’s scope, workstreams and price range, and whether its evidence is still current.'],
+  list_meetings: ['low', 'read_only', 'Reads upcoming and recent meetings, each in its own time zone.'],
+  reschedule_meeting: ['medium', 'writes_internal_state', 'Moves a recorded meeting to a new time. No invitation or message is sent.'],
+  cancel_meeting: ['medium', 'writes_internal_state', 'Cancels a recorded meeting in the CRM. Nobody is told by this.'],
+  record_meeting_outcome: ['medium', 'writes_internal_state', 'Records whether a meeting was held or the other side did not show. Nothing is sent.'],
+  set_deal_owner: ['medium', 'writes_internal_state', 'Assigns a deal to a teammate. Nothing is sent.'],
+  complete_task: ['medium', 'writes_internal_state', 'Marks a task done. A LinkedIn step is never closed this way. Nothing is sent.'],
+  // ops.ts — the worker, in place of a terminal
+  worker_status: ['low', 'read_only', 'Reads what the worker is doing: its heartbeat, whether it sends and reads replies, and its health.'],
+  recent_errors: ['low', 'read_only', 'Reads the worker’s recent warnings and errors by kind, with no values in them.'],
+  queue_status: ['low', 'read_only', 'Reads what is waiting to go out and why: approvals, deferrals, refusals and channels nothing carries.'],
+  rescan_stale: ['low', 'derived_write', 'Re-scans a few companies whose evidence is stale or missing, from their own public pages.'],
+  // profiles.ts — the ideal-customer profiles (0021). Creating one stores it
+  // INACTIVE and changes nothing anybody is judged by; activating it changes
+  // how every later scan is scored, which a person decides (`changes_scoring`).
+  list_icps: ['low', 'read_only', 'Reads every ideal-customer profile: which is active, and the markets and size band each targets.'],
+  create_icp: ['medium', 'writes_internal_state', 'Creates a new, inactive ideal-customer profile for a market or size band. Nothing is scored under it until it is activated.'],
+  activate_icp: ['medium', 'changes_scoring', 'Switches the active ideal-customer profile, so every later scan is scored under it — a person decides that.'],
 } as const satisfies Readonly<Record<string, readonly [Risk, RiskRule, string]>>
 
 export type AgencyToolName = keyof typeof AGENCY_TOOL_RISK
@@ -293,13 +370,26 @@ export function classifyRisk(call: ToolCall): RiskVerdict {
     const row = (AGENCY_TOOL_RISK as Readonly<Record<string, readonly [Risk, RiskRule, string]>>)[
       parsed.bareName
     ]
-    if (row) return verdict(row[0], row[1], row[2])
-    return verdict(
-      'high',
-      'unregistered_tool',
-      'This agency tool has no risk classification, so it cannot be run.',
-      true,
-    )
+    if (!row) {
+      return verdict(
+        'high',
+        'unregistered_tool',
+        'This agency tool has no risk classification, so it cannot be run.',
+        true,
+      )
+    }
+    // A campaign set active releases what it holds — messages a person
+    // approved and then held by pausing it. That is lifting a pause,
+    // `resume_contact`'s rule, whatever else the same call changes; pausing,
+    // renaming and re-capping stay internal writes.
+    if (parsed.bareName === 'update_campaign' && call.input.status === 'active') {
+      return verdict(
+        'high',
+        'reopens_outreach',
+        'Sets a campaign active, so the messages it holds may go out — a person decides that.',
+      )
+    }
+    return verdict(row[0], row[1], row[2])
   }
 
   // 7. A connector added at runtime (§6). Usable, but with a human on every
@@ -320,4 +410,49 @@ export function classifyRisk(call: ToolCall): RiskVerdict {
     `${parsed.bareName} is not a tool this agent is allowed to use.`,
     true,
   )
+}
+
+/**
+ * Whether a classified call runs without a person deciding first.
+ *
+ * Reads, derived writes, and the agency's own INTERNAL writes run at once.
+ * Everything else raises an approval card.
+ *
+ * Internal writes used to raise a card too, and the operator decided against
+ * that (2026-10-06): an agent that has to ask before it adds a note, moves a
+ * deal or files a company cannot run the CRM, which is what chat is for. The
+ * line drawn is §2.4's own — "anything that leaves the building" — so it is
+ * drawn by RULE, never by tier:
+ *
+ *  - `writes_internal_state` runs at once. It changes this agency's own
+ *    records and nothing reaches anybody outside it. Two of those tools,
+ *    `pause_contact` and `add_suppression`, can only ever STOP outreach — the
+ *    conservative direction, and the one an agent should never be slowed in.
+ *  - `leaves_the_building` (`queue_touch`, `enrol_contacts`) and
+ *    `reopens_outreach` (`resume_contact`, and `update_campaign` setting a
+ *    campaign active) keep their card: the first drafts words for a person
+ *    outside, the second lifts a hold that may be the only thing keeping a
+ *    message from somebody who asked to stop — or, for a campaign, the hold a
+ *    person put on everything it had approved. Both are what
+ *    §2.1 and §2.4 exist for, and an operator's "control everything" is not
+ *    read as reaching them — that needs saying in so many words.
+ *  - `connector_unreviewed` keeps its card. A third-party server's tool can
+ *    send an email or post a message, and nobody here has read it.
+ *  - `delegation` keeps its card. It writes nothing itself (every tool a
+ *    subagent uses is classified on its own), but it is the one place a
+ *    budget runs away, and the API balance is prepaid and small.
+ *  - `changes_scoring` (`activate_icp`, 0021) keeps its card. It writes only
+ *    the agency's own records, but it changes how every LATER scan is judged
+ *    — and every company then needs a re-scan before its next proposal — so
+ *    the switch is a person's, like a campaign set active.
+ *
+ * Keyed on the rule rather than `risk !== 'high'` because the tier is a
+ * statement about danger and the rule is a statement about WHO is affected —
+ * delegation is medium and still waits, and a future medium rule must be a
+ * deliberate addition here rather than one that slips through. A refused
+ * verdict never runs, whatever its rule.
+ */
+export function runsWithoutApproval(v: RiskVerdict): boolean {
+  if (v.refuse) return false
+  return v.risk === 'low' || v.rule === 'writes_internal_state'
 }

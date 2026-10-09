@@ -43,6 +43,13 @@ export interface CandidateDecision {
    * "re-scan".
    */
   readonly evidenceSuperseded?: true
+  /**
+   * A `paused` refusal of a shared number's holder whose own pause stood:
+   * Resume refuses it until the number is recorded (`previewSend`'s
+   * `sharedNumberHold`, review round 10, [2]). Present only when true, and
+   * `approveBlock` says what lifts it — the number recorded first.
+   */
+  readonly sharedNumberHold?: true
 }
 
 /**
@@ -67,10 +74,16 @@ const SEND_NOW_WORDS = 'nothing stops it right now'
  */
 const SUPERSEDED_REASON = /^A newer scan of this company has reached the site since the scan these words quote\b/
 
-/** A `previewSend` decision in the words the card shows. */
-export function decisionView(d: PreviewDecision): CandidateDecision {
+/**
+ * A `previewSend` decision in the words the card shows. `facts` is the
+ * preview's own facts beside it — `SendPreviewFacts` is assignable — for
+ * the one fact the decision's code cannot carry: a pause Resume refuses
+ * until a shared number is recorded (review round 10, [2]).
+ */
+export function decisionView(d: PreviewDecision, facts?: { readonly sharedNumberHold?: boolean }): CandidateDecision {
   if (d.allowed) return { code: 'send_now', words: SEND_NOW_WORDS, humanCanResolve: true, reason: null }
   const view = { code: d.code, words: refusalWords(d.code), humanCanResolve: d.humanCanResolve, reason: d.reason }
+  if (d.code === 'paused' && facts?.sharedNumberHold === true) return { ...view, sharedNumberHold: true }
   return d.code === 'stale_evidence' && SUPERSEDED_REASON.test(d.reason) ? { ...view, evidenceSuperseded: true } : view
 }
 
@@ -135,6 +148,11 @@ export function candidateLine(decision: CandidateDecision | null): string {
  * them, and `approveDraft` refuses anyone else (`rendered_for_another`). So
  * neither the paused block nor the default one says "choose someone else"
  * there. Round 4, finding [22]. Without a channel the email words stand.
+ *
+ * A pause Resume refuses until a shared number is recorded
+ * (`sharedNumberHold`, review round 10, [2]) says so in the block itself:
+ * the person reading it is about to go and resume them, and Resume would
+ * answer 409 until the number is on /suppressions.
  */
 export function approveBlock(decision: CandidateDecision | null, channel?: string): string | null {
   if (decision === null || decision.humanCanResolve) return null
@@ -155,6 +173,7 @@ export function approveBlock(decision: CandidateDecision | null, channel?: strin
   if (decision.code === 'paused') {
     return (
       `Approving is pointless: ${decision.words}, and nobody may approve past a pause — the worker would refuse it. ` +
+      (decision.sharedNumberHold ? `${SHARED_NUMBER_HOLD_BLOCK} ` : '') +
       (onlyThem
         ? `The rule below says what lifts it; the draft can wait here until then. ${FILLED_FOR_ONE}`
         : 'The rule below says what lifts it; the draft can wait here until then, or choose someone else.')
@@ -189,6 +208,11 @@ export function approveBlock(decision: CandidateDecision | null, channel?: strin
 export const TEMPLATE_CHANNEL_NAMES: ReadonlySet<string> = new Set(['sms', 'whatsapp'])
 
 const FILLED_FOR_ONE = 'Its template was filled in for this one person, so it cannot go to anyone else.'
+
+/** What a shared number's holder waits for (review round 10, [2]). Never that they asked. */
+const SHARED_NUMBER_HOLD_BLOCK =
+  'A text from a number they share asked to stop and could not be recorded — they may not have sent it — so they ' +
+  'cannot be resumed until the number is recorded on /suppressions.'
 
 // ---------------------------------------------------------------------------
 // Which campaign the decisions were computed under
@@ -621,12 +645,37 @@ export function approveFootnote(noSenderNote: string | null, channel = 'email'):
 export function approvedMessage(channel: string, noSenderNote: string | null): string {
   if (isLinkedIn(channel)) return LINKEDIN_APPROVED
   if (channel === 'sms') return noSenderNote === null ? SMS_APPROVED : SMS_APPROVED_NO_WORKER
-  return noSenderNote === null
-    ? 'Approved. The worker will send it on its next pass — after checking the suppression list, ' +
-        'consent, quiet hours and the daily cap again. If it lands in quiet hours it waits for morning.'
-    : 'Approved, and queued. No worker is configured on this deployment, so it goes only if one runs against ' +
-        'this database elsewhere — and every rule is checked at that moment, not now.'
+  return noSenderNote === null ? EMAIL_APPROVED : EMAIL_APPROVED_NO_WORKER
 }
+
+/**
+ * The pop-up after Approve (2026-10-09): the card keeps `approvedMessage`
+ * whole; this is its gist, short enough to read in a toast, and it promises
+ * no more than the card does — approving is not sending, and nothing here
+ * says a worker will send it.
+ */
+export function approvedToast(channel: string, noSenderNote: string | null): string {
+  if (isLinkedIn(channel)) return 'Approved. It is now a step on /tasks for a person to send; nothing was sent.'
+  if (noSenderNote !== null) return 'Approved, and queued. No worker is configured here, so it goes only if one runs elsewhere.'
+  return channel === 'sms'
+    ? 'Approved. Every rule is checked again before it goes, the registered template included.'
+    : 'Approved. Every rule is checked again before it goes.'
+}
+
+/**
+ * A worker being configured (AGENT_URL) says where chat goes, not that
+ * anything sends email: the documented laptop worker is reached for chat
+ * and asked separately whether to send, defaulting to No (review round 15).
+ * So the card says what sends it, as the SMS card does, and where to look.
+ */
+export const EMAIL_APPROVED =
+  'Approved. It goes on the next pass of a worker that sends email — SMTP_HOST and MAIL_FROM on its host, ' +
+  'which this page cannot see; the dashboard’s worker line says whether yours does — after the suppression ' +
+  'list, consent, quiet hours and the daily cap are checked again. If it lands in quiet hours it waits for morning.'
+
+const EMAIL_APPROVED_NO_WORKER =
+  'Approved, and queued. No worker is configured on this deployment, so it goes only if one runs against ' +
+  'this database elsewhere — and every rule is checked at that moment, not now.'
 
 /**
  * `nothingWillSendNote()` above the queue — only while a draft on it is one
@@ -656,6 +705,29 @@ export function nextFocus(ids: readonly string[], current: string | null, key: s
   if (at === -1) return key === 'j' ? ids[0]! : ids[ids.length - 1]!
   const step = key === 'j' ? 1 : -1
   return ids[(at + step + ids.length) % ids.length]!
+}
+
+/**
+ * Editing a draft's words on /approvals (2026-10-08). The limits are
+ * `editDraft`'s (`DRAFT_SUBJECT_MAX`, `DRAFT_BODY_MAX` in @agency/db), restated
+ * for the browser and held equal by a test. SMS and WhatsApp are not
+ * editable: their words are a registered template filled for one person.
+ */
+export const EDIT_SUBJECT_MAX = 200
+export const EDIT_BODY_MAX = 4000
+export const EDITING_BLOCKS_APPROVAL = 'Save or cancel the edit first: approval is of the saved words.'
+
+/** Whether a draft on this channel may have its words edited here. */
+export function wordsEditable(channel: string): boolean {
+  return channel === 'email' || channel === 'linkedin'
+}
+
+/** The editor's line under the words: what saving does, and what it does not. */
+export function editNote(channel: string): string {
+  return channel === 'linkedin'
+    ? 'Saving changes the words a person will be handed on /tasks once this is approved. Nothing is sent by saving.'
+    : 'Saving changes the words; nothing is sent by saving. The send rules — and the evidence the words may quote, ' +
+        'dated from when the draft was first written — are checked again when it goes.'
 }
 
 export type Approvability = { readonly ok: true } | { readonly ok: false; readonly why: string }
@@ -734,10 +806,13 @@ export function approvability(card: {
   readonly contactId: string
   readonly campaignId: string
   readonly block: string | null
+  /** An edit of the words is open and unsaved: approval is of the SAVED words. */
+  readonly editing?: boolean
 }): Approvability {
   if (!card.canDecide) return { ok: false, why: 'Your role cannot decide approvals.' }
   if (card.settled) return { ok: false, why: 'This draft has already been decided.' }
   if (card.busy) return { ok: false, why: 'A decision on this draft is already on its way.' }
+  if (card.editing) return { ok: false, why: EDITING_BLOCKS_APPROVAL }
   if (!card.contactId || !card.campaignId) return { ok: false, why: 'Choose a person and a campaign first.' }
   if (card.block) return { ok: false, why: card.block }
   return { ok: true }

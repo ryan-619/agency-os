@@ -1,7 +1,10 @@
 import { NextResponse } from 'next/server'
 import { assertCan, can } from '@agency/core'
-import { appendAudit, campaignEditInput, readCampaign, updateCampaign, type AgencyDb, type CampaignUpdate } from '@agency/db/queries'
+import {
+  appendAudit, campaignEditInput, isUniqueViolation, readCampaign, updateCampaign, type AgencyDb, type CampaignUpdate,
+} from '@agency/db/queries'
 import { auth } from '@/auth'
+import { log } from '@/lib/logger'
 import { getDb } from '@/lib/db'
 
 /**
@@ -79,10 +82,25 @@ export async function PATCH(
   // the FORM loaded goes in the predicate too, for everybody.
   const mayToggle = can(principal, 'campaigns:set_auto_send')
   const { expectStatus, ...input } = parsed.data
-  const saved = await updateCampaign(db, user.orgId, id, input, {
-    autoSend: mayToggle ? null : current.autoSend,
-    status: expectStatus ?? null,
-  })
+  let saved: CampaignUpdate
+  try {
+    saved = await updateCampaign(db, user.orgId, id, input, {
+      autoSend: mayToggle ? null : current.autoSend,
+      status: expectStatus ?? null,
+    })
+  } catch (err) {
+    // A rename onto a name the org already uses is the one fault a person
+    // can fix; it was a 500. Anything else is logged by its class alone —
+    // drizzle's message quotes every bound value.
+    if (isUniqueViolation(err)) {
+      return NextResponse.json(
+        { error: `A campaign called "${input.name}" already exists. Nothing was saved.` },
+        { status: 409 },
+      )
+    }
+    log.error('campaign save failed', { error: err instanceof Error ? err.name : 'UnknownError' })
+    return NextResponse.json({ error: 'The campaign could not be saved. Nothing was saved; try again.' }, { status: 500 })
+  }
   if (!saved.ok) {
     if (saved.reason === 'not_found') return NextResponse.json({ error: 'No such campaign.' }, { status: 404 })
     return NextResponse.json({ error: refusedSave(saved) }, { status: 409 })

@@ -87,6 +87,9 @@ describe('the pipeline tools', () => {
       const rows = out.data as Array<{ domain: string; stage: string; nextAction: string | null }>
       expect(rows).toEqual([expect.objectContaining({ domain: 'rentman.io', stage: 'replied', nextAction: 'answer them' })])
       expect(out.summary).toContain('rentman.io')
+      // Only the summary reaches the model, and set_deal_owner names a deal by its id.
+      const deal = await openDealFor(db, orgId, companyId)
+      expect(out.summary).toContain(`deal ${deal!.id}`)
     })
 
     it('filters by stage', async () => {
@@ -111,7 +114,9 @@ describe('the pipeline tools', () => {
       const out = await run(updateDeal, { domain: 'rentman.io', stage: 'contacted', nextAction: 'follow up Thursday' })
       if (!out.ok) throw new Error(out.message)
       expect(out.data).toMatchObject({ stage: 'contacted', nextAction: 'follow up Thursday' })
-      expect((await openDealFor(db, orgId, companyId))!.stage).toBe('contacted')
+      const deal = await openDealFor(db, orgId, companyId)
+      expect(deal!.stage).toBe('contacted')
+      expect(out.summary).toContain(`(deal ${deal!.id})`)
     })
 
     it('moves an existing deal in either direction, because a person asked', async () => {
@@ -165,6 +170,8 @@ describe('the pipeline tools', () => {
       expect(out.data).toMatchObject({ domain: 'rentman.io', deal: 'created:meeting' })
       expect(out.summary).toMatch(/No invitation was sent/)
       const [meeting] = await db.select().from(schema.meetings)
+      // The three meeting tools name it by its id, and only the summary reaches the model.
+      expect(out.summary).toContain(`Recorded meeting ${meeting!.id} with rentman.io`)
       expect(meeting!.source).toBe('agent')
       expect(meeting!.contactId).not.toBeNull()
       expect(meeting!.endsAt!.getTime() - meeting!.startsAt.getTime()).toBe(30 * 60_000)
@@ -181,6 +188,11 @@ describe('the pipeline tools', () => {
 
     it.each([
       ['a time that is not an instant', { startsAt: 'Thursday at 2', timeZone: 'Europe/London' }],
+      // V8 rolls each of these to a day nobody typed (2 March, 1 May, the next day).
+      ['30 February', { startsAt: '2026-02-30T10:00:00Z', timeZone: 'Europe/London' }],
+      ['31 April', { startsAt: '2026-04-31T10:00:00+01:00', timeZone: 'Europe/London' }],
+      ['hour 24', { startsAt: '2026-04-30T24:00:00Z', timeZone: 'Europe/London' }],
+      ['a time with no offset', { startsAt: '2026-04-30T10:00:00', timeZone: 'Europe/London' }],
       ['a timezone it does not know', { startsAt: at, timeZone: 'Mars/Olympus' }],
     ])('refuses %s', async (_label, over) => {
       const out = await run(bookMeeting, { domain: 'rentman.io', ...over })

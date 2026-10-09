@@ -86,6 +86,7 @@ export default async function TasksPage({ searchParams }: { searchParams: Promis
     assigneeLabel: t.assigneeName ?? t.assigneeEmail,
     dueAt: t.dueAt ? t.dueAt.toISOString() : null,
     doneAt: t.doneAt ? t.doneAt.toISOString() : null,
+    outcome: t.outcome,
     overdue: tasksIsOverdue(t, now),
   })
   const members = team.map((u) => ({ id: u.id, label: u.name ?? u.email }))

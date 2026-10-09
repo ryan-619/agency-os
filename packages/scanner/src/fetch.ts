@@ -28,6 +28,7 @@ import { connect as tlsConnect, type PeerCertificate } from 'node:tls'
 import { gunzipSync, inflateRawSync } from 'node:zlib'
 import { ALL_PUBLIC_PATHS, type RawCapture, type RawResponse, type RawTls } from './types.js'
 import { isScannableHost, normaliseDomain } from './extract.js'
+import { publicOnlyLookup } from './address.js'
 
 const USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
@@ -249,6 +250,12 @@ export function redirectTarget(location: string, from: URL): URL {
   if (!isScannableHost(next.hostname)) {
     throw new RedirectRefused(`redirected to "${next.hostname}", which is not a public hostname`)
   }
+  // A company's site is served on the default port. A hop to any other port is
+  // refused, so a site cannot turn the scanner into a probe of somebody's
+  // ports (review, 2026-10-08) — what the page said is recorded as a failure.
+  if (next.port !== '') {
+    throw new RedirectRefused(`redirected to port ${next.port}, and the scanner requests only the default ports`)
+  }
   return next
 }
 
@@ -261,6 +268,8 @@ function once(url: URL, timeoutMs: number): Promise<IncomingMessage> {
       {
         method: 'GET',
         agent: https ? httpsAgent : httpAgent,
+        // Resolve, and refuse an address that is not public, at the moment of connecting (`address.ts`).
+        lookup: publicOnlyLookup,
         headers: {
           'user-agent': USER_AGENT,
           accept: 'text/html,application/xhtml+xml,text/plain,*/*',
@@ -332,7 +341,7 @@ function describe(err: unknown): string {
 /** Read the certificate the server presents. Never sends a request. */
 export function fetchTls(host: string, now: () => Date = () => new Date()): Promise<RawTls> {
   return new Promise((resolve) => {
-    const socket = tlsConnect({ host, port: 443, servername: host, timeout: 8000 }, () => {
+    const socket = tlsConnect({ host, port: 443, servername: host, timeout: 8000, lookup: publicOnlyLookup }, () => {
       try {
         const cert = socket.getPeerCertificate() as PeerCertificate & { issuer?: { O?: string } }
         const protocol = socket.getProtocol() ?? ''

@@ -1,11 +1,11 @@
 import { redirect } from 'next/navigation'
 import { sql } from 'drizzle-orm'
-import { can } from '@agency/core'
+import { NEEDS, can } from '@agency/core'
 import {
   COMPLIANCE_WINDOW_DAYS, auditResolveActors, auditSubjectsToCompanies, complianceAutoSendOffCold,
   complianceColdOptInTouches, complianceDisclosure, complianceDraftsOnStaleEvidence, complianceEvidenceFreshness,
   complianceOptOutsNotRecorded, complianceOptOutsWithoutSuppression, inboxUnhandledCount, listAudit, listDeals,
-  tasksCounts, type AgencyDb,
+  nightReportLatest, tasksCounts, todayActions, whatChanged, type AgencyDb,
 } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { AuditLog } from '@/components/audit/log'
@@ -19,6 +19,8 @@ import {
 import { getDb, schema } from '@/lib/db'
 import { deployment } from '@/lib/deployment'
 import { workerStatus } from '@/lib/worker-status'
+import { Coffee } from 'lucide-react'
+import { EmptyState } from '@/components/empty-state'
 
 /**
  * The dashboard: what needs a person, what just happened, and what this
@@ -124,8 +126,10 @@ export default async function Dashboard() {
   // reason the channels and cap are headed as the profile's DESCRIPTION — the
   // send path applies each campaign's own, and reads neither of these.
   const def = icp?.definition as
-    | { scoring?: { qualify_at?: number }; outreach?: { channels?: string[]; max_per_day?: number } }
+    | { scoring?: { qualify_at?: number }; outreach?: { channels?: string[]; max_per_day?: number }; signals?: Record<string, { why?: string }> }
     | undefined
+  // A changed signal is shown under the ICP's own words for it, as a finding is everywhere else.
+  const signalWords = (key: string): string => def?.signals?.[key]?.why ?? key
   const qualifyAt = def?.scoring?.qualify_at
   const channels = def?.outreach?.channels
   const dailyCap = def?.outreach?.max_per_day
@@ -133,7 +137,7 @@ export default async function Dashboard() {
   // that page reads it, so the counter and the list it opens agree.
   const { staleAfterDays } = readIcp(icp?.definition)
 
-  const [c, worker, unhandled, tasks, deals, freshness, compliance, feed, lastRescan] = await Promise.all([
+  const [c, worker, unhandled, tasks, deals, freshness, compliance, feed, lastRescan, today, night, changed] = await Promise.all([
     counts(user.orgId),
     workerStatus(db, now),
     inboxUnhandledCount(db, user.orgId),
@@ -143,7 +147,14 @@ export default async function Dashboard() {
     complianceMustBeZero(db, user.orgId, staleAfterDays, now),
     mayReadAudit ? listAudit(db, user.orgId, { limit: FEED_ROWS }) : Promise.resolve([]),
     listAudit(db, user.orgId, { limit: 1, actionPrefix: 'scan.cron_run' }),
+    todayActions(db, { orgId: user.orgId, userId: user.id, now }),
+    // The night shift's morning list (0025); a database before 0025 shows none rather than failing the page.
+    nightReportLatest(db, user.orgId).catch(() => null),
+    // What changed since the previous scan of each company (2026-10-09): a gap fixed or opened in the last week.
+    whatChanged(db, { orgId: user.orgId, now }).catch(() => []),
   ])
+  // Last night's, not last week's: a list a day and a half old is no longer this morning's.
+  const overnight = night && now.getTime() - night.at.getTime() <= 36 * 3_600_000 && night.top.length > 0 ? night : null
 
   const [companies, people] = await Promise.all([
     auditSubjectsToCompanies(db, user.orgId, feed),
@@ -210,6 +221,88 @@ export default async function Dashboard() {
           {status.at ? <> <When iso={status.at.toISOString()} /></> : null}
           {status.tail ? <span className="muted"> · {status.tail}</span> : null}
         </p>
+
+        <h2>Today’s top actions</h2>
+        {today.length > 0 ? (
+          <ol className="today">
+            {today.map((a) => (
+              <li key={a.id} className={a.kind === 'call' ? 'today-hot' : undefined}>
+                <a href={a.href}>{a.title}</a>
+                {a.at ? <span className="muted"> · <When iso={a.at.toISOString()} /></span> : null}
+                {a.detail ? <div className="muted today-detail">{a.detail}</div> : null}
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <EmptyState
+            icon={Coffee}
+            title="Nothing is due right now"
+            compact
+            actions={[
+              { href: '/chat', label: 'Ask Chat to find businesses' },
+              { href: '/pipeline', label: 'Look over the pipeline', secondary: true },
+            ]}
+          >
+            Ask Chat to find businesses that need what you sell, or look over the pipeline.
+          </EmptyState>
+        )}
+
+        {overnight ? (
+          <>
+            <h2>Found overnight</h2>
+            <p className="muted" style={{ fontSize: 13, margin: '0 0 8px' }}>
+              The night shift&apos;s best new finds{overnight.date ? ` (${overnight.date})` : ''}, by what they need and whether
+              they can be called — from {overnight.searches} saved {overnight.searches === 1 ? 'search' : 'searches'}, {overnight.added} new in
+              all. <a href="/settings/night">Night shift settings →</a>
+            </p>
+            <ol className="today">
+              {overnight.top.map((co) => {
+                const needs = (overnight.needs.get(co.id) ?? []).map((k) => NEEDS[k].label)
+                const facts = [
+                  co.googleCategory?.replace(/_/g, ' '),
+                  co.city,
+                  co.googleRating !== null ? `★${Number(co.googleRating).toFixed(1)}${co.googleReviewCount ? ` (${co.googleReviewCount})` : ''}` : null,
+                  co.phone ? 'phone on file' : null,
+                ].filter(Boolean)
+                return (
+                  <li key={co.id}>
+                    <a href={`/companies/${encodeURIComponent(co.domain)}`}>{co.name || co.domain}</a>
+                    {facts.length > 0 ? <span className="muted"> · {facts.join(' · ')}</span> : null}
+                    {needs.length > 0 ? <div className="muted today-detail">{needs.join(' · ')}</div> : null}
+                  </li>
+                )
+              })}
+            </ol>
+          </>
+        ) : null}
+
+        {changed.length > 0 ? (
+          <>
+            <h2>What changed</h2>
+            <p className="muted" style={{ fontSize: 13, margin: '0 0 8px' }}>
+              Companies whose latest scan differs from the one before, this week. A gap fixed means they are investing in
+              their site; a gap opened is a problem they can see for themselves — a dated reason to call. Only what the
+              latest scan observed may be quoted.
+            </p>
+            <ol className="today">
+              {changed.map((s) => (
+                <li key={`${s.company.id}-${s.at.toISOString()}`}>
+                  <a href={`/companies/${encodeURIComponent(s.company.domain)}`}>{s.company.name || s.company.domain}</a>
+                  <span className="muted">
+                    {' '}· <When iso={s.at.toISOString()} />
+                    {s.openDeal ? ' · open deal' : null}
+                    {s.taskId ? ' · task made' : null}
+                  </span>
+                  <div className="muted today-detail">
+                    {s.regressed.length > 0 ? `New gaps: ${s.regressed.map(signalWords).join('; ')}` : null}
+                    {s.regressed.length > 0 && s.fixed.length > 0 ? ' · ' : null}
+                    {s.fixed.length > 0 ? `Fixed: ${s.fixed.map(signalWords).join('; ')}` : null}
+                  </div>
+                </li>
+              ))}
+            </ol>
+          </>
+        ) : null}
 
         <h2>Needs a look</h2>
         {look.waiting.length > 0 ? (

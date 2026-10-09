@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { When } from '@/components/when'
+import { toast } from '../toast/toast'
 
 /**
  * Settings → Credentials (PROMPT.md §2.3).
@@ -68,6 +69,7 @@ export function CredentialsPanel({
         setErrors((e) => ({ ...e, [c.id]: body.error ?? 'That did not work.' }))
         return
       }
+      toast.success('Credential deleted.')
       router.refresh()
     } catch {
       setErrors((e) => ({ ...e, [c.id]: 'The request did not complete. Try again.' }))
@@ -186,6 +188,8 @@ export function CredentialsPanel({
                 onDone={(message) => {
                   setEditing(null)
                   setDone((d) => ({ ...d, [k.id]: message }))
+                  // The row's ok-line keeps the whole message: the connector is now disabled, and what to do next.
+                  toast.success(`Credential stored for ${k.name}.`)
                   router.refresh()
                 }}
               />

@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { describeApproval } from '@/lib/approval-card'
 import { When } from '@/components/when'
 import {
   emptyChat, parseFrame, reduceChat, withUserMessage,
@@ -27,9 +28,11 @@ import {
 export function ChatPanel({
   sessionId,
   agentAvailable,
+  agentMisconfigured,
   archived = false,
   canDecide,
   initialBlocks = [],
+  initialDraft = '',
 }: {
   /**
    * The thread this panel speaks in. The page renders the panel with
@@ -39,6 +42,12 @@ export function ChatPanel({
    */
   sessionId: string
   agentAvailable: boolean
+  /**
+   * Set when chat is off because AGENT_URL or AGENT_INTERNAL_TOKEN holds a
+   * value that cannot be used: the sentence naming which (agent-config.ts),
+   * never the value. "Not both set" would be false of it.
+   */
+  agentMisconfigured?: string
   /**
    * Hidden from the thread list. Read-only here, because a turn started in a
    * thread the list does not show is a conversation its owner cannot find
@@ -55,9 +64,18 @@ export function ChatPanel({
    * things that were no longer on screen.
    */
   initialBlocks?: readonly Block[]
+  /**
+   * Words a record page sent along ("Ask the assistant about this",
+   * 2026-10-09): in the composer when the thread opens, and nothing sent
+   * until the person presses Send.
+   */
+  initialDraft?: string
 }) {
   const [state, setState] = useState<ChatState>(() => ({ ...emptyChat, blocks: initialBlocks }))
-  const [draft, setDraft] = useState('')
+  const [draft, setDraft] = useState(initialDraft)
+  // "Think harder": the next message only. It runs on a stronger, dearer
+  // model, so it never stays on by itself.
+  const [deep, setDeep] = useState(false)
   const [stopping, setStopping] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
   const endRef = useRef<HTMLDivElement | null>(null)
@@ -69,7 +87,9 @@ export function ChatPanel({
   const send = useCallback(async () => {
     const text = draft.trim()
     if (!text || state.running) return
+    const thinkHarder = deep
     setDraft('')
+    setDeep(false)
     setStopping(false)
     setState((s) => withUserMessage({ ...s, running: true, endedBecause: null }, text))
 
@@ -81,7 +101,7 @@ export function ChatPanel({
       res = await fetch('/api/chat/turns', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ chatSessionId: sessionId, text }),
+        body: JSON.stringify({ chatSessionId: sessionId, text, ...(thinkHarder ? { deep: true } : {}) }),
         signal: ac.signal,
       })
     } catch {
@@ -102,7 +122,7 @@ export function ChatPanel({
             tone: 'error',
             code: 'internal',
             text: messageForRefusal(detail.error),
-            retryable: detail.error !== 'agent_not_configured',
+            retryable: !NOT_RETRYABLE.has(detail.error ?? ''),
           } satisfies NoticeBlock,
         ],
       }))
@@ -136,7 +156,7 @@ export function ChatPanel({
       setStopping(false)
       abortRef.current = null
     }
-  }, [draft, sessionId, state.running])
+  }, [deep, draft, sessionId, state.running])
 
   /**
    * Stop the TURN, not just this browser's view of it.
@@ -255,6 +275,14 @@ export function ChatPanel({
             <strong>This thread is archived.</strong> It is read-only while it is out of the list;
             put it back in the list to carry on the conversation.
           </div>
+        ) : agentMisconfigured !== undefined ? (
+          <div className="note">
+            <strong>Chat is off.</strong> {agentMisconfigured} Your threads still work: you can
+            start, rename and archive them now.
+            {state.blocks.length > 0 ? (
+              <> This conversation is shown above and is read-only until the value is corrected.</>
+            ) : null}
+          </div>
         ) : (
           <div className="note">
             <strong>No worker is connected.</strong> Chat needs the agent worker, which runs on an
@@ -277,8 +305,9 @@ export function ChatPanel({
         {state.blocks.length === 0 ? (
           <p className="muted" style={{ fontSize: 13.5 }}>
             Ask about the companies in the CRM — what is worth working, what a company&apos;s
-            posture looks like, what to say to them. The agent can read the CRM and scan public
-            pages. It cannot send anything.
+            posture looks like, what to say to them — or ask it to make a change. The agent can
+            read the CRM, scan public pages and update the team&apos;s records. It cannot send
+            anything.
           </p>
         ) : null}
         {state.blocks.map((b) => (
@@ -311,6 +340,17 @@ export function ChatPanel({
         )}
       </div>
 
+      <label className="chat-deep" htmlFor="chat-think-harder">
+        <input
+          id="chat-think-harder"
+          type="checkbox"
+          checked={deep}
+          disabled={state.running}
+          onChange={(e) => setDeep(e.target.checked)}
+        />
+        Think harder on this message — a stronger model, several times the cost
+      </label>
+
       {/* §8.1: "A team that cannot see cost will not trust the tool." */}
       <div className="chat-cost">
         {state.turnCostUsd ? <span>last answer ${trim(state.turnCostUsd)}</span> : null}
@@ -325,12 +365,19 @@ function trim(usd: string): string {
   return Number.isFinite(n) ? n.toFixed(n < 0.01 ? 4 : 2) : usd
 }
 
+/** Refusals a retry cannot change: a value in this deployment has to be. */
+const NOT_RETRYABLE: ReadonlySet<string> = new Set(['agent_not_configured', 'agent_misconfigured', 'agent_token_refused'])
+
 function messageForRefusal(code: string | undefined): string {
   switch (code) {
     case 'agent_not_configured':
       return 'The agent worker is not configured for this deployment.'
+    case 'agent_misconfigured':
+      return 'Chat is off: AGENT_URL or AGENT_INTERNAL_TOKEN in this deployment is not a usable value — Settings → Deployment says which. Everything else still works.'
     case 'agent_unreachable':
-      return 'The agent worker is not responding. Everything else still works.'
+      return 'The agent worker is not responding — the computer running it may be off or asleep, or its tunnel is down. Everything else still works.'
+    case 'agent_token_refused':
+      return 'The agent worker refused this site’s token: AGENT_INTERNAL_TOKEN here is not the one the worker was started with. Everything else still works.'
     case 'chat_disabled':
       return 'The agent worker is running but cannot reach a model: it has neither an API key nor a developer login. Everything else still works.'
     case 'runtime_halted':
@@ -424,7 +471,7 @@ function ApprovalCard({
         <strong>The agent wants to {block.explain.replace(/\.$/, '')}</strong>
         <span className="pill pill-risk">{block.risk} risk</span>
       </div>
-      <pre className="mono approval-payload">{JSON.stringify(block.payload, null, 2)}</pre>
+      <ApprovalReadingView toolName={block.toolName} payload={block.payload} />
 
       {pending ? (
         canDecide ? (
@@ -450,6 +497,40 @@ function ApprovalCard({
           {block.status === 'expired' ? '. Nothing was done.' : '.'}
         </p>
       )}
+    </div>
+  )
+}
+
+/**
+ * The payload as a person reads it (2026-10-09): a title, the message's
+ * words as a message, every other key as a fact — and the whole JSON a
+ * click away, because the reading is not the record.
+ */
+function ApprovalReadingView({ toolName, payload }: { toolName: string; payload: unknown }) {
+  const r = describeApproval(toolName, payload)
+  return (
+    <div className="approval-reading">
+      <div className="approval-title">{r.title}</div>
+      {r.message ? (
+        <div className="approval-message">
+          {r.message.subject ? <div className="approval-subject">{r.message.subject}</div> : null}
+          <pre>{r.message.body}</pre>
+        </div>
+      ) : null}
+      {r.facts.length > 0 ? (
+        <dl className="approval-facts">
+          {r.facts.map((f) => (
+            <div key={f.label}>
+              <dt>{f.label}</dt>
+              <dd>{f.value.includes('\n') ? <pre>{f.value}</pre> : f.value}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
+      <details className="approval-raw">
+        <summary>The exact payload, as the tool would receive it</summary>
+        <pre className="mono approval-payload">{JSON.stringify(payload, null, 2)}</pre>
+      </details>
     </div>
   )
 }

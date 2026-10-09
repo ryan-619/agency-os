@@ -17,6 +17,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { ALLOWED_AGENT_KEYS, buildAgents } from '../src/runtime/agents.js'
+import { PLAYBOOK_HEADER } from '../src/runtime/options.js'
 import type { AgentDefRow } from '@agency/db'
 
 const silent = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} }
@@ -135,6 +136,17 @@ describe('what it builds', () => {
 
   it('leaves a disabled definition out', () => {
     expect(buildAgents([row({ enabled: false })], silent).agents).toEqual({})
+  })
+
+  it('gives every helper the playbook under the main agent’s header, after its own prompt', () => {
+    const { agents } = buildAgents([row()], silent, 'We secure B2B SaaS apps.')
+    expect(agents['qualifier']!.prompt).toBe(
+      `You qualify companies from what their public pages actually show.\n\n${PLAYBOOK_HEADER}\nWe secure B2B SaaS apps.`,
+    )
+    // None written: the row's prompt exactly as stored.
+    expect(buildAgents([row()], silent, '').agents['qualifier']!.prompt).toBe(
+      'You qualify companies from what their public pages actually show.',
+    )
   })
 
   it('builds several, keyed by slug', () => {

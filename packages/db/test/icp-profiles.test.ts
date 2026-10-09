@@ -53,25 +53,24 @@ describe('icpProfilesList', () => {
   })
 
   /**
-   * The state `activeIcpProfile` resolves arbitrarily. Both rows come back,
-   * both marked active, so the page can say the scanner is choosing between
-   * them.
+   * Until 0021 two active rows were a state `activeIcpProfile` resolved
+   * arbitrarily, and this listed both so the page could say so. 0021's
+   * `icp_profiles_one_active_per_org` makes the state unstorable; the list
+   * still puts the active one first, then the rest by name.
    */
-  it('returns both of two active rows, active before inactive, then by name', async () => {
+  it('returns the active row first, then the rest by name — and a second active row cannot be stored', async () => {
     await db.insert(schema.icpProfiles).values([
       { orgId, name: 'b-inactive', definition: DEF, active: false },
       { orgId, name: 'z-active', definition: DEF, active: true },
       { orgId, name: 'a-inactive', definition: DEF, active: false },
-      { orgId, name: 'm-active', definition: DEF, active: true },
     ])
+    await expect(db.insert(schema.icpProfiles).values({ orgId, name: 'm-active', definition: DEF, active: true })).rejects.toThrow()
     const rows = await icpProfilesList(db, orgId)
     expect(rows.map((r) => [r.name, r.active])).toEqual([
-      ['m-active', true],
       ['z-active', true],
       ['a-inactive', false],
       ['b-inactive', false],
     ])
-    expect(rows.filter((r) => r.active)).toHaveLength(2)
   })
 
   it('hands back the definition as stored, for the page to parse', async () => {

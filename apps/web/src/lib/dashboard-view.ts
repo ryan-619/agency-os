@@ -73,7 +73,21 @@ export interface WorkerStatusLike {
    * absent reads as null.
    */
   readonly sms?: 'on' | 'off' | null
+  /**
+   * Whether the mailboxes accepted the worker's logins (`heartbeatMailLogin`):
+   * a `refused` one is said on the worker line, because approved email fails
+   * on it, or no reply is read. Optional, absent reads as null.
+   */
+  readonly smtpLogin?: 'unchecked' | 'ok' | 'refused' | 'unreachable' | null
+  readonly imapLogin?: 'unchecked' | 'ok' | 'refused' | 'unreachable' | null
 }
+
+/** The sending mailbox refused the worker's login: what the worker line says. */
+export const SMTP_LOGIN_REFUSED_WORDS =
+  'the mail server REFUSED the sending login — approved emails will fail until it is fixed where the worker runs (./tools/run-worker.sh --gmail)'
+/** The reply mailbox refused the worker's login. */
+export const IMAP_LOGIN_REFUSED_WORDS =
+  'the mailbox REFUSED the reply-reading login — replies are not being read until it is fixed where the worker runs (./tools/run-worker.sh --gmail)'
 
 /**
  * What the worker is called: its status, or `retired` — `heartbeatReportedStatus`
@@ -286,11 +300,21 @@ export function workerLine(w: WorkerStatusLike, now: Date): WorkerLine {
           : w.chat === 'disabled'
             ? 'chat off'
             : null
+      // A refused login outranks everything else on the line: the worker is
+      // live and the email it was approved to send will fail.
+      const smtpRefused = w.smtpLogin === 'refused'
+      const imapRefused = w.imapLogin === 'refused'
       return {
-        tone: 'ok',
+        tone: smtpRefused || imapRefused ? 'warn' : 'ok',
         lead: age === null ? 'Worker reporting in' : `Worker last seen ${elapsed(age)} ago`,
         at: null,
-        tail: join([doing ?? null, texts, chat]),
+        tail: join([
+          smtpRefused ? SMTP_LOGIN_REFUSED_WORDS : null,
+          imapRefused ? IMAP_LOGIN_REFUSED_WORDS : null,
+          doing ?? null,
+          texts,
+          chat,
+        ]),
       }
     }
     case 'silent':

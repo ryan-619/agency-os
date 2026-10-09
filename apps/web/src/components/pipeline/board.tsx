@@ -1,6 +1,8 @@
 'use client'
 
-import { useState, type DragEvent } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type DragEvent } from 'react'
+import { Flip, MOTION_OK, gsap } from '@/components/motion/gsap'
+import { toast } from '@/components/toast/toast'
 import { When } from '@/components/when'
 
 /**
@@ -16,6 +18,15 @@ import { When } from '@/components/when'
  * puts the card back with the sentence the route returned. Nothing on this
  * board is invented — the stage vocabulary is the database's, and the
  * card shows what the row says.
+ *
+ * Cards glide (2026-10-09): every card's place is recorded just before the
+ * board changes — a move, a move put back after a refusal, the owner
+ * filter — and each card then slides from where it was to where it is
+ * (GSAP Flip), so a card dropped on another column travels there and the
+ * cards it leaves and joins close up and make room. Once the server has the
+ * move, the card rings where it landed — a win with a burst of colour — and
+ * a pop-up says what happened. None of it moves for a visitor who asked for
+ * less motion; the board works the same either way.
  *
  * A card nobody has changed for longer than its stage allows is marked
  * `.rotten` and says "untouched for N days", and its column head counts
@@ -58,6 +69,8 @@ export interface DealCard {
   readonly untouched: { readonly days: number; readonly rotten: boolean; readonly threshold: number } | null
   /** Core's wording for a rotten card ("untouched for 12 days"); null otherwise. */
   readonly rottenLabel: string | null
+  /** Why the card needs a look (2026-10-09): `dealHealth`'s level and reasons; null when it is fine or closed. */
+  readonly health?: { readonly level: 'ok' | 'watch' | 'act'; readonly reasons: readonly string[] } | null
   readonly ownerUserId: string | null
   /** Resolved for display — null when nobody has taken it. */
   readonly ownerEmail: string | null
@@ -86,6 +99,43 @@ function endOfLocalDay(value: string): string | null {
   return Number.isFinite(end.getTime()) ? end.toISOString() : null
 }
 
+/** A burst of colour from a card that was just won. Decoration only, and only where motion is welcome. */
+function celebrate(card: HTMLElement): void {
+  if (!window.matchMedia(MOTION_OK).matches) return
+  const r = card.getBoundingClientRect()
+  const x = r.left + r.width / 2
+  const y = r.top + Math.min(r.height / 2, 40)
+  const colours = ['#22c55e', '#2b59e8', '#7c3aed', '#f59e0b', '#ec4899', '#14b8a6']
+  for (let i = 0; i < 28; i++) {
+    const bit = document.createElement('span')
+    bit.className = 'confetti'
+    bit.setAttribute('aria-hidden', 'true')
+    bit.style.left = `${x}px`
+    bit.style.top = `${y}px`
+    bit.style.background = colours[i % colours.length] ?? '#22c55e'
+    document.body.appendChild(bit)
+    const angle = (i / 28) * Math.PI * 2 + gsap.utils.random(-0.2, 0.2)
+    const reach = gsap.utils.random(60, 150)
+    gsap
+      .timeline({ onComplete: () => bit.remove() })
+      .to(bit, { x: Math.cos(angle) * reach, y: Math.sin(angle) * reach - 50, rotation: gsap.utils.random(-300, 300), duration: 0.75, ease: 'power3.out' })
+      .to(bit, { y: '+=110', opacity: 0, duration: 0.85, ease: 'power1.in' }, '-=0.2')
+  }
+}
+
+/** The card rings where it landed, in the accent — or in green for a win. */
+function ring(card: HTMLElement, won: boolean): void {
+  if (!window.matchMedia(MOTION_OK).matches) return
+  const token = getComputedStyle(document.documentElement).getPropertyValue(won ? '--ok' : '--accent').trim()
+  const [r, g, b] = gsap.utils.splitColor(token || '#2b59e8')
+  gsap.fromTo(
+    card,
+    // The card's own box-shadow transition is held off while GSAP draws the ring.
+    { boxShadow: `0 0 0 0px rgba(${r}, ${g}, ${b}, 0.6)`, transition: 'none' },
+    { boxShadow: `0 0 0 12px rgba(${r}, ${g}, ${b}, 0)`, duration: won ? 1.3 : 1.05, ease: 'power2.out', clearProps: 'boxShadow,transition' },
+  )
+}
+
 /** The bit before the @, which is what a person recognises on a small card. */
 function shortName(member: { name: string | null; email: string }): string {
   return member.name?.trim() || (member.email.split('@')[0] ?? member.email)
@@ -105,6 +155,18 @@ export function PipelineBoard({
 }) {
   const [deals, setDeals] = useState<readonly DealCard[]>(initial)
   const [over, setOver] = useState<Stage | null>(null)
+  /** The card being dragged, faded in its old place while its ghost travels. */
+  const [dragging, setDragging] = useState<string | null>(null)
+  /** A move the server has just accepted: the card rings where it landed. */
+  const [landed, setLanded] = useState<{ readonly id: string; readonly won: boolean; readonly at: number } | null>(null)
+  const board = useRef<HTMLDivElement>(null)
+  const flipFrom = useRef<Flip.FlipState | null>(null)
+
+  /** Where every card is now, so the next render can glide each one from here to where it lands. */
+  const capture = (): void => {
+    const el = board.current
+    if (el && window.matchMedia(MOTION_OK).matches) flipFrom.current = Flip.getState(el.querySelectorAll('.kcard'))
+  }
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   /** The card whose due-date input is open (one at a time), and what is typed in it. */
@@ -131,6 +193,29 @@ export function PipelineBoard({
    */
   const [ownerFilter, setOwnerFilter] = useState<string>('')
 
+  useLayoutEffect(() => {
+    const state = flipFrom.current
+    const el = board.current
+    flipFrom.current = null
+    if (!state || !el) return
+    Flip.from(state, {
+      targets: el.querySelectorAll('.kcard'),
+      duration: 0.62,
+      ease: 'power3.inOut',
+      prune: true,
+      toggleClass: 'flipping',
+      onEnter: (entering) => gsap.fromTo(entering, { opacity: 0, scale: 0.94 }, { opacity: 1, scale: 1, duration: 0.4, ease: 'power2.out' }),
+    })
+  }, [deals, ownerFilter])
+
+  useEffect(() => {
+    if (!landed) return
+    const card = board.current?.querySelector<HTMLElement>(`[data-deal="${CSS.escape(landed.id)}"]`)
+    if (!card) return
+    ring(card, landed.won)
+    if (landed.won) celebrate(card)
+  }, [landed])
+
   const assign = async (deal: DealCard, ownerUserId: string | null): Promise<void> => {
     setBusy(deal.id)
     setError(null)
@@ -146,6 +231,8 @@ export function PipelineBoard({
         return
       }
       const member = team.find((m) => m.id === body.ownerUserId)
+      const name = deal.companyName ?? deal.companyDomain
+      toast.success(member ? `${name} is ${shortName(member)}’s now.` : `${name} is unassigned now.`)
       setDeals((ds) =>
         ds.map((d) =>
           d.id === deal.id
@@ -180,6 +267,7 @@ export function PipelineBoard({
     setError(null)
     setBusy(deal.id)
     const before = deals
+    capture()
     setDeals((ds) => ds.map((d) => (d.id === deal.id ? { ...d, stage: to, lostReason } : d)))
     try {
       const res = await fetch(`/api/deals/${deal.id}`, {
@@ -189,12 +277,23 @@ export function PipelineBoard({
       })
       const body = (await res.json().catch(() => ({}))) as { error?: string; closedAt?: string | null }
       if (!res.ok) {
+        capture()
         setDeals(before)
         setError(body.error ?? 'That move was refused.')
         return
       }
       setDeals((ds) => ds.map((d) => (d.id === deal.id ? { ...touched(d, to), closedAt: body.closedAt ?? null } : d)))
+      setLanded({ id: deal.id, won: to === 'won', at: Date.now() })
+      const name = deal.companyName ?? deal.companyDomain
+      toast.success(
+        to === 'won'
+          ? `${name} won. The deal is closed.`
+          : to === 'lost'
+            ? `${name} moved to Lost, with the reason recorded.`
+            : `${name} moved to ${LABEL[to]}.`,
+      )
     } catch {
+      capture()
       setDeals(before)
       setError('The request did not complete. The card is back where it was.')
     } finally {
@@ -219,6 +318,7 @@ export function PipelineBoard({
         return
       }
       setDeals((ds) => ds.map((d) => (d.id === deal.id ? { ...touched(d), nextAction: body.nextAction ?? null } : d)))
+      toast.success(body.nextAction ? 'Next action saved.' : 'Next action cleared.')
     } catch {
       setError('The request did not complete.')
     } finally {
@@ -251,6 +351,7 @@ export function PipelineBoard({
         ),
       )
       setDating(null)
+      toast.success(body.nextActionAt ? 'Due date set.' : 'Due date cleared.')
     } catch {
       setError('The request did not complete.')
     } finally {
@@ -261,10 +362,13 @@ export function PipelineBoard({
   const onDragStart = (e: DragEvent<HTMLElement>, deal: DealCard): void => {
     e.dataTransfer.setData('text/plain', deal.id)
     e.dataTransfer.effectAllowed = 'move'
+    // A frame later, so the ghost the browser drags is the card as it was, not faded.
+    requestAnimationFrame(() => setDragging(deal.id))
   }
   const onDrop = (e: DragEvent<HTMLElement>, to: Stage): void => {
     e.preventDefault()
     setOver(null)
+    setDragging(null)
     const id = e.dataTransfer.getData('text/plain')
     const deal = deals.find((d) => d.id === id)
     if (deal) void move(deal, to)
@@ -279,7 +383,10 @@ export function PipelineBoard({
           <select
             id="owner-filter"
             value={ownerFilter}
-            onChange={(e) => setOwnerFilter(e.target.value)}
+            onChange={(e) => {
+              capture()
+              setOwnerFilter(e.target.value)
+            }}
           >
             <option value="">everyone</option>
             {/* The pile worth having: a deal nobody has taken is the failure
@@ -293,7 +400,7 @@ export function PipelineBoard({
           </select>
         </div>
       ) : null}
-      <div className="board" data-testid="board">
+      <div className="board" data-testid="board" ref={board}>
         {STAGES.map((stage) => {
           const cards = deals.filter(
             (d) =>
@@ -337,10 +444,12 @@ export function PipelineBoard({
               {cards.map((deal) => (
                 <article
                   key={deal.id}
-                  className={`kcard${deal.untouched?.rotten ? ' rotten' : ''}${busy === deal.id ? ' busy' : ''}`}
+                  className={`kcard${deal.untouched?.rotten ? ' rotten' : ''}${busy === deal.id ? ' busy' : ''}${dragging === deal.id ? ' dragging' : ''}`}
                   draggable={canWrite}
                   onDragStart={(e) => onDragStart(e, deal)}
+                  onDragEnd={() => setDragging(null)}
                   data-deal={deal.id}
+                  data-flip-id={deal.id}
                 >
                   <a href={`/companies/${encodeURIComponent(deal.companyDomain)}`} className="kcard-name">
                     {deal.companyName ?? deal.companyDomain}
@@ -352,7 +461,13 @@ export function PipelineBoard({
                     <div className="kcard-next muted">no next action</div>
                   ) : null}
                   {deal.lostReason ? <div className="kcard-next muted">lost: {deal.lostReason}</div> : null}
-                  {deal.untouched?.rotten && deal.rottenLabel ? (
+                  {deal.health ? (
+                    <div className={`kcard-health kcard-health-${deal.health.level}`} title={deal.health.reasons.join(' · ')}>
+                      {deal.health.reasons[0]}
+                      {deal.health.reasons.length > 1 ? <span className="muted"> +{deal.health.reasons.length - 1}</span> : null}
+                    </div>
+                  ) : null}
+                  {deal.untouched?.rotten && deal.rottenLabel && !deal.health ? (
                     <div
                       className="kcard-next"
                       style={{ color: 'var(--warn)' }}

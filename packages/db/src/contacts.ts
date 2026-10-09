@@ -12,11 +12,41 @@
  */
 import { and, asc, eq, sql } from 'drizzle-orm'
 import { z } from 'zod'
-import { normaliseEmail } from '@agency/core'
+import { normaliseEmail, normaliseLinkedIn, normalisePhone } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 
 export type ContactRow = typeof schema.contacts.$inferSelect
+
+/**
+ * The two sentences an address that cannot be stored is refused with, on
+ * every writer of a contact: `createContact`, `contactsUpdate` and the
+ * routes in front of them. One wording, because a person who meets the same
+ * refusal on the form and in chat should read the same thing.
+ */
+export function phoneNotInternational(raw: string): string {
+  return (
+    `"${raw}" is not a number in international form. Include the country code, like ` +
+    '+1 415 555 0100 — without one it cannot be matched against an opt-out.'
+  )
+}
+
+export function linkedinUnreadable(raw: string): string {
+  return (
+    `"${raw}" could not be read as a LinkedIn profile. Paste the full URL, like ` +
+    'linkedin.com/in/jane-doe — a bare handle does not say whether it is a person or a company.'
+  )
+}
+
+/**
+ * Whether a LinkedIn URL can be stored on a contact: one `normaliseLinkedIn`
+ * reads, as an edit requires. The form's route asks it before
+ * `createContact`; the CSV import keeps its own rule (it stores the URL as
+ * the file had it), so this is not in `createContact` itself.
+ */
+export function linkedinIsReadable(raw: string): boolean {
+  return normaliseLinkedIn(raw) !== null
+}
 
 /** Postgres's unique_violation, wherever drizzle wrapped it. */
 function isUniqueViolation(err: unknown): boolean {
@@ -122,6 +152,14 @@ export async function createContact(
   if (!email && !input.phone && !input.linkedinUrl) {
     return { ok: false, message: 'A contact needs at least one way to reach them.' }
   }
+  // Stored as E.164, as an edit stores it (§1): a number in any other form
+  // matches no suppression key and no text sent back, so a STOP from it would
+  // find nobody. The CSV import has already normalised it, or dropped it.
+  let phone: string | null = null
+  if (input.phone) {
+    phone = normalisePhone(input.phone)
+    if (!phone) return { ok: false, message: phoneNotInternational(input.phone) }
+  }
 
   const company = await db
     .select({ id: schema.companies.id })
@@ -153,7 +191,7 @@ export async function createContact(
       lastName: input.lastName || null,
       title: input.title || null,
       email,
-      phone: input.phone || null,
+      phone,
       linkedinUrl: input.linkedinUrl || null,
       timeZone: input.timeZone || null,
       source: input.source,

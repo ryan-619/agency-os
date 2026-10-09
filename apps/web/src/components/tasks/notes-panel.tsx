@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { When } from '@/components/when'
+import { toast } from '../toast/toast'
 
 /**
  * Notes on a company, as the company page shows them: pinned first, each
@@ -74,16 +75,22 @@ export function NotesPanel({
       method: 'POST',
       body: JSON.stringify({ companyId, contactId: contactId || null, body }),
     })
-    if (ok) window.location.reload()
+    if (!ok) return
+    toast.success('Note added.')
+    window.location.reload()
   }
 
   const pin = async (id: string, pinned: boolean): Promise<void> => {
-    if (await call(`/api/notes/${id}`, { method: 'PATCH', body: JSON.stringify({ pinned }) })) window.location.reload()
+    if (!(await call(`/api/notes/${id}`, { method: 'PATCH', body: JSON.stringify({ pinned }) }))) return
+    toast.success(pinned ? 'Note pinned.' : 'Note unpinned.')
+    window.location.reload()
   }
 
   const remove = async (id: string): Promise<void> => {
     if (!window.confirm('Delete this note? It cannot be brought back.')) return
-    if (await call(`/api/notes/${id}`, { method: 'DELETE' })) window.location.reload()
+    if (!(await call(`/api/notes/${id}`, { method: 'DELETE' }))) return
+    toast.success('Note deleted.')
+    window.location.reload()
   }
 
   const used = charCount(body)

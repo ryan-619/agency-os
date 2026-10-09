@@ -17,6 +17,8 @@ import {
   answerIsLive, answerSchema, answerStateWords, answerSubject, firstIssue, groupInbox, inboxActionSchema,
   inboxDeploymentNotes, inboxGroupOf, personName,
 } from '../src/lib/inbox-view'
+import { optedOutNote, optedOutWarning } from '../src/components/inbox/opted-out'
+import { answerComposerNote, colleagueHeadline, resumedLine } from '../src/components/inbox/sender'
 
 const BARE: Deployment = {
   worker: false, mailIsLocalSink: false, inbound: 'none', cron: false, slack: false, unsubscribe: false,
@@ -93,6 +95,126 @@ describe('reclassifying (§2.1: opted_out is the reader’s alone)', () => {
   it('tells a person the choice is missing on purpose', () => {
     expect(RECLASSIFY_HINT).toBe('an opt-out is decided by the person’s own words, never here.')
     expect(OPTED_OUT_NOTE).toBe('asked to stop — do not answer. The suppression row is what enforces it.')
+  })
+})
+
+/**
+ * Review round 8, [8]. A colleague on the thread replied all "please remove
+ * me", and the reply was filed under the contact our message went to. The
+ * row read "Priya Shah asked to stop — do not answer", and its warning told
+ * a person to add a suppression for "this person" — which suppressing
+ * PRIYA's address satisfied, while the sender stayed unrecorded.
+ */
+describe('a reply that asked to stop, and whose it was', () => {
+  const own = { fromIsContact: true, from: 'priya@rentman.io', contactName: 'Priya Shah', suppressed: true }
+  const colleague = { fromIsContact: false, from: 'sam@rentman.io', contactName: 'Priya Shah', suppressed: true }
+
+  it('words the contact’s own stop exactly as before', () => {
+    expect(optedOutNote(own)).toBe(`Priya Shah ${OPTED_OUT_NOTE}`)
+    expect(optedOutWarning(own)).toBeNull()
+    expect(optedOutWarning({ ...own, suppressed: false })).toBe(
+      'This reply asked to stop, but no suppression row matches this person. Add one on the suppressions page — ' +
+        'until then nothing but the pause stands between them and the next message.',
+    )
+    expect(optedOutNote({ ...own, contactName: null })).toBe(`This person ${OPTED_OUT_NOTE}`)
+  })
+
+  it('never says the contact asked to stop when somebody else on the thread did', () => {
+    const note = optedOutNote(colleague)
+    expect(note).not.toContain('Priya Shah asked to stop')
+    expect(note).toBe(
+      'A reply from another address on this thread (sam@rentman.io) asked to stop — do not answer it. Priya Shah did ' +
+        'not ask, and is not treated as the one who asked; the address on the suppression list must be the one the ' +
+        'reply came from.',
+    )
+    expect(optedOutWarning(colleague)).toBeNull()
+  })
+
+  it('sends a person to record the sender’s address, never the contact’s', () => {
+    const warning = optedOutWarning({ ...colleague, suppressed: false })
+    expect(warning).toBe(
+      'This reply asked to stop, but no suppression row matches the address it came from (sam@rentman.io), which is ' +
+        'not Priya Shah’s. Record THAT address on the suppressions page — never Priya Shah’s: recording theirs does ' +
+        'not record this opt-out. Until it is recorded, Priya Shah cannot be resumed or answered.',
+    )
+    expect(warning).not.toContain('matches this person')
+  })
+
+  it('is fed by the page from the row, never worked out on the client', () => {
+    const page = readFileSync(fileURLToPath(new URL('../src/app/inbox/page.tsx', import.meta.url)), 'utf8')
+    expect(page).toContain('fromIsContact: r.fromIsContact')
+    const queue = readFileSync(fileURLToPath(new URL('../src/components/inbox/queue.tsx', import.meta.url)), 'utf8')
+    expect(queue).toContain('optedOutNote(stopOf(row))')
+    expect(queue).toContain('optedOutWarning(stopOf(row))')
+    expect(queue).not.toContain('OPTED_OUT_NOTE')
+  })
+})
+
+/**
+ * Review round 9 [13]: a colleague's reply that is not a stop was headlined
+ * under the contact's name ("Priya Shah <sam@rentman.io>"), and the composer
+ * said "Drafting resumes Priya Shah: their reply paused them" — while it was
+ * Sam's reply that paused Priya, and the answer is addressed to Priya's
+ * address on file, not to Sam. The Slack notice already said "from somebody
+ * else on the thread".
+ */
+describe('a reply from somebody else on the thread', () => {
+  const own = { fromIsContact: true, from: 'priya@rentman.io', contactName: 'Priya Shah', contactEmail: 'priya@rentman.io' }
+  const colleague = { fromIsContact: false, from: 'sam@rentman.io', contactName: 'Priya Shah', contactEmail: 'priya@rentman.io' }
+  const queue = readFileSync(fileURLToPath(new URL('../src/components/inbox/queue.tsx', import.meta.url)), 'utf8')
+    .replace(/\s+/g, ' ')
+
+  it('is headlined under its sender, filed under the contact', () => {
+    expect(colleagueHeadline(colleague)).toEqual({
+      sender: 'sam@rentman.io',
+      note: 'another address on this thread, filed under Priya Shah',
+    })
+    expect(colleagueHeadline({ ...colleague, contactName: null })?.note).toBe(
+      'another address on this thread, filed under a contact no longer in the CRM',
+    )
+  })
+
+  it('leaves the contact’s own reply headlined as before', () => {
+    expect(colleagueHeadline(own)).toBeNull()
+    // No sender to headline: nothing to say about whose it was.
+    expect(colleagueHeadline({ ...colleague, from: null })).toBeNull()
+  })
+
+  it('says the answer goes to the contact’s address on file, not to the sender, and that this reply paused them', () => {
+    const note = answerComposerNote(colleague)
+    expect(note).toBe(
+      'This answer goes to Priya Shah’s address on file (priya@rentman.io), not to sam@rentman.io, the address this ' +
+        'reply came from. Drafting resumes Priya Shah: this reply, filed under them, paused them in every campaign, ' +
+        'and an approved answer to a paused person is refused. If the draft is denied, or the answer fails or is ' +
+        'refused when it would be sent, the pause this reply caused goes back on — unless somebody resumes them ' +
+        'before then, or another answer to them is still waiting.',
+    )
+    expect(note).not.toContain('their reply paused them')
+    expect(answerComposerNote({ ...colleague, contactEmail: null })).toMatch(
+      /^This answer goes to Priya Shah’s address on file, not to sam@rentman\.io, the address this reply came from\./,
+    )
+  })
+
+  it('says, once drafted, that the reply filed under them — not theirs — had paused them', () => {
+    expect(resumedLine(colleague)).toBe('Priya Shah is resumed — the reply filed under them had paused them in every campaign.')
+    expect(resumedLine(own)).toBe('Priya Shah is resumed — their reply had paused them in every campaign.')
+  })
+
+  it('is fed from the row by the queue, for the headline, the composer and the drafted line', () => {
+    expect(queue).toContain('const colleague = colleagueHeadline(senderOf(row))')
+    expect(queue).toContain(
+      '{colleague ? ( <> <strong>{colleague.sender}</strong> <span className="muted">— {colleague.note}</span> </> ) : (',
+    )
+    expect(queue).toContain('{answerComposerNote(senderOf(row))}')
+    expect(queue).toContain('lines.push(resumedLine(senderOf(row)))')
+    expect(queue).toContain('contactEmail: row.contact?.email ?? null')
+    expect(queue).not.toContain('their reply paused them in every campaign')
+  })
+
+  /** What the composer says is true: an answer is addressed through the contact, never the reply's From. */
+  it('is right about where the answer goes', () => {
+    const outreach = readFileSync(fileURLToPath(new URL('../../../packages/db/src/outreach.ts', import.meta.url)), 'utf8')
+    expect(outreach).toContain('const recipient = recipientFor(channel, row.contact)')
   })
 })
 
@@ -207,12 +329,18 @@ describe('personName', () => {
 describe('what the answer composer says about a deny', () => {
   const src = readFileSync(fileURLToPath(new URL('../src/components/inbox/queue.tsx', import.meta.url)), 'utf8')
     .replace(/\s+/g, ' ')
+  const own = { fromIsContact: true, from: 'priya@rentman.io', contactName: 'Priya Shah', contactEmail: 'priya@rentman.io' }
 
   it('says the pause their reply caused goes back on, and when it does not', () => {
     expect(src).not.toContain('pause them again here')
-    expect(src).toContain(
-      'If the draft is denied, or the answer fails or is refused when it would be sent, the pause their reply ' +
-        'caused goes back on — unless somebody resumes them before then, or another answer to them is still waiting.',
+    expect(answerComposerNote(own)).not.toContain('pause them again here')
+    // Worded by sender.ts since review round 9, and rendered by the composer.
+    expect(src).toContain('{answerComposerNote(senderOf(row))}')
+    expect(answerComposerNote(own)).toBe(
+      'Drafting resumes Priya Shah: their reply paused them in every campaign, and an approved answer to a paused ' +
+        'person is refused. If the draft is denied, or the answer fails or is refused when it would be sent, the ' +
+        'pause their reply caused goes back on — unless somebody resumes them before then, or another answer to ' +
+        'them is still waiting.',
     )
   })
 

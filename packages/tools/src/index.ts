@@ -13,6 +13,24 @@ export { getScanHistory, getEvidenceChanges, getStaleCompanies } from './evidenc
 export { getReplies, classifyReply } from './replies.js'
 export { getPipelineMetrics, getCompanyTimeline, getComplianceSummary, searchCrm } from './reporting.js'
 export { addNote, createTask, listTasks } from './tasks.js'
+export { listContacts, addCompany, updateCompany, importCompanies, addContact, updateContact, pauseContact, resumeContact, addSuppression } from './records.js'
+export { listCampaigns, createCampaign, updateCampaign, enrolContacts, listDrafts, getDraft, editDraftTool } from './campaigns.js'
+export { generateProposalTool, getProposal, listMeetings, rescheduleMeetingTool, cancelMeetingTool, recordMeetingOutcome, setDealOwnerTool, completeTask } from './proposals.js'
+export { workerStatus, recentErrors, queueStatus, rescanStale } from './ops.js'
+export { listIcps, createIcp, activateIcp } from './profiles.js'
+export {
+  findBusinesses, addBusinessesTool, auditWebsite, makeAuditWebsite, getOpportunities, listServices, priceWords,
+  forgetListings, forgetRunningAudits, LISTING_KEEP_MS, PAGESPEED_WORST_MS,
+} from './opportunities.js'
+export { createQuote, getQuote, updateQuote, listQuotes } from './quotes.js'
+export { createShareLink, SHARE_PATHS } from './share.js'
+export { setCampaignSteps } from './sequences.js'
+export { runNightShift, type NightRunResult } from './night.js'
+export { getNightFinds } from './night-read.js'
+export { getEvidenceSignals } from './signals.js'
+export { getResearch, recordResearch } from './research.js'
+export { getWhatsWorking } from './insights.js'
+export { businessFromListing, placesSearchesToday } from './opportunities.js'
 
 import { AGENCY_TOOL_NAMES } from '@agency/core'
 import type { AgencyToolSpec } from './spec.js'
@@ -24,6 +42,19 @@ import { getScanHistory, getEvidenceChanges, getStaleCompanies } from './evidenc
 import { getReplies, classifyReply } from './replies.js'
 import { getPipelineMetrics, getCompanyTimeline, getComplianceSummary, searchCrm } from './reporting.js'
 import { addNote, createTask, listTasks } from './tasks.js'
+import { listContacts, addCompany, updateCompany, importCompanies, addContact, updateContact, pauseContact, resumeContact, addSuppression } from './records.js'
+import { listCampaigns, createCampaign, updateCampaign, enrolContacts, listDrafts, getDraft, editDraftTool } from './campaigns.js'
+import { generateProposalTool, getProposal, listMeetings, rescheduleMeetingTool, cancelMeetingTool, recordMeetingOutcome, setDealOwnerTool, completeTask } from './proposals.js'
+import { workerStatus, recentErrors, queueStatus, rescanStale } from './ops.js'
+import { listIcps, createIcp, activateIcp } from './profiles.js'
+import { findBusinesses, addBusinessesTool, auditWebsite, getOpportunities, listServices } from './opportunities.js'
+import { createQuote, getQuote, updateQuote, listQuotes } from './quotes.js'
+import { createShareLink } from './share.js'
+import { setCampaignSteps } from './sequences.js'
+import { getNightFinds } from './night-read.js'
+import { getEvidenceSignals } from './signals.js'
+import { getResearch, recordResearch } from './research.js'
+import { getWhatsWorking } from './insights.js'
 
 /**
  * Every tool the `agency` MCP server exposes.
@@ -62,6 +93,53 @@ export const AGENCY_TOOLS: readonly AgencyToolSpec[] = [
   addNote,
   createTask,
   listTasks,
+  listContacts,
+  addCompany,
+  updateCompany,
+  importCompanies,
+  addContact,
+  updateContact,
+  pauseContact,
+  resumeContact,
+  addSuppression,
+  listCampaigns,
+  createCampaign,
+  updateCampaign,
+  enrolContacts,
+  listDrafts,
+  getDraft,
+  editDraftTool,
+  generateProposalTool,
+  getProposal,
+  listMeetings,
+  rescheduleMeetingTool,
+  cancelMeetingTool,
+  recordMeetingOutcome,
+  setDealOwnerTool,
+  completeTask,
+  workerStatus,
+  recentErrors,
+  queueStatus,
+  rescanStale,
+  listIcps,
+  createIcp,
+  activateIcp,
+  findBusinesses,
+  addBusinessesTool,
+  auditWebsite,
+  getOpportunities,
+  listServices,
+  createQuote,
+  getQuote,
+  updateQuote,
+  listQuotes,
+  createShareLink,
+  setCampaignSteps,
+  getNightFinds,
+  getEvidenceSignals,
+  recordResearch,
+  getResearch,
+  getWhatsWorking,
 ] as unknown as readonly AgencyToolSpec[]
 
 export { AGENCY_TOOL_NAMES }

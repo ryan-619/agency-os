@@ -48,13 +48,17 @@ describe('the agent HTTP surface', () => {
   const probed: string[] = []
   let nextTurn: TurnHandle = fakeTurn([event(1), event(2, { kind: 'turn_finished', reason: 'success', sdkSessionId: 's' } as never)])
   let startResult: Awaited<ReturnType<AgentHttpDeps['startTurn']>> | null = null
+  const started: Parameters<AgentHttpDeps['startTurn']>[0][] = []
 
   beforeAll(async () => {
     deps = {
       port: 0,
       token: TOKEN,
       log: silent,
-      startTurn: async () => startResult ?? { ok: true, turn: nextTurn },
+      startTurn: async (req) => {
+        started.push(req)
+        return startResult ?? { ok: true, turn: nextTurn }
+      },
       interrupt: (id) => {
         interrupted.push(id)
         return true
@@ -123,6 +127,29 @@ describe('the agent HTTP surface', () => {
     it('rejects a request with no text', async () => {
       const res = await post('/internal/turns', { chatSessionId: 's', userId: 'u', text: '   ' })
       expect(res.status).toBe(400)
+    })
+
+    /**
+     * "Think harder" runs one turn on a dearer model, so only an exact `true`
+     * asks for it: a string, a 1 or anything else is an ordinary turn.
+     */
+    it('asks for the stronger model only for an exact true', async () => {
+      started.length = 0
+      for (const deep of [true, 'true', 1, null, undefined]) {
+        const res = await post('/internal/turns', { chatSessionId: 's', userId: 'u', text: 'hi', deep })
+        expect(res.status).toBe(200)
+        await res.text()
+      }
+      expect(started.map((r) => r.deep)).toEqual([true, false, false, false, false])
+    })
+
+    it('never takes an unattended turn from a request: only the worker’s own brief starts one', async () => {
+      started.length = 0
+      const res = await post('/internal/turns', { chatSessionId: 's', userId: 'u', text: 'hi', unattended: true })
+      expect(res.status).toBe(200)
+      await res.text()
+      expect(started).toHaveLength(1)
+      expect(started[0]!.unattended).toBeUndefined()
     })
 
     it('rejects a body that is not the right shape', async () => {

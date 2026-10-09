@@ -68,6 +68,26 @@ const PUBLIC = [
   '/unsubscribe',
   '/p',
   '/api/p',
+  // A quote's link (0023): the same rules as a proposal's. `/q` is a whole
+  // segment, so `/quotes` stays behind the gate.
+  '/q',
+  '/api/q',
+  // A business's own audit page and its website preview (2026-10-08): read-only
+  // pages behind the same kind of link. Whole segments, so nothing else matches.
+  '/r',
+  '/w',
+  // Where those pages' own script counts a view (`lib/link-view.ts`); the token is the credential.
+  '/api/l',
+  // The free website check (2026-10-08): a stranger's form, under the agency's booking slug, like /book.
+  '/check',
+  '/api/check',
+  // The app's manifest and icons (2026-10-08): a browser fetches them without the session cookie.
+  '/manifest.webmanifest',
+  '/icon.svg',
+  '/apple-icon.png',
+  '/icon-192.png',
+  '/icon-512.png',
+  '/maskable-512.png',
 ]
 
 export default function proxy(req: NextRequest): NextResponse {

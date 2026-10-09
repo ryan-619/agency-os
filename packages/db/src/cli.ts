@@ -16,6 +16,7 @@
  * is never printed, not even on error (PROMPT.md §2.3).
  */
 import { Client } from 'pg'
+import { pgConnectionString } from './connection-string.js'
 import { pgDriver } from './driver.js'
 import { MIGRATIONS_DIR } from './paths.js'
 import {
@@ -45,7 +46,7 @@ async function main(): Promise<void> {
 
   // A Client, not a Pool — the migrator issues BEGIN/COMMIT as separate
   // statements and they must land on one connection.
-  const client = new Client({ connectionString: url })
+  const client = new Client({ connectionString: pgConnectionString(url) })
   await client.connect()
   const driver = pgDriver(client)
   const log = (m: string) => console.log(`  ${m}`)
