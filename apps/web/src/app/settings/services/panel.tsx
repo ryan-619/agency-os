@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { toast } from '../../../components/toast/toast'
 import { PRICE_UNITS, priceLine } from '@/lib/service-price'
 
 /**
@@ -162,6 +163,7 @@ export function ServicesPanel({
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       })
       if (res.ok) {
+        toast.afterReload(method === 'DELETE' ? 'Service removed.' : method === 'POST' ? 'Added to the catalogue.' : 'Service saved.')
         window.location.reload()
         return true
       }

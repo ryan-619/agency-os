@@ -1,7 +1,9 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { toast } from '../../../components/toast/toast'
 import { knownTimeZones } from '@/lib/wall-clock'
+import { ToastOn } from '../../../components/toast/toast-on'
 
 export interface NightSearchView {
   readonly id: string
@@ -51,8 +53,10 @@ export function NightPanel({
     try {
       const failed = await f()
       if (failed) setError(failed)
-      else if (reload) window.location.reload()
-      else setNote(done)
+      else if (reload) {
+        if (done) toast.afterReload(done)
+        window.location.reload()
+      } else setNote(done)
     } finally {
       setBusy(false)
     }
@@ -77,7 +81,7 @@ export function NightPanel({
           </label>
         </div>
         <div className="row-actions" style={{ justifyContent: 'flex-start', marginTop: 12 }}>
-          <button type="button" className="primary" disabled={busy} onClick={() => void act(() => send('/api/settings/night', 'PUT', { enabled: on, runAt: at, timeZone: zone }), '')}>
+          <button type="button" className="primary" disabled={busy} onClick={() => void act(() => send('/api/settings/night', 'PUT', { enabled: on, runAt: at, timeZone: zone }), 'Night shift saved.')}>
             Save
           </button>
           {enabled ? (
@@ -102,10 +106,10 @@ export function NightPanel({
                   <td className="muted">{[s.city, s.region].filter(Boolean).join(', ') || '—'}</td>
                   <td className="muted">{s.lastRunAt ? `last ran ${s.lastRunAt.slice(0, 10)}` : 'not run yet'}</td>
                   <td>
-                    <button type="button" disabled={busy} onClick={() => void act(() => send(`/api/settings/night/searches/${s.id}`, 'PATCH', { active: !s.active }), '')}>
+                    <button type="button" disabled={busy} onClick={() => void act(() => send(`/api/settings/night/searches/${s.id}`, 'PATCH', { active: !s.active }), s.active ? 'Search switched off.' : 'Search switched on.')}>
                       {s.active ? 'Pause' : 'Resume'}
                     </button>{' '}
-                    <button type="button" disabled={busy} onClick={() => void act(() => send(`/api/settings/night/searches/${s.id}`, 'DELETE'), '')}>
+                    <button type="button" disabled={busy} onClick={() => void act(() => send(`/api/settings/night/searches/${s.id}`, 'DELETE'), 'Search removed.')}>
                       Remove
                     </button>
                   </td>
@@ -122,7 +126,7 @@ export function NightPanel({
                 <span>
                   {s.query} <span className="muted">· {s.won} won</span>
                 </span>
-                <button type="button" disabled={busy} onClick={() => void act(() => send('/api/settings/night/searches', 'POST', { query: s.query, city: s.city, region: 'IN' }), '')}>
+                <button type="button" disabled={busy} onClick={() => void act(() => send('/api/settings/night/searches', 'POST', { query: s.query, city: s.city, region: 'IN' }), 'Search saved.')}>
                   Save
                 </button>
               </div>
@@ -136,13 +140,13 @@ export function NightPanel({
             <input type="text" placeholder="IN" value={region} maxLength={2} onChange={(e) => setRegion(e.target.value.toUpperCase())} style={{ width: 56 }} aria-label="Country (two letters)" />
           </div>
           <div>
-            <button type="button" disabled={busy || query.trim().length < 3} onClick={() => void act(() => send('/api/settings/night/searches', 'POST', { query, city, region }), '')}>
+            <button type="button" disabled={busy || query.trim().length < 3} onClick={() => void act(() => send('/api/settings/night/searches', 'POST', { query, city, region }), 'Search saved.')}>
               Add search
             </button>
           </div>
         </div>
       </section>
-      {note ? <p className="note" style={{ marginTop: 12 }}>{note}</p> : null}
+      <ToastOn message={note} />
       {error ? <p className="error" role="alert" style={{ marginTop: 12 }}>{error}</p> : null}
     </>
   )

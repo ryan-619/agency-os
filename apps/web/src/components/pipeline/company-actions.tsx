@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from 'react'
 import { detectTimeZone, knownTimeZones, wallClockToInstant } from '@/lib/wall-clock'
+import { toast } from '../toast/toast'
+import { ToastOn } from '../toast/toast-on'
 
 /**
  * What a person can DO with a company from its page (PROMPT.md §8.6):
@@ -74,7 +76,12 @@ export function CompanyActions({
 
   const putOnBoard = async (): Promise<void> => {
     const out = await post('/api/deals', { companyId, stage: 'new' })
-    if (out) window.location.reload()
+    if (out) {
+      // `unchanged`: somebody put it on the board while this page was open.
+      if (out.outcome === 'unchanged') toast.afterReload('Already on the board.', 'info')
+      else toast.afterReload('Put on the board.')
+      window.location.reload()
+    }
   }
 
   const book = async (): Promise<void> => {
@@ -93,7 +100,10 @@ export function CompanyActions({
       notes: notes.trim() || null,
     })
     if (out) {
-      setDone(typeof out.note === 'string' ? out.note : 'Recorded.')
+      const note = typeof out.note === 'string' ? out.note : 'Recorded.'
+      setDone(note)
+      // Said again once the page has reloaded: 600 ms is too short to read it.
+      toast.afterReload(note)
       setMode('idle')
       setTimeout(() => window.location.reload(), 600)
     }
@@ -116,7 +126,7 @@ export function CompanyActions({
         {dealStage ? <>On the board at <strong>{dealStage}</strong>.</> : 'Not on the board yet — nothing has happened to this company.'}
       </p>
       {error ? <div className="err-line" role="alert">{error}</div> : null}
-      {done ? <div className="ok-line">{done}</div> : null}
+      <ToastOn message={done} />
 
       {mode === 'idle' ? (
         <div className="row-actions" style={{ marginTop: 10 }}>

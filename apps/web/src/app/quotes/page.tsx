@@ -5,6 +5,8 @@ import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { getDb } from '@/lib/db'
 import { money } from '@/lib/quote-view'
+import { ReceiptText } from 'lucide-react'
+import { EmptyState } from '@/components/empty-state'
 
 /** Every quote, newest first, by status (0023). A new one is raised from a company's page. */
 export const dynamic = 'force-dynamic'
@@ -47,7 +49,21 @@ export default async function QuotesPage({ searchParams }: { searchParams: Promi
         {STATUSES.map((s) => <span key={s}> · <a href={`/quotes?status=${s}`}>{s}</a></span>)}
       </p>
       {quotes.length === 0 ? (
-        <p className="muted">No quotes{status ? ` ${status}` : ''} yet.</p>
+        status ? (
+          <EmptyState icon={ReceiptText} title={`No ${status} quotes`} compact actions={[{ href: '/quotes', label: 'Every quote', secondary: true }]} />
+        ) : (
+          <EmptyState
+            icon={ReceiptText}
+            title="No quotes yet"
+            actions={[
+              { href: '/companies', label: 'Open a company to quote' },
+              { href: '/settings/profile', label: 'Business profile', secondary: true },
+            ]}
+          >
+            A quote is raised from a company’s page, from the services that answer what the business needs. Your business
+            profile supplies the GST and the UPI code for the advance.
+          </EmptyState>
+        )
       ) : (
         <table>
           <thead>

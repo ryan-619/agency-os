@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { When } from '@/components/when'
+import { toast } from '../toast/toast'
 import { ConnectorCatalog, type FormPrefill } from './connector-catalog'
 import type { BrowserPreset } from './connector-presets'
 
@@ -386,6 +387,11 @@ function ReadsSwitch({ connector, canWrite }: { connector: ConnectorView; canWri
         return
       }
       setOn(body.readsWithoutCard === true)
+      toast.success(
+        body.readsWithoutCard === true
+          ? `Saved. The ${connector.name} connector runs without asking from the next message on; every call is still recorded in /audit.`
+          : `Saved. The ${connector.name} connector asks a person on every call from the next message on.`,
+      )
     } catch {
       setError('The request did not complete. Try again.')
     } finally {
@@ -493,10 +499,8 @@ function ToolChecks({
   )
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [saved, setSaved] = useState(false)
 
   const toggle = (name: string): void => {
-    setSaved(false)
     setTicked((current) => {
       const next = new Set(current)
       if (next.has(name)) next.delete(name)
@@ -520,7 +524,10 @@ function ToolChecks({
         return
       }
       onSaved(body.disabledTools)
-      setSaved(true)
+      toast.success(
+        `Saved. ${ticked.size === 0 ? 'No tool is disabled' : `${ticked.size} disabled`} from the next message on; ` +
+          `the connector stays ${connector.enabled ? 'enabled' : 'disabled'}.`,
+      )
     } catch {
       setError('The request did not complete. Try again.')
     } finally {
@@ -589,12 +596,6 @@ function ToolChecks({
           {busy ? 'Saving…' : 'Save disabled tools'}
         </button>
       </div>
-      {saved ? (
-        <div className="ok-line">
-          Saved. {ticked.size === 0 ? 'No tool is disabled' : `${ticked.size} disabled`} from the next message on;
-          the connector stays {connector.enabled ? 'enabled' : 'disabled'}.
-        </div>
-      ) : null}
     </>
   )
 }

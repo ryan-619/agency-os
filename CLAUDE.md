@@ -155,6 +155,16 @@ the pages clients open (the website preview, the free check, the audit
 page). None of it moves for a visitor who asked their system for less
 motion.
 
+**Then the finishing touches (2026-10-09), on no migration** (§2, "Pop-ups,
+outlines, the board's glide, empty screens and the theme"): a pop-up
+confirms what was just saved, approved or sent — on about forty forms and
+buttons — and survives the page reload most of them do; grey outlines of a
+page stand in while a slow one loads; pipeline cards glide to the column
+they were dropped on (GSAP Flip) and ring where they land, a win with a
+burst of colour; pages with nothing on them say what goes there and link
+the first step; and a Light / Dark / Match-this-device switch under each
+person's name, kept in their browser and applied before the first paint.
+
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
 machine"), which needs no public address, because everything but chat is
@@ -1570,6 +1580,81 @@ rules and these promises. **Stated residuals:** a card's number shows,
 drops to zero and counts back up when the page's script arrives late; and
 in a browser tab that throttles animation frames (a background tab, an
 embedded preview pane) the intros run slowly, which is the tab's choice.
+
+### Pop-ups, outlines, the board's glide, empty screens and the theme (2026-10-09)
+
+**A pop-up says what just happened, and nothing more.** `components/toast/`:
+`toast.success|error|info(message)` from any client module (a module-level
+channel, so a handler anywhere can raise one; raised before the toaster
+mounted, the newest few wait for it), shown by the one `<Toaster />` in the
+root layout — a stack in the bottom corner (full-width on a phone) that
+springs in and closes up with GSAP Flip, leaves after `toastLifeMs`
+(3.5–9 s by length, 6–12 s for a fault, the shrinking line at its foot),
+holds every clock while hovered or focused, and is a polite live region
+that exists before any toast. `<ToastOn message={…} />` turns a form's own
+"done" state into a toast. The success lines that only confirmed an action
+(`ok-line`s) became toasts; a line that shows a RESULT or a STATE — a
+send-check's answer, "Last answered", a settled approvals card, the erasure
+summary, a link to copy — stays on the page, with a toast beside it, and
+every `err-line` stays where it was. The words claim no more than the line
+did: approving is not sending (`approvedToast` in `lib/approval-view.ts` is
+the card's `approvedMessage` cut to its gist, and a test holds it short and
+free of "sent"), a draft "waits on /approvals", "I sent it" is "Recorded as
+sent.", a link made is not a send, and no toast carries an address, a
+number, a token or a person's words (a suppression's says "Suppression
+added.", never the value). **Most forms here reload as soon as they save**,
+which would wipe a toast, so a toast survives the reload: the toaster keeps
+what is on screen at `pagehide` in this tab's session storage
+(`carryToasts`, `TOAST_AFTER_RELOAD_KEY`) and the next page shows it in
+place (`showCarried`, no second entrance), within `TOAST_CARRY_MS` (30 s);
+an action may also say so outright (`toast.afterReload`), and a page the
+browser kept forgets them (`pageshow` persisted). Blocked storage costs the
+toast, never the action. `apps/web/test/toast.test.ts`.
+
+**A slow page shows its outlines.** `MotionRoot` lays grey outlines of a page
+— a title, two lines, a row of cards, table rows, with a sweep where motion
+is welcome — over the page area once a click has waited `SKELETON_AFTER_MS`
+(220 ms), and lifts them when the address changes. It reads the QUERY as
+well as the path now (`Arrivals`, `useSearchParams` behind its own Suspense
+boundary), because a move to the same page with other filters never said it
+had arrived, and the bar crept for fifteen seconds. Never for a link to a
+page ABOVE this one (`outlinesFor` in `lib/motion-rules.ts`: `/chat` from a
+thread may redirect straight back, and nothing would ever say it arrived);
+the dashboard (`/`) is not "above". Outlines are hidden by opacity and
+`pointer-events: none`, never printed.
+
+**Pipeline cards glide.** `PipelineBoard` records every card's place (Flip
+`getState`, only where motion is welcome) just before a move, a move put
+back after a refusal, or a change of owner filter, and each card slides
+from where it was — matched across columns by `data-flip-id`, since React
+remounts a moved card in its new column; an interrupted glide is recorded
+mid-flight and carried on. Once the server has the move the card rings in
+the accent (a won deal in green, with a burst of confetti) and a toast
+names it ("Acme moved to Contacted.", "Acme won. The deal is closed."). A
+card's hover lift moves `translate`, never `transform`, so it never fights
+GSAP mid-glide; a dragged card fades in its old place while the browser's
+ghost travels.
+
+**Empty pages say what goes there** (`components/empty-state.tsx`, server-
+and client-safe, no `@/` import): an icon, a title, a sentence, and links to
+the first step — Companies (import a list, or ask Chat), Contacts, Inbox,
+Approvals, Pipeline (board, due, meetings), Quotes, Campaigns, Calls,
+Visits, Suppressions, Tasks and the dashboard's top actions; a filtered
+list says so and offers to clear the filter. `apps/web/test/
+empty-state.test.ts` checks every link names a page of this app.
+
+**Light, dark or the device's.** `globals.css`'s dark tokens apply for the
+system's dark unless `data-theme="light"`, and always for
+`data-theme="dark"` — the two dark blocks are held identical by
+`apps/web/test/theme.test.ts` — with `color-scheme` set so native controls
+match. `ThemeSwitch` (under the person's name in the sidebar) keeps the
+choice in `localStorage` (`THEME_KEY` in `lib/theme.ts`) and a
+`beforeInteractive` script applies it before the first paint
+(`THEME_BEFORE_PAINT`), so no page flashes the other theme; where the
+browser has View Transitions and motion is welcome, the new look opens out
+in a circle from the button. **Stated residuals:** the choice is per
+browser, not per person; and in a tab that throttles animation frames a
+toast's clock runs slowly too, so it waits until it can be read.
 
 ### The night shift (0025, 2026-10-08)
 

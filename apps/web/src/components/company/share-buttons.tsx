@@ -1,6 +1,8 @@
 'use client'
 
 import { useState } from 'react'
+import { toast } from '../toast/toast'
+import { ToastOn } from '../toast/toast-on'
 
 async function post(url: string, method: string, body: unknown): Promise<{ ok: boolean; data: Record<string, unknown> }> {
   const res = await fetch(url, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
@@ -27,8 +29,13 @@ export function ShareButtons({ companyId, canWrite, preview }: { companyId: stri
         return
       }
       setUrl(r.data['url'] as string)
-      await navigator.clipboard?.writeText(r.data['url'] as string).catch(() => {})
-      setNote('Link made and copied. Paste it into your message — WhatsApp, email, anywhere.')
+      // A browser may refuse the copy after the request (Safari does): say "copied" only when it was.
+      const copied = await navigator.clipboard?.writeText(r.data['url'] as string).then(() => true, () => false)
+      setNote(
+        copied
+          ? 'Link made and copied. Paste it into your message — WhatsApp, email, anywhere.'
+          : 'Link made. Copy it from below and paste it into your message — WhatsApp, email, anywhere.',
+      )
     } catch {
       setError('The request did not complete. Try again.')
     } finally {
@@ -66,7 +73,7 @@ export function ShareButtons({ companyId, canWrite, preview }: { companyId: stri
         ) : null}
       </div>
       {error ? <div className="err-line" style={{ marginTop: 6 }}>{error}</div> : null}
-      {note ? <div className="ok-line" style={{ marginTop: 6 }}>{note}</div> : null}
+      <ToastOn message={note} />
       {url ? <div className="note" style={{ marginTop: 6, wordBreak: 'break-all' }}><a href={url} target="_blank" rel="noreferrer">{url}</a></div> : null}
     </div>
   )
@@ -82,7 +89,9 @@ ShareButtons.Revoke = function Revoke({ companyId, linkId }: { companyId: string
       className="linkish"
       onClick={() => {
         void post(`/api/companies/${companyId}/share`, 'DELETE', { linkId }).then((r) => {
-          if (r.ok) setDone(true)
+          if (!r.ok) return
+          toast.success('Link revoked.')
+          setDone(true)
         })
       }}
     >

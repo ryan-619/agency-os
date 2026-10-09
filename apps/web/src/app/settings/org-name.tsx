@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { toast } from '../../components/toast/toast'
 
 /**
  * The organisation's name, editable in place by an owner. Saved through
@@ -36,6 +37,7 @@ export function OrgName({ name, canWrite }: { name: string; canWrite: boolean })
         body: JSON.stringify({ name: value }),
       })
       if (res.ok) {
+        toast.afterReload(`Renamed to ${value.trim()}.`)
         window.location.reload()
         return
       }

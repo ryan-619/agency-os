@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { toast } from '../../../components/toast/toast'
 
 type Fields = Record<
   'legalName' | 'address' | 'phone' | 'email' | 'website' | 'gstin' | 'gstRate' | 'upiVpa' | 'upiPayee'
@@ -13,10 +14,8 @@ export function ProfilePanel({ initial, canWrite }: { initial: Fields; canWrite:
   const [f, setF] = useState<Fields>(initial)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [saved, setSaved] = useState(false)
   const set = (k: keyof Fields) => (e: { target: { value: string } }) => {
     setF({ ...f, [k]: e.target.value })
-    setSaved(false)
   }
   const save = async () => {
     setBusy(true)
@@ -33,7 +32,7 @@ export function ProfilePanel({ initial, canWrite }: { initial: Fields; canWrite:
         }),
       })
       const answer = (await res.json().catch(() => ({}))) as { error?: string }
-      if (res.ok) setSaved(true)
+      if (res.ok) toast.success('Saved. New quotes and drafts use it from now on.')
       else setError(answer.error ?? 'That did not save.')
     } catch {
       setError('The request did not complete. Nothing changed; try again.')
@@ -91,7 +90,6 @@ export function ProfilePanel({ initial, canWrite }: { initial: Fields; canWrite:
       </section>
 
       {error ? <div className="err-line">{error}</div> : null}
-      {saved ? <div className="ok-line">Saved. New quotes and drafts use it from now on.</div> : null}
       {canWrite ? (
         <div className="row-actions"><button type="button" disabled={busy} onClick={() => void save()}>{busy ? 'Saving…' : 'Save profile'}</button></div>
       ) : (

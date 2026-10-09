@@ -2,6 +2,8 @@
 
 import { Fragment, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { toast } from '../../../components/toast/toast'
+import { ToastOn } from '../../../components/toast/toast-on'
 import {
   CATEGORY_HINT, IMPORT_OUTCOME_WORDS, NOT_SENDABLE_NOTE, TEMPLATE_CATEGORY_OPTIONS, TEMPLATE_CHANNEL_LABEL,
   bodySegments, categoryWords, type TemplateChannelName,
@@ -72,6 +74,13 @@ export function TemplatesPanel({ templates, canWrite }: { templates: readonly Te
         setErrors((e) => ({ ...e, [t.id]: b.error ?? 'That did not work.' }))
         return
       }
+      // `changed` is false when the template was already in the state asked for.
+      const answer = (await res.json().catch(() => ({}))) as { changed?: boolean }
+      toast.success(
+        answer.changed === false
+          ? `Template ${t.externalId} was already ${t.active ? 'off' : 'on'}.`
+          : `Template ${t.externalId} switched ${t.active ? 'off' : 'on'}.`,
+      )
       router.refresh()
     } catch {
       setErrors((e) => ({ ...e, [t.id]: 'The request did not complete. Try again.' }))
@@ -277,7 +286,7 @@ function AddForm({ onDone }: { onDone: () => void }) {
         </div>
       ) : null}
       {error ? <div className="err-line">{error}</div> : null}
-      {done ? <div className="ok-line">{done}</div> : null}
+      <ToastOn message={done} />
       <div className="row-actions" style={{ marginTop: 10 }}>
         <button type="button" disabled={busy || !externalId.trim() || !senderId.trim() || !body.trim()} onClick={() => void submit()}>
           {busy ? 'Recording…' : 'Record template'}

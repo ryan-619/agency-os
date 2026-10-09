@@ -9,7 +9,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { COUNT_MAX, countPlan, formatCount, startsNavigation } from '../src/lib/motion-rules'
+import { COUNT_MAX, countPlan, formatCount, outlinesFor, startsNavigation } from '../src/lib/motion-rules'
 
 const SRC = fileURLToPath(new URL('../src', import.meta.url))
 const read = (rel: string) => readFileSync(join(SRC, rel), 'utf8')
@@ -72,12 +72,34 @@ describe('startsNavigation: the loading bar starts only for another page of this
   })
 })
 
+describe('outlinesFor: grey outlines stand in only where the page is sure to say it arrived', () => {
+  const link = (href: string, here: string) => outlinesFor({ href, target: '', download: false }, here)
+
+  it('for another page, the dashboard included, and for the same page with other filters', () => {
+    expect(link('/contacts', 'https://myagencyos.in/companies')).toBe(true)
+    expect(link('/', 'https://myagencyos.in/companies')).toBe(true)
+    expect(link('/companies?page=3', 'https://myagencyos.in/companies?page=2')).toBe(true)
+    expect(link('/chat/abc', 'https://myagencyos.in/chat')).toBe(true)
+  })
+
+  it('never for a page above this one, which may hand the visitor straight back here', () => {
+    expect(link('/chat', 'https://myagencyos.in/chat/abc')).toBe(false)
+    expect(link('/settings', 'https://myagencyos.in/settings/team')).toBe(false)
+    expect(link('/chat/', 'https://myagencyos.in/chat/abc')).toBe(false)
+  })
+
+  it('never where the bar itself does not start', () => {
+    expect(link('/contacts#top', 'https://myagencyos.in/contacts')).toBe(false)
+    expect(link('https://wa.me/919876543210', 'https://myagencyos.in/companies')).toBe(false)
+  })
+})
+
 describe('the motion source keeps its promises', () => {
   const all = sources(SRC)
 
   it('only a client module imports GSAP, so a server component never carries it', () => {
-    const importers = all.filter((s) => /from 'gsap|from '@gsap\/react'|from '@\/components\/motion\/gsap'|from '\.\/gsap'/.test(s.src))
-    expect(importers.length).toBeGreaterThanOrEqual(5)
+    const importers = all.filter((s) => /from 'gsap|from '@gsap\/react'|from '[^']*motion\/gsap'|from '\.\/gsap'/.test(s.src))
+    expect(importers.length).toBeGreaterThanOrEqual(8)
     for (const { file, src } of importers) {
       if (file === 'components/motion/gsap.ts') continue
       expect(src, file).toMatch(/^'use client'/)
@@ -93,6 +115,29 @@ describe('the motion source keeps its promises', () => {
 
   it('the sidebar highlight jumps rather than slides where motion is unwelcome', () => {
     expect(read('components/motion/nav-indicator.tsx')).toMatch(/matchMedia\(MOTION_OK\)\.matches/)
+  })
+
+  it('pipeline cards glide only where motion is welcome, and a win bursts only there', () => {
+    const board = read('components/pipeline/board.tsx')
+    expect(read('components/motion/gsap.ts')).toMatch(/gsap\.registerPlugin\(Flip, /)
+    // The glide is recorded only where motion is welcome; with nothing recorded, the board just changes.
+    expect(board).toMatch(/if \(el && window\.matchMedia\(MOTION_OK\)\.matches\) flipFrom\.current = Flip\.getState/)
+    expect(board.match(/if \(!window\.matchMedia\(MOTION_OK\)\.matches\) return/g)).toHaveLength(2)
+    // A card is matched across columns by its deal, since React remounts it in its new column.
+    expect(board).toMatch(/data-flip-id=\{deal\.id\}/)
+    // The hover lift moves `translate`, so it never fights GSAP for `transform` mid-glide.
+    expect(read('app/globals.css')).toMatch(/\.kcard:hover \{ translate: 0 -1px;/)
+  })
+
+  it('a slow page shows grey outlines, never content, and they lift when the address changes — query included', () => {
+    const root = read('components/motion/motion-root.tsx')
+    expect(root).toMatch(/<div ref=\{ref\} className="page-skeleton" aria-hidden="true">/)
+    expect(root).toMatch(/const query = useSearchParams\(\)/)
+    expect(root).toMatch(/<Suspense fallback=\{null\}>\s*<Arrivals onArrive=\{onArrive\} \/>/)
+    expect(root).toMatch(/outline \? window\.setTimeout\(showOutline, SKELETON_AFTER_MS\) : 0/)
+    const css = read('app/globals.css')
+    expect(css).toMatch(/\.page-skeleton \{[^}]*pointer-events: none;/)
+    expect(css).toMatch(/@media print \{\s*\.toaster, \.page-skeleton, \.confetti, \.theme-switch \{ display: none !important; \}/)
   })
 
   it('content waiting to rise into view is hidden by opacity alone — still focusable — and prints', () => {

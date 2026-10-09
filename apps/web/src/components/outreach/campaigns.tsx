@@ -1,9 +1,12 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { Megaphone } from 'lucide-react'
+import { EmptyState } from '../empty-state'
 import type { EnrolSkip } from '@agency/core'
 import { REFUSAL_WORDS, campaignAutoPausedWords } from '@/lib/refusal-words'
 import { CHANNEL_HINT, SMS_AUTO_SEND_OFF, SMS_NOT_ENROLLED } from '@/components/campaigns/sms-words'
+import { toast } from '../toast/toast'
 import { CampaignSteps, type RunsView, type StepView } from './campaign-steps'
 
 /**
@@ -89,10 +92,10 @@ export function CampaignsPanel({
     <>
       <div className="rows">
         {campaigns.length === 0 ? (
-          <p className="muted" style={{ fontSize: 13.5 }}>
-            No campaigns yet. A campaign is where a message&apos;s daily cap and quiet hours come from;
-            a draft cannot be approved without one.
-          </p>
+          <EmptyState icon={Megaphone} title="No campaigns yet">
+            A campaign is where a message&apos;s daily cap and quiet hours come from; a draft cannot be approved without
+            one. Start one with New campaign below, then enrol people into it.
+          </EmptyState>
         ) : null}
 
         {campaigns.map((c) =>
@@ -225,6 +228,13 @@ function CampaignForm({
         setError(body.error ?? 'That did not work.')
         return
       }
+      toast.afterReload(
+        !campaign
+          ? 'Campaign created.'
+          : status === 'paused' && campaign.status !== 'paused'
+            ? 'Paused. Nothing in it goes out until it is set active.'
+            : 'Campaign saved.',
+      )
       window.location.reload()
     } catch {
       setError('The request did not complete. Try again.')
@@ -373,6 +383,22 @@ interface EnrolPlan {
 
 const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`
 
+/**
+ * The pop-up once enrolment has run, from the counts the route answered.
+ * Enrolling writes drafts or queues messages and sends nothing, so the words
+ * say where they wait and never that anything went; the panel's note keeps
+ * the detail and the skips.
+ */
+function enrolledWords(done: EnrolPlan, channel: CampaignView['channel']): string {
+  const n = done.queued
+  if (n === 0) return 'Nothing was queued.'
+  if (done.status === 'awaiting_approval') {
+    return `Enrolled ${plural(n, 'person', 'people')} — ${n === 1 ? 'their draft waits' : 'their drafts wait'} on /approvals.`
+  }
+  if (channel === 'linkedin') return `Queued ${plural(n, 'message', 'messages')} as steps on /tasks. Nothing was sent.`
+  return `Queued ${plural(n, 'message', 'messages')}. Nothing was sent yet — each one is checked against every rule at the moment it is sent.`
+}
+
 function SkipCounts({ plan }: { plan: EnrolPlan }) {
   const rows = (Object.entries(plan.skipped) as [EnrolSkip, number][]).filter(([, n]) => n > 0)
   if (rows.length === 0) return null
@@ -422,7 +448,11 @@ function EnrolPanel({
         return
       }
       if (dryRun) setPlan(body as EnrolPlan)
-      else setDone(body as EnrolPlan)
+      else {
+        const finished = body as EnrolPlan
+        setDone(finished)
+        toast(enrolledWords(finished, campaign.channel), finished.queued > 0 ? 'success' : 'info')
+      }
     } catch {
       setError('The request did not complete. Try again.')
     } finally {

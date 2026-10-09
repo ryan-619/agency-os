@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { toast } from '../toast/toast'
 import { STEP_DEFAULT_BODY, STEP_KIND_WORDS, STEP_LIMITS, STEP_PLACEHOLDERS, STOP_REASON_WORDS, stepsLine, type StepKind } from './steps-words'
 
 export interface StepView {
@@ -60,6 +61,7 @@ export function CampaignSteps({
         setError(data.error ?? 'The steps could not be saved.')
         return
       }
+      toast.afterReload('Follow-ups saved.')
       window.location.reload()
     } finally {
       setBusy(false)

@@ -1,8 +1,8 @@
 'use client'
 
-import { usePathname } from 'next/navigation'
-import { useEffect, useRef } from 'react'
-import { countPlan, formatCount, startsNavigation } from '@/lib/motion-rules'
+import { usePathname, useSearchParams } from 'next/navigation'
+import { Suspense, useCallback, useEffect, useRef } from 'react'
+import { countPlan, formatCount, outlinesFor, startsNavigation } from '@/lib/motion-rules'
 import { FINE_POINTER, MOTION_OK, ScrollTrigger, SplitText, gsap, useGSAP } from './gsap'
 
 /**
@@ -17,7 +17,9 @@ import { FINE_POINTER, MOTION_OK, ScrollTrigger, SplitText, gsap, useGSAP } from
  * - a button marked `data-magnetic` leans toward a mouse pointer;
  * - every button press ripples out from where it was pressed;
  * - a thin bar at the top shows a page is on its way, from the click until
- *   it arrives;
+ *   it arrives — and when it takes longer than a moment, grey outlines of a
+ *   page stand where the page will be (`.page-skeleton`), so a slow page
+ *   never looks like a click that did nothing;
  * - a long document read by a client (`data-read-progress`) shows how far
  *   down it the reader is.
  *
@@ -52,6 +54,23 @@ export const COUNT_SELECTOR = '.main .card .n, .report-score-n, [data-count]'
 
 /** A page is late, not loading, after this: the bar fades rather than creep for ever. */
 const PROGRESS_GIVE_UP_MS = 15_000
+
+/** A page that arrives sooner than this never shows its outlines, so a quick move does not flash. */
+export const SKELETON_AFTER_MS = 220
+
+/**
+ * Tells MotionRoot each time the address — path AND query — changes. Apart
+ * from MotionRoot because reading the query needs a Suspense boundary;
+ * without the query, a move to the same page with other filters (the next
+ * page of /companies) never said it had arrived, and the bar crept on.
+ */
+function Arrivals({ onArrive }: { readonly onArrive: (at: string) => void }) {
+  const pathname = usePathname()
+  const query = useSearchParams()
+  const at = `${pathname}?${query.toString()}`
+  useEffect(() => onArrive(at), [at, onArrive])
+  return null
+}
 
 function revealOnScroll(): () => void {
   const fold = window.innerHeight * 0.95
@@ -180,6 +199,7 @@ export function MotionRoot() {
   const pathname = usePathname()
   const loading = useRef<HTMLDivElement>(null)
   const reading = useRef<HTMLDivElement>(null)
+  const skeleton = useRef<HTMLDivElement>(null)
 
   // What belongs to one page, set up afresh when the page changes.
   useGSAP(
@@ -222,51 +242,131 @@ export function MotionRoot() {
     return () => document.removeEventListener('pointerdown', onDown)
   }, [])
 
-  // The loading bar: starts on a click that loads another page, finishes when it arrives.
-  useEffect(() => {
-    const bar = loading.current
-    if (!bar) return
-    let giveUp = 0
-    const start = () => {
-      window.clearTimeout(giveUp)
-      gsap.killTweensOf(bar)
-      gsap.set(bar, { opacity: 1, scaleX: 0.02 })
-      gsap.to(bar, { scaleX: 0.86, duration: 9, ease: 'power4.out' })
-      giveUp = window.setTimeout(() => gsap.to(bar, { opacity: 0, duration: 0.3 }), PROGRESS_GIVE_UP_MS)
-    }
-    const onClick = (e: MouseEvent) => {
-      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
-      const a = e.target instanceof Element ? e.target.closest('a[href]') : null
-      if (!(a instanceof HTMLAnchorElement) || a.closest('[data-no-progress]')) return
-      if (startsNavigation({ href: a.href, target: a.target, download: a.hasAttribute('download') }, window.location.href)) start()
-    }
-    // Back to a page the browser kept: nothing is loading.
-    const onShow = (e: PageTransitionEvent) => {
-      if (e.persisted) gsap.set(bar, { opacity: 0, scaleX: 0 })
-    }
-    document.addEventListener('click', onClick, true)
-    window.addEventListener('pageshow', onShow)
-    return () => {
-      window.clearTimeout(giveUp)
-      document.removeEventListener('click', onClick, true)
-      window.removeEventListener('pageshow', onShow)
+  // The loading bar, and the page's outlines when it is slow: start on a click that loads another page.
+  const pending = useRef<{ giveUp: number; outline: number } | null>(null)
+  const arrivedAt = useRef<string | null>(null)
+
+  const hideOutline = useCallback((instantly: boolean) => {
+    const sk = skeleton.current
+    if (!sk) return
+    gsap.killTweensOf(sk)
+    if (instantly || !window.matchMedia(MOTION_OK).matches) gsap.set(sk, { opacity: 0 })
+    else gsap.to(sk, { opacity: 0, duration: 0.18, ease: 'power1.out' })
+  }, [])
+
+  const settle = useCallback(() => {
+    if (pending.current) {
+      window.clearTimeout(pending.current.giveUp)
+      window.clearTimeout(pending.current.outline)
+      pending.current = null
     }
   }, [])
 
   useEffect(() => {
     const bar = loading.current
-    if (!bar || Number(gsap.getProperty(bar, 'opacity')) === 0) return
-    gsap.killTweensOf(bar)
-    gsap.timeline()
-      .to(bar, { scaleX: 1, duration: 0.25, ease: 'power2.out' })
-      .to(bar, { opacity: 0, duration: 0.3 })
-      .set(bar, { scaleX: 0 })
-  }, [pathname])
+    const sk = skeleton.current
+    if (!bar || !sk) return
+    const showOutline = () => {
+      const main = document.querySelector<HTMLElement>('.main')
+      if (!main) return
+      const r = main.getBoundingClientRect()
+      gsap.set(sk, { left: r.left, width: r.width, top: Math.max(r.top, 0) })
+      if (window.matchMedia(MOTION_OK).matches) gsap.fromTo(sk, { opacity: 0 }, { opacity: 1, duration: 0.2, ease: 'power1.out' })
+      else gsap.set(sk, { opacity: 1 })
+    }
+    const start = (outline: boolean) => {
+      settle()
+      hideOutline(true)
+      gsap.killTweensOf(bar)
+      gsap.set(bar, { opacity: 1, scaleX: 0.02 })
+      gsap.to(bar, { scaleX: 0.86, duration: 9, ease: 'power4.out' })
+      pending.current = {
+        outline: outline ? window.setTimeout(showOutline, SKELETON_AFTER_MS) : 0,
+        giveUp: window.setTimeout(() => {
+          gsap.to(bar, { opacity: 0, duration: 0.3 })
+          hideOutline(false)
+          pending.current = null
+        }, PROGRESS_GIVE_UP_MS),
+      }
+    }
+    const onClick = (e: MouseEvent) => {
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
+      const a = e.target instanceof Element ? e.target.closest('a[href]') : null
+      if (!(a instanceof HTMLAnchorElement) || a.closest('[data-no-progress]')) return
+      const link = { href: a.href, target: a.target, download: a.hasAttribute('download') }
+      if (startsNavigation(link, window.location.href)) start(outlinesFor(link, window.location.href))
+    }
+    // Back to a page the browser kept: nothing is loading.
+    const onShow = (e: PageTransitionEvent) => {
+      if (!e.persisted) return
+      settle()
+      gsap.set(bar, { opacity: 0, scaleX: 0 })
+      hideOutline(true)
+    }
+    // Capturing, so the click is seen before a client-side link cancels its default.
+    document.addEventListener('click', onClick, true)
+    window.addEventListener('pageshow', onShow)
+    return () => {
+      settle()
+      document.removeEventListener('click', onClick, true)
+      window.removeEventListener('pageshow', onShow)
+    }
+  }, [settle, hideOutline])
+
+  // The page arrived: finish the bar, lift the outlines.
+  const onArrive = useCallback(
+    (at: string) => {
+      const before = arrivedAt.current
+      arrivedAt.current = at
+      if (before === null || before === at) return
+      settle()
+      hideOutline(false)
+      const bar = loading.current
+      if (!bar || Number(gsap.getProperty(bar, 'opacity')) === 0) return
+      gsap.killTweensOf(bar)
+      gsap.timeline()
+        .to(bar, { scaleX: 1, duration: 0.25, ease: 'power2.out' })
+        .to(bar, { opacity: 0, duration: 0.3 })
+        .set(bar, { scaleX: 0 })
+    },
+    [settle, hideOutline],
+  )
 
   return (
     <>
       <div ref={loading} className="route-progress" aria-hidden="true" />
       <div ref={reading} className="read-progress" aria-hidden="true" />
+      <PageOutline ref={skeleton} />
+      <Suspense fallback={null}>
+        <Arrivals onArrive={onArrive} />
+      </Suspense>
     </>
+  )
+}
+
+/**
+ * Grey outlines of a page — a title, a line under it, a row of cards and a
+ * table — laid over the page area while the next page is on its way. Every
+ * page here is some arrangement of those, so the shape reads as "the page
+ * is coming" without pretending to know what will be in it. Nothing in it
+ * can be read, focused or clicked.
+ */
+function PageOutline({ ref }: { readonly ref: React.Ref<HTMLDivElement> }) {
+  return (
+    <div ref={ref} className="page-skeleton" aria-hidden="true">
+      <div className="sk sk-title" />
+      <div className="sk sk-line" />
+      <div className="sk sk-line sk-short" />
+      <div className="sk-cards">
+        {[0, 1, 2, 3].map((i) => (
+          <div key={i} className="sk sk-card" />
+        ))}
+      </div>
+      <div className="sk-rows">
+        {[0, 1, 2, 3, 4, 5].map((i) => (
+          <div key={i} className="sk sk-row" />
+        ))}
+      </div>
+    </div>
   )
 }

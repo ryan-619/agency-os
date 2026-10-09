@@ -9,6 +9,8 @@ import {
 } from '@/lib/company-list'
 import { getDb } from '@/lib/db'
 import { listCompaniesForOrg, icpForOrg } from '@/lib/queries'
+import { Building, SearchX } from 'lucide-react'
+import { EmptyState } from '@/components/empty-state'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -172,6 +174,7 @@ export default async function Companies({
         {qs ? <a href="/companies" style={{ fontSize: 13 }}>Clear</a> : null}
       </form>
 
+      {shown.length > 0 ? (
       <table>
         <thead>
           <tr>
@@ -215,15 +218,22 @@ export default async function Companies({
           ))}
         </tbody>
       </table>
+      ) : null}
 
       {all.length === 0 ? (
-        <p className="muted" style={{ marginTop: 16 }}>
-          No companies yet. <a href="/companies/import">Import a list</a> to start.
-        </p>
+        <EmptyState
+          icon={Building}
+          title="No companies yet"
+          actions={[
+            { href: '/companies/import', label: 'Import a list' },
+            { href: '/chat', label: 'Ask Chat to find businesses', secondary: true },
+          ]}
+        >
+          Every scan, person, deal and quote hangs off a company. Bring in a list of websites, or ask Chat to find
+          businesses on the map that need what you sell.
+        </EmptyState>
       ) : filtered && shown.length === 0 ? (
-        <p className="muted" style={{ marginTop: 16 }}>
-          No company matches these filters. <a href="/companies">Clear them</a>.
-        </p>
+        <EmptyState icon={SearchX} title="No company matches these filters" compact actions={[{ href: '/companies', label: 'Clear the filters', secondary: true }]} />
       ) : null}
 
       {unscanned.length ? (

@@ -9,6 +9,8 @@ import { When } from '@/components/when'
 import { deployment } from '@/lib/deployment'
 import { getDb } from '@/lib/db'
 import { inZone } from '@/lib/format'
+import { CalendarCheck, CalendarClock, SquareKanban } from 'lucide-react'
+import { EmptyState } from '@/components/empty-state'
 
 /**
  * The pipeline (PROMPT.md §8.6).
@@ -109,10 +111,10 @@ export default async function PipelinePage() {
 
       <h2>Due today, or overdue</h2>
       {due.length === 0 ? (
-        <p className="muted">
-          Nothing due. A due date is set on a card, and it is the end of the day it names; this lists every
-          open deal due within the next twenty-four hours or already past it.
-        </p>
+        <EmptyState icon={CalendarCheck} title="Nothing due" compact>
+          A due date is set on a card, and it is the end of the day it names; this lists every open deal due within
+          the next twenty-four hours or already past it.
+        </EmptyState>
       ) : (
         <table>
           <thead>
@@ -139,11 +141,27 @@ export default async function PipelinePage() {
       )}
 
       <h2>Board</h2>
-      <PipelineBoard deals={cards} canWrite={can(principal, 'deals:write')} team={team} rotDays={STAGE_ROT_DAYS} />
+      {cards.length === 0 ? (
+        <EmptyState
+          icon={SquareKanban}
+          title="No deals yet"
+          actions={[
+            { href: '/companies', label: 'Companies' },
+            { href: '/campaigns', label: 'Campaigns', secondary: true },
+          ]}
+        >
+          A card appears once something happens to a company — a message goes, a reply comes, a meeting is booked — or
+          when somebody starts a deal from the company’s page.
+        </EmptyState>
+      ) : (
+        <PipelineBoard deals={cards} canWrite={can(principal, 'deals:write')} team={team} rotDays={STAGE_ROT_DAYS} />
+      )}
 
       <h2>Meetings coming up</h2>
       {meetings.length === 0 ? (
-        <p className="muted">Nothing booked. A meeting is recorded from a company&apos;s page, by the agent, or through the booking link.</p>
+        <EmptyState icon={CalendarClock} title="Nothing booked" compact>
+          A meeting is recorded from a company&apos;s page, by the agent, or through the booking link.
+        </EmptyState>
       ) : (
         <table>
           <thead>

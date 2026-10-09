@@ -12,6 +12,7 @@ import {
   answerStateWords, answerSubject, type InboxGroup,
 } from '@/lib/inbox-view'
 import { SHARED_NUMBER_LABEL, isSharedNumberOptOutPause } from '@/lib/shared-number-pause'
+import { toast } from '../toast/toast'
 
 /**
  * The inbox's rows and what a person can do with each (PROMPT.md §8.4).
@@ -94,6 +95,27 @@ export interface InboxCampaignChoice {
 
 type Drafted = { readonly lines: readonly string[] }
 
+/** A drafted answer's first line when the route sends none, and the toast every drafted answer raises. */
+const DRAFTED_WORDS = 'Drafted. A person approves it on /approvals.'
+
+/** Pause here is a teammate's hold, which only Resume lifts. */
+const PAUSED_WORDS = 'Paused. Nothing goes to them until somebody resumes them.'
+
+/**
+ * What a toast says once Handled or Reclassify has landed — no more than the
+ * route reported. A reply moved off "automatic" pauses the person and cancels
+ * what was waiting to go to them, as a reply does (`replyReclassify`).
+ */
+function actedWords(body: Record<string, unknown>, out: Record<string, unknown>): string {
+  if (body.action === 'handled') return 'Marked handled.'
+  const kind = typeof out.kind === 'string' ? out.kind : ''
+  const said = Object.hasOwn(INBOX_GROUP_LABELS, kind) ? `Reclassified as “${INBOX_GROUP_LABELS[kind as InboxGroup]}”.` : 'Reclassified.'
+  const n = typeof out.cancelled === 'number' ? out.cancelled : 0
+  const cancelled = n > 0 ? `cancelled ${n} message${n === 1 ? '' : 's'} waiting to go to them` : null
+  if (out.paused === true) return `${said} That paused them in every campaign${cancelled ? ` and ${cancelled}` : ''}.`
+  return cancelled ? `${said} That ${cancelled}.` : said
+}
+
 /** What `opted-out.ts` reads off a row to say whose stop it was. */
 function stopOf(row: InboxRowView): OptedOutRow {
   return { fromIsContact: row.fromIsContact, from: row.from, contactName: row.contact?.name ?? null, suppressed: row.suppressed }
@@ -155,7 +177,10 @@ export function InboxQueue({
   }
 
   const act = async (row: InboxRowView, body: Record<string, unknown>) => {
-    if (await send(row.id, `/api/inbox/${row.id}`, 'PATCH', body)) router.refresh()
+    const out = await send(row.id, `/api/inbox/${row.id}`, 'PATCH', body)
+    if (!out) return
+    toast.success(actedWords(body, out))
+    router.refresh()
   }
 
   const pause = async (row: InboxRowView) => {
@@ -166,14 +191,20 @@ export function InboxQueue({
       fail(row.id, 'Say why — a pause with no reason gets cleared.')
       return
     }
-    if (await send(row.id, `/api/contacts/${row.contact.id}`, 'PATCH', { action: 'pause', reason })) router.refresh()
+    if (await send(row.id, `/api/contacts/${row.contact.id}`, 'PATCH', { action: 'pause', reason })) {
+      toast.success(PAUSED_WORDS)
+      router.refresh()
+    }
   }
 
   const resume = async (row: InboxRowView) => {
     if (!row.contact) return
     // The pause this row showed: the route lifts that one and no other.
     const body = { action: 'resume', pausedReason: row.contact.pausedReason }
-    if (await send(row.id, `/api/contacts/${row.contact.id}`, 'PATCH', body)) router.refresh()
+    if (await send(row.id, `/api/contacts/${row.contact.id}`, 'PATCH', body)) {
+      toast.success('Resumed.')
+      router.refresh()
+    }
   }
 
   const formFor = (row: InboxRowView) =>
@@ -190,13 +221,14 @@ export function InboxQueue({
       campaignId: f.campaignId || null,
     })
     if (!b) return
-    const lines: string[] = [typeof b.note === 'string' ? b.note : 'Drafted. A person approves it on /approvals.']
+    const lines: string[] = [typeof b.note === 'string' ? b.note : DRAFTED_WORDS]
     if (b.resumed === true && row.contact) lines.push(resumedLine(senderOf(row)))
     const hold = b.wouldHold as { reason?: unknown } | null | undefined
     if (hold && typeof hold.reason === 'string') lines.push(`If it were approved right now: ${hold.reason}`)
     if (typeof b.deployment === 'string') lines.push(b.deployment)
     setDrafted((d) => ({ ...d, [row.id]: { lines } }))
     setOpen(null)
+    toast.success(DRAFTED_WORDS)
     router.refresh()
   }
 

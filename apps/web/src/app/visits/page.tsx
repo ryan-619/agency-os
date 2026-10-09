@@ -6,6 +6,8 @@ import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { getDb } from '@/lib/db'
 import { VisitsPlanner, type VisitView } from './planner'
+import { MapPin } from 'lucide-react'
+import { EmptyState } from '@/components/empty-state'
 
 /**
  * Today's visits (2026-10-08): the open visit tasks that are yours or
@@ -60,7 +62,17 @@ export default async function VisitsPage() {
         to open in Google Maps. Where you are is used only in this page, when you ask.
       </p>
       {located.length === 0 ? (
-        <p className="muted">No open visit with a location on record. Ask Chat for a visit task for a business it found on the map.</p>
+        <EmptyState
+          icon={MapPin}
+          title="No visits to plan"
+          actions={[
+            { href: '/chat', label: 'Ask Chat for a visit task' },
+            { href: '/tasks', label: 'Tasks', secondary: true },
+          ]}
+        >
+          A visit is a task for a business with a location on record. Ask Chat to find businesses on the map and make a
+          visit task for the ones worth calling on; they are put in driving order here.
+        </EmptyState>
       ) : (
         <VisitsPlanner visits={located} />
       )}

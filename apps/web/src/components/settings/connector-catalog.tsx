@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { toast } from '../toast/toast'
 import type { BrowserPreset, CatalogGroup } from './connector-presets'
 
 /**
@@ -215,6 +216,7 @@ function PresetCard({
     if (body && typeof body['id'] === 'string') {
       setAdded({ id: body['id'], name: String(body['name'] ?? name) })
       setOpen(false)
+      toast.success(`Added ${String(body['name'] ?? name)}, disabled.`)
     }
   }
 

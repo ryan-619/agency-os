@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { toast } from '../toast/toast'
 
 /**
  * What can happen to a proposal next. The transitions are the route's;
@@ -39,6 +40,8 @@ export function ProposalStatus({ id, status, canWrite }: { id: string; status: s
         setError(b.error ?? 'That did not work.')
         return
       }
+      // What was recorded, and no more: marking it sent sends nothing.
+      toast.afterReload(to === 'sent' ? 'Marked as sent.' : to === 'withdrawn' ? 'Withdrawn.' : `Recorded as ${to}.`)
       window.location.reload()
     } catch {
       setError('The request did not complete.')

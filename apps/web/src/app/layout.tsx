@@ -3,6 +3,8 @@ import Script from 'next/script'
 import { GeistMono } from 'geist/font/mono'
 import { GeistSans } from 'geist/font/sans'
 import { MotionRoot } from '@/components/motion/motion-root'
+import { Toaster } from '@/components/toast/toaster'
+import { THEME_BEFORE_PAINT } from '@/lib/theme'
 import './globals.css'
 
 export const metadata: Metadata = {
@@ -30,15 +32,20 @@ const MOTION_CLASS = `try{if(matchMedia('(prefers-reduced-motion: no-preference)
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    // The class above is added before React hydrates <html>, so this element alone may differ.
+    // The class and the theme above are set before React hydrates <html>, so this element alone may differ.
     <html lang="en" className={`${GeistSans.variable} ${GeistMono.variable}`} suppressHydrationWarning>
       <body>
         {/* Next puts a beforeInteractive script in the document head, ahead of everything React renders. */}
         <Script id="motion-ok" strategy="beforeInteractive">
           {MOTION_CLASS}
         </Script>
+        {/* A person's light or dark choice (theme-switch.tsx), before anything is painted in the other one. */}
+        <Script id="theme" strategy="beforeInteractive">
+          {THEME_BEFORE_PAINT}
+        </Script>
         {children}
         <MotionRoot />
+        <Toaster />
       </body>
     </html>
   )

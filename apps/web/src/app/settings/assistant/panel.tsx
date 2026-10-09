@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { When } from '@/components/when'
 import { knownTimeZones } from '@/lib/wall-clock'
+import { ToastOn } from '../../../components/toast/toast-on'
 import { BRIEF_LIMITS, BRIEF_STEPS, PLAYBOOK_ABOUT, PLAYBOOK_COST_NOTE, PLAYBOOK_OUTLINE, type Line } from './words'
 
 /**
@@ -136,7 +137,7 @@ function PlaybookForm({ canWrite, playbook, playbookMax, playbookSavedBy, playbo
           <p className="muted" style={{ fontSize: 13 }}>Only an owner can change the playbook.</p>
         )}
         {error ? <div className="err-line">{error}</div> : null}
-        {done ? <div className="ok-line">{done}</div> : null}
+        <ToastOn message={done} />
       </div>
     </>
   )
@@ -258,7 +259,7 @@ function BriefForm({ canWrite, brief, status, worker, latest }: AssistantPanelPr
           <p className="muted" style={{ fontSize: 13 }}>Only an owner can change the morning brief or run it.</p>
         )}
         {error ? <div className="err-line">{error}</div> : null}
-        {done ? <div className="ok-line">{done}</div> : null}
+        <ToastOn message={done} />
         <p className="muted" style={{ fontSize: 12.5, marginBottom: 0 }}>
           Switched on, it runs as whoever saved it, in a thread of theirs titled “Morning brief · date”. It costs one chat
           turn a day, within the worker&apos;s per-turn budget. Run it now counts as that day&apos;s brief.

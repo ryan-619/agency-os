@@ -71,3 +71,20 @@ export function startsNavigation(link: LinkFacts, here: string): boolean {
   if (to.pathname.startsWith('/api/')) return false
   return to.pathname !== from.pathname || to.search !== from.search
 }
+
+/**
+ * Whether grey outlines of a page may stand in while this link's page loads
+ * (motion-root.tsx): any link that starts the bar, except one to a page
+ * ABOVE this one — `/chat` from `/chat/<thread>` — which may hand the visitor
+ * straight back here. The address would then never change, nothing would
+ * say the page had arrived, and the outlines would cover a page that was
+ * already there until the bar gave up. The dashboard (`/`) sits above every
+ * page and never sends anybody back, so it is not "above" in this sense.
+ */
+export function outlinesFor(link: LinkFacts, here: string): boolean {
+  if (!startsNavigation(link, here)) return false
+  const from = new URL(here)
+  const to = new URL(link.href, from)
+  const path = to.pathname.replace(/\/+$/, '')
+  return path === '' || !from.pathname.startsWith(`${path}/`)
+}

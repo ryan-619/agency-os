@@ -9,6 +9,7 @@ import { MainFrame } from '@/components/motion/main-frame'
 import { NavIndicator } from '@/components/motion/nav-indicator'
 import { NavCloser } from '@/components/nav-closer'
 import { SearchBox } from '@/components/search-box'
+import { ThemeSwitch } from '@/components/theme/theme-switch'
 import { orgIdentity } from '@/lib/org-identity'
 
 export interface ShellUser {
@@ -200,6 +201,7 @@ export async function Shell({
               <span style={{ marginLeft: 6 }}>read-only settings</span>
             )}
           </div>
+          <ThemeSwitch />
           <form action={signOut}>
             <button className="signout">
               <LogOut aria-hidden="true" />

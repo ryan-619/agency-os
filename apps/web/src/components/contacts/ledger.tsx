@@ -1,6 +1,8 @@
 'use client'
 
 import { Fragment, useState } from 'react'
+import { ContactRound } from 'lucide-react'
+import { EmptyState } from '../empty-state'
 import { pauseReasonClass } from '@agency/core'
 import { When } from '@/components/when'
 import { ContactEdit } from '@/components/contacts/edit'
@@ -8,6 +10,7 @@ import { SmsComposer } from '@/components/contacts/sms-composer'
 import { SharedNumberHolderNote } from '@/components/shared-number-note'
 import { sendCheckSentence, type SendCheckView } from '@/lib/consent-view'
 import { offersResume, resumeOfferFor } from '@/lib/shared-number-pause'
+import { toast } from '../toast/toast'
 
 /**
  * The consent ledger (§2.1): one row per person, and per row the facts the
@@ -106,6 +109,12 @@ export interface LedgerCampaign {
 
 const KEY_WORDS: Record<LedgerSuppressionView['key'], string> = { email: 'email', phone: 'phone', linkedin: 'LinkedIn' }
 
+/** What a toast says once a row's Pause or Resume has landed, by the request's action. */
+const PATCHED_WORDS: ReadonlyMap<unknown, string> = new Map<unknown, string>([
+  ['pause', 'Paused. Nothing goes to them until somebody resumes them.'],
+  ['resume', 'Resumed.'],
+])
+
 type Panel = 'check' | 'edit' | 'erase' | 'sms'
 
 /** Only a URL that is plainly a LinkedIn page becomes a link; anything else is shown as text. */
@@ -147,6 +156,7 @@ export function ContactsLedger({
         setErrors((e) => ({ ...e, [id]: b.error ?? 'That did not work.' }))
         return
       }
+      toast.success(PATCHED_WORDS.get(body.action) ?? 'Saved.')
       window.location.reload()
     } catch {
       setErrors((e) => ({ ...e, [id]: 'The request did not complete. Try again.' }))
@@ -156,7 +166,19 @@ export function ContactsLedger({
   }
 
   if (rows.length === 0) {
-    return <p className="muted">Nobody matches. People are added from a company’s page.</p>
+    return (
+      <EmptyState
+        icon={ContactRound}
+        title="Nobody matches"
+        actions={[
+          { href: '/contacts/import', label: 'Import people' },
+          { href: '/companies', label: 'Companies', secondary: true },
+        ]}
+      >
+        People are added from a company’s page or imported from a file, and somebody who books through the booking page
+        arrives here on their own.
+      </EmptyState>
+    )
   }
 
   return (
@@ -498,6 +520,7 @@ function EraseContact({ contactId, name, onCancel }: { contactId: string; name: 
         return
       }
       setDone(b as EraseResponse)
+      toast.success('Erased.')
     } catch {
       setError('The request did not complete. Reload the page to see whether they are still listed before trying again.')
     } finally {

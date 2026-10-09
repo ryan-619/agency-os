@@ -1,9 +1,13 @@
 'use client'
 
 import { useState } from 'react'
+import { Ban, CirclePause } from 'lucide-react'
+import { EmptyState } from '../empty-state'
 import { When } from '@/components/when'
 import { SharedNumberHolderNote } from '@/components/shared-number-note'
 import { SHARED_NUMBER_LABEL, isSharedNumberOptOutPause } from '@/lib/shared-number-pause'
+import { toast } from '../toast/toast'
+import { ToastOn } from '../toast/toast-on'
 
 /**
  * The suppression list, and who is paused (PROMPT.md §2.1, §8.4).
@@ -99,10 +103,12 @@ export function SuppressionsPanel({
         return
       }
       if (body.alreadyPresent) {
-        setNotice(`${body.value} was already on the list. Nothing changed.`)
+        // Never the value: a pop-up is no place for an address or a number.
+        setNotice('Already on the list. Nothing changed.')
         setValue('')
         return
       }
+      toast.afterReload('Suppression added.')
       window.location.reload()
     } catch {
       setError('The request did not complete. Try again.')
@@ -128,6 +134,7 @@ export function SuppressionsPanel({
         setError(body.error ?? 'That did not work.')
         return
       }
+      toast.afterReload('Suppression removed.')
       window.location.reload()
     } finally {
       setBusy(null)
@@ -146,6 +153,7 @@ export function SuppressionsPanel({
         body: JSON.stringify({ action: 'resume', pausedReason: p.pausedReason }),
       })
       if (res.ok) {
+        toast.afterReload('Pause lifted.')
         window.location.reload()
         return
       }
@@ -193,7 +201,7 @@ export function SuppressionsPanel({
             </span>
           </label>
           {error ? <div className="err-line">{error}</div> : null}
-          {notice ? <div className="ok-line">{notice}</div> : null}
+          <ToastOn message={notice} tone="info" />
           <div className="row-actions" style={{ marginTop: 10 }}>
             <button type="button" disabled={busy === 'add' || !value || !reason} onClick={() => void add()}>
               {busy === 'add' ? 'Adding…' : 'Add'}
@@ -213,7 +221,10 @@ export function SuppressionsPanel({
         ))}
       </p>
       {suppressions.length === 0 ? (
-        <p className="muted" style={{ fontSize: 13 }}>Nobody is suppressed.</p>
+        <EmptyState icon={Ban} title="Nobody is suppressed" compact>
+          A reply that asks to stop, a click on an unsubscribe link, or somebody adding one above puts an address here,
+          and the send path checks this list before every message.
+        </EmptyState>
       ) : (
         <div className="rows">
           {suppressions.map((s) => (
@@ -247,7 +258,7 @@ export function SuppressionsPanel({
         until the pause is lifted.
       </p>
       {paused.length === 0 ? (
-        <p className="muted" style={{ fontSize: 13 }}>Nobody is paused.</p>
+        <EmptyState icon={CirclePause} title="Nobody is paused" compact />
       ) : (
         <div className="rows">
           {paused.map((p) => (

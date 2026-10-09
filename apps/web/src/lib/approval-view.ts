@@ -649,6 +649,20 @@ export function approvedMessage(channel: string, noSenderNote: string | null): s
 }
 
 /**
+ * The pop-up after Approve (2026-10-09): the card keeps `approvedMessage`
+ * whole; this is its gist, short enough to read in a toast, and it promises
+ * no more than the card does — approving is not sending, and nothing here
+ * says a worker will send it.
+ */
+export function approvedToast(channel: string, noSenderNote: string | null): string {
+  if (isLinkedIn(channel)) return 'Approved. It is now a step on /tasks for a person to send; nothing was sent.'
+  if (noSenderNote !== null) return 'Approved, and queued. No worker is configured here, so it goes only if one runs elsewhere.'
+  return channel === 'sms'
+    ? 'Approved. Every rule is checked again before it goes, the registered template included.'
+    : 'Approved. Every rule is checked again before it goes.'
+}
+
+/**
  * A worker being configured (AGENT_URL) says where chat goes, not that
  * anything sends email: the documented laptop worker is reached for chat
  * and asked separately whether to send, defaulting to No (review round 15).

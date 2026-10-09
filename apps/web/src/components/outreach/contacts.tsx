@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { When } from '@/components/when'
 import { SharedNumberHolderNote } from '@/components/shared-number-note'
 import { isSharedNumberOptOutPause } from '@/lib/shared-number-pause'
+import { toast } from '../toast/toast'
 
 /**
  * The people at a company (PROMPT.md §2.1, §8.4).
@@ -34,6 +35,9 @@ export interface ContactView {
   readonly consents: readonly { readonly channel: string; readonly granted: boolean; readonly source: string }[]
 }
 
+/** A consent channel as the pop-up names it. */
+const CHANNEL_WORDS: Readonly<Record<string, string>> = { email: 'email', sms: 'SMS', voice: 'voice', whatsapp: 'WhatsApp' }
+
 export function ContactsPanel({
   companyId,
   contacts,
@@ -47,7 +51,8 @@ export function ContactsPanel({
   const [busy, setBusy] = useState<string | null>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
 
-  const patch = async (id: string, body: Record<string, unknown>): Promise<void> => {
+  /** `done` is the pop-up once the route has taken it. */
+  const patch = async (id: string, body: Record<string, unknown>, done: string): Promise<void> => {
     setBusy(id)
     setErrors((e) => ({ ...e, [id]: '' }))
     try {
@@ -61,6 +66,7 @@ export function ContactsPanel({
         setErrors((e) => ({ ...e, [id]: b.error ?? 'That did not work.' }))
         return
       }
+      toast.afterReload(done)
       window.location.reload()
     } catch {
       setErrors((e) => ({ ...e, [id]: 'The request did not complete. Try again.' }))
@@ -90,6 +96,7 @@ export function ContactsPanel({
         setErrors((e) => ({ ...e, [id]: b.error ?? 'That did not work.' }))
         return
       }
+      toast.afterReload(`${granted ? 'Opt-in' : 'Refusal'} recorded for ${CHANNEL_WORDS[channel] ?? channel}.`)
       window.location.reload()
     } catch {
       setErrors((e) => ({ ...e, [id]: 'The request did not complete. Try again.' }))
@@ -119,7 +126,11 @@ export function ContactsPanel({
                 {canWrite ? (
                   <div className="row-actions">
                     {c.pausedAt ? (
-                      <button type="button" disabled={busy === c.id} onClick={() => void patch(c.id, { action: 'resume', pausedReason: c.pausedReason })}>
+                      <button
+                        type="button"
+                        disabled={busy === c.id}
+                        onClick={() => void patch(c.id, { action: 'resume', pausedReason: c.pausedReason }, 'Pause lifted.')}
+                      >
                         Resume
                       </button>
                     ) : (
@@ -128,7 +139,9 @@ export function ContactsPanel({
                         disabled={busy === c.id}
                         onClick={() => {
                           const reason = window.prompt('Why pause them? (kept with the pause)')
-                          if (reason?.trim()) void patch(c.id, { action: 'pause', reason })
+                          if (reason?.trim()) {
+                            void patch(c.id, { action: 'pause', reason }, 'Paused. Nothing further goes to them until the pause is lifted.')
+                          }
                         }}
                       >
                         Pause
@@ -165,7 +178,10 @@ export function ContactsPanel({
                     disabled={busy === c.id}
                     onClick={() => {
                       const zone = window.prompt('IANA timezone, e.g. Europe/London or America/New_York', c.timeZone ?? '')
-                      if (zone !== null) void patch(c.id, { action: 'timeZone', timeZone: zone })
+                      if (zone !== null) {
+                        // The route stores a blank as no zone.
+                        void patch(c.id, { action: 'timeZone', timeZone: zone }, zone.trim() ? 'Timezone saved.' : 'Timezone cleared.')
+                      }
                     }}
                   >
                     {c.timeZone ? 'Change' : 'Set timezone'}
@@ -256,6 +272,7 @@ function AddContact({ companyId, onCancel }: { companyId: string; onCancel: () =
         setError(b.error ?? 'That did not work.')
         return
       }
+      toast.afterReload('Contact added.')
       window.location.reload()
     } finally {
       setBusy(false)

@@ -1,7 +1,11 @@
 'use client'
 
 import { useState } from 'react'
+import { ListChecks } from 'lucide-react'
+import { EmptyState } from '../empty-state'
 import { When } from '@/components/when'
+import { toast } from '../toast/toast'
+import { ToastOn } from '../toast/toast-on'
 
 /**
  * Tasks as a person works them: tick one off, hand it to somebody, move its
@@ -55,6 +59,25 @@ function endOfLocalDay(day: string): string | null {
   return Number.isNaN(at.getTime()) ? null : at.toISOString()
 }
 
+/**
+ * What a toast says once a task change has landed. Never the assignee's
+ * label: a teammate with no name on record is labelled by their address.
+ */
+function taskChangeWords(body: Record<string, unknown>): string {
+  switch (body.action) {
+    case 'done':
+      return 'Task done.'
+    case 'reopen':
+      return 'Task reopened.'
+    case 'due':
+      return body.dueAt ? 'Due date set.' : 'Due date cleared.'
+    case 'assign':
+      return body.assigneeUserId ? 'Task assigned.' : 'Task unassigned.'
+    default:
+      return 'Saved.'
+  }
+}
+
 async function send(
   url: string,
   method: 'POST' | 'PATCH',
@@ -96,10 +119,11 @@ export function TaskList({
       setError(r.error)
       return
     }
+    toast.success(taskChangeWords(body))
     window.location.reload()
   }
 
-  if (tasks.length === 0) return <p className="muted" style={{ fontSize: 13 }}>{empty}</p>
+  if (tasks.length === 0) return <EmptyState icon={ListChecks} title={empty.replace(/\.$/, '')} compact />
 
   return (
     <div>
@@ -254,6 +278,7 @@ export function NewTaskForm({
       setError(r.error)
       return
     }
+    toast.success('Task added.')
     window.location.reload()
   }
 
@@ -349,7 +374,7 @@ export function TemplateButtons({
   return (
     <div style={{ marginTop: 14 }}>
       {error ? <div className="err-line" role="alert">{error}</div> : null}
-      {done ? <div className="ok-line">{done}</div> : null}
+      <ToastOn message={done} />
       {rows.map(([template, label, copy, state]) => (
         <div key={template} className="row-actions" style={{ marginTop: 8, alignItems: 'center' }}>
           <button

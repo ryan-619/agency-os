@@ -19,6 +19,8 @@ import {
 import { getDb, schema } from '@/lib/db'
 import { deployment } from '@/lib/deployment'
 import { workerStatus } from '@/lib/worker-status'
+import { Coffee } from 'lucide-react'
+import { EmptyState } from '@/components/empty-state'
 
 /**
  * The dashboard: what needs a person, what just happened, and what this
@@ -228,10 +230,17 @@ export default async function Dashboard() {
             ))}
           </ol>
         ) : (
-          <p className="muted" style={{ fontSize: 13.5 }}>
-            Nothing is due right now. Ask Chat to find businesses that need what you sell, or look over the{' '}
-            <a href="/pipeline">pipeline</a>.
-          </p>
+          <EmptyState
+            icon={Coffee}
+            title="Nothing is due right now"
+            compact
+            actions={[
+              { href: '/chat', label: 'Ask Chat to find businesses' },
+              { href: '/pipeline', label: 'Look over the pipeline', secondary: true },
+            ]}
+          >
+            Ask Chat to find businesses that need what you sell, or look over the pipeline.
+          </EmptyState>
         )}
 
         {overnight ? (

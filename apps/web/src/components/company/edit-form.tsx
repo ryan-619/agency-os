@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { knownTimeZones } from '@/lib/wall-clock'
+import { toast } from '../toast/toast'
 
 /** core's `COMPANY_STAGES`, restated client-side; `company-edit-form.test.ts` holds the two equal. */
 export const STAGE_OPTIONS = [
@@ -104,6 +105,7 @@ export function CompanyEditForm({
         setError(b.error ?? 'That did not work.')
         return
       }
+      toast.success('Saved.')
       window.location.reload()
     } catch {
       setError('The request did not complete. Try again.')

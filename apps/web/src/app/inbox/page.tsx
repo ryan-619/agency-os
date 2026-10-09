@@ -12,6 +12,8 @@ import { inZone } from '@/lib/format'
 import {
   INBOX_GROUP_LABELS, INBOX_GROUP_ORDER, INBOX_LEDE, groupInbox, inboxDeploymentNotes, inboxGroupOf, personName,
 } from '@/lib/inbox-view'
+import { Inbox } from 'lucide-react'
+import { EmptyState } from '@/components/empty-state'
 
 /**
  * The inbox (PROMPT.md §8.4): every reply, its kind, and what a person did.
@@ -150,11 +152,20 @@ export default async function InboxPage({
       </p>
 
       {views.length === 0 ? (
-        <p className="muted" style={{ fontSize: 13 }}>
-          {unhandledOnly || kind
-            ? 'Nothing matches that filter.'
-            : 'No replies yet. When somebody answers a message this system sent, it lands here — paused, classified, and waiting for a person.'}
-        </p>
+        unhandledOnly || kind ? (
+          <EmptyState icon={Inbox} title="Nothing matches that filter" compact actions={[{ href: '/inbox', label: 'Show every reply', secondary: true }]} />
+        ) : (
+          <EmptyState
+            icon={Inbox}
+            title="No replies yet"
+            actions={[
+              { href: '/campaigns', label: 'Write to people from a campaign' },
+              { href: '/approvals', label: 'See what waits for approval', secondary: true },
+            ]}
+          >
+            When somebody answers a message this system sent, it lands here — paused, classified, and waiting for a person.
+          </EmptyState>
+        )
       ) : (
         <InboxQueue
           groups={groupInbox(views, (v) => v.group)}

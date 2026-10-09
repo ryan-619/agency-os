@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react'
 import { QUOTE_UNITS, quoteItemFromService, quoteTotals, type QuoteItem, type QuoteUnit, type QuotableService } from '@agency/core'
 import { money, unitWords } from '@/lib/quote-view'
+import { ToastOn } from '../../../components/toast/toast-on'
 
 /**
  * Editing a quote (0023): the title, the opening words, every line, the
@@ -187,7 +188,7 @@ export function QuoteEditor({
         </div>
       </div>
       {error ? <div className="err-line" style={{ margin: '8px 0' }}>{error}</div> : null}
-      {notice ? <div className="ok-line" style={{ margin: '8px 0' }}>{notice}</div> : null}
+      <ToastOn message={notice} />
       {link ? (
         <div className="note" style={{ margin: '8px 0', wordBreak: 'break-all' }}>
           Link for the buyer: <a href={link} target="_blank" rel="noreferrer">{link}</a>

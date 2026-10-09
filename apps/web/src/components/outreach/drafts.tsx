@@ -2,9 +2,10 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { When } from '@/components/when'
+import { toast } from '../toast/toast'
 import {
   EDIT_BODY_MAX, EDIT_SUBJECT_MAX, EDITING_BLOCKS_APPROVAL, EVIDENCE_LINES_SHOWN, KEY_HELP, OTHER_CAMPAIGN_NOTE,
-  addressedByLabel, approvability, approveBlock, approveFootnote, approvedMessage, candidateLine, checkedUnderLabel,
+  addressedByLabel, approvability, approveBlock, approveFootnote, approvedMessage, approvedToast, candidateLine, checkedUnderLabel,
   draftTitle, editNote, evidenceHeading, evidenceNote, keyAction, queueNoSenderNote, templateLine, wordsEditable,
   type AddressedBy, type Approvability, type CandidateDecision, type CheckedUnder, type DraftEvidence,
   type DraftTemplate,
@@ -122,7 +123,6 @@ export function DraftQueue({
   )
   /** An open, unsaved edit. While one is open the card cannot be approved. */
   const [editing, setEditing] = useState<Record<string, Editor | undefined>>({})
-  const [saved, setSaved] = useState<Record<string, string>>({})
   const cards = useRef(new Map<string, HTMLDivElement>())
 
   const wordsOf = (d: DraftView): Words => words[d.id] ?? { subject: d.subject, body: d.body }
@@ -153,7 +153,8 @@ export function DraftQueue({
       if (res.ok) {
         setWords((w) => ({ ...w, [draft.id]: { subject: answer.subject ?? null, body: answer.body ?? null } }))
         setEditing((x) => ({ ...x, [draft.id]: undefined }))
-        setSaved((x) => ({ ...x, [draft.id]: answer.changed ? 'Saved. Approve the new words when they are right.' : 'Nothing had changed.' }))
+        if (answer.changed) toast.success('Saved. Approve the new words when they are right.')
+        else toast.info('Nothing had changed.')
       } else {
         setErrors((e) => ({ ...e, [draft.id]: answer.error ?? 'That did not save.' }))
       }
@@ -185,16 +186,16 @@ export function DraftQueue({
       })
       const body = (await res.json().catch(() => ({}))) as { error?: string }
       if (res.ok) {
+        const message =
+          decision === 'approved'
+            ? approvedMessage(draft.channel, noSenderNote)
+            : 'Denied. Nothing was sent, and the note is kept with the draft.'
         setSettled((s) => ({
           ...s,
-          [draft.id]: {
-            outcome: decision === 'approved' ? 'approved' : 'refused',
-            message:
-              decision === 'approved'
-                ? approvedMessage(draft.channel, noSenderNote)
-                : 'Denied. Nothing was sent, and the note is kept with the draft.',
-          },
+          [draft.id]: { outcome: decision === 'approved' ? 'approved' : 'refused', message },
         }))
+        // The card keeps the whole sentence; the pop-up says its gist.
+        toast.success(decision === 'approved' ? approvedToast(draft.channel, noSenderNote) : message)
       } else if (res.status === 409) {
         setSettled((s) => ({ ...s, [draft.id]: { outcome: 'taken', message: 'Someone else decided this first.' } }))
       } else {
@@ -438,14 +439,12 @@ export function DraftQueue({
                         disabled={busy === d.id}
                         onClick={() => {
                           const w = wordsOf(d)
-                          setSaved((x) => ({ ...x, [d.id]: '' }))
                           setArmed((a) => (a === d.id ? null : a))
                           setEditing((x) => ({ ...x, [d.id]: { subject: w.subject ?? '', body: w.body ?? '' } }))
                         }}
                       >
                         Edit the words
                       </button>
-                      {saved[d.id] ? <span className="muted" style={{ marginLeft: 8, fontSize: 12.5 }}>{saved[d.id]}</span> : null}
                     </p>
                   ) : null}
                 </>
