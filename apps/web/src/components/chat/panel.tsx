@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { describeApproval } from '@/lib/approval-card'
 import { When } from '@/components/when'
 import {
   emptyChat, parseFrame, reduceChat, withUserMessage,
@@ -463,7 +464,7 @@ function ApprovalCard({
         <strong>The agent wants to {block.explain.replace(/\.$/, '')}</strong>
         <span className="pill pill-risk">{block.risk} risk</span>
       </div>
-      <pre className="mono approval-payload">{JSON.stringify(block.payload, null, 2)}</pre>
+      <ApprovalReadingView toolName={block.toolName} payload={block.payload} />
 
       {pending ? (
         canDecide ? (
@@ -489,6 +490,40 @@ function ApprovalCard({
           {block.status === 'expired' ? '. Nothing was done.' : '.'}
         </p>
       )}
+    </div>
+  )
+}
+
+/**
+ * The payload as a person reads it (2026-10-09): a title, the message's
+ * words as a message, every other key as a fact — and the whole JSON a
+ * click away, because the reading is not the record.
+ */
+function ApprovalReadingView({ toolName, payload }: { toolName: string; payload: unknown }) {
+  const r = describeApproval(toolName, payload)
+  return (
+    <div className="approval-reading">
+      <div className="approval-title">{r.title}</div>
+      {r.message ? (
+        <div className="approval-message">
+          {r.message.subject ? <div className="approval-subject">{r.message.subject}</div> : null}
+          <pre>{r.message.body}</pre>
+        </div>
+      ) : null}
+      {r.facts.length > 0 ? (
+        <dl className="approval-facts">
+          {r.facts.map((f) => (
+            <div key={f.label}>
+              <dt>{f.label}</dt>
+              <dd>{f.value.includes('\n') ? <pre>{f.value}</pre> : f.value}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
+      <details className="approval-raw">
+        <summary>The exact payload, as the tool would receive it</summary>
+        <pre className="mono approval-payload">{JSON.stringify(payload, null, 2)}</pre>
+      </details>
     </div>
   )
 }

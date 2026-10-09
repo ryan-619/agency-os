@@ -193,6 +193,14 @@ in place of a plain Done; "call back" makes the next call task on the day
 agreed, and "asked to stop" puts the number on the suppression list FIRST
 and refuses the outcome if that row cannot be written.
 
+**Then a readable approval card in chat (2026-10-09), on no migration**:
+`describeApproval` (`apps/web/src/lib/approval-card.ts`, pure) turns a
+carded tool's payload into a title ("Draft an email to kumardental.in for
+approval"), the message's subject and body shown as a message, and every
+other key as a labelled fact — nothing dropped — and the card keeps the
+whole JSON a click away ("The exact payload, as the tool would receive
+it"), because a reading is not the record. `apps/web/test/approval-card.test.ts`.
+
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
 machine"), which needs no public address, because everything but chat is
