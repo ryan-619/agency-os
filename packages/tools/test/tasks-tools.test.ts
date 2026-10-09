@@ -16,7 +16,7 @@ import { tasksComplete, type AgencyDb } from '@agency/db'
 import * as schema from '@agency/db/schema'
 import { migratedDb, type TestDb } from '../../db/test/helpers.js'
 import {
-  addNote, createTask, listTasks, type AgencyToolSpec, type ToolContext, type ToolOutcome,
+  addNote, completeTask, createTask, listTasks, type AgencyToolSpec, type ToolContext, type ToolOutcome,
 } from '../src/index.js'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -331,5 +331,44 @@ describe('the notes and tasks tools', () => {
     const member = { principal: { id: teammateId, orgId, role: 'member' as const } }
     expect(summaryOf(await run(addNote, { domain: 'rentman.io', body: 'Another.' }, member)).endsWith('Nothing was sent.')).toBe(true)
     expect(summaryOf(await run(createTask, { title: 'Another.' }, member)).endsWith('Nothing was sent.')).toBe(true)
+  })
+
+  // -------------------------------------------------------------------------
+  describe('complete_task with an outcome (0027)', () => {
+    it('records what came of a call, makes the call-back task, and refuses an outcome on a to-do', async () => {
+      await db.update(schema.companies).set({ phone: '+918041234567', timeZone: 'Asia/Kolkata' }).where(eq(schema.companies.id, companyId))
+      const made = await run(createTask, { domain: 'rentman.io', kind: 'call', title: 'Call Rentman' })
+      const callId = (made.ok ? (made.data as { taskId: string }).taskId : '')
+      expect(callId).toMatch(UUID)
+
+      const out = await run(completeTask, { taskId: callId, outcome: 'call_back', callBackOn: '2026-09-22' })
+      const summary = summaryOf(out)
+      expect(summary).toContain('call back')
+      expect(summary).toContain('The next call is a task on 2026-09-22')
+      const rows = await tasks()
+      const done = rows.find((t) => t.id === callId)!
+      expect(done).toMatchObject({ outcome: 'call_back', doneBy: userId })
+      const next = rows.find((t) => t.id !== callId)!
+      expect(next).toMatchObject({ kind: 'call', title: 'Call Rentman again, as agreed on the phone', assigneeUserId: userId, doneAt: null })
+      expect(audited.at(-1)).toMatchObject({ action: 'agent.complete_task', detail: { taskId: callId, outcome: 'call_back', callBackTaskId: next.id, suppressed: false } })
+
+      const todo = await run(createTask, { domain: 'rentman.io', title: 'Send the deck' })
+      const todoId = (todo.ok ? (todo.data as { taskId: string }).taskId : '')
+      const refused = await run(completeTask, { taskId: todoId, outcome: 'reached' })
+      expect(refused.ok).toBe(false)
+      if (!refused.ok) expect(refused.code).toBe('invalid_state')
+      expect((await tasks()).find((t) => t.id === todoId)!.doneAt).toBeNull()
+    })
+
+    it('puts the number on the suppression list first when they asked not to be called', async () => {
+      await db.update(schema.companies).set({ phone: '+918041234567' }).where(eq(schema.companies.id, companyId))
+      const made = await run(createTask, { domain: 'rentman.io', kind: 'call', title: 'Call Rentman' })
+      const callId = (made.ok ? (made.data as { taskId: string }).taskId : '')
+      const out = await run(completeTask, { taskId: callId, outcome: 'asked_to_stop' })
+      expect(summaryOf(out)).toContain('suppression list')
+      const rows = await db.select().from(schema.suppressions).where(eq(schema.suppressions.orgId, orgId))
+      expect(rows).toHaveLength(1)
+      expect(rows[0]).toMatchObject({ kind: 'phone', value: '+918041234567', source: 'manual' })
+    })
   })
 })

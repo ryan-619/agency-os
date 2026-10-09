@@ -394,7 +394,7 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'agent.cancel_meeting': { meetingId: SUBJECT, companyId: SUBJECT, turnId: SUBJECT },
   'agent.record_meeting_outcome': { meetingId: SUBJECT, companyId: SUBJECT, outcome: 'no_show', previous: 'held', turnId: SUBJECT },
   'agent.set_deal_owner': { dealId: SUBJECT, companyId: SUBJECT, ownerUserId: OTHER_USER, previousOwnerUserId: null, turnId: SUBJECT },
-  'agent.complete_task': { taskId: SUBJECT, companyId: SUBJECT, alreadyDone: false, turnId: SUBJECT },
+  'agent.complete_task': { taskId: SUBJECT, companyId: SUBJECT, alreadyDone: false, outcome: 'call_back', callBackTaskId: SUBJECT, suppressed: false, turnId: SUBJECT },
   // --- end proposals.ts ---
 
   // --- ops.ts tools (2026-10-06): this file's actions go below ---

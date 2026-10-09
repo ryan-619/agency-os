@@ -2026,8 +2026,11 @@ cannot be read, a fault) the outcome is REFUSED and rolled back with a
 sentence that says to record the number on `/suppressions` by hand, because
 a "done: asked to stop" with no suppression behind it is the opt-out nobody
 recorded. A number already on the list is fine (`alreadyPresent`). The
-tasks card and `list_tasks` show the outcome beside a done task.
-`packages/db/test/task-outcomes.test.ts` holds each path.
+tasks card and `list_tasks` show the outcome beside a done task, and
+`complete_task` takes `outcome` (and `callBackOn`) for a call or a visit —
+only as the person said it, never guessed — through the same writer, and
+refuses one on any other kind. `packages/db/test/task-outcomes.test.ts` and
+`packages/tools/test/tasks-tools.test.ts` hold each path.
 
 **Stated residuals.** An outcome is about the NUMBER called: "asked to
 stop" suppresses the company's phone and pauses nobody by email, because

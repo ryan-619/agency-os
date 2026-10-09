@@ -64,7 +64,7 @@ import {
 import {
   activeIcpProfile, appendAudit, cancelMeeting, findCompanyByDomain, generateProposal, meetingRescheduleLinks,
   openDealFor, proposalsForCompany, readMeetingWithCompany, readProposal, rescheduleMeeting, setDealOwner,
-  setMeetingOutcome, shareEvidenceSuperseded, tasksComplete, upcomingMeetings,
+  setMeetingOutcome, shareEvidenceSuperseded, tasksComplete, tasksRecordOutcome, TASK_OUTCOMES, type TaskOutcome, upcomingMeetings,
   type AgencyDb, type DealRow, type MeetingLink, type MeetingRow, type ProposalRow,
 } from '@agency/db'
 import * as schema from '@agency/db/schema'
@@ -1110,6 +1110,15 @@ export const setDealOwnerTool: AgencyToolSpec<typeof setDealOwnerShape> = {
 
 const completeTaskShape = {
   taskId: z.uuid().describe('The task, by its id.'),
+  outcome: z
+    .enum(TASK_OUTCOMES as [TaskOutcome, ...TaskOutcome[]])
+    .optional()
+    .describe(
+      'For a call or a visit (0027): what came of it, as the person said — reached, no_answer, busy, wrong_number, ' +
+        'call_back (with callBackOn), not_interested, or asked_to_stop, which puts the company’s number on the ' +
+        'suppression list first. Only when they told you; never guess one.',
+    ),
+  callBackOn: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('With call_back: the day agreed, YYYY-MM-DD.'),
 }
 
 /** PATCH /api/tasks/[id]'s 409, verbatim, with where it is done instead. */
@@ -1123,7 +1132,9 @@ export const completeTask: AgencyToolSpec<typeof completeTaskShape> = {
   description:
     'Mark a task done, by its id, in the name of the person you are helping. A task already done is left as ' +
     'it is. A LinkedIn step is never closed this way: it is done when a person sends the message and presses ' +
-    '“I sent it” on /tasks, which checks every send rule first. Nothing is sent.',
+    '“I sent it” on /tasks, which checks every send rule first. A call or a visit takes an outcome when the ' +
+    'person told you what came of it — call_back makes the next call task on the day agreed, asked_to_stop puts ' +
+    'the number on the suppression list first. Nothing is sent.',
   shape: completeTaskShape,
   async handler(input, ctx): Promise<ToolOutcome<unknown>> {
     // PATCH /api/tasks/[id]'s gate.
@@ -1169,11 +1180,33 @@ export const completeTask: AgencyToolSpec<typeof completeTaskShape> = {
     // Checked before anything is written, done or not, as the route does.
     if (task.kind === 'linkedin_send') return fail('invalid_state', LINKEDIN_STEP)
 
+    const named = `the task “${oneLine(task.title, 120)}”${task.domain ? ` about ${task.domain}` : ''} (task ${task.id})`
+    if (input.outcome) {
+      // What came of a call or a visit (0027): the completion and the outcome
+      // in one transaction, through the writer /tasks uses.
+      if (task.kind !== 'call' && task.kind !== 'visit') {
+        return fail('invalid_state', `Only a call or a visit has an outcome; ${named} is a ${task.kind}. Call complete_task without one. ${NOTHING_CHANGED}`)
+      }
+      const o = await tasksRecordOutcome(ctx.db, {
+        orgId: ctx.orgId, id: task.id, byUserId, actor: 'agent', outcome: input.outcome, callBackOn: input.callBackOn ?? null, now: ctx.now(),
+      })
+      if (!o.ok) {
+        return fail(o.reason === 'not_found' ? 'not_found' : 'invalid_state', `${o.message} ${NOTHING_CHANGED}`)
+      }
+      await ctx.audit('agent.complete_task', { taskId: task.id, companyId: task.companyId, alreadyDone: false, outcome: input.outcome, callBackTaskId: o.callBackTaskId, suppressed: o.suppressed })
+      return ok(
+        { taskId: task.id, domain: task.domain, alreadyDone: false, doneAt: o.task.doneAt?.toISOString() ?? null, doneBy: o.task.doneBy, outcome: input.outcome, callBackTaskId: o.callBackTaskId, suppressed: o.suppressed },
+        `Marked ${named} done — ${input.outcome.replace(/_/g, ' ')} — in the name of the person you are helping.` +
+          (o.suppressed ? ' The company’s number went on the suppression list first, so nothing here will call or text it again.' : '') +
+          (o.callBackTaskId ? ` The next call is a task on ${input.callBackOn} (task ${o.callBackTaskId}).` : '') +
+          ` ${NOTHING_SENT}`,
+      )
+    }
+
     const r = await tasksComplete(ctx.db, { orgId: ctx.orgId, id: task.id, byUserId, actor: 'agent', now: ctx.now() })
     if (!r.ok) return fail('not_found', `${r.message} ${NOTHING_CHANGED}`)
 
     await ctx.audit('agent.complete_task', { taskId: task.id, companyId: task.companyId, alreadyDone: r.alreadyDone })
-    const named = `the task “${oneLine(task.title, 120)}”${task.domain ? ` about ${task.domain}` : ''} (task ${task.id})`
     const data = {
       taskId: task.id,
       domain: task.domain,
