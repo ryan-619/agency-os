@@ -110,4 +110,16 @@ describe('the agency tools the model is shown', () => {
     expect(AGENCY_SERVER_INSTRUCTIONS).toMatch(/A person approves first/)
     expect(AGENCY_SERVER_INSTRUCTIONS).not.toMatch(/every change asks a person/)
   })
+
+  /**
+   * True data only (2026-10-13): the agent filed made-up people and addresses
+   * composed from a name and a domain. The server's own words say what its
+   * tools now refuse, beside the system prompt's longer section.
+   */
+  it('says a person, an address or a website is written down only when the conversation showed it', () => {
+    expect(AGENCY_SERVER_INSTRUCTIONS).toMatch(
+      /A person, an address or a website is written down only when this conversation showed it/,
+    )
+    expect(AGENCY_SERVER_INSTRUCTIONS).toMatch(/never composed from a name or a pattern/)
+  })
 })

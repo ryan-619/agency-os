@@ -39,6 +39,8 @@ import { agencyToolsToOmit } from './mcp/agency.js'
 import { placesClient } from './google/places.js'
 import { pageSpeedClient } from './google/pagespeed.js'
 import { faultFields } from './log-fields.js'
+import { webReader, type WebReader } from './web/reader.js'
+import { ConversationLedgers } from './chat/ledger.js'
 
 export interface WorkerDeps {
   /** Already validated — `loadEnv()` in `index.ts`, or a test's own. */
@@ -242,6 +244,22 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
   })
 
   /**
+   * The open web, read from the worker (2026-10-13): public pages, and whether
+   * a domain resolves and receives mail, for the tools that find and check a
+   * contact or a website. One reader for every turn, so a page read twice in a
+   * conversation is one request to the business.
+   */
+  const web = webReader()
+  /**
+   * What each conversation has shown the agent (chat/ledger.ts): the person's
+   * own words and what its tools read from outside the agency, held per chat
+   * session across its turns, so an address, a person or a website the agent
+   * writes can be checked against them. In memory only; the person's words
+   * are read back from the database after a restart.
+   */
+  const conversations = new ConversationLedgers({ log })
+
+  /**
    * Resolved ONCE, here, rather than on every turn.
    *
    * A malformed SECRETS_KEY is a configuration mistake, and it should be a
@@ -331,7 +349,10 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
       return true
     },
     startTurn: (req) =>
-      beginTurn({ req, db, env, log, halt, running, secretsKey, skills, credential, ops, refineOpener, omitTools, places, pagespeed }),
+      beginTurn({
+        req, db, env, log, halt, running, secretsKey, skills, credential, ops, refineOpener, omitTools, places, pagespeed,
+        web, conversations,
+      }),
   })
 
   const apiPort = env.AGENT_PORT + 1
@@ -494,6 +515,7 @@ export async function startWorker(deps: WorkerDeps): Promise<RunningWorker> {
         const begun = await beginTurn({
           req: { ...req, deep: false, unattended: true },
           db, env, log, halt, running, secretsKey, skills, credential, ops, refineOpener, omitTools, places, pagespeed,
+          web, conversations,
         })
         if (!begun.ok) return { ok: false, message: begun.message }
         // Nobody reads this stream: the turn writes its own messages as it
@@ -587,8 +609,15 @@ async function beginTurn(args: {
   places: PlacesClient | undefined
   /** Google PageSpeed, built once at boot. */
   pagespeed: PageSpeedClient | undefined
+  /** The open web, read from the worker — the same reader every turn. */
+  web: WebReader
+  /** What each conversation has shown the agent, one per worker process. */
+  conversations: ConversationLedgers
 }): Promise<{ ok: true; turn: TurnHandle } | { ok: false; status: number; message: string }> {
-  const { req, db, env, log, halt, running, secretsKey, skills, credential, ops, refineOpener, omitTools, places, pagespeed } = args
+  const {
+    req, db, env, log, halt, running, secretsKey, skills, credential, ops, refineOpener, omitTools, places, pagespeed,
+    web, conversations,
+  } = args
 
   if (!credential) return { ok: false, status: 503, message: 'chat_disabled' }
   if (halt.halted()) return { ok: false, status: 503, message: 'runtime_halted' }
@@ -623,6 +652,8 @@ async function beginTurn(args: {
       omitTools,
       places,
       pagespeed,
+      web,
+      conversations,
       // Only the origin: a path or query in the variable is never part of a link.
       ...(env.WEB_PUBLIC_URL ? { webOrigin: new URL(env.WEB_PUBLIC_URL).origin } : {}),
     },
@@ -646,6 +677,10 @@ async function beginTurn(args: {
     role: 'user',
     content: { text: req.text },
   })
+  // The person's own words are what this conversation has shown the agent
+  // first. The morning brief's prompt is OUR words, written as if a person
+  // had asked, so it never counts as theirs.
+  if (req.unattended !== true) runtime.conversation?.addPerson(req.text)
   await ensureChatSessionTitle(db, who.orgId, req.chatSessionId, req.text)
 
   const turn = startTurn(

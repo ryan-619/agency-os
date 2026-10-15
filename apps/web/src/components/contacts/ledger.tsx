@@ -9,6 +9,7 @@ import { ContactEdit } from '@/components/contacts/edit'
 import { SmsComposer } from '@/components/contacts/sms-composer'
 import { SharedNumberHolderNote } from '@/components/shared-number-note'
 import { sendCheckSentence, type SendCheckView } from '@/lib/consent-view'
+import type { AddressSourceLine } from '@/lib/address-source'
 import { offersResume, resumeOfferFor } from '@/lib/shared-number-pause'
 import { toast } from '../toast/toast'
 
@@ -49,6 +50,10 @@ import { toast } from '../toast/toast'
  * (`sms-composer.tsx`): a registered DLT template, its variables filled, the
  * sender's dry run over those exact words, and a draft parked on /approvals.
  *
+ * Under each email and phone, where it came from (0029) — a page, a
+ * teammate, an import — in words chosen on the server, and a warning for an
+ * address the assistant added before sources were kept.
+ *
  * Two more per row. "Download record" is everything held about the person,
  * as JSON (`/api/contacts/[id]/record`, any member, audited). "Erase…" is
  * owners only, and asks for the contact's id typed back before it will send
@@ -79,6 +84,12 @@ export interface LedgerView {
   readonly title: string | null
   readonly email: string | null
   readonly phone: string | null
+  /**
+   * Where the email and the phone came from (0029), worded on the server by
+   * `lib/address-source.ts`; null for an address they do not have.
+   */
+  readonly emailFrom: AddressSourceLine | null
+  readonly phoneFrom: AddressSourceLine | null
   readonly linkedinUrl: string | null
   readonly companyDomain: string
   readonly companyName: string | null
@@ -116,6 +127,29 @@ const PATCHED_WORDS: ReadonlyMap<unknown, string> = new Map<unknown, string>([
 ])
 
 type Panel = 'check' | 'edit' | 'erase' | 'sms'
+
+/**
+ * Where an address came from, under it (0029). A page it was seen on is a
+ * link, opened in a new tab with no referrer and no follow, as the Research
+ * card's sources are; a source nobody can vouch for reads as a warning.
+ */
+function AddressFrom({ from }: { from: AddressSourceLine | null }) {
+  if (!from) return null
+  return (
+    <span className={from.tone === 'warn' ? 'address-source err-line' : 'address-source'}>
+      {from.href ? (
+        <>
+          {from.before}
+          <a href={from.href} target="_blank" rel="noopener noreferrer nofollow" title={from.href}>
+            {from.linkText}
+          </a>
+        </>
+      ) : (
+        from.words
+      )}
+    </span>
+  )
+}
 
 /** Only a URL that is plainly a LinkedIn page becomes a link; anything else is shown as text. */
 function linkedinHref(url: string): string | null {
@@ -223,8 +257,18 @@ export function ContactsLedger({
                   ) : null}
                 </td>
                 <td style={{ fontSize: 12.5 }}>
-                  {r.email ? <div><code>{r.email}</code></div> : null}
-                  {r.phone ? <div style={{ marginTop: 3 }}><code>{r.phone}</code></div> : null}
+                  {r.email ? (
+                    <div>
+                      <code>{r.email}</code>
+                      <AddressFrom from={r.emailFrom} />
+                    </div>
+                  ) : null}
+                  {r.phone ? (
+                    <div style={{ marginTop: 3 }}>
+                      <code>{r.phone}</code>
+                      <AddressFrom from={r.phoneFrom} />
+                    </div>
+                  ) : null}
                   {r.linkedinUrl ? (
                     <div style={{ marginTop: 3 }}>
                       {li ? (

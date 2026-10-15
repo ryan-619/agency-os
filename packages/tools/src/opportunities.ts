@@ -147,7 +147,9 @@ export const findBusinesses: AgencyToolSpec<typeof findShape> = {
         'unreachable',
         'Google Maps search is not switched on for this worker: the person running it adds a Google API key with ' +
           '`./tools/run-worker.sh --google` (Places API enabled on that key). Until then, find businesses with the ' +
-          'research connectors and add them with add_company. Nothing was searched.',
+          'research connectors, read_page their listing or directory page for what it shows, and file them with ' +
+          'add_company — website "none" (with name and city) for one whose own website you have not seen; never a ' +
+          'domain you composed. Nothing was searched.',
       )
     }
     const used = await searchesToday(ctx)

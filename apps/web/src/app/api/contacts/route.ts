@@ -4,6 +4,7 @@ import {
   appendAudit, contactInput, createContact, linkedinIsReadable, linkedinUnreadable, type AgencyDb,
 } from '@agency/db/queries'
 import { auth } from '@/auth'
+import { addressSourceKind, personAddressSources } from '@/lib/address-source'
 import { getDb } from '@/lib/db'
 
 /**
@@ -16,6 +17,13 @@ import { getDb } from '@/lib/db'
  * and is NOT created here. A new contact has no consent rows, which §2.1
  * reads as "no" for the opt-in channels and as "nothing recorded" for the
  * cold ones.
+ *
+ * Each address a person types here is recorded as theirs (0029): `person`
+ * beside an email or a phone that was given, from the session and never the
+ * body (`personAddressSources`). A body that names a source of its own —
+ * "seen on a page", "the assistant was shown it" — is overridden, because
+ * the screens that show where an address came from would otherwise show
+ * whatever a request claimed.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -53,7 +61,7 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
 
   const db = getDb() as unknown as AgencyDb
-  const result = await createContact(db, user.orgId, parsed.data)
+  const result = await createContact(db, user.orgId, { ...parsed.data, ...personAddressSources(parsed.data) })
   if (!result.ok) return NextResponse.json({ error: result.message }, { status: 400 })
 
   await appendAudit(db, {
@@ -63,8 +71,15 @@ export async function POST(request: Request): Promise<NextResponse> {
     subjectType: 'contact',
     subjectId: result.contact.id,
     // Not the address (§2.3 reads a log more widely than a table). The
-    // company and the source say enough.
-    detail: { companyId: result.contact.companyId, source: result.contact.source, hasTimeZone: !!result.contact.timeZone },
+    // company and the source say enough — and where each address came from
+    // as a KIND word (0029), `person` or null, never the source itself.
+    detail: {
+      companyId: result.contact.companyId,
+      source: result.contact.source,
+      hasTimeZone: !!result.contact.timeZone,
+      emailSourceKind: addressSourceKind(result.contact.emailSource),
+      phoneSourceKind: addressSourceKind(result.contact.phoneSource),
+    },
   }).catch(() => {})
   return NextResponse.json({ id: result.contact.id }, { status: 201 })
 }

@@ -25,10 +25,16 @@
  * asked, because a person approving it is the thing the owner switched off.
  * It is a refusal added on top of `high`, never an allow — there is no branch
  * in this file that a disabled list can reach and come out allowed.
+ *
+ * So is a connector that refused a call earlier in this turn (2026-10-13):
+ * the hooks after a call mark it (gate/connector-watch.ts), and every later
+ * call to it is refused here at once, before the research allow, audited as
+ * `agent.tool_refused` with the rule `connector_refused`.
  */
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 import { type ChatEventBody, classifyRisk, runsWithoutApproval } from '@agency/core'
 import { canonicalJson, connectorToolsIsDisabled, connectorToolsMatch, type ApprovalRow } from '@agency/db'
+import { connectorRefusalSentence, connectorServerOf, type ConnectorWatch } from './connector-watch.js'
 import { fingerprint, type AuthorisationLedger } from './ledger.js'
 import type { ApprovalWaiter } from './waiter.js'
 
@@ -105,6 +111,13 @@ export interface GateDeps {
    * tool an owner turned off nor a turn nobody is watching ever reaches it.
    */
   readonly readsWithoutCard?: ReadonlySet<string>
+  /**
+   * This turn's watch on connectors that refuse (gate/connector-watch.ts,
+   * 2026-10-13): a server that answered a call with a refusal of its own —
+   * its key missing or refused, its quota spent — is refused here for the
+   * rest of the turn, at once, before anything could allow it.
+   */
+  readonly connectors?: Pick<ConnectorWatch, 'refused'> | undefined
   readonly audit: (action: string, detail: Record<string, unknown>) => Promise<void>
   readonly emit: (event: ChatEventBody) => void
   /** Marks a tool_use_id as having passed the gate, so a bypass is detectable. */
@@ -171,6 +184,20 @@ export function makeCanUseTool(deps: GateDeps): CanUseTool {
           `${toolName} is not available in Agency OS (${verdict.explain}) ` +
             'Do not try a variation of it; tell the user why and stop.',
         )
+      }
+
+      // --- a connector that already refused this turn -----------------------
+      // Its key is missing or not accepted, or it is out of quota: every call
+      // after the first would be refused the same way, and the model kept
+      // making them. Refused at once, in the words the hook used when it
+      // happened, before the research allow below could run it.
+      const server = connectorServerOf(toolName)
+      const refusedBefore = server !== null && deps.connectors ? deps.connectors.refused(server) : null
+      if (server !== null && refusedBefore !== null) {
+        await deps.audit('agent.tool_refused', {
+          toolName, toolUseId: options.toolUseID, risk: verdict.risk, rule: 'connector_refused',
+        })
+        return deny(connectorRefusalSentence(server, refusedBefore))
       }
 
       const parsed = deps.parseToolInput(toolName, input)

@@ -16,14 +16,16 @@ import { and, eq } from 'drizzle-orm'
 import { z } from 'zod'
 import { pauseReasonClass, type Principal } from '@agency/core'
 import {
-  contactResumeByHand, contactsUpdate, sharedNumberOptOutReason, type AgencyDb,
+  companiesSetReachFacts, contactResumeByHand, contactsUpdate, sharedNumberOptOutReason, type AgencyDb,
 } from '@agency/db'
 import * as schema from '@agency/db/schema'
 import { migratedDb, type TestDb } from '../../db/test/helpers.js'
 import {
-  addCompany, addContact, addSuppression, importCompanies, listContacts, pauseContact, resumeContact,
-  updateCompany, updateContact, type AgencyToolSpec, type ToolContext, type ToolOutcome,
+  addCompany, addContact, addSuppression, findContactDetails, forgetFound, importCompanies, listContacts,
+  makeImportCompanies, pauseContact, readPage, resumeContact, updateCompany, updateContact,
+  type AgencyToolSpec, type SeenOrigin, type ToolContext, type ToolOutcome,
 } from '../src/index.js'
+import { fakeLedger, fakeWeb, htmlPage } from './web-fakes.js'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const NOW = new Date('2026-09-15T12:00:00.000Z')
@@ -935,6 +937,395 @@ describe('the records tools', () => {
       ]
       for (const out of writes) expect(summaryOf(out).endsWith('Nothing was sent.')).toBe(true)
     }
+  })
+
+  // -------------------------------------------------------------------------
+  /**
+   * True data only (2026-10-13), on the cases the chat agent actually stored:
+   * a made-up person to "test the features", an address composed from a
+   * LinkedIn name and a domain, a website for a café whose listing named none.
+   * Each is refused with nothing written; what a conversation DID show is
+   * stored with where it came from.
+   */
+  describe('true data only', () => {
+    const PERSON: SeenOrigin = { kind: 'person' }
+    const EXA: SeenOrigin = { kind: 'tool', tool: 'mcp__exa__web_search_exa' }
+    const OURS: SeenOrigin = { kind: 'tool', tool: 'mcp__agency__get_company' }
+    const CONTACT_URL = 'https://127atelier.in/pages/contact'
+    const CONTACT_PAGE = htmlPage(
+      CONTACT_URL,
+      '<title>Contact – 127 Atelier</title><p>Riya Mehta, founder: riya.mehta@127atelier.in</p>' +
+        '<p>Studio: info@127atelier.in · Call +91 98765 43210</p>',
+    )
+    const site = () =>
+      fakeWeb(
+        {
+          'https://127atelier.in/': htmlPage('https://127atelier.in/', '<title>127 Atelier</title><a href="/pages/contact">Contact</a>'),
+          [CONTACT_URL]: CONTACT_PAGE,
+          'https://vahdam.in/': htmlPage('https://vahdam.in/', '<title>VAHDAM India | Teas from India</title><p>Teas, sourced fresh.</p>'),
+        },
+        {
+          mail: { 'nomx-cafe.in': { ok: false, why: 'no_mail' } },
+          resolves: {
+            'myrahspa-mumbai.co': 'none',
+            'www.myrahspa-mumbai.co': 'none',
+            'intranet-acme.in': 'private',
+            'www.intranet-acme.in': 'private',
+          },
+        },
+      )
+    const ledger = (...entries: Array<[string, SeenOrigin]>) => fakeLedger(entries.map(([text, origin]) => ({ text, origin })))
+    const createdDetail = async (contactId: string) =>
+      (await db.select().from(schema.auditLog).where(and(eq(schema.auditLog.action, 'contact.created'), eq(schema.auditLog.subjectId, contactId))))[0]
+        ?.detail
+
+    let carbonId: string
+    beforeEach(async () => {
+      forgetFound()
+      const rows = await db
+        .insert(schema.companies)
+        .values([
+          { orgId, domain: 'carbonmaps.io', name: 'Carbonmaps' },
+          { orgId, domain: 'farmley.com', name: 'Farmley', country: 'India' },
+          { orgId, domain: '127atelier.in', name: '127 Atelier', country: 'India' },
+          { orgId, domain: 'nomx-cafe.in', name: 'Nomx Cafe', country: 'India' },
+        ])
+        .returning({ id: schema.companies.id, domain: schema.companies.domain })
+      carbonId = rows.find((r) => r.domain === 'carbonmaps.io')!.id
+    })
+
+    it('refuses "Alex Chen, VP Engineering, security@carbonmaps.io" when nothing in the conversation shows either', async () => {
+      const before = await db.select().from(schema.contacts)
+      const conversation = ledger(['Can you test all the features of the CRM?', PERSON])
+      const out = await run(
+        addContact,
+        { domain: 'carbonmaps.io', firstName: 'Alex', lastName: 'Chen', title: 'VP Engineering', email: 'security@carbonmaps.io' },
+        { web: site(), conversation },
+      )
+      expect(refusalOf(out)).toEqual({
+        code: 'not_permitted',
+        message:
+          's…@carbonmaps.io appears nowhere in this conversation — not in anything the person typed, a page you read or a ' +
+          'tool’s result. An address is never composed from a name or a pattern (first@domain, info@…). Use ' +
+          'find_contact_details or read_page on a page that shows it, or ask the person. Nothing was added.',
+      })
+      // A number the person typed does not make up for a name nobody gave.
+      const named = await run(
+        addContact,
+        { domain: 'carbonmaps.io', firstName: 'Alex', lastName: 'Chen', phone: '+44 20 7946 0958' },
+        { web: site(), conversation: ledger(['Their switchboard is +44 20 7946 0958', PERSON]) },
+      )
+      expect(refusalOf(named)).toMatchObject({ code: 'not_permitted', message: expect.stringContaining('Nobody called Alex Chen appears in this conversation') })
+      expect(refusalOf(named).message).toContain('never invent a person to fill a role')
+      expect(await db.select().from(schema.contacts)).toHaveLength(before.length)
+      expect(await logOf('contact.created')).toEqual([])
+      expect(audited).toEqual([])
+      expect(carbonId).toMatch(UUID)
+    })
+
+    it('refuses akash@farmley.com composed from an Exa snippet that showed only his name and LinkedIn — and takes the name and the profile alone', async () => {
+      const conversation = ledger(
+        ['Find the founders of Farmley', PERSON],
+        ['Akash Sharma - Co-founder - Farmley | LinkedIn https://in.linkedin.com/in/akash92sharma', EXA],
+      )
+      const guessed = await run(
+        addContact,
+        { domain: 'farmley.com', firstName: 'Akash', lastName: 'Sharma', email: 'akash@farmley.com', linkedinUrl: 'https://www.linkedin.com/in/akash92sharma' },
+        { web: site(), conversation },
+      )
+      expect(refusalOf(guessed)).toMatchObject({ code: 'not_permitted', message: expect.stringContaining('a…@farmley.com appears nowhere in this conversation') })
+      expect(await db.select().from(schema.contacts).where(eq(schema.contacts.email, 'akash@farmley.com'))).toEqual([])
+
+      const shown = await run(
+        addContact,
+        { domain: 'farmley.com', firstName: 'Akash', lastName: 'Sharma', title: 'Co-founder', linkedinUrl: 'https://www.linkedin.com/in/akash92sharma' },
+        { web: site(), conversation },
+      )
+      const { contactId } = dataOf<{ contactId: string }>(shown)
+      expect(await contactRow(contactId)).toMatchObject({ firstName: 'Akash', email: null, emailSource: null, linkedinUrl: 'https://www.linkedin.com/in/akash92sharma' })
+      expect(await createdDetail(contactId)).toMatchObject({ emailSourceKind: null, phoneSourceKind: null })
+
+      // A profile nobody showed is refused like an address.
+      const otherProfile = await run(
+        addContact,
+        { domain: 'farmley.com', firstName: 'Akash', linkedinUrl: 'linkedin.com/in/akash' },
+        { web: site(), conversation },
+      )
+      expect(refusalOf(otherProfile)).toMatchObject({ code: 'not_permitted', message: expect.stringContaining('linkedin.com/in/akash appears nowhere') })
+    })
+
+    it('stores an address the person typed with the source chat, and one a connector returned with connector:<name>', async () => {
+      const typed = await run(
+        addContact,
+        { domain: '127atelier.in', firstName: 'Riya', email: 'Riya@127Atelier.in' },
+        { web: site(), conversation: ledger(['Add Riya — her email is riya@127atelier.in', PERSON]) },
+      )
+      const riyaId = dataOf<{ contactId: string }>(typed).contactId
+      expect(await contactRow(riyaId)).toMatchObject({ email: 'riya@127atelier.in', emailSource: 'chat', source: 'agent' })
+      expect(summaryOf(typed)).toContain('email …@127atelier.in (typed in chat by the person the assistant was helping)')
+      expect(await createdDetail(riyaId)).toMatchObject({ emailSourceKind: 'chat', phoneSourceKind: null })
+
+      const fromExa = await run(
+        addContact,
+        { domain: 'farmley.com', email: 'hello@farmley.com' },
+        { web: site(), conversation: ledger(['Farmley — healthy snacks. Contact: hello@farmley.com', EXA]) },
+      )
+      const farmleyId = dataOf<{ contactId: string }>(fromExa).contactId
+      expect(await contactRow(farmleyId)).toMatchObject({ emailSource: 'connector:exa' })
+      expect(summaryOf(fromExa)).toContain('returned by the exa connector — not confirmed on a page')
+      expect(await createdDetail(farmleyId)).toMatchObject({ emailSourceKind: 'connector' })
+
+      // Our own tools show a person's address only by its handle: one whole there was typed by the model.
+      const ours = await run(addContact, { domain: 'farmley.com', email: 'sales@farmley.com' }, {
+        web: site(), conversation: ledger(['…sales@farmley.com…', OURS]),
+      })
+      expect(refusalOf(ours).code).toBe('not_permitted')
+
+      // A role inbox read_page showed whole, typed back after its handle expired, is not "nowhere": read the page again.
+      const expired = await run(addContact, { domain: 'farmley.com', email: 'care@farmley.com' }, {
+        web: site(), conversation: ledger(['Write to [email E-1a2b3c · care@farmley.com]', { kind: 'tool', tool: 'mcp__agency__read_page' }]),
+      })
+      expect(refusalOf(expired)).toMatchObject({
+        code: 'invalid_state',
+        message: expect.stringContaining('care@farmley.com was shown by a page read more than two hours ago'),
+      })
+    })
+
+    it('stores an address by the handle find_contact_details gave, with the page it is on — and the page names the person', async () => {
+      const web = site()
+      const found = summaryOf(await run(findContactDetails, { domain: '127atelier.in' }, { web }))
+      const handle = /(E-[0-9a-z]{6}) · r…@127atelier\.in/.exec(found)![1]!
+      const phoneHandle = /(P-[0-9a-z]{6}) · \+91…3210/.exec(found)![1]!
+      // Nothing in the conversation names Riya Mehta; the page the address is on does.
+      const out = await run(
+        addContact,
+        { domain: '127atelier.in', firstName: 'Riya', lastName: 'Mehta', title: 'Founder', emailFrom: handle, phoneFrom: phoneHandle },
+        { web, conversation: ledger(['find a contact at 127 Atelier', PERSON]) },
+      )
+      const { contactId } = dataOf<{ contactId: string }>(out)
+      expect(await contactRow(contactId)).toMatchObject({
+        email: 'riya.mehta@127atelier.in', emailSource: CONTACT_URL, phone: '+919876543210', phoneSource: CONTACT_URL,
+      })
+      expect(summaryOf(out)).toContain('email …@127atelier.in (seen on 127atelier.in/pages/contact)')
+      expect(summaryOf(out)).not.toContain('riya.mehta@')
+      expect(await createdDetail(contactId)).toMatchObject({ emailSourceKind: 'page', phoneSourceKind: 'page' })
+
+      // A handle stands only for what it was given for, in this org, for two hours.
+      for (const [input, words] of [
+        [{ emailFrom: 'E-zzzzzz' }, 'is not a handle from a page read in the last two hours'],
+        [{ emailFrom: phoneHandle }, 'stands for a phone number, not an email address'],
+        [{ emailFrom: handle, email: 'someone@127atelier.in' }, 'is not the one'],
+      ] as const) {
+        const r = await run(addContact, { domain: '127atelier.in', ...input }, { web, conversation: ledger() })
+        expect(refusalOf(r).message).toContain(words)
+      }
+    })
+
+    it('never hands back by a refusal an address the model holds only by its handle', async () => {
+      const web = site()
+      const found = summaryOf(await run(findContactDetails, { domain: '127atelier.in' }, { web }))
+      const handle = /(E-[0-9a-z]{6}) · r…@127atelier\.in/.exec(found)![1]!
+      await run(addContact, { domain: '127atelier.in', emailFrom: handle }, { web, conversation: ledger() })
+      // The same address again: createContact's sentence quotes it, and the model never held it whole.
+      const again = await run(addContact, { domain: '127atelier.in', emailFrom: handle }, { web, conversation: ledger() })
+      expect(refusalOf(again).message).toContain('r…@127atelier.in is already a contact in this CRM.')
+      expect(refusalOf(again).message).not.toContain('riya.mehta@')
+      const moved = await run(updateContact, { contactId: joId, emailFrom: handle }, { web, conversation: ledger() })
+      expect(refusalOf(moved).message).toContain('r…@127atelier.in is already a contact in this CRM.')
+      expect(refusalOf(moved).message).not.toContain('riya.mehta@')
+    })
+
+    it('counts a name only where something outside the agency showed it — never the agency’s own records read back', async () => {
+      // A name the assistant once wrote into a note, a description or a research claim, read back by get_company.
+      const readBack = await run(
+        addContact,
+        { domain: 'carbonmaps.io', firstName: 'Alex', lastName: 'Chen', linkedinUrl: 'https://www.linkedin.com/in/alexchen' },
+        { web: site(), conversation: ledger(['Carbonmaps — run by Alex Chen — linkedin.com/in/alexchen', OURS]) },
+      )
+      expect(refusalOf(readBack).code).toBe('not_permitted')
+      // The same words from a page read_page read are the page's.
+      const pageRead: SeenOrigin = { kind: 'tool', tool: 'mcp__agency__read_page' }
+      const fromPage = await run(
+        addContact,
+        { domain: 'carbonmaps.io', firstName: 'Alex', lastName: 'Chen', linkedinUrl: 'https://www.linkedin.com/in/alexchen' },
+        { web: site(), conversation: ledger(['Team: Alex Chen, founder — linkedin.com/in/alexchen', pageRead]) },
+      )
+      expect(dataOf<{ contactId: string }>(fromPage).contactId).toMatch(UUID)
+    })
+
+    it('reads a page given as the source, and stores the address only when the page shows it', async () => {
+      const web = site()
+      const out = await run(
+        addContact,
+        { domain: '127atelier.in', email: 'info@127atelier.in', emailSource: '127atelier.in/pages/contact' },
+        { web, conversation: ledger() },
+      )
+      expect(await contactRow(dataOf<{ contactId: string }>(out).contactId)).toMatchObject({ emailSource: CONTACT_URL })
+      const missing = await run(
+        addContact,
+        { domain: '127atelier.in', email: 'orders@127atelier.in', emailSource: CONTACT_URL },
+        { web, conversation: ledger() },
+      )
+      expect(refusalOf(missing)).toMatchObject({ code: 'invalid_state', message: expect.stringContaining('orders@127atelier.in does not appear on 127atelier.in/pages/contact') })
+      // Without the worker's reader, a page source cannot be checked, so it is not taken on trust.
+      expect(refusalOf(await run(addContact, { domain: '127atelier.in', email: 'info@127atelier.in', emailSource: CONTACT_URL })).code).toBe('unreachable')
+    })
+
+    it('refuses an email at a domain that receives no mail, however it was shown', async () => {
+      const out = await run(
+        addContact,
+        { domain: 'nomx-cafe.in', email: 'owner@nomx-cafe.in' },
+        { web: site(), conversation: ledger(['email owner@nomx-cafe.in', PERSON]) },
+      )
+      expect(refusalOf(out)).toMatchObject({
+        code: 'invalid_state',
+        message: expect.stringContaining('nomx-cafe.in receives no email — there is no mail server for it, so nothing sent there can arrive.'),
+      })
+    })
+
+    it('holds a changed address, a changed name and a new profile to the same rules on update_contact', async () => {
+      const web = site()
+      const conversation = ledger(['Jo moved; her new email is jo.new@rentman.io', PERSON])
+      const guess = await run(updateContact, { contactId: joId, email: 'jo.bloggs@rentman.io' }, { web, conversation })
+      expect(refusalOf(guess)).toMatchObject({ code: 'not_permitted', message: expect.stringContaining('j…@rentman.io appears nowhere') })
+      expect((await contactRow(joId)).email).toBe('jo@rentman.io')
+
+      const typed = await run(updateContact, { contactId: joId, email: 'jo.new@rentman.io' }, { web, conversation })
+      expect(summaryOf(typed)).toContain('Their email is now …@rentman.io. It was typed in chat by the person the assistant was helping.')
+      expect(await contactRow(joId)).toMatchObject({ email: 'jo.new@rentman.io', emailSource: 'chat' })
+
+      const renamed = await run(updateContact, { contactId: joId, firstName: 'Joanna' }, { web, conversation })
+      expect(refusalOf(renamed).message).toContain('Nobody called Joanna appears in this conversation')
+      // A title, an unchanged name and a zone need nothing shown.
+      expect(summaryOf(await run(updateContact, { contactId: joId, firstName: 'Jo', title: 'CISO' }, { web, conversation }))).toContain('changed their title')
+    })
+
+    it('refuses a business.site address, a domain that does not resolve and one that resolves privately — and writes nothing', async () => {
+      const before = await db.select().from(schema.companies)
+      const conversation = ledger(['add Yummy Bites, Myrah Spa and Acme', PERSON])
+      for (const [domain, words] of [
+        ['yummybites-delhi.business.site', 'Google’s business.site websites were shut down in 2024 — if you have not seen a website of its own, use website "none".'],
+        ['myrahspa-mumbai.co', 'No website answers at myrahspa-mumbai.co'],
+        ['intranet-acme.in', 'resolves to a private address'],
+      ]) {
+        const out = await run(addCompany, { website: domain, name: 'Yummy Bites' }, { web: site(), conversation })
+        expect(refusalOf(out).message, domain).toContain(words)
+        expect(refusalOf(out).message, domain).toContain('Nothing was added.')
+      }
+      // business.site is refused even with no reader and no conversation at all.
+      expect(refusalOf(await run(addCompany, { domain: 'yummybites-delhi.business.site' })).message).toContain('shut down in 2024')
+      expect(await db.select().from(schema.companies)).toHaveLength(before.length)
+      expect(audited).toEqual([])
+    })
+
+    it('adds vahdam.in, never shown in chat, because its homepage names VAHDAM — and refuses a domain shown nowhere whose homepage does not', async () => {
+      const conversation = ledger(['add some Indian tea brands', PERSON])
+      const out = await run(addCompany, { domain: 'vahdam.in', name: 'Vahdam India', country: 'India' }, { web: site(), conversation })
+      expect(summaryOf(out)).toContain('Added vahdam.in to the CRM: named Vahdam India')
+      const shownNowhere = await run(addCompany, { domain: 'teabox-india.in', name: 'Teabox' }, {
+        web: fakeWeb({ 'https://teabox-india.in/': htmlPage('https://teabox-india.in/', '<title>Welcome to nginx</title>') }),
+        conversation,
+      })
+      expect(refusalOf(shownNowhere)).toMatchObject({
+        code: 'not_permitted',
+        message: expect.stringContaining('teabox-india.in appears nowhere in this conversation and its homepage does not name Teabox.'),
+      })
+      // A domain a search returned is taken without its homepage.
+      const shown = await run(addCompany, { website: 'https://www.mokobara.com/', name: 'Mokobara' }, {
+        web: fakeWeb({}),
+        conversation: ledger(['Mokobara — luggage — https://mokobara.com', EXA]),
+      })
+      expect(dataOf(shown)).toMatchObject({ domain: 'mokobara.com', created: true })
+    })
+
+    it('files a business with no website as website "none", under a placeholder, with a phone the conversation showed', async () => {
+      const conversation = ledger(['Myrah Spa, Bandra West, Mumbai · 4.6 ★ · +91 98200 12345 · no website', EXA])
+      const out = await run(
+        addCompany,
+        { website: 'none', name: 'Myrah Spa', city: 'Mumbai', country: 'India', timeZone: 'Asia/Kolkata', phone: '+91 98200 12345', address: 'Bandra West, Mumbai' },
+        { web: site(), conversation },
+      )
+      const { domain, companyId } = dataOf<{ domain: string; companyId: string }>(out)
+      expect(domain).toMatch(/^myrah-spa-[0-9a-z]{6}\.nosite\.invalid$/)
+      expect(await companyRow(orgId, domain)).toMatchObject({
+        name: 'Myrah Spa', city: 'Mumbai', phone: '+919820012345', address: 'Bandra West, Mumbai', source: 'agent', listingCheckedAt: null,
+      })
+      const summary = summaryOf(out)
+      expect(summary).toContain('as a business with no website of its own, under the placeholder')
+      expect(summary).toContain('its phone +91…2345 (returned by the exa connector — not confirmed on a page)')
+      expect(summary).not.toContain('98200 12345')
+      expect(summary.endsWith('Nothing was sent.')).toBe(true)
+      expect((await logOf('company.updated'))[0]).toMatchObject({ subjectId: companyId, detail: { fields: ['country', 'timeZone', 'city', 'phone', 'address'] } })
+      // The same business named again is the same row.
+      const again = await run(addCompany, { website: 'none', name: 'Myrah Spa', city: 'mumbai', address: 'Bandra West,  Mumbai' }, { web: site(), conversation })
+      expect(dataOf(again)).toMatchObject({ domain, created: false })
+
+      for (const [input, words] of [
+        [{ website: 'none', name: 'Lotus Cafe', city: 'Delhi', phone: '+91 98111 00000' }, '+91…0000 appears nowhere in this conversation'],
+        [{ website: 'none', name: 'Lotus Cafe' }, 'give its city or its address'],
+        [{ website: 'none', city: 'Delhi' }, 'is filed by its name'],
+        [{ website: 'none', domain: 'lotus.in', name: 'Lotus' }, 'exactly one of the two'],
+        [{ name: 'Lotus' }, 'exactly one of the two'],
+      ] as const) {
+        const r = await run(addCompany, input, { web: site(), conversation })
+        expect(refusalOf(r).message, JSON.stringify(input)).toContain(words)
+      }
+    })
+
+    it('imports line by line under the same rules, refusing a line not checked in time', async () => {
+      const conversation = ledger(['shortlist: mokobara.com, vahdam.in', PERSON])
+      const out = await run(
+        importCompanies,
+        {
+          companies: [
+            { domain: 'mokobara.com', name: 'Mokobara' },
+            { domain: 'yummybites-delhi.business.site' },
+            { website: 'none', name: 'Lotus Cafe', city: 'Delhi' },
+            { domain: 'myrahspa-mumbai.co', name: 'Myrah Spa' },
+          ],
+        },
+        { web: site(), conversation },
+      )
+      const lines = dataOf<{ lines: Array<{ line: number; outcome: string; why: string | null }> }>(out).lines
+      expect(lines.map((l) => [l.line, l.outcome])).toEqual([[1, 'added'], [2, 'refused'], [3, 'added'], [4, 'refused']])
+      expect(lines[1]!.why).toContain('shut down in 2024')
+      expect(lines[3]!.why).toContain('No website answers at myrahspa-mumbai.co')
+      expect(summaryOf(out)).toContain('1 business was filed with no website of its own')
+
+      const started = Date.now()
+      const slow = await run(makeImportCompanies({ budgetMs: 150 }), { companies: [{ domain: 'teabox-india.in', name: 'Teabox' }] }, {
+        web: fakeWeb({ 'https://teabox-india.in/': 'slow', 'https://www.teabox-india.in/': 'slow' }),
+        conversation,
+      })
+      expect(Date.now() - started).toBeLessThan(3_000)
+      expect(dataOf<{ lines: Array<{ outcome: string; why: string | null }> }>(slow).lines).toEqual([
+        expect.objectContaining({ outcome: 'refused', why: 'Not checked in time — add it again.' }),
+      ])
+      expect(await companyRow(orgId, 'teabox-india.in')).toBeUndefined()
+    })
+
+    it('stores a company’s phone as E.164 and its address on one line through companiesSetReachFacts — and only what changed', async () => {
+      const direct = await companiesSetReachFacts(db, orgId, companyId, { phone: '+91 98200 12345', address: '  12 Hill Road,\n Bandra  ' })
+      expect(direct).toMatchObject({ ok: true, changed: ['phone', 'address'] })
+      expect(await companyRow(orgId, 'rentman.io')).toMatchObject({ phone: '+919820012345', address: '12 Hill Road, Bandra', listingCheckedAt: null })
+      expect(await companiesSetReachFacts(db, orgId, companyId, { phone: '+919820012345' })).toMatchObject({ ok: true, changed: [] })
+      expect(await companiesSetReachFacts(db, orgId, companyId, { phone: '098200 12345' })).toMatchObject({ ok: false, reason: 'invalid' })
+      expect(await companiesSetReachFacts(db, orgId, companyId, { address: 'x'.repeat(301) })).toMatchObject({ ok: false, reason: 'invalid' })
+      expect(await companiesSetReachFacts(db, otherOrgId, companyId, { phone: '+919820012345' })).toMatchObject({ ok: false, reason: 'not_found' })
+      expect(await companiesSetReachFacts(db, orgId, companyId, { address: '' })).toMatchObject({ ok: true, changed: ['address'] })
+      expect((await companyRow(orgId, 'rentman.io'))!.address).toBeNull()
+    })
+
+    it('reads a directory page with read_page and files the business by the handle of the number it shows', async () => {
+      const url = 'https://www.justdial.com/Mumbai/Lotus-Cafe'
+      const web = fakeWeb({ [url]: htmlPage(url, '<title>Lotus Cafe, Bandra - Justdial</title><p>Lotus Cafe · Call 098200 55555</p>') })
+      const read = summaryOf(await run(readPage, { url }, { web }))
+      const handle = /(P-[0-9a-z]{6}) · \+91…5555/.exec(read)![1]!
+      const out = await run(addCompany, { website: 'none', name: 'Lotus Cafe', city: 'Mumbai', phoneFrom: handle }, { web, conversation: ledger() })
+      const { domain } = dataOf<{ domain: string }>(out)
+      expect(await companyRow(orgId, domain)).toMatchObject({ phone: '+919820055555' })
+      expect(summaryOf(out)).toContain('(seen on justdial.com/Mumbai/Lotus-Cafe)')
+    })
   })
 
   it('names no channel and no org in any input, so the gate’s channel rule and org scoping hold', () => {

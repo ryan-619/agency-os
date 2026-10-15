@@ -51,8 +51,11 @@ export async function runDueBriefs(deps: MorningBriefDeps): Promise<number> {
     const begun = await deps.start({
       chatSessionId: thread.id,
       userId: claimed.userId,
-      // The time it STARTS, which is later than b.at when the worker slept through it.
-      text: morningBriefPrompt({ localDate: b.localDate, at: b.localTime, timeZone: b.timeZone }),
+      // The moment it STARTS — later than b.at when the worker slept through it, and later
+      // than the look for a brief that waited on another org's — which the prompt states in
+      // the agency's zone with the UTC instant beside it, so the model cannot mistake one
+      // clock for the other ("12:28 UTC" of 12:28 in Kolkata).
+      text: morningBriefPrompt({ localDate: b.localDate, timeZone: b.timeZone, startedAt: deps.now() }),
     })
     await appendAudit(deps.db, {
       orgId: b.orgId,

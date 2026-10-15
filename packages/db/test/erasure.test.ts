@@ -228,6 +228,20 @@ describe('a contact’s record and their erasure', () => {
     })
 
     /**
+     * Where their email and phone came from (0029) is something held about
+     * them — a page they were seen on names them — so the record carries it.
+     */
+    it('carries where each address came from', async () => {
+      await db
+        .update(schema.contacts)
+        .set({ emailSource: 'https://rentman.io/team/priya', phoneSource: 'connector:apollo' })
+        .where(eq(schema.contacts.id, priya))
+      const r = await erasureRecord(db, orgId, priya, NOON)
+      expect(r?.contact).toMatchObject({ emailSource: 'https://rentman.io/team/priya', phoneSource: 'connector:apollo' })
+      expect(JSON.stringify(r)).toContain('https://rentman.io/team/priya')
+    })
+
+    /**
      * The suppression list's own history is the one place the append-only
      * audit log holds an address — and an erasure keeps it, for the reason it
      * keeps the suppression. The record used to say the audit log held no
@@ -320,6 +334,26 @@ describe('a contact’s record and their erasure', () => {
       expect(rows.every((s) => s.reason === 'erasure request, 2026-09-15')).toBe(true)
       // NOT the domain: that would silence every person at the company.
       expect(rows.some((s) => s.kind === 'domain')).toBe(false)
+    })
+
+    /**
+     * 0029's pairing CHECKs — a source never outlives its address — are what
+     * an erasure that blanked the addresses in place would trip over. It does
+     * not: the row goes whole, sources and all, and nothing about where the
+     * addresses came from is written anywhere it would outlive them.
+     */
+    it('erases a person whose addresses carry their sources, and leaves no source behind', async () => {
+      await db
+        .update(schema.contacts)
+        .set({ emailSource: 'https://rentman.io/team/priya', phoneSource: 'chat' })
+        .where(eq(schema.contacts.id, priya))
+      const r = await erase()
+      expect(r).toMatchObject({ ok: true })
+      expect(await contactExists(priya)).toBe(false)
+      const [erased] = await audit('contact.erased')
+      expect(JSON.stringify(erased!.detail)).not.toContain('rentman.io/team')
+      // Tom's are his, and stay.
+      expect(await contactExists(tom)).toBe(true)
     })
 
     it('scrubs exactly the person’s messages: their words go, the agency’s stay, no address remains', async () => {

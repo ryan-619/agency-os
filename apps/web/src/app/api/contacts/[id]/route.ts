@@ -32,7 +32,8 @@ import { getDb } from '@/lib/db'
  *  - `timeZone`. The thing that unblocks a contact the send path has been
  *    refusing as `unknown_timezone`.
  *  - `update`: name, title and addresses (`contactPatchInput`). The email is
- *    folded, a duplicate is refused with a sentence, and an address a
+ *    folded, a duplicate is refused with a sentence, a changed address is
+ *    recorded as typed by a teammate (`person`, 0029), and an address a
  *    suppression row matches cannot be edited away (`contactsUpdate` says
  *    why) — nor, until the number is recorded, the phone of a contact held
  *    because a number they share asked to stop (review round 9). The audit
@@ -134,7 +135,11 @@ export async function PATCH(
         { status: 400 },
       )
     }
-    const r = await contactsUpdate(db, user.orgId, id, parsed.data)
+    // A teammate typed whatever address this changes (0029): `person`, from
+    // the session and never the body, which could otherwise claim a page or
+    // the assistant. `contactsUpdate` reads a source only for an address that
+    // CHANGES, so an edit to a title leaves an imported email's source alone.
+    const r = await contactsUpdate(db, user.orgId, id, { ...parsed.data, emailSource: 'person', phoneSource: 'person' })
     if (!r.ok) {
       // `shared_number_hold` (review round 9): a phone held for a shared
       // number's unrecorded STOP is a conflict with state, like `suppressed`,

@@ -74,13 +74,18 @@ export function makeInputParser(): (
  * team's own records at once, a person first only for what reaches somebody
  * outside, lifts a hold or changes the scoring. It said every change asked a
  * person, after the operator decided on 2026-10-06 that internal writes run at
- * once, and a model told so declines work it was asked to do.
+ * once, and a model told so declines work it was asked to do. And since
+ * 2026-10-13 it says what the tools now refuse: a person, an address or a
+ * website the conversation never showed — the agent had filed made-up people
+ * and addresses composed from a name and a domain.
  */
 export const AGENCY_SERVER_INSTRUCTIONS =
   'The agency CRM: companies, people, scans, findings, scores, profiles, campaigns, drafts, deals, meetings, ' +
   'proposals, tasks and the worker that sends. Reads, scans and changes to the team’s own records run at once. ' +
   'A person approves first anything that drafts a message to someone outside the company, lets outreach reach ' +
-  'somebody again, or changes which profile scores companies — and every message is approved again before it is sent.'
+  'somebody again, or changes which profile scores companies — and every message is approved again before it is sent. ' +
+  'A person, an address or a website is written down only when this conversation showed it — in the words of the ' +
+  'person you are helping, on a page you read or in a tool’s result — and is never composed from a name or a pattern.'
 
 export function createAgencyMcpServer(deps: McpDeps): McpSdkServerConfigWithInstance {
   const omit = deps.omit

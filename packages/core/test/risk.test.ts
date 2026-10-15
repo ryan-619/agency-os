@@ -262,7 +262,14 @@ describe('the registry cannot drift from what is reachable', () => {
     for (const write of ['create_quote', 'update_quote', 'create_share_link'] as const) {
       expect(AGENCY_TOOL_RISK[write].slice(0, 2), write).toEqual(['medium', 'writes_internal_state'])
     }
-    expect(AGENCY_TOOL_NAMES).toHaveLength(23 + 26 + 3 + 2 + 5 + 4 + 1 + 1 + 1 + 1 + 1 + 2)
+    // True data only (2026-10-13): a page, a company's published contact details and a
+    // check of the addresses on file — reads, so a person's message is never held for them.
+    for (const read of ['read_page', 'find_contact_details', 'check_contacts'] as const) {
+      expect(AGENCY_TOOL_RISK[read].slice(0, 2), read).toEqual(['low', 'read_only'])
+      expect(runsWithoutApproval(call(`mcp__agency__${read}`)), read).toBe(true)
+    }
+    expect(AGENCY_TOOL_NAMES).toHaveLength(23 + 26 + 3 + 2 + 5 + 4 + 1 + 1 + 1 + 1 + 1 + 2 + 3)
+    expect(AGENCY_TOOL_NAMES).toHaveLength(73)
   })
 
   it('never lets a write run without a person: every non-read tool but the scans is medium or high', () => {

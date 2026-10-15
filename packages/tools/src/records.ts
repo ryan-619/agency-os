@@ -20,8 +20,18 @@
  * `agent`. So the agent's write and a person's are the same row, refused for
  * the same reasons in the same sentences.
  *
- * Three rules are the agent's own, on top of a person's:
+ * Four rules are the agent's own, on top of a person's:
  *
+ *   - true data only (2026-10-13): an email address, a phone number, a named
+ *     person, a LinkedIn profile and a website are stored only when this
+ *     conversation SHOWED them — the person typed them, or a tool returned
+ *     them (a page read, a search, a connector's answer) — never when the
+ *     model composed them. An address is stored with where it came from (the
+ *     page, `chat`, `connector:<name>`), an email whose domain receives no
+ *     mail is refused, and a business with no website of its own is filed as
+ *     website "none" rather than under a domain nobody showed. The checks
+ *     read the worker's page reader and the conversation's ledger; a test or
+ *     a script without them skips them;
  *   - a company is added only by a domain the scanner would request
  *     (`isScannableHost`) — a model-supplied domain is the untrusted input
  *     that check exists for — and never as the booking page's
@@ -45,22 +55,29 @@
 import { z } from 'zod'
 import { and, eq, inArray, sql, type SQL } from 'drizzle-orm'
 import {
-  COMPANY_STAGES, can, normaliseEmail, normaliseLinkedIn, normalisePhone, pauseReasonClass,
-  type PauseReasonClass, type SuppressionKind,
+  COMPANY_STAGES, addressSourceWords, can, isNoSiteDomain, maskAddress, maskPhone, noSiteDomain, normaliseEmail,
+  normaliseLinkedIn, normalisePhone, pageLabel, pauseReasonClass, readablePathProblem, textNamesPerson,
+  textShowsEmail, textShowsPhone,
+  type FindPhonesOptions, type PauseReasonClass, type SuppressionKind,
 } from '@agency/core'
 import {
-  COMPLIANCE_UNSENT_STATUSES, addSuppression as addSuppressionRow, appendAudit, auditSuppressionAdded, companiesUpdate,
-  companyPatchInput, consentLedgerFor, contactInput, contactPatchInput, contactPauseByHand, contactResumeByHand,
-  contactsLedger, contactsUpdate, createContact, findCompanyByDomain, importCompanies as importCompanyRows,
-  isKnownTimeZone, isSharedNumberOptOutPause, updateContactTimeZone,
+  COMPLIANCE_UNSENT_STATUSES, addSuppression as addSuppressionRow, appendAudit, auditSuppressionAdded, companiesSetReachFacts,
+  companiesUpdate, companyPatchInput, consentLedgerFor, contactInput, contactPatchInput, contactPauseByHand,
+  contactResumeByHand, contactsLedger, contactsUpdate, createContact, findCompanyByDomain,
+  importCompanies as importCompanyRows, isKnownTimeZone, isSharedNumberOptOutPause, updateContactTimeZone,
   type ConsentLedger, type ContactPauseOutcome, type ContactResumeOutcome, type ContactRow,
   type ContactsUpdateOutcome, type LedgerRow,
 } from '@agency/db'
 import * as schema from '@agency/db/schema'
-import { isScannableHost, normaliseDomain } from '@agency/scanner'
+import { isScannableHost, normaliseDomain, type PageRead } from '@agency/scanner'
 import {
-  bounded, fail, ok, type AgencyToolSpec, type ToolContext, type ToolErrorCode, type ToolOutcome,
+  TOOL_TIME_BUDGET_MS, bounded, fail, ok, type AgencyToolSpec, type SeenOrigin, type ToolContext, type ToolErrorCode,
+  type ToolOutcome,
 } from './spec.js'
+import {
+  WEB_WORK_MS, connectorSource, deadline, foundByHandle, foundByValue, hasNameParts, pageSource, phoneOptsFor,
+  phoneValue, readWithin, serverOf, showsIt, textShowsLinkedIn, websiteCheck, within,
+} from './web.js'
 
 const NOTHING_SENT = 'Nothing was sent.'
 const UNCHANGED = 'Nothing was changed.'
@@ -171,6 +188,8 @@ interface FoundContact {
   readonly domain: string
   /** The zone quiet hours fall back to for a person with none of their own. */
   readonly companyTimeZone: string | null
+  /** As recorded: whether a number written without +91 is read as India's. */
+  readonly companyCountry: string | null
 }
 
 /**
@@ -196,7 +215,12 @@ async function contactFor(
     match = sql`lower(${schema.contacts.email}) = ${email}`
   }
   const rows = await ctx.db
-    .select({ contact: schema.contacts, domain: schema.companies.domain, companyTimeZone: schema.companies.timeZone })
+    .select({
+      contact: schema.contacts,
+      domain: schema.companies.domain,
+      companyTimeZone: schema.companies.timeZone,
+      companyCountry: schema.companies.country,
+    })
     .from(schema.contacts)
     .innerJoin(
       schema.companies,
@@ -211,7 +235,9 @@ async function contactFor(
       byId ? `No contact with that id is in the CRM. ${UNCHANGED}` : `Nobody with that email address is in the CRM. ${UNCHANGED}`,
     )
   }
-  return { ok: true, contact: row.contact, domain: row.domain, companyTimeZone: row.companyTimeZone }
+  return {
+    ok: true, contact: row.contact, domain: row.domain, companyTimeZone: row.companyTimeZone, companyCountry: row.companyCountry,
+  }
 }
 
 /**
@@ -244,6 +270,294 @@ function addableDomain(raw: string): { ok: true; domain: string } | Refusal {
 /** `companiesUpdate`'s sentence for a zone the runtime does not know, and `createContact`'s. */
 const unknownZone = (zone: string): string =>
   `"${oneLine(zone, 64)}" is not a timezone this system recognises. Use an IANA name like Europe/London.`
+
+// ---------------------------------------------------------------------------
+// True data only (2026-10-13): where an address, a person and a website came from
+// ---------------------------------------------------------------------------
+
+/** What an address is recorded as having come from, as the `contact.created` row names it: a kind, never the page. */
+type SourceKind = 'page' | 'chat' | 'connector'
+
+/** An address as it will be stored, with where it came from. */
+interface Sourced {
+  /** Normalised: a lower-case address, or E.164. */
+  readonly value: string
+  /** In core's ADDRESS_SOURCE_PATTERN, or null when nothing could be asked (a test, a script). */
+  readonly source: string | null
+  readonly kind: SourceKind | null
+  /** The page that showed it, for the check that it names the person too. */
+  readonly page: string | null
+  /** Something the reader could not check just now, said in the summary. */
+  readonly note: string | null
+}
+
+/** What the model gave for one address: its value as typed, a handle, a page it says shows it. */
+interface AddressClaim {
+  readonly raw?: string | undefined
+  readonly from?: string | undefined
+  readonly sourceUrl?: string | undefined
+}
+
+const given = (v: string | undefined): string | null => (v !== undefined && v.trim() !== '' ? v.trim() : null)
+
+/** Pages read during one call, so the address check and the name check read each once. */
+type PageReads = Map<string, Promise<PageRead>>
+
+function readOnce(ctx: ToolContext, pages: PageReads, url: string, signal: AbortSignal): Promise<PageRead> {
+  let read = pages.get(url)
+  if (!read) {
+    read = ctx.web
+      ? readWithin(ctx.web, url, signal)
+      : Promise.resolve<PageRead>({ ok: false, url, why: 'unreachable', detail: 'No page reader in this run.' })
+    pages.set(url, read)
+  }
+  return read
+}
+
+/** The words of a page a check reads: its title, its words and its HTML (a `mailto:` or `tel:` link shows an address its words may not). */
+const pageHaystack = (p: Extract<PageRead, { ok: true }>): string => `${p.title ?? ''}\n${p.text}\n${p.html}`
+
+const NOT_SHOWN_EMAIL = (masked: string): string =>
+  `${masked} appears nowhere in this conversation — not in anything the person typed, a page you read or a tool’s ` +
+  'result. An address is never composed from a name or a pattern (first@domain, info@…). Use find_contact_details ' +
+  'or read_page on a page that shows it, or ask the person.'
+const NOT_SHOWN_PHONE = (masked: string): string =>
+  `${masked} appears nowhere in this conversation — not in anything the person typed, a page you read or a tool’s ` +
+  'result. A number is never guessed or completed. Use find_contact_details or read_page on a page that shows it, ' +
+  'or ask the person.'
+const STALE_HANDLE = (raw: string): string =>
+  `"${oneLine(raw, 24)}" is not a handle from a page read in the last two hours. Read the page again (read_page or ` +
+  'find_contact_details) and use the handle it gives.'
+/**
+ * One of our readers (read_page, find_contact_details) showed it — a role inbox
+ * is shown whole — but more than two hours ago, so the handle that remembered
+ * its page is gone. Saying it appears nowhere would be false, and would invite
+ * a guess.
+ */
+const HANDLE_EXPIRED = (masked: string): string =>
+  `${masked} was shown by a page read more than two hours ago, and the handle that remembered which page has ` +
+  'expired. Read the page again (read_page or find_contact_details) and give the handle it prints, so it is stored ' +
+  'with where it came from.'
+
+/** Whether only the agency's own readers of the open web showed a value — never the person, never a connector. */
+function shownByOurReaderOnly(origins: readonly SeenOrigin[]): boolean {
+  return origins.length > 0 && origins.every((o) => o.kind === 'tool' && serverOf(o.tool) === 'agency') && origins.some(showsIt)
+}
+
+const NEEDS_A_READER =
+  'A page given as where it came from is read to check that it shows it, and the page reader runs in the worker, ' +
+  'which this run does not have. Give the value without a source, or ask the person.'
+
+/** A page address as the model gave it: a bare host is read over https. Null for anything that is not one. */
+function sourcePageUrl(raw: string): URL | null {
+  const text = raw.trim()
+  try {
+    const u = new URL(/^[a-z][a-z0-9+.-]*:/i.test(text) ? text : `https://${text}`)
+    return u.protocol === 'https:' || u.protocol === 'http:' ? u : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Where one email address or phone number came from — or why it may not be
+ * stored. In order: a handle a page read gave (its page is the source); a
+ * page the model names, read now and required to show it; a page this org's
+ * tools already saw it on; the person's own words (`chat`); a connector's
+ * result (`connector:<server>`). Our own tools' answers do not count: they
+ * show a person's address only by its handle, so an address found there
+ * whole was typed by the model. Nothing shows it: refused, nothing written.
+ *
+ * An email's domain is then asked whether it receives mail at all: one that
+ * cannot ("no_domain", "no_mail") makes the address a guess that can never
+ * arrive, and is refused; a resolver that could not answer is let through
+ * with a note.
+ */
+async function sourcedAddress(
+  ctx: ToolContext,
+  which: 'email' | 'phone',
+  claim: AddressClaim,
+  phoneOpts: FindPhonesOptions,
+  pages: PageReads,
+  signal: AbortSignal,
+): Promise<{ ok: true; sourced: Sourced | null } | Refusal> {
+  const raw = given(claim.raw)
+  const from = given(claim.from)
+  const sourceUrl = given(claim.sourceUrl)
+  const what = which === 'email' ? 'email address' : 'phone number'
+  const norm = (v: string): string | null => (which === 'email' ? normaliseEmail(v) : normalisePhone(v))
+  const mask = (v: string): string => (which === 'email' ? maskAddress(v) : maskPhone(v))
+  const now = ctx.now().getTime()
+
+  let sourced: Omit<Sourced, 'note'> | null = null
+  if (from) {
+    const hit = foundByHandle(ctx.orgId, from, now)
+    if (!hit) return refuse('invalid_state', STALE_HANDLE(from))
+    if (hit.kind !== which) {
+      return refuse(
+        'invalid_state',
+        `${hit.handle} stands for ${hit.kind === 'email' ? 'an email address' : 'a phone number'}, not ` +
+          `${which === 'email' ? 'an email address' : 'a phone number'}.`,
+      )
+    }
+    if (raw && norm(raw) !== hit.value) {
+      return refuse('invalid_state', `The ${what} given is not the one ${hit.handle} stands for. Give the handle alone.`)
+    }
+    sourced = { value: hit.value, source: hit.url, kind: 'page', page: hit.url }
+  } else if (raw) {
+    const value = norm(raw)
+    // One that cannot be read is refused by the writer, in the route's words.
+    if (!value) return { ok: true, sourced: null }
+    if (sourceUrl) {
+      if (!ctx.web) return refuse('unreachable', NEEDS_A_READER)
+      const url = sourcePageUrl(sourceUrl)
+      if (!url) return refuse('invalid_state', `"${oneLine(sourceUrl, 120)}" is not a web page’s address.`)
+      const problem = readablePathProblem(url)
+      if (problem) return refuse('not_permitted', problem)
+      // As read_page asks first: an IP address, localhost or a reserved name is never read.
+      if (!isScannableHost(url.hostname.toLowerCase())) {
+        return refuse('not_permitted', `"${oneLine(url.hostname, 100)}" is not a public website, so it is never read.`)
+      }
+      const page = await readOnce(ctx, pages, url.toString(), signal)
+      if (!page.ok) {
+        return refuse(
+          'unreachable',
+          `${pageLabel(url.toString())} could not be read (${oneLine(page.detail, 160)}), so it cannot show that ${what}.`,
+        )
+      }
+      const shown =
+        which === 'email' ? textShowsEmail(pageHaystack(page), value) : textShowsPhone(pageHaystack(page), value, phoneOpts)
+      if (!shown) {
+        return refuse(
+          'invalid_state',
+          `${mask(value)} does not appear on ${pageLabel(page.finalUrl)}. Name the page that shows it — or use ` +
+            'find_contact_details or read_page and give the handle they print.',
+        )
+      }
+      const source = pageSource(page.finalUrl) ?? pageSource(url.toString())
+      if (!source) return refuse('invalid_state', `${pageLabel(page.finalUrl)}’s address is too long to record as a source.`)
+      sourced = { value, source, kind: 'page', page: page.finalUrl }
+    } else {
+      const hit = foundByValue(ctx.orgId, which, value, now)
+      if (hit) {
+        sourced = { value, source: hit.url, kind: 'page', page: hit.url }
+      } else if (ctx.conversation) {
+        const test =
+          which === 'email' ? (t: string) => textShowsEmail(t, value) : (t: string) => textShowsPhone(t, value, phoneOpts)
+        const origins = await within(() => ctx.conversation!.find(test), signal)
+        if (origins === 'late' || origins === 'failed') {
+          return refuse('unreachable', `Whether this conversation showed that ${what} could not be checked just now. Try again.`)
+        }
+        const server = origins
+          .map((o) => (o.kind === 'tool' ? serverOf(o.tool) : null))
+          .find((s): s is string => s !== null && s !== 'agency')
+        if (origins.some((o) => o.kind === 'person')) sourced = { value, source: 'chat', kind: 'chat', page: null }
+        else if (server) sourced = { value, source: connectorSource(server), kind: 'connector', page: null }
+        else if (shownByOurReaderOnly(origins)) return refuse('invalid_state', HANDLE_EXPIRED(mask(value)))
+        else return refuse('not_permitted', which === 'email' ? NOT_SHOWN_EMAIL(mask(value)) : NOT_SHOWN_PHONE(mask(value)))
+      } else {
+        sourced = { value, source: null, kind: null, page: null }
+      }
+    }
+  } else if (sourceUrl) {
+    return refuse('invalid_state', `A source was given for a ${what}, but no ${what}. Give it (or its handle) with the source.`)
+  } else {
+    return { ok: true, sourced: null }
+  }
+
+  let note: string | null = null
+  if (which === 'email' && ctx.web) {
+    const web = ctx.web
+    const domain = sourced.value.slice(sourced.value.lastIndexOf('@') + 1)
+    const mail = await within(() => web.mailHosts(domain), signal)
+    if (mail !== 'late' && mail !== 'failed' && !mail.ok && (mail.why === 'no_domain' || mail.why === 'no_mail')) {
+      return refuse(
+        'invalid_state',
+        `${domain} receives no email — there is no mail server for it, so nothing sent there can arrive. Find the ` +
+          'address the business publishes (find_contact_details), or ask the person.',
+      )
+    }
+    if (mail === 'late' || mail === 'failed' || !mail.ok) note = `Whether ${domain} receives mail could not be checked just now.`
+  }
+  return { ok: true, sourced: { ...sourced, note } }
+}
+
+/** "seen on 127atelier.in/pages/contact" — or that nothing was recorded. */
+function sourceWords(s: Sourced | null): string {
+  return addressSourceWords(s?.source ?? null).words
+}
+
+/** The same, as a sentence of its own. */
+function sourceSentence(s: Sourced | null): string {
+  return s?.source ? `It was ${addressSourceWords(s.source).words}.` : 'Where it came from was not recorded.'
+}
+
+/**
+ * Whether this conversation — or a page an address came from — names the
+ * person: every part of their name of two letters or more, as a whole word.
+ * A role ("VP Engineering at carbonmaps") is never a reason to make one up.
+ */
+async function personShown(
+  ctx: ToolContext,
+  first: string | null,
+  last: string | null,
+  pageUrls: readonly string[],
+  pages: PageReads,
+  signal: AbortSignal,
+): Promise<boolean | 'late'> {
+  if (!ctx.conversation || !hasNameParts(first, last)) return true
+  const origins = await within(() => ctx.conversation!.find((t) => textNamesPerson(t, first, last)), signal)
+  if (origins === 'late') return 'late'
+  if (origins !== 'failed' && origins.some(showsIt)) return true
+  for (const url of pageUrls) {
+    const page = await readOnce(ctx, pages, url, signal)
+    if (page.ok && textNamesPerson(`${page.title ?? ''}\n${page.text}`, first, last)) return true
+  }
+  return false
+}
+
+const NOT_SHOWN_PERSON = (name: string, fromPage: boolean): string =>
+  `Nobody called ${oneLine(name, 80)} appears in this conversation${fromPage ? ' or on the page their address came from' : ''} ` +
+  '— not in anything the person typed, a page you read or a tool’s result; never invent a person to fill a role. ' +
+  'Add the business’s own published address without a name, or ask the person who to write to.'
+
+/** Whether this conversation showed this LinkedIn profile (its `in/<slug>`). */
+async function linkedinShown(ctx: ToolContext, key: string, signal: AbortSignal): Promise<boolean | 'late'> {
+  if (!ctx.conversation) return true
+  const origins = await within(() => ctx.conversation!.find((t) => textShowsLinkedIn(t, key)), signal)
+  if (origins === 'late') return 'late'
+  return origins !== 'failed' && origins.some(showsIt)
+}
+
+const NOT_SHOWN_LINKEDIN = (key: string): string =>
+  `linkedin.com/${key} appears nowhere in this conversation — not in anything the person typed, a page you read or ` +
+  'a tool’s result. A profile is never composed from a name. Use the one a search or a page showed, or ask the person.'
+
+const OUT_OF_TIME = 'It could not be checked in time — try again.'
+
+/**
+ * A writer's sentence with each address the model holds only by its HANDLE
+ * put back behind its mask. `createContact` and `contactsUpdate` quote the
+ * address they refuse ("… is already a contact in this CRM"), and read_page
+ * and find_contact_details never hand a person's whole address to the model;
+ * a refusal must not do it for them. An address the model typed whole is its
+ * own words, and is quoted as before.
+ */
+function maskHeld(message: string, held: ReadonlyArray<{ readonly which: 'email' | 'phone'; readonly value: string } | null>): string {
+  let out = message
+  for (const h of held) {
+    if (!h) continue
+    const masked = h.which === 'email' ? maskAddress(h.value) : maskPhone(h.value)
+    out = out.replace(new RegExp(h.value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), masked)
+  }
+  return out
+}
+
+/** An address by handle, or the page that shows it (2026-10-13). */
+const addressFields = {
+  from: z.string().max(24),
+  source: z.string().max(2048),
+}
 
 // ---------------------------------------------------------------------------
 // list_contacts
@@ -505,13 +819,41 @@ function firmographicPatch(input: FirmographicInput): Record<string, unknown> {
   return out
 }
 
+/**
+ * Where a business is reached when it has no website, or beside one
+ * (2026-10-13): its main phone line and its street address, as a listing or
+ * a page showed them. Stored only on a company this call creates.
+ */
+const companyReachFields = {
+  website: z
+    .string()
+    .min(1)
+    .max(253)
+    .describe(
+      'Its own website — a domain or URL this conversation showed — or "none" when no website of its own was seen: ' +
+        'then name and city (or address) are required, and it is filed under a placeholder that is never scanned. ' +
+        'Never a domain you composed, and never a business.site address (shut down in 2024).',
+    ),
+  phone: z
+    .string()
+    .max(40)
+    .describe('Its main phone line, exactly as the person, a listing or a page showed it — e.g. +91 98765 43210.'),
+  phoneFrom: addressFields.from.describe('Its phone by the handle read_page or find_contact_details printed (P-…), instead of phone.'),
+  address: z.string().max(300).describe('Its street address, as its listing or a page shows it.'),
+}
+
 const addCompanyShape = {
   domain: z
     .string()
     .min(1)
     .max(253)
-    .describe('The company’s own public website domain, e.g. "rentman.io". A URL is read for its host.'),
-  name: companyNameField.optional().describe('The company’s name, if known.'),
+    .optional()
+    .describe(
+      'The company’s own public website domain, e.g. "rentman.io" — one this conversation showed. A URL is read for ' +
+        'its host. Give this or website.',
+    ),
+  website: companyReachFields.website.optional(),
+  name: companyNameField.optional().describe('The company’s name, as it was shown.'),
   country: companyCountryField.optional().describe('Its country, as people write it. Never used to guess a time zone.'),
   timeZone: companyZoneField
     .optional()
@@ -524,6 +866,9 @@ const addCompanyShape = {
   headcountSource: firmographicFields.headcountSource.optional(),
   stage: firmographicFields.stage.optional(),
   description: firmographicFields.description.optional(),
+  phone: companyReachFields.phone.optional(),
+  phoneFrom: companyReachFields.phoneFrom.optional(),
+  address: companyReachFields.address.optional(),
 }
 
 const COMPANY_FIELD_WORDS: Record<string, string> = {
@@ -553,24 +898,133 @@ function companyFacts(c: Company): string {
   ].join(', ')
 }
 
+/** Where a new company is filed: a domain somebody showed, or — for a business with none of its own — a placeholder. */
+interface CompanyTarget {
+  readonly ok: true
+  readonly domain: string
+  /** Filed as website "none", under `noSiteDomain`: never scanned, never resolved. */
+  readonly none: boolean
+}
+
+/**
+ * The domain a company is added under, from `domain` or `website` (exactly
+ * one). Website "none" files a business with no website of its own under
+ * `noSiteDomain`, told apart from a namesake by its name and where it is — so
+ * it needs a name, and a city or an address. A real domain must be one the
+ * scanner would request, and never the booking page's `.inbound` placeholder
+ * (`addableDomain`); whether it was SHOWN, and answers, is `websiteCheck`'s.
+ */
+function companyTarget(input: {
+  readonly domain?: string | undefined
+  readonly website?: string | undefined
+  readonly name?: string | undefined
+  readonly city?: string | undefined
+  readonly address?: string | undefined
+}): CompanyTarget | Refusal {
+  const domain = given(input.domain)
+  const website = given(input.website)
+  if (!!domain === !!website) {
+    return refuse(
+      'invalid_state',
+      'Give the company’s website as domain or as website — exactly one of the two. website "none" files a business ' +
+        'with no website of its own.',
+    )
+  }
+  const site = (website ?? domain)!
+  if (site.toLowerCase() === 'none') {
+    const name = given(input.name)
+    if (!name) {
+      return refuse('invalid_state', 'A business with no website of its own is filed by its name: give name, and its city or address.')
+    }
+    const city = given(input.city)
+    const address = given(input.address)
+    if (!city && !address) {
+      return refuse(
+        'invalid_state',
+        `${oneLine(name, 80)} has no website of its own, so it is told apart from businesses of the same name by where ` +
+          'it is: give its city or its address.',
+      )
+    }
+    const id = (v: string | null): string => (v ?? '').toLowerCase().replace(/\s+/g, ' ').trim()
+    return { ok: true, domain: noSiteDomain(name, `name:${id(name)}|${id(city)}|${id(address)}`), none: true }
+  }
+  const addable = addableDomain(site)
+  if (!addable.ok) return addable
+  return { ok: true, domain: addable.domain, none: false }
+}
+
+/** A company's phone as it will be stored (E.164), and where it came from — or why not. */
+async function companyPhone(
+  ctx: ToolContext,
+  input: { readonly phone?: string | undefined; readonly phoneFrom?: string | undefined },
+  opts: FindPhonesOptions,
+  signal: AbortSignal,
+): Promise<{ ok: true; value: string | null; source: string | null } | Refusal> {
+  const raw = given(input.phone)
+  const from = given(input.phoneFrom)
+  const now = ctx.now().getTime()
+  if (from) {
+    const hit = foundByHandle(ctx.orgId, from, now)
+    if (!hit) return refuse('invalid_state', STALE_HANDLE(from))
+    if (hit.kind !== 'phone') return refuse('invalid_state', `${hit.handle} stands for an email address, not a phone number.`)
+    if (raw && phoneValue(raw, opts) !== hit.value) {
+      return refuse('invalid_state', `The phone number given is not the one ${hit.handle} stands for. Give the handle alone.`)
+    }
+    return { ok: true, value: hit.value, source: hit.url }
+  }
+  if (!raw) return { ok: true, value: null, source: null }
+  const value = phoneValue(raw, opts)
+  if (!value) return refuse('invalid_state', PHONE_UNREADABLE(raw))
+  const hit = foundByValue(ctx.orgId, 'phone', value, now)
+  if (hit) return { ok: true, value, source: hit.url }
+  if (!ctx.conversation) return { ok: true, value, source: null }
+  const origins = await within(() => ctx.conversation!.find((t) => textShowsPhone(t, value, opts)), signal)
+  if (origins === 'late' || origins === 'failed') return refuse('unreachable', OUT_OF_TIME)
+  // As for a person's number: our own tools show a number only by its handle, so one seen whole there was typed by the model.
+  const person = origins.some((o) => o.kind === 'person')
+  const server = origins
+    .map((o) => (o.kind === 'tool' ? serverOf(o.tool) : null))
+    .find((s): s is string => s !== null && s !== 'agency')
+  if (!person && !server) {
+    if (shownByOurReaderOnly(origins)) return refuse('invalid_state', HANDLE_EXPIRED(maskPhone(value)))
+    return refuse('not_permitted', NOT_SHOWN_PHONE(maskPhone(value)))
+  }
+  return { ok: true, value, source: person ? 'chat' : connectorSource(server!) }
+}
+
+/** The fields a new company's reach facts changed, for the route's `company.updated` row beside the rest. */
+async function setReach(
+  ctx: ToolContext,
+  companyId: string,
+  phone: string | null,
+  address: string | null,
+): Promise<{ ok: true; company: Company | null; changed: string[] } | { ok: false; message: string }> {
+  if (!phone && !address) return { ok: true, company: null, changed: [] }
+  const r = await companiesSetReachFacts(ctx.db, ctx.orgId, companyId, {
+    ...(phone ? { phone } : {}),
+    ...(address ? { address } : {}),
+  })
+  return r.ok ? { ok: true, company: r.company, changed: r.changed } : { ok: false, message: r.message }
+}
 
 export const addCompany: AgencyToolSpec<typeof addCompanyShape> = {
   name: 'add_company',
   description:
-    'Add one company to the CRM by the domain of its own public website, with what you know of it: name, ' +
-    'country, IANA time zone, industry, city, headcount (with where that number came from), funding stage and a ' +
-    'one-line description. A company already there is left exactly as it is — update_company changes it. It ' +
-    'records only that the team intends to look at the company: nothing is scanned (scan_company does that), ' +
-    'and nothing is sent.',
+    'Add one company to the CRM by the domain of its own public website — one this conversation showed (the person, ' +
+    'a search result or a page) — or, for a business with no website of its own, with website "none" and its name ' +
+    'and city or address. With what you know of it: name, country, IANA time zone, industry, city, headcount (with ' +
+    'where that number came from), stage, a one-line description, and its phone and address as they were shown. A ' +
+    'company already there is left exactly as it is — update_company changes it. Nothing is scanned (scan_company ' +
+    'does that), and nothing is sent.',
   shape: addCompanyShape,
   async handler(input, ctx): Promise<ToolOutcome<unknown>> {
     // The import page's own gate.
     if (!can(ctx.principal, 'companies:write')) {
       return fail('not_permitted', `The person you are helping cannot add companies. ${NOTHING_SENT}`)
     }
-    const addable = addableDomain(input.domain)
-    if (!addable.ok) return fail(addable.code, `${addable.message} Nothing was added.`)
-    const { domain } = addable
+    const target = companyTarget(input)
+    if (!target.ok) return fail(target.code, `${target.message} Nothing was added.`)
+    const { domain } = target
 
     // The country and zone are checked as `companiesUpdate` checks them, BEFORE
     // anything is written: a refused zone must not leave a company half-added.
@@ -597,6 +1051,24 @@ export const addCompany: AgencyToolSpec<typeof addCompanyShape> = {
       )
     }
 
+    // True data only: the phone was shown, and the website was shown and answers.
+    const phoneOpts = phoneOptsFor({ country: input.country ?? null, domain })
+    let note: string | null = null
+    let phone: { value: string | null; source: string | null }
+    const clock = deadline(WEB_WORK_MS)
+    try {
+      const p = await companyPhone(ctx, input, phoneOpts, clock.signal)
+      if (!p.ok) return fail(p.code, `${p.message} Nothing was added.`)
+      phone = p
+      if (!target.none) {
+        const check = await websiteCheck(ctx, domain, given(input.name), clock.signal)
+        if (!check.ok) return fail(check.late ? 'unreachable' : 'not_permitted', `${check.why} Nothing was added.`)
+        note = check.note
+      }
+    } finally {
+      clock.stop()
+    }
+
     // Source 'agent', so the CRM records that a model put this row here.
     const name = input.name?.trim()
     const result = await importCompanyRows(ctx.db, ctx.orgId, [{ domain, ...(name ? { name } : {}) }], 'agent')
@@ -604,25 +1076,34 @@ export const addCompany: AgencyToolSpec<typeof addCompanyShape> = {
     if (!company) throw new Error('a company just imported could not be read back')
     const created = result.inserted === 1
 
-    // Only a row this call created gets the country and zone: one somebody
-    // else added between the read and the insert is theirs, as they wrote it.
-    if (created && Object.keys(extras.data).length > 0) {
-      const updated = await companiesUpdate(ctx.db, ctx.orgId, company.id, extras.data)
-      if (!updated.ok) {
-        return fail(
-          updated.reason === 'not_found' ? 'not_found' : 'invalid_state',
-          `${domain} was added, but the details given with it were not set: ${updated.message}`,
-        )
+    // Only a row this call created gets the country, the zone and how it is
+    // reached: one somebody else added between the read and the insert is
+    // theirs, as they wrote it.
+    if (created) {
+      const fields: string[] = []
+      if (Object.keys(extras.data).length > 0) {
+        const updated = await companiesUpdate(ctx.db, ctx.orgId, company.id, extras.data)
+        if (!updated.ok) {
+          return fail(
+            updated.reason === 'not_found' ? 'not_found' : 'invalid_state',
+            `${domain} was added, but the details given with it were not set: ${updated.message}`,
+          )
+        }
+        company = updated.company
+        fields.push(...updated.changed)
       }
-      company = updated.company
-      if (updated.changed.length > 0) {
+      const reach = await setReach(ctx, company.id, phone.value, given(input.address))
+      if (!reach.ok) return fail('invalid_state', `${domain} was added, but its phone and address were not set: ${reach.message}`)
+      if (reach.company) company = reach.company
+      fields.push(...reach.changed)
+      if (fields.length > 0) {
         await appendAudit(ctx.db, {
           orgId: ctx.orgId,
           actor: 'agent',
           action: 'company.updated',
           subjectType: 'company',
           subjectId: company.id,
-          detail: { fields: updated.changed },
+          detail: { fields },
         }).catch(() => {})
       }
     }
@@ -635,10 +1116,24 @@ export const addCompany: AgencyToolSpec<typeof addCompanyShape> = {
           `update_company changes what is recorded about it. ${NOTHING_SENT}`,
       )
     }
+    const reachWords = [
+      company.phone ? `its phone ${maskPhone(company.phone)} (${addressSourceWords(phone.source).words})` : null,
+      company.address ? 'its address' : null,
+    ].filter(Boolean)
+    const reachSentence = reachWords.length ? ` On file: ${reachWords.join(' and ')}.` : ''
+    if (target.none) {
+      return ok(
+        { companyId: company.id, domain, created: true, website: 'none' },
+        `Filed ${oneLine(company.name, 80)} as a business with no website of its own, under the placeholder ${domain} ` +
+          `— how every page and tool names it; it is never scanned: ${companyFacts(company)}.${reachSentence} It is ` +
+          'reached by a call or a visit (create_task) or an email a person was given. ' +
+          NOTHING_SENT,
+      )
+    }
     return ok(
       { companyId: company.id, domain, created: true },
-      `Added ${domain} to the CRM: ${companyFacts(company)}. Nothing has been scanned — it has no score and no ` +
-        `findings until a scan runs; ask to scan it with scan_company. ${NOTHING_SENT}`,
+      `Added ${domain} to the CRM: ${companyFacts(company)}.${reachSentence}${note ? ` ${note}` : ''} Nothing has been ` +
+        `scanned — it has no score and no findings until a scan runs; ask to scan it with scan_company. ${NOTHING_SENT}`,
     )
   },
 }
@@ -758,8 +1253,14 @@ const importCompaniesShape = {
   companies: z
     .array(
       z.object({
-        domain: z.string().min(1).max(253).describe('The company’s own public website domain.'),
-        name: companyNameField.optional().describe('Its name, if known.'),
+        domain: z
+          .string()
+          .min(1)
+          .max(253)
+          .optional()
+          .describe('The company’s own public website domain, as this conversation showed it. Give this or website.'),
+        website: companyReachFields.website.optional(),
+        name: companyNameField.optional().describe('Its name, as it was shown.'),
         country: companyCountryField.optional().describe('Its country, if known.'),
         timeZone: companyZoneField
           .optional()
@@ -770,13 +1271,17 @@ const importCompaniesShape = {
         headcountSource: firmographicFields.headcountSource.optional(),
         stage: firmographicFields.stage.optional(),
         description: firmographicFields.description.optional(),
+        phone: companyReachFields.phone.optional(),
+        phoneFrom: companyReachFields.phoneFrom.optional(),
+        address: companyReachFields.address.optional(),
       }),
     )
     .min(1)
     .max(50)
     .describe(
-      'Up to 50 companies, each by the domain of its own public website, with its name and what you know of it ' +
-        '(country, time zone, industry, city, headcount with its source, stage, description).',
+      'Up to 50 companies, each by the domain of its own public website — or website "none" with its name and city ' +
+        'for a business with none of its own — with what you know of it (country, time zone, industry, city, ' +
+        'headcount with its source, stage, description, its phone and address as shown).',
     ),
 }
 
@@ -789,135 +1294,226 @@ interface ImportLine {
   readonly why: string | null
 }
 
-export const importCompanies: AgencyToolSpec<typeof importCompaniesShape> = {
-  name: 'import_companies',
-  description:
-    'Add a list of up to 50 companies to the CRM by the domains of their own public websites, each with its ' +
-    'name and what you know of it — country, time zone, industry, city, headcount with its source, stage, ' +
-    'description. ' +
-    'Companies already there are left exactly as they are, and each line is reported as added, already present ' +
-    'or refused with why. Nothing is scanned (scan_company does that when asked), and nothing is sent.',
-  shape: importCompaniesShape,
-  async handler(input, ctx): Promise<ToolOutcome<unknown>> {
-    // The import page's own gate.
-    if (!can(ctx.principal, 'companies:write')) {
-      return fail('not_permitted', `The person you are helping cannot add companies. ${NOTHING_SENT}`)
-    }
+/** How many lines' websites and phones are checked at once. */
+const IMPORT_CHECKS_AT_ONCE = 6
+const NOT_CHECKED_IN_TIME = 'Not checked in time — add it again.'
+/**
+ * What an import's checks may spend: the tool budget less what writing up to
+ * fifty new companies needs after them — an insert, then for each its details,
+ * its phone and address and its audit row, a handful of round trips apiece.
+ * A line not checked by then is refused, and added again by the next call.
+ */
+const IMPORT_CHECK_MS = TOOL_TIME_BUDGET_MS - 13_000
 
-    const checked: Array<{ line: number; domain: string; refused: string | null; duplicate: boolean }> = []
-    const rows: Array<{ domain: string; name?: string }> = []
-    // What each new company is recorded as, checked BEFORE anything is
-    // written, as add_company checks it: a line whose details would be
-    // refused is refused whole rather than half-added.
-    const details = new Map<string, Record<string, unknown>>()
-    const seen = new Set<string>()
-    input.companies.forEach((row, i) => {
-      const addable = addableDomain(row.domain)
-      if (!addable.ok) {
-        checked.push({ line: i + 1, domain: oneLine(row.domain, 100), refused: addable.message, duplicate: false })
-        return
-      }
-      if (seen.has(addable.domain)) {
-        checked.push({ line: i + 1, domain: addable.domain, refused: null, duplicate: true })
-        return
-      }
-      const patch = {
-        ...(row.country !== undefined ? { country: row.country } : {}),
-        ...(row.timeZone !== undefined ? { timeZone: row.timeZone } : {}),
-        ...firmographicPatch(row),
-      }
-      const parsed = companyPatchInput.safeParse(patch)
-      if (!parsed.success) {
-        checked.push({ line: i + 1, domain: addable.domain, refused: issueWords(parsed.error), duplicate: false })
-        return
-      }
-      if (parsed.data.timeZone && !isKnownTimeZone(parsed.data.timeZone)) {
-        checked.push({ line: i + 1, domain: addable.domain, refused: unknownZone(parsed.data.timeZone), duplicate: false })
-        return
-      }
-      if (parsed.data.headcountSource && parsed.data.headcount === undefined) {
-        checked.push({
-          line: i + 1, domain: addable.domain, refused: 'A headcount source needs the headcount it is for.', duplicate: false,
-        })
-        return
-      }
-      seen.add(addable.domain)
-      if (Object.keys(parsed.data).length > 0) details.set(addable.domain, parsed.data)
-      const name = row.name?.trim()
-      rows.push({ domain: addable.domain, ...(name ? { name } : {}) })
-      checked.push({ line: i + 1, domain: addable.domain, refused: null, duplicate: false })
-    })
+type ImportRow = z.infer<typeof importCompaniesShape.companies>[number]
 
-    // Source 'agent'. `ON CONFLICT DO NOTHING`: a company already here keeps its row as it is.
-    const result = rows.length > 0 ? await importCompanyRows(ctx.db, ctx.orgId, rows, 'agent') : null
-    const inserted = new Set(result?.domains ?? [])
-
-    // Only a row this call created gets its details — one already here is as
-    // whoever recorded it left it (update_company changes it).
-    const detailsNotSet: string[] = []
-    for (const domain of inserted) {
-      const patch = details.get(domain)
-      if (!patch) continue
-      const company = await findCompanyByDomain(ctx.db, ctx.orgId, domain)
-      if (!company) continue
-      const updated = await companiesUpdate(ctx.db, ctx.orgId, company.id, patch)
-      if (!updated.ok) {
-        detailsNotSet.push(`${domain}: ${updated.message}`)
-        continue
+export function makeImportCompanies(opts: { readonly budgetMs?: number } = {}): AgencyToolSpec<typeof importCompaniesShape> {
+  const budgetMs = opts.budgetMs ?? IMPORT_CHECK_MS
+  return {
+    name: 'import_companies',
+    description:
+      'Add a list of up to 50 companies to the CRM by the domains of their own public websites — each one this ' +
+      'conversation showed — or website "none" with a name and city for a business with no website of its own, ' +
+      'each with what you know of it: country, time zone, industry, city, headcount with its source, stage, ' +
+      'description, phone and address as shown. Companies already there are left exactly as they are, and each line ' +
+      'is reported as added, already present or refused with why. Nothing is scanned (scan_company does that when ' +
+      'asked), and nothing is sent.',
+    shape: importCompaniesShape,
+    async handler(input, ctx): Promise<ToolOutcome<unknown>> {
+      // The import page's own gate.
+      if (!can(ctx.principal, 'companies:write')) {
+        return fail('not_permitted', `The person you are helping cannot add companies. ${NOTHING_SENT}`)
       }
-      if (updated.changed.length > 0) {
-        await appendAudit(ctx.db, {
-          orgId: ctx.orgId,
-          actor: 'agent',
-          action: 'company.updated',
-          subjectType: 'company',
-          subjectId: company.id,
-          detail: { fields: updated.changed },
-        }).catch(() => {})
+
+      interface Candidate {
+        readonly line: number
+        readonly domain: string
+        readonly none: boolean
+        readonly row: ImportRow
       }
-    }
-    const lines: ImportLine[] = checked.map((c) => ({
-      line: c.line,
-      domain: c.domain,
-      why: c.refused,
-      outcome: c.refused !== null ? 'refused' : c.duplicate ? 'duplicate' : inserted.has(c.domain) ? 'added' : 'already_present',
-    }))
-    const count = (o: ImportOutcome): number => lines.filter((l) => l.outcome === o).length
-    const added = lines.filter((l) => l.outcome === 'added').map((l) => l.domain)
-    const present = lines.filter((l) => l.outcome === 'already_present').map((l) => l.domain)
-    const refused = lines.filter((l) => l.outcome === 'refused')
+      const checked: Array<{ line: number; domain: string; refused: string | null; duplicate: boolean }> = []
+      const candidates: Candidate[] = []
+      // What each new company is recorded as, checked BEFORE anything is
+      // written, as add_company checks it: a line whose details would be
+      // refused is refused whole rather than half-added.
+      const details = new Map<string, Record<string, unknown>>()
+      const seen = new Set<string>()
+      input.companies.forEach((row, i) => {
+        const line = i + 1
+        const target = companyTarget(row)
+        if (!target.ok) {
+          checked.push({ line, domain: oneLine(row.domain ?? row.website ?? row.name ?? '', 100), refused: target.message, duplicate: false })
+          return
+        }
+        if (seen.has(target.domain)) {
+          checked.push({ line, domain: target.domain, refused: null, duplicate: true })
+          return
+        }
+        const patch = {
+          ...(row.country !== undefined ? { country: row.country } : {}),
+          ...(row.timeZone !== undefined ? { timeZone: row.timeZone } : {}),
+          ...firmographicPatch(row),
+        }
+        const parsed = companyPatchInput.safeParse(patch)
+        if (!parsed.success) {
+          checked.push({ line, domain: target.domain, refused: issueWords(parsed.error), duplicate: false })
+          return
+        }
+        if (parsed.data.timeZone && !isKnownTimeZone(parsed.data.timeZone)) {
+          checked.push({ line, domain: target.domain, refused: unknownZone(parsed.data.timeZone), duplicate: false })
+          return
+        }
+        if (parsed.data.headcountSource && parsed.data.headcount === undefined) {
+          checked.push({ line, domain: target.domain, refused: 'A headcount source needs the headcount it is for.', duplicate: false })
+          return
+        }
+        seen.add(target.domain)
+        if (Object.keys(parsed.data).length > 0) details.set(target.domain, parsed.data)
+        candidates.push({ line, domain: target.domain, none: target.none, row })
+        checked.push({ line, domain: target.domain, refused: null, duplicate: false })
+      })
 
-    await ctx.audit('agent.import_companies', {
-      added: count('added'),
-      alreadyPresent: count('already_present'),
-      refused: count('refused'),
-      duplicates: count('duplicate'),
-    })
+      // A company already here is left exactly as it is, and needs no checking.
+      const present = new Set(
+        candidates.length === 0
+          ? []
+          : (
+              await ctx.db
+                .select({ domain: schema.companies.domain })
+                .from(schema.companies)
+                .where(and(eq(schema.companies.orgId, ctx.orgId), inArray(schema.companies.domain, candidates.map((c) => c.domain))))
+            ).map((r) => r.domain),
+      )
 
-    const detail = [
-      ...(added.length ? [`Added: ${added.join(', ')}`] : []),
-      ...(present.length ? [`Already in the CRM, left as they were: ${present.join(', ')}`] : []),
-      ...refused.map((l) => `Refused, line ${l.line} ("${l.domain}"): ${l.why}`),
-      ...detailsNotSet.map((d) => `Added, but its details were not set — ${d}`),
-    ]
-    return ok(
-      { lines, added: added.length, alreadyPresent: present.length, refused: refused.length, duplicates: count('duplicate') },
-      [
-        `${plural(added.length, 'company', 'companies')} added, ${present.length} already in the CRM, ` +
-          `${refused.length} refused` +
-          (count('duplicate') > 0 ? `, ${count('duplicate')} listed twice (counted once)` : '') +
-          '.',
-        bounded(detail, 6_000),
-        added.length > 0
-          ? 'Nothing has been scanned — a new company has no score and no findings until a scan runs; ask to scan ' +
-            `one with scan_company. ${NOTHING_SENT}`
-          : NOTHING_SENT,
+      // True data only, line by line as add_company checks one: its phone was
+      // shown, and its website was shown and answers — six at a time, inside
+      // the call's time. A line not checked in time is refused, never let through.
+      const verdicts = new Map<string, { readonly refused: string } | { readonly phone: string | null }>()
+      const queue = candidates.filter((c) => !present.has(c.domain))
+      const clock = deadline(budgetMs)
+      try {
+        const check = async (c: Candidate): Promise<{ refused: string } | { phone: string | null }> => {
+          const phone = await companyPhone(ctx, c.row, phoneOptsFor({ country: c.row.country ?? null, domain: c.domain }), clock.signal)
+          if (!phone.ok) return { refused: phone.message === OUT_OF_TIME ? NOT_CHECKED_IN_TIME : phone.message }
+          if (!c.none) {
+            const site = await websiteCheck(ctx, c.domain, given(c.row.name), clock.signal)
+            if (!site.ok) return { refused: site.late ? NOT_CHECKED_IN_TIME : site.why }
+          }
+          return { phone: phone.value }
+        }
+        const worker = async (): Promise<void> => {
+          while (queue.length > 0 && !clock.signal.aborted) {
+            const c = queue.shift()!
+            verdicts.set(c.domain, await check(c))
+          }
+        }
+        await Promise.all(Array.from({ length: Math.min(IMPORT_CHECKS_AT_ONCE, queue.length) }, worker))
+      } finally {
+        clock.stop()
+      }
+      const passed: Candidate[] = []
+      for (const c of candidates) {
+        const verdict = present.has(c.domain) ? { phone: null } : (verdicts.get(c.domain) ?? { refused: NOT_CHECKED_IN_TIME })
+        if ('refused' in verdict) {
+          const entry = checked.find((e) => e.line === c.line)!
+          entry.refused = verdict.refused
+        } else passed.push(c)
+      }
+      const phones = new Map(
+        [...verdicts].flatMap(([domain, v]) => ('phone' in v && v.phone ? [[domain, v.phone] as const] : [])),
+      )
+
+      // Source 'agent'. `ON CONFLICT DO NOTHING`: a company already here keeps its row as it is.
+      const rows = passed.map((c) => {
+        const name = c.row.name?.trim()
+        return { domain: c.domain, ...(name ? { name } : {}) }
+      })
+      const result = rows.length > 0 ? await importCompanyRows(ctx.db, ctx.orgId, rows, 'agent') : null
+      const inserted = new Set(result?.domains ?? [])
+
+      // Only a row this call created gets its details — one already here is as
+      // whoever recorded it left it (update_company changes it).
+      const detailsNotSet: string[] = []
+      for (const c of passed) {
+        if (!inserted.has(c.domain)) continue
+        const patch = details.get(c.domain)
+        const phone = phones.get(c.domain) ?? null
+        const address = given(c.row.address)
+        if (!patch && !phone && !address) continue
+        const company = await findCompanyByDomain(ctx.db, ctx.orgId, c.domain)
+        if (!company) continue
+        const fields: string[] = []
+        if (patch) {
+          const updated = await companiesUpdate(ctx.db, ctx.orgId, company.id, patch)
+          if (!updated.ok) {
+            detailsNotSet.push(`${c.domain}: ${updated.message}`)
+            continue
+          }
+          fields.push(...updated.changed)
+        }
+        const reach = await setReach(ctx, company.id, phone, address)
+        if (!reach.ok) detailsNotSet.push(`${c.domain}: ${reach.message}`)
+        else fields.push(...reach.changed)
+        if (fields.length > 0) {
+          await appendAudit(ctx.db, {
+            orgId: ctx.orgId,
+            actor: 'agent',
+            action: 'company.updated',
+            subjectType: 'company',
+            subjectId: company.id,
+            detail: { fields },
+          }).catch(() => {})
+        }
+      }
+      const lines: ImportLine[] = checked.map((c) => ({
+        line: c.line,
+        domain: c.domain,
+        why: c.refused,
+        outcome: c.refused !== null ? 'refused' : c.duplicate ? 'duplicate' : inserted.has(c.domain) ? 'added' : 'already_present',
+      }))
+      const count = (o: ImportOutcome): number => lines.filter((l) => l.outcome === o).length
+      const added = lines.filter((l) => l.outcome === 'added').map((l) => l.domain)
+      const alreadyHere = lines.filter((l) => l.outcome === 'already_present').map((l) => l.domain)
+      const refused = lines.filter((l) => l.outcome === 'refused')
+      const noSite = added.filter((d) => isNoSiteDomain(d)).length
+
+      await ctx.audit('agent.import_companies', {
+        added: count('added'),
+        alreadyPresent: count('already_present'),
+        refused: count('refused'),
+        duplicates: count('duplicate'),
+      })
+
+      const detail = [
+        ...(added.length ? [`Added: ${added.join(', ')}`] : []),
+        ...(alreadyHere.length ? [`Already in the CRM, left as they were: ${alreadyHere.join(', ')}`] : []),
+        ...refused.map((l) => `Refused, line ${l.line} ("${l.domain}"): ${l.why}`),
+        ...detailsNotSet.map((d) => `Added, but its details were not set — ${d}`),
       ]
-        .filter(Boolean)
-        .join('\n'),
-    )
-  },
+      return ok(
+        { lines, added: added.length, alreadyPresent: alreadyHere.length, refused: refused.length, duplicates: count('duplicate') },
+        [
+          `${plural(added.length, 'company', 'companies')} added, ${alreadyHere.length} already in the CRM, ` +
+            `${refused.length} refused` +
+            (count('duplicate') > 0 ? `, ${count('duplicate')} listed twice (counted once)` : '') +
+            '.',
+          bounded(detail, 6_000),
+          ...(noSite > 0
+            ? [`${plural(noSite, 'business was', 'businesses were')} filed with no website of its own (a .nosite.invalid placeholder): never scanned, reached by a call or a visit.`]
+            : []),
+          added.length > noSite
+            ? 'Nothing has been scanned — a new company has no score and no findings until a scan runs; ask to scan ' +
+              `one with scan_company. ${NOTHING_SENT}`
+            : NOTHING_SENT,
+        ]
+          .filter(Boolean)
+          .join('\n'),
+      )
+    },
+  }
 }
+
+export const importCompanies = makeImportCompanies()
 
 // ---------------------------------------------------------------------------
 // add_contact
@@ -941,22 +1537,41 @@ const contactFields = {
   timeZone: z.string().max(64),
 }
 
+
+/** The kind of source an address was stored with, for the route's `contact.created` row: never the page itself. */
+const kindOf = (s: Sourced | null): SourceKind | null => s?.kind ?? null
+
 const addContactShape = {
   domain: z
     .string()
     .min(1)
     .max(253)
     .describe('The company they are at, by its domain. add_company first if it is not in the CRM.'),
-  firstName: contactFields.firstName.optional().describe('Their first name.'),
-  lastName: contactFields.lastName.optional().describe('Their last name.'),
+  firstName: contactFields.firstName
+    .optional()
+    .describe('Their first name — only a person this conversation named: the person you help, a page or a search.'),
+  lastName: contactFields.lastName.optional().describe('Their last name, as it was shown.'),
   title: contactFields.title.optional().describe('Their job title.'),
-  email: contactFields.email.optional().describe('Their work email address.'),
+  email: contactFields.email
+    .optional()
+    .describe(
+      'Their email address exactly as something in this conversation showed it — the person typed it, or a page or ' +
+        'a search returned it. Never composed from a name or a pattern. Or give emailFrom.',
+    ),
+  emailFrom: addressFields.from.optional().describe('Their email by the handle read_page or find_contact_details printed (E-…).'),
+  emailSource: addressFields.source
+    .optional()
+    .describe('The page that shows the email, if not a handle: it is read to check that it does, and stored as where it came from.'),
   phone: contactFields.phone
     .optional()
-    .describe('Their phone number in international form with the country code, e.g. +44 20 7946 0958.'),
+    .describe('Their phone number in international form with the country code, e.g. +44 20 7946 0958 — as it was shown.'),
+  phoneFrom: addressFields.from.optional().describe('Their phone by the handle read_page or find_contact_details printed (P-…).'),
+  phoneSource: addressFields.source
+    .optional()
+    .describe('The page that shows the number, if not a handle: it is read to check that it does.'),
   linkedinUrl: contactFields.linkedinUrl
     .optional()
-    .describe('Their LinkedIn profile URL, e.g. linkedin.com/in/jane-doe.'),
+    .describe('Their LinkedIn profile URL as a search or a page showed it, e.g. linkedin.com/in/jane-doe.'),
   timeZone: contactFields.timeZone
     .optional()
     .describe('Their IANA time zone, e.g. Europe/London. With none of theirs or the company’s, nothing can be sent to them.'),
@@ -978,8 +1593,11 @@ export const addContact: AgencyToolSpec<typeof addContactShape> = {
   name: 'add_contact',
   description:
     'Add a person at a company to the CRM, with at least one way to reach them — an email address, a phone ' +
-    'number in international form, or a LinkedIn profile — and their IANA time zone if known. It records NO ' +
-    'consent of any kind (absence is no) and puts them in no campaign; nothing is sent.',
+    'number in international form, or a LinkedIn profile — and their IANA time zone if known. Only what this ' +
+    'conversation showed: an address by its handle from read_page or find_contact_details, or exactly as the person ' +
+    'or a search gave it — never one composed from a name or a pattern, never a made-up person. Each address is ' +
+    'stored with where it came from. It records NO consent of any kind (absence is no) and puts them in no ' +
+    'campaign; nothing is sent.',
   shape: addContactShape,
   async handler(input, ctx): Promise<ToolOutcome<unknown>> {
     // POST /api/contacts's own gate.
@@ -995,47 +1613,101 @@ export const addContact: AgencyToolSpec<typeof addContactShape> = {
     // A LinkedIn URL is kept as typed (a link somebody clicks), but only one
     // `normaliseLinkedIn` can read: the key an opt-out is recorded against.
     const rawPhone = input.phone?.trim() || null
-    const phone = rawPhone ? normalisePhone(rawPhone) : null
-    if (rawPhone && !phone) return fail('invalid_state', `${PHONE_UNREADABLE(rawPhone)} Nothing was added.`)
+    if (rawPhone && !normalisePhone(rawPhone)) return fail('invalid_state', `${PHONE_UNREADABLE(rawPhone)} Nothing was added.`)
     const linkedinUrl = input.linkedinUrl?.trim() || null
-    if (linkedinUrl && !normaliseLinkedIn(linkedinUrl)) {
+    const linkedinKey = linkedinUrl ? normaliseLinkedIn(linkedinUrl) : null
+    if (linkedinUrl && !linkedinKey) {
       return fail('invalid_state', `${LINKEDIN_UNREADABLE(linkedinUrl)} Nothing was added.`)
     }
 
+    // True data only: each address from what this conversation showed, the
+    // person named by it too, and an email at a domain that receives mail.
+    const phoneOpts = phoneOptsFor(company)
+    const pages: PageReads = new Map()
+    const clock = deadline(WEB_WORK_MS)
+    let email: Sourced | null
+    let phone: Sourced | null
+    try {
+      const e = await sourcedAddress(
+        ctx, 'email', { raw: input.email, from: input.emailFrom, sourceUrl: input.emailSource }, phoneOpts, pages, clock.signal,
+      )
+      if (!e.ok) return fail(e.code, `${e.message} Nothing was added.`)
+      const p = await sourcedAddress(
+        ctx, 'phone', { raw: input.phone, from: input.phoneFrom, sourceUrl: input.phoneSource }, phoneOpts, pages, clock.signal,
+      )
+      if (!p.ok) return fail(p.code, `${p.message} Nothing was added.`)
+      email = e.sourced
+      phone = p.sourced
+      if (linkedinKey) {
+        const shown = await linkedinShown(ctx, linkedinKey, clock.signal)
+        if (shown === 'late') return fail('unreachable', `${OUT_OF_TIME} Nothing was added.`)
+        if (!shown) return fail('not_permitted', `${NOT_SHOWN_LINKEDIN(linkedinKey)} Nothing was added.`)
+      }
+      const first = given(input.firstName)
+      const last = given(input.lastName)
+      const addressPages = [email?.page, phone?.page].filter((u): u is string => !!u)
+      const named = await personShown(ctx, first, last, addressPages, pages, clock.signal)
+      if (named === 'late') return fail('unreachable', `${OUT_OF_TIME} Nothing was added.`)
+      if (!named) {
+        return fail('not_permitted', `${NOT_SHOWN_PERSON([first, last].filter(Boolean).join(' '), addressPages.length > 0)} Nothing was added.`)
+      }
+    } finally {
+      clock.stop()
+    }
+
     // The route's parse, then the route's writer: it folds the email, checks
-    // the zone, refuses a duplicate address in this org with a sentence.
+    // the zone, refuses a duplicate address in this org with a sentence. A
+    // source goes only beside the address it is about.
+    const emailValue = email?.value ?? (input.email?.trim() || null)
+    const phoneValueStored = phone?.value ?? null
     const parsed = contactInput.safeParse({
       companyId: company.id,
       firstName: input.firstName ?? null,
       lastName: input.lastName ?? null,
       title: input.title ?? null,
-      email: input.email?.trim() || null,
-      phone,
+      email: emailValue,
+      phone: phoneValueStored,
       linkedinUrl,
       timeZone: input.timeZone?.trim() || null,
       source: 'agent',
+      ...(email?.source ? { emailSource: email.source } : {}),
+      ...(phone?.source ? { phoneSource: phone.source } : {}),
     })
     if (!parsed.success) return fail('invalid_state', `${issueWords(parsed.error)} Nothing was added.`)
     const result = await createContact(ctx.db, ctx.orgId, parsed.data)
-    if (!result.ok) return fail('invalid_state', `${result.message} Nothing was added.`)
+    if (!result.ok) {
+      const held = [
+        given(input.emailFrom) && email ? { which: 'email' as const, value: email.value } : null,
+        given(input.phoneFrom) && phone ? { which: 'phone' as const, value: phone.value } : null,
+      ]
+      return fail('invalid_state', `${maskHeld(result.message, held)} Nothing was added.`)
+    }
     const contact = result.contact
 
-    // The route's own row, as it writes it: never the address (§2.3).
+    // The route's own row, as it writes it: never the address (§2.3), and of
+    // where each came from only its KIND — a page's address can carry a person's name.
     await appendAudit(ctx.db, {
       orgId: ctx.orgId,
       actor: 'agent',
       action: 'contact.created',
       subjectType: 'contact',
       subjectId: contact.id,
-      detail: { companyId: contact.companyId, source: contact.source, hasTimeZone: !!contact.timeZone },
+      detail: {
+        companyId: contact.companyId,
+        source: contact.source,
+        hasTimeZone: !!contact.timeZone,
+        emailSourceKind: contact.email ? kindOf(email) : null,
+        phoneSourceKind: contact.phone ? kindOf(phone) : null,
+      },
     }).catch(() => {})
     await ctx.audit('agent.add_contact', { contactId: contact.id, companyId: company.id })
 
     const reach = [
-      contact.email ? `email ${maskEmail(contact.email)}` : null,
-      contact.phone ? 'a phone number (stored in international form)' : null,
+      contact.email ? `email ${maskEmail(contact.email)} (${sourceWords(email)})` : null,
+      contact.phone ? `a phone number (stored in international form; ${sourceWords(phone)})` : null,
       contact.linkedinUrl ? 'a LinkedIn profile' : null,
     ].filter(Boolean)
+    const notes = [email?.note, phone?.note].filter((n): n is string => !!n)
     return ok(
       {
         contactId: contact.id,
@@ -1045,8 +1717,11 @@ export const addContact: AgencyToolSpec<typeof addContactShape> = {
         hasLinkedIn: !!contact.linkedinUrl,
         timeZone: contact.timeZone,
         consentRecorded: false,
+        emailSourceKind: contact.email ? kindOf(email) : null,
+        phoneSourceKind: contact.phone ? kindOf(phone) : null,
       },
       `Added ${personWithId(contact, company.domain)}; on file: ${reach.join(', ')}. ` +
+        (notes.length ? `${notes.join(' ')} ` : '') +
         'No consent row of any kind was recorded, and absence is a no: SMS, voice and WhatsApp stay closed to them ' +
         'until a person records an opt-in on /contacts, while cold email and LinkedIn need none and still meet every ' +
         'other send rule. They are in no campaign. ' +
@@ -1066,13 +1741,24 @@ const updateContactShape = {
   title: contactFields.title.optional().describe('Their job title. An empty string clears it.'),
   email: contactFields.email
     .optional()
-    .describe('Their NEW email address; an empty string clears it. Refused while a message to them is waiting to go out.'),
+    .describe(
+      'Their NEW email address, exactly as this conversation showed it (never composed); an empty string clears it. ' +
+        'Refused while a message to them is waiting to go out.',
+    ),
+  emailFrom: addressFields.from.optional().describe('Their new email by the handle read_page or find_contact_details printed (E-…).'),
+  emailSource: addressFields.source
+    .optional()
+    .describe('The page that shows the new email, if not a handle: it is read to check that it does.'),
   phone: contactFields.phone
     .optional()
-    .describe('Their NEW phone number, in international form; an empty string clears it. Refused while a message to them waits.'),
+    .describe('Their NEW phone number, in international form, as it was shown; an empty string clears it. Refused while a message to them waits.'),
+  phoneFrom: addressFields.from.optional().describe('Their new phone by the handle read_page or find_contact_details printed (P-…).'),
+  phoneSource: addressFields.source
+    .optional()
+    .describe('The page that shows the new number, if not a handle: it is read to check that it does.'),
   linkedinUrl: contactFields.linkedinUrl
     .optional()
-    .describe('Their NEW LinkedIn profile URL; an empty string clears it. Refused while a message to them waits.'),
+    .describe('Their NEW LinkedIn profile URL, as a search or a page showed it; an empty string clears it. Refused while a message to them waits.'),
   timeZone: contactFields.timeZone
     .optional()
     .describe('Their IANA time zone, e.g. Europe/London. An empty string clears it.'),
@@ -1119,8 +1805,9 @@ export const updateContact: AgencyToolSpec<typeof updateContactShape> = {
   description:
     'Change a person’s name, title, IANA time zone, or an address (email, phone, LinkedIn), under the rules a ' +
     'teammate editing them meets: an address on the suppression list is not edited away, nor a number held ' +
-    'for an unrecorded opt-out. An address is never changed while a message to them waits to go out. Nothing ' +
-    'is sent.',
+    'for an unrecorded opt-out. An address is never changed while a message to them waits to go out, and a new ' +
+    'one must have been shown in this conversation (by handle, a page, the person or a search) — never composed. ' +
+    'Nothing is sent.',
   shape: updateContactShape,
   async handler(input, ctx): Promise<ToolOutcome<unknown>> {
     // PATCH /api/contacts/[id]'s own gate.
@@ -1129,10 +1816,22 @@ export const updateContact: AgencyToolSpec<typeof updateContactShape> = {
     }
     const found = await contactFor(ctx, input)
     if (!found.ok) return fail(found.code, found.message)
-    const { contact, domain, companyTimeZone } = found
+    const { contact, domain, companyTimeZone, companyCountry } = found
 
     const patch: Partial<Record<(typeof PATCH_FIELDS)[number], string>> = {}
     for (const f of PATCH_FIELDS) if (input[f] !== undefined) patch[f] = input[f]
+    // An address by its handle is that address, for every rule below.
+    const now = ctx.now().getTime()
+    for (const [field, from] of [['email', input.emailFrom], ['phone', input.phoneFrom]] as const) {
+      const handle = given(from)
+      if (!handle) continue
+      const hit = foundByHandle(ctx.orgId, handle, now)
+      if (!hit) return fail('invalid_state', `${STALE_HANDLE(handle)} ${UNCHANGED}`)
+      if (hit.kind !== field) {
+        return fail('invalid_state', `${hit.handle} stands for ${hit.kind === 'email' ? 'an email address' : 'a phone number'}. ${UNCHANGED}`)
+      }
+      if (patch[field] === undefined || patch[field]!.trim() === '') patch[field] = hit.value
+    }
     const zone = input.timeZone === undefined ? undefined : input.timeZone.trim() || null
     if (Object.keys(patch).length === 0 && zone === undefined) {
       return fail('invalid_state', `Say what to change: a name, a title, an address or a time zone. ${UNCHANGED}`)
@@ -1170,17 +1869,64 @@ export const updateContact: AgencyToolSpec<typeof updateContactShape> = {
       }
     }
 
+    // True data only: a NEW address was shown in this conversation, a new
+    // name too, and a new email's domain receives mail. Clearing needs nothing.
+    const phoneOpts = phoneOptsFor({ country: companyCountry, domain })
+    const pages: PageReads = new Map()
+    const sources: { emailSource?: string; phoneSource?: string } = {}
+    const sourcedNow: { email?: Sourced | null; phone?: Sourced | null } = {}
+    const clock = deadline(WEB_WORK_MS)
+    try {
+      for (const field of ['email', 'phone'] as const) {
+        if (!moving.includes(field) || !given(patch[field])) continue
+        const claim =
+          field === 'email'
+            ? { raw: patch.email, from: input.emailFrom, sourceUrl: input.emailSource }
+            : { raw: patch.phone, from: input.phoneFrom, sourceUrl: input.phoneSource }
+        const r = await sourcedAddress(ctx, field, claim, phoneOpts, pages, clock.signal)
+        if (!r.ok) return fail(r.code, `${r.message} ${UNCHANGED}`)
+        sourcedNow[field] = r.sourced
+        if (r.sourced?.source) sources[field === 'email' ? 'emailSource' : 'phoneSource'] = r.sourced.source
+      }
+      const linkedinKey = moving.includes('linkedinUrl') && given(patch.linkedinUrl) ? normaliseLinkedIn(patch.linkedinUrl!) : null
+      if (linkedinKey) {
+        const shown = await linkedinShown(ctx, linkedinKey, clock.signal)
+        if (shown === 'late') return fail('unreachable', `${OUT_OF_TIME} ${UNCHANGED}`)
+        if (!shown) return fail('not_permitted', `${NOT_SHOWN_LINKEDIN(linkedinKey)} ${UNCHANGED}`)
+      }
+      const newFirst = given(input.firstName) && given(input.firstName) !== (contact.firstName ?? '').trim() ? given(input.firstName) : null
+      const newLast = given(input.lastName) && given(input.lastName) !== (contact.lastName ?? '').trim() ? given(input.lastName) : null
+      if (newFirst || newLast) {
+        const addressPages = [sourcedNow.email?.page, sourcedNow.phone?.page].filter((u): u is string => !!u)
+        const named = await personShown(ctx, newFirst, newLast, addressPages, pages, clock.signal)
+        if (named === 'late') return fail('unreachable', `${OUT_OF_TIME} ${UNCHANGED}`)
+        if (!named) {
+          return fail('not_permitted', `${NOT_SHOWN_PERSON([newFirst, newLast].filter(Boolean).join(' '), addressPages.length > 0)} ${UNCHANGED}`)
+        }
+      }
+    } finally {
+      clock.stop()
+    }
+
     // The route's parse, then the route's writer, with every refusal it words:
     // a suppression that would stop matching, a shared number's hold, a
-    // duplicate address, an edit raced by an opt-out.
+    // duplicate address, an edit raced by an opt-out. A source goes only
+    // beside the address it is about, which `contactsUpdate` stamps only when
+    // that address changes.
     let changed: string[] = []
     let bounceCleared = false
     let after: ContactRow = contact
     if (Object.keys(patch).length > 0) {
-      const parsed = contactPatchInput.safeParse(patch)
+      const parsed = contactPatchInput.safeParse({ ...patch, ...sources })
       if (!parsed.success) return fail('invalid_state', `${issueWords(parsed.error)} ${UNCHANGED}`)
       const r = await contactsUpdate(ctx.db, ctx.orgId, contact.id, parsed.data, { actor: 'agent' })
-      if (!r.ok) return fail(UPDATE_REFUSAL[r.reason], unchanged(r.message))
+      if (!r.ok) {
+        const held = [
+          given(input.emailFrom) && patch.email ? { which: 'email' as const, value: patch.email } : null,
+          given(input.phoneFrom) && patch.phone ? { which: 'phone' as const, value: patch.phone } : null,
+        ]
+        return fail(UPDATE_REFUSAL[r.reason], unchanged(maskHeld(r.message, held)))
+      }
       changed = r.changed
       bounceCleared = r.bounceCleared
       after = r.contact
@@ -1223,9 +1969,18 @@ export const updateContact: AgencyToolSpec<typeof updateContactShape> = {
       )
     }
     const notes = [
-      ...(changed.includes('email') ? [`Their email is now ${maskEmail(after.email) ?? 'cleared'}.`] : []),
+      ...(changed.includes('email')
+        ? [
+            after.email
+              ? `Their email is now ${maskEmail(after.email)}. ${sourceSentence(sourcedNow.email ?? null)}`
+              : 'Their email is now cleared.',
+          ]
+        : []),
       ...(bounceCleared ? ['The bounce mark on their old address was lifted with it.'] : []),
-      ...(changed.includes('phone') && after.phone ? ['Their phone is stored in international form.'] : []),
+      ...(changed.includes('phone') && after.phone
+        ? [`Their phone is stored in international form. ${sourceSentence(sourcedNow.phone ?? null)}`]
+        : []),
+      ...[sourcedNow.email?.note, sourcedNow.phone?.note].filter((n): n is string => !!n),
       ...(changed.includes('timeZone') ? [zoneSentence(after.timeZone, { domain, timeZone: companyTimeZone })] : []),
     ]
     return ok(

@@ -195,6 +195,12 @@ export const AGENCY_TOOL_RISK = {
   // Research with sources (0028): a claim and the page it came from, never evidence; the read beside it.
   record_research: ['medium', 'writes_internal_state', 'Records claims about a company with the pages they came from; research, never evidence. Nothing is sent.'],
   get_research: ['low', 'read_only', 'Reads the research on file about a company, each claim with its source.'],
+  // True data only (2026-10-13): an address is stored only when something real shows it, and
+  // these three are how the assistant finds and checks what is shown — a public page read
+  // from the outside, never a probe, and the mail answer of a domain. All three are reads.
+  read_page: ['low', 'read_only', 'Reads one public web page and the email addresses and phone numbers it shows. Nothing is written.'],
+  find_contact_details: ['low', 'read_only', 'Reads a company’s own site for the email addresses, phone numbers and profiles it publishes. Nothing is written.'],
+  check_contacts: ['low', 'read_only', 'Checks where each contact’s address came from, whether its domain receives mail and whether the company’s site shows it. Nothing is written.'],
   // What changed (2026-10-09): a gap fixed or opened since the previous scan, from our own scans. A read.
   get_evidence_signals: ['low', 'read_only', 'Reads which companies’ sites changed since our previous scan: gaps fixed or opened.'],
   // What's working (2026-10-08): reply and win rates, and searches for more like what was won. A read.

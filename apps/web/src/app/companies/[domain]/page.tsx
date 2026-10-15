@@ -6,6 +6,7 @@ import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { Sparkles } from 'lucide-react'
 import { askAboutCompany, askLink } from '@/lib/ask-link'
+import { contactAddressSources } from '@/lib/address-source'
 import { can, isNoSiteDomain } from '@agency/core'
 import {
   companyThread, linkedinThreadWithheld, listContactsForCompany, meetingsForCompany, openDealFor, proposalsForCompany,
@@ -371,18 +372,24 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
       <ContactsPanel
         companyId={company.id}
         canWrite={can(principal, 'contacts:write')}
-        contacts={contacts.map((c) => ({
-          id: c.id,
-          name: [c.firstName, c.lastName].filter(Boolean).join(' ') || c.email || 'unnamed',
-          title: c.title,
-          email: c.email,
-          phone: c.phone,
-          linkedinUrl: c.linkedinUrl,
-          timeZone: c.timeZone,
-          pausedAt: c.pausedAt ? c.pausedAt.toISOString() : null,
-          pausedReason: c.pausedReason,
-          consents: c.consents.map((k) => ({ channel: k.channel, granted: k.granted, source: k.source })),
-        }))}
+        contacts={contacts.map((c) => {
+          // Where each address came from (0029), worded once for every screen.
+          const from = contactAddressSources(c)
+          return {
+            id: c.id,
+            name: [c.firstName, c.lastName].filter(Boolean).join(' ') || c.email || 'unnamed',
+            title: c.title,
+            email: c.email,
+            phone: c.phone,
+            emailFrom: from.email,
+            phoneFrom: from.phone,
+            linkedinUrl: c.linkedinUrl,
+            timeZone: c.timeZone,
+            pausedAt: c.pausedAt ? c.pausedAt.toISOString() : null,
+            pausedReason: c.pausedReason,
+            consents: c.consents.map((k) => ({ channel: k.channel, granted: k.granted, source: k.source })),
+          }
+        })}
       />
       <NotesSlot {...slot} />
 

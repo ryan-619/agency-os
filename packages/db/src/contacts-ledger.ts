@@ -29,14 +29,16 @@
 import { and, asc, eq, ilike, isNotNull, isNull, ne, or, sql, type SQL } from 'drizzle-orm'
 import { z } from 'zod'
 import {
-  normaliseEmail, normaliseLinkedIn, normalisePhone, suppressionKeysFor,
+  ADDRESS_SOURCE_MAX, normaliseEmail, normaliseLinkedIn, normalisePhone, suppressionKeysFor,
   type Channel, type SuppressionKind,
 } from '@agency/core'
 import * as schema from './schema.js'
 import type { AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
-import { linkedinUnreadable, phoneNotInternational, type ConsentRow, type ContactRow } from './contacts.js'
-import { isUniqueViolation } from './pg-errors.js'
+import {
+  addressSourceProblem, linkedinUnreadable, phoneNotInternational, type ConsentRow, type ContactRow,
+} from './contacts.js'
+import { isCheckViolation, isUniqueViolation } from './pg-errors.js'
 import { heldForUnrecordedSharedNumber, resumeAsksSharedNumber, sharedNumberHolderRowExists } from './sms.js'
 
 export type ConsentWriteChannel = 'email' | 'sms' | 'voice' | 'whatsapp'
@@ -348,6 +350,13 @@ export async function contactsLedger(
  * its own action with its own audit row, and a general-purpose edit that
  * could also move a person between companies is a way to file one company's
  * contact under another's deal.
+ *
+ * `emailSource` and `phoneSource` (0029) say where a NEW address came from —
+ * the web form's route passes `person`, the assistant what it was shown —
+ * and are read only when that address changes: a source is about the
+ * address it arrived with, so one given beside an address that is not
+ * changing updates nothing. They are not fields of their own, and never
+ * appear in `changed`.
  */
 export const contactPatchInput = z.object({
   firstName: z.string().trim().max(80).optional().nullable(),
@@ -356,6 +365,8 @@ export const contactPatchInput = z.object({
   email: z.string().trim().max(254).optional().nullable(),
   phone: z.string().trim().max(40).optional().nullable(),
   linkedinUrl: z.string().trim().max(500).optional().nullable(),
+  emailSource: z.string().trim().max(ADDRESS_SOURCE_MAX * 2).optional().nullable(),
+  phoneSource: z.string().trim().max(ADDRESS_SOURCE_MAX * 2).optional().nullable(),
 })
 
 export type ContactPatch = z.infer<typeof contactPatchInput>
@@ -449,6 +460,13 @@ function blankIsNull(v: string | null): string | null {
  * code it lifted. The same-address-different-case edit changes nothing and
  * so lifts nothing.
  *
+ * Where an address came from (0029) moves with it, in the same UPDATE, for
+ * the same reason: the old source was about the old address. A changed email
+ * takes the patch's `emailSource`, or NULL — "not recorded" — when none was
+ * given; a cleared one takes NULL, which `contacts_email_source_needs_an_email`
+ * requires. The phone likewise. A source that is not in core's
+ * ADDRESS_SOURCE_PATTERN is refused `unreadable` before anything is written.
+ *
  * And the phone of a contact held because a number they share asked to stop
  * and it could not be recorded (`heldForUnrecordedSharedNumber`) is not
  * changed or cleared until the number is recorded (review round 9): the
@@ -528,6 +546,19 @@ export async function contactsUpdate(
 
   const changed = Object.keys(next)
   if (changed.length === 0) return { ok: true, contact: old, changed: [], bounceCleared: false }
+
+  // Each address that changes takes the source it arrived with, or none; a
+  // cleared one takes none. Asked only of an address that IS changing, so a
+  // form that always sends `person` can edit a title past an imported email.
+  const sources: { emailSource?: string | null; phoneSource?: string | null } = {}
+  for (const [field, key] of [['email', 'emailSource'], ['phone', 'phoneSource']] as const) {
+    if (next[field] === undefined) continue
+    const value = next[field] ?? null
+    const source = value === null ? null : blankIsNull(patch[key] ?? null)
+    const problem = addressSourceProblem(field, source, value)
+    if (problem) return { ok: false, reason: 'unreadable', message: `${problem} Nothing was changed.` }
+    sources[key] = source
+  }
 
   const after = (f: AddressField): string | null => (next[f] !== undefined ? next[f]! : old[f])
   if (!after('email') && !after('phone') && !after('linkedinUrl')) {
@@ -618,6 +649,7 @@ export async function contactsUpdate(
       .update(schema.contacts)
       .set({
         ...next,
+        ...sources,
         ...(emailChanges ? { emailBouncedAt: null, emailBounceCode: null } : {}),
         updatedAt: sql`now()`,
       })
@@ -643,6 +675,20 @@ export async function contactsUpdate(
   } catch (err) {
     // `contacts_org_email_key` — a race past the check above gets the same sentence.
     if (isUniqueViolation(err)) return { ok: false, reason: 'duplicate', message: `${next.email} is already a contact in this CRM.` }
+    // 0029's source CHECKs, which the check above already asked: a sentence
+    // all the same, never a 500, if a caller found a way past it.
+    if (
+      isCheckViolation(err, 'contacts_email_source_is_known') ||
+      isCheckViolation(err, 'contacts_phone_source_is_known') ||
+      isCheckViolation(err, 'contacts_email_source_needs_an_email') ||
+      isCheckViolation(err, 'contacts_phone_source_needs_a_phone')
+    ) {
+      return {
+        ok: false,
+        reason: 'unreadable',
+        message: 'Where the new address came from could not be recorded as given. Nothing was changed.',
+      }
+    }
     throw err
   }
   const contact = rows[0]

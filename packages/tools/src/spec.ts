@@ -34,6 +34,7 @@
 import type { ZodObject, ZodRawShape, infer as ZodInfer } from 'zod'
 import type { AgencyToolName, Draft, IcpDefinition, Principal, SiteProfile } from '@agency/core'
 import type { AgencyDb, SiteAuditResult } from '@agency/db'
+import type { DomainAnswer, MailHosts, PageRead } from '@agency/scanner'
 
 /** What a tool is allowed to know. Assembled by the worker, per turn. */
 export interface ToolContext {
@@ -72,6 +73,49 @@ export interface ToolContext {
    * full (`create_share_link`). Absent, the tool prints the path and says so.
    */
   readonly webOrigin?: string
+  /**
+   * The open web, read from the worker (2026-10-13): public pages only, never
+   * a probe, and two DNS answers. Absent — a test, a script — the tools that
+   * need it say the page reader runs in the worker, and the writes skip the
+   * page and mail checks.
+   */
+  readonly web?: WebReader
+  /**
+   * What this conversation has shown the agent: the person's own messages and
+   * every tool's result. Absent — a test, a script — the writes skip the
+   * checks that an address, a person or a website was shown before it is stored.
+   */
+  readonly conversation?: ConversationLedger
+}
+
+// ---------------------------------------------------------------------------
+// The open web and the conversation, as the true-data checks see them (2026-10-13)
+// ---------------------------------------------------------------------------
+
+/**
+ * The worker's page reader and DNS answers: the scanner's `readPublicPage`,
+ * `mailHostsOf` and `domainResolves`, cached per process. A test passes a
+ * fake, so no test touches the network.
+ */
+export interface WebReader {
+  /** One public page; cached per URL for a few minutes. Never throws for a page that failed — that is `ok: false`. */
+  read(url: string, signal?: AbortSignal): Promise<PageRead>
+  /** Whether a domain receives mail, and where. */
+  mailHosts(domain: string): Promise<MailHosts>
+  /** Whether a name resolves to the public internet — asked exactly as written (`www.` included). */
+  resolves(domain: string): Promise<DomainAnswer>
+}
+
+/**
+ * Where a conversation showed the agent something: the person typed it, or a
+ * tool returned it — `tool` is the full name, e.g. `mcp__exa__web_search_exa`
+ * or `mcp__agency__read_page`.
+ */
+export type SeenOrigin = { readonly kind: 'person' } | { readonly kind: 'tool'; readonly tool: string }
+
+export interface ConversationLedger {
+  /** Where, if anywhere, this conversation showed the agent a value: the first origin of each kind. */
+  find(test: (text: string) => boolean): Promise<readonly SeenOrigin[]>
 }
 
 // ---------------------------------------------------------------------------

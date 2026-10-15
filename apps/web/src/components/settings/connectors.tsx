@@ -28,6 +28,11 @@ import type { BrowserPreset } from './connector-presets'
  * only direction this screen offers: a ticked tool is refused by the gate
  * before anyone is asked, and an unticked one asks a person on every call,
  * exactly as it did before this list existed. Nothing here approves anything.
+ *
+ * Under "Last answered", a server that refused a call in a chat turn says so
+ * (0029) — when, and whether its key or its quota is the trouble — because
+ * Test connection calls no tool, and a keyless server passes it and then
+ * refuses every search.
  */
 
 /**
@@ -45,6 +50,19 @@ export interface DisabledToolsView {
   readonly preset: string | null
 }
 
+/** Why a connector refused a call (0029), in our two words — `ConnectorFailureKind` from core. */
+export type ConnectorRefusalKind = 'auth' | 'quota'
+
+/**
+ * What a person reads after "Refused a call <when>:" — what the refusal means
+ * and where it is fixed. Never the server's own text, which the worker does
+ * not keep: it carries URLs, sign-up links and the query that was asked.
+ */
+const CONNECTOR_REFUSAL_WORDS: Readonly<Record<ConnectorRefusalKind, string>> = Object.freeze({
+  auth: 'its key is missing, wrong or not accepted — re-enter it in Settings → Credentials',
+  quota: 'rate-limited or out of quota — check the plan with the provider',
+})
+
 export interface ConnectorView {
   readonly id: string
   readonly name: string
@@ -53,6 +71,11 @@ export interface ConnectorView {
   readonly hasCredential: boolean
   readonly lastOkAt: string | null
   readonly lastError: string | null
+  /**
+   * The last call it refused during a chat turn (0029), and why, as the
+   * worker recorded it; null when none is on record or a later call answered.
+   */
+  readonly lastFailure: { readonly at: string; readonly kind: ConnectorRefusalKind } | null
   /** What the config says, with nothing that could hold a credential. */
   readonly summary: string
   /** Tool names only. */
@@ -271,6 +294,13 @@ export function ConnectorsPanel({
                   Never tested. It cannot be enabled until it answers once.
                 </div>
               )}
+              {c.lastFailure ? (
+                // Test connection lists tools and calls none, so a server can pass
+                // it and still refuse every call; this is the call's answer.
+                <div className="err-line">
+                  Refused a call <When iso={c.lastFailure.at} />: {CONNECTOR_REFUSAL_WORDS[c.lastFailure.kind]}
+                </div>
+              ) : null}
               {c.lastError ? <div className="err-line">{c.lastError}</div> : null}
               {error ? <div className="err-line">{error}</div> : null}
               <DisabledLine off={off} canWrite={canWrite} />

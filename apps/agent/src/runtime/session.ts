@@ -18,19 +18,28 @@ import { and, eq, isNull } from 'drizzle-orm'
 import type { McpServerConfig, Options } from '@anthropic-ai/claude-agent-sdk'
 import { parseIcpDefinition, type ChatEventBody, type Draft, type Principal } from '@agency/core'
 import {
-  activeIcpProfile, appendAudit, enabledAgentDefs, ensureApproval, expireApproval, readApproval,
-  readPlaybook, schema, type AgencyDb, type ApprovalRow,
+  activeIcpProfile, appendAudit, connectorFailuresSince, connectorsClearFailure, connectorsRecordFailure,
+  enabledAgentDefs, ensureApproval, expireApproval, readApproval, readPlaybook, schema,
+  type AgencyDb, type ApprovalRow, type ConnectorFailure,
 } from '@agency/db'
 import type { OpsContext, PageSpeedClient, PlacesClient, ToolContext } from '@agency/tools'
+import type { ConversationLedgers, SessionLedger } from '../chat/ledger.js'
 import { makeCanUseTool } from '../gate/can-use-tool.js'
+import { createConnectorWatch } from '../gate/connector-watch.js'
 import { createLedger } from '../gate/ledger.js'
-import { makePostToolUse, makePreToolUse, HOOK_TIMEOUT_SECONDS } from '../gate/pre-tool-use.js'
+import {
+  makePostToolUse, makePostToolUseFailure, makePreToolUse, HOOK_TIMEOUT_SECONDS,
+} from '../gate/pre-tool-use.js'
 import { abortableSleep, createApprovalWaiter } from '../gate/waiter.js'
 import { createAgencyMcpServer, makeInputParser } from '../mcp/agency.js'
 import { buildAgents } from './agents.js'
 import { buildMcpServers, describeServers } from './connectors.js'
 import { buildQueryOptions, childEnv, type AgentCredential, systemPrompt } from './options.js'
+import type { WebReader } from '../web/reader.js'
 import type { Logger } from '../logger.js'
+
+/** How far back a connector's refusal is named in the prompt. */
+export const CONNECTOR_TROUBLE_WINDOW_MS = 24 * 60 * 60_000
 
 export interface RuntimeHalt {
   readonly halted: () => boolean
@@ -112,6 +121,20 @@ export interface SessionDeps {
   readonly pagespeed?: PageSpeedClient | undefined
   /** The web app's origin (`WEB_PUBLIC_URL`), for a link a tool prints in full; absent without one. */
   readonly webOrigin?: string | undefined
+  /**
+   * The open web, read from the worker — public pages, and whether a domain
+   * resolves and receives mail — for read_page, find_contact_details and
+   * check_contacts, and the checks behind add_contact and add_company. Built
+   * once by `startWorker`, with its own short memory of what it read.
+   */
+  readonly web?: WebReader | undefined
+  /**
+   * What each conversation has shown the agent (chat/ledger.ts), one per
+   * worker process: this turn's session's ledger is handed to the tools that
+   * write an address, a person or a website, and fed by the hooks after
+   * every call.
+   */
+  readonly conversations?: ConversationLedgers | undefined
 }
 
 export interface TurnRuntime {
@@ -128,6 +151,12 @@ export interface TurnRuntime {
    */
   readonly mcpServers: Readonly<Record<string, McpServerConfig>>
   readonly abort: AbortController
+  /**
+   * This chat session's ledger — the person's message is added to it as the
+   * turn starts (`beginTurn`), and never the morning brief's prompt, which is
+   * ours. Absent without `SessionDeps.conversations`.
+   */
+  readonly conversation?: SessionLedger | undefined
 }
 
 /**
@@ -199,7 +228,7 @@ export async function buildTurnRuntime(
    * Both builders SKIP a row they cannot use rather than throwing: one broken
    * connector must not take the whole chat down.
    */
-  const [connectors, agentRows, playbook] = await Promise.all([
+  const [connectors, agentRows, playbook, troubled] = await Promise.all([
     buildMcpServers(deps.db, args.orgId, deps.secretsKey, deps.log),
     enabledAgentDefs(deps.db, args.orgId),
     // The agency's own words (Settings → Assistant), read fresh like the
@@ -210,6 +239,17 @@ export async function buildTurnRuntime(
       })
       return ''
     }),
+    // The connectors that refused a call in the last day (2026-10-13), named
+    // in the prompt so the model does not reach for them first. A read that
+    // fails costs the turn that section, never the turn.
+    connectorFailuresSince(deps.db, args.orgId, new Date(deps.now().getTime() - CONNECTOR_TROUBLE_WINDOW_MS)).catch(
+      (err: unknown): ConnectorFailure[] => {
+        deps.log.warn('could not read which connectors refused lately; this turn runs without that section', {
+          error: err instanceof Error ? err.name : 'UnknownError',
+        })
+        return []
+      },
+    ),
   ])
   const subagents = buildAgents(agentRows, deps.log, playbook)
   if (Object.keys(connectors.servers).length > 0 || Object.keys(subagents.agents).length > 0) {
@@ -225,6 +265,24 @@ export async function buildTurnRuntime(
       ...(subagents.skipped.length > 0 ? { skippedSubagents: subagents.skipped } : {}),
     })
   }
+
+  /**
+   * This turn's watch on connectors that refuse (gate/connector-watch.ts),
+   * shared by both hooks after a call and by `canUseTool`. Its writes to the
+   * connector row run behind the hooks' answers, never holding one up.
+   */
+  const connectorWatch = createConnectorWatch({
+    record: (name, kind) => connectorsRecordFailure(deps.db, { orgId: args.orgId, name, kind, at: deps.now() }),
+    clear: (name) => connectorsClearFailure(deps.db, { orgId: args.orgId, name }),
+    log: deps.log,
+  })
+
+  /** What this chat session has shown the agent, kept across its turns; see chat/ledger.ts. */
+  const conversation = deps.conversations?.forSession({
+    db: deps.db,
+    orgId: args.orgId,
+    sessionId: args.chatSessionId,
+  })
 
   const canUseTool = makeCanUseTool({
     orgId: args.orgId,
@@ -248,6 +306,8 @@ export async function buildTurnRuntime(
     // server that is turned on.
     disabledTools: connectors.disabledTools,
     readsWithoutCard: connectors.readsWithoutCard,
+    // A connector that refused earlier in this turn is refused at once.
+    connectors: connectorWatch,
     audit,
     emit: args.emit,
     markGated: () => {},
@@ -273,6 +333,10 @@ export async function buildTurnRuntime(
     ...(deps.places ? { places: deps.places } : {}),
     ...(deps.pagespeed ? { pagespeed: deps.pagespeed } : {}),
     ...(deps.webOrigin ? { webOrigin: deps.webOrigin } : {}),
+    // The open web and what this conversation has shown the agent: the
+    // worker's, never the model's to supply (2026-10-13).
+    ...(deps.web ? { web: deps.web } : {}),
+    ...(conversation ? { conversation } : {}),
   })
 
   const mcpServer = createAgencyMcpServer({
@@ -294,9 +358,17 @@ export async function buildTurnRuntime(
     omit: deps.omitTools,
   })
 
-  // The same set both rings refuse: the hook denies first, and canUseTool
-  // denies again if the hook was ever not consulted.
-  const hookDeps = { audit, log: deps.log, disabledTools: connectors.disabledTools }
+  // The same disabled set both rings refuse: the hook denies first, and
+  // canUseTool denies again if the hook was ever not consulted. The hooks
+  // after a call feed the conversation's ledger and the connector watch —
+  // the same watch `canUseTool` asks.
+  const hookDeps = {
+    audit,
+    log: deps.log,
+    disabledTools: connectors.disabledTools,
+    ledger: conversation,
+    connectors: connectorWatch,
+  }
 
   const icpRow = await activeIcpProfile(deps.db, args.orgId)
   let icpLabel: string | null = null
@@ -320,6 +392,9 @@ export async function buildTurnRuntime(
     hooks: {
       PreToolUse: [{ hooks: [makePreToolUse(hookDeps)], timeout: HOOK_TIMEOUT_SECONDS }],
       PostToolUse: [{ hooks: [makePostToolUse(hookDeps)], timeout: HOOK_TIMEOUT_SECONDS }],
+      // A call that failed: where a connector's flagged refusal arrives (jina's
+      // "HTTP 401", firecrawl's "keyless access is unavailable").
+      PostToolUseFailure: [{ hooks: [makePostToolUseFailure(hookDeps)], timeout: HOOK_TIMEOUT_SECONDS }],
     },
     systemPrompt: systemPrompt(
       args.orgName,
@@ -328,6 +403,9 @@ export async function buildTurnRuntime(
       // The research servers an owner let run without a card, by name, so the
       // model knows which searches cost nobody a click (2026-10-07).
       [...connectors.readsWithoutCard].map((entry) => entry.slice('mcp__'.length, -'__*'.length)),
+      // The connectors that refused a call in the last day, by name and kind
+      // only — never the server's words (2026-10-13).
+      troubled,
     ),
     cwd: deps.cwd,
     abortController: abort,
@@ -349,7 +427,7 @@ export async function buildTurnRuntime(
   const handedOver = Object.keys(connectors.servers).some((name) => name !== 'agency')
   const mcpServers = handedOver ? { ...connectors.servers, agency: mcpServer } : {}
 
-  return { turnId, options, mcpServers, abort }
+  return { turnId, options, mcpServers, abort, ...(conversation ? { conversation } : {}) }
 }
 
 /**

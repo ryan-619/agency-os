@@ -163,7 +163,15 @@ export async function websiteCheckRequest(db: AgencyDb, req: CheckRequest): Prom
     const companyId = created!.id
     const [contact] = await t
       .insert(schema.contacts)
-      .values({ orgId: org.id, companyId, email, firstName: name.split(' ')[0] ?? name, lastName: name.split(' ').slice(1).join(' ') || null, timeZone: zone })
+      .values({
+        orgId: org.id, companyId, email, firstName: name.split(' ')[0] ?? name, lastName: name.split(' ').slice(1).join(' ') || null, timeZone: zone,
+        // A stranger's form, as the booking page's contact is: 'inbound', never
+        // the column's default 'manual', which reads "somebody on the team typed
+        // this" (it did until 0029). And the address is one they typed
+        // themselves, recorded as such (0029).
+        source: 'inbound',
+        emailSource: 'inbound',
+      })
       .returning({ id: schema.contacts.id })
     await recordConsent(t, {
       orgId: org.id, contactId: contact!.id, channel: 'email', granted: true, source: 'website check form',

@@ -17,7 +17,7 @@
  */
 import { and, count, eq, isNull } from 'drizzle-orm'
 import { z } from 'zod'
-import { COMPANY_STAGES } from '@agency/core'
+import { COMPANY_STAGES, normalisePhone } from '@agency/core'
 import * as schema from './schema.js'
 import type { Company } from './schema.js'
 import { isKnownTimeZone } from './contacts.js'
@@ -156,6 +156,73 @@ export async function companiesUpdate(
     .returning()
   const company = updated[0]
   // Deleted between the read and the write.
+  if (!company) return notFound
+  return { ok: true, company, changed }
+}
+
+/**
+ * A business's main phone line and its street address, as something real
+ * showed them (2026-10-13): what the assistant files for a business with no
+ * website of its own, which is how it is reached — a call or a visit.
+ *
+ * Neither is a listing fact here: 0022 ties Google's reading to
+ * `listing_checked_at`, and these two stand on their own (0022's
+ * `companies_phone_is_e164` and `companies_address_is_bounded`), so a number
+ * read from a directory page is stored without claiming a Google listing was
+ * read. The phone is stored E.164 or refused, because a call task dials it and
+ * a suppression is matched on it; the address is trimmed, one line, at most
+ * 300 characters. Only the fields given are written; `changed` names those
+ * whose stored value is now different, and the caller audits them.
+ */
+export async function companiesSetReachFacts(
+  db: AgencyDb,
+  orgId: string,
+  companyId: string,
+  facts: { readonly phone?: string | null; readonly address?: string | null },
+): Promise<
+  | { ok: true; company: Company; changed: Array<'phone' | 'address'> }
+  | { ok: false; reason: 'not_found' | 'invalid'; message: string }
+> {
+  const notFound = { ok: false as const, reason: 'not_found' as const, message: 'That company is not in the CRM.' }
+  if (!UUID.safeParse(companyId).success) return notFound
+  const set: { phone?: string | null; address?: string | null } = {}
+  if (facts.phone !== undefined) {
+    const raw = facts.phone?.trim() ?? ''
+    if (raw === '') set.phone = null
+    else {
+      const phone = normalisePhone(raw)
+      if (!phone) {
+        return {
+          ok: false,
+          reason: 'invalid',
+          message: `"${raw.slice(0, 40)}" is not a phone number in international form. Include the country code, like +91 80 4123 4567.`,
+        }
+      }
+      set.phone = phone
+    }
+  }
+  if (facts.address !== undefined) {
+    const address = (facts.address ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ').replace(/\s+/g, ' ').trim()
+    if (Array.from(address).length > 300) {
+      return { ok: false, reason: 'invalid', message: 'An address is at most 300 characters.' }
+    }
+    set.address = address === '' ? null : address
+  }
+  const rows = await db
+    .select()
+    .from(schema.companies)
+    .where(and(eq(schema.companies.orgId, orgId), eq(schema.companies.id, companyId)))
+    .limit(1)
+  const current = rows[0]
+  if (!current) return notFound
+  const changed = (['phone', 'address'] as const).filter((f) => set[f] !== undefined && set[f] !== current[f])
+  if (changed.length === 0) return { ok: true, company: current, changed: [] }
+  const updated = await db
+    .update(schema.companies)
+    .set(Object.fromEntries(changed.map((f) => [f, set[f] ?? null])))
+    .where(and(eq(schema.companies.orgId, orgId), eq(schema.companies.id, companyId)))
+    .returning()
+  const company = updated[0]
   if (!company) return notFound
   return { ok: true, company, changed }
 }

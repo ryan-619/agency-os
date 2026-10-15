@@ -300,6 +300,13 @@ export const contacts = pgTable(
     emailBouncedAt: timestamp('email_bounced_at', { withTimezone: true }),
     /** NOT NULL exactly when `emailBouncedAt` is: the evidence for the mark. */
     emailBounceCode: text('email_bounce_code'),
+    /** Where the email came from (0029): `person`, `import`, `inbound`, `chat`,
+     *  `connector:<name>` or the page it was seen on — core's
+     *  ADDRESS_SOURCE_PATTERN. NULL is "not recorded", the truth about every
+     *  row written before 0029. Never outlives the email it is about. */
+    emailSource: text('email_source'),
+    /** Where the phone came from (0029), in the same words as `emailSource`. */
+    phoneSource: text('phone_source'),
     ...timestamps,
   },
   (t) => [
@@ -693,6 +700,12 @@ export const connectors = pgTable(
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
     lastOkAt: timestamp('last_ok_at', { withTimezone: true }),
     lastError: text('last_error'),
+    /** When a tool call to this server last refused (0029) — a key it lacks,
+     *  a quota it ran out of. Written by the worker; `lastOkAt` and
+     *  `lastError` stay Test connection's. NULL exactly when the kind is. */
+    lastFailureAt: timestamp('last_failure_at', { withTimezone: true }),
+    /** 'auth' | 'quota' — our own word for the refusal, never the server's text. */
+    lastFailureKind: text('last_failure_kind'),
     ...timestamps,
   },
   (t) => [

@@ -274,6 +274,10 @@ export async function bookInbound(db: AgencyDb, req: BookingRequest): Promise<Bo
             // inbound lead is what this is; the booking page is recorded on
             // the meeting.
             source: 'inbound',
+            // And each address is one they typed themselves (0029's
+            // `inbound`), recorded only beside an address that is stored.
+            emailSource: email ? 'inbound' : null,
+            phoneSource: phone ? 'inbound' : null,
           })
           .returning({ id: schema.contacts.id })
         contactId = inserted[0]!.id

@@ -1922,3 +1922,144 @@ describe('0019 — message templates, and what the operator said', () => {
     expect(left[0]?.n).toBe(0)
   })
 })
+
+describe('0029 — where an address came from, and a connector that refused', () => {
+  let db: TestDb
+  let orgId: string
+  let companyId: string
+  let n = 0
+
+  beforeAll(async () => {
+    db = await migratedDb()
+    ;[{ id: orgId }] = await db.driver.select<{ id: string }>(`INSERT INTO orgs (name) VALUES ('Agency') RETURNING id`)
+    ;[{ id: companyId }] = await db.driver.select<{ id: string }>(
+      `INSERT INTO companies (org_id, domain) VALUES ($1, '127atelier.in') RETURNING id`, [orgId],
+    )
+  })
+  afterAll(async () => { await db.close() })
+
+  const reject = async (sql: string, params: unknown[]) => expectRejection(() => db.driver.select(sql, params))
+  /** A contact with an email and a phone, each with the source given. A fresh address each time. */
+  const contact = (emailSource: string | null, phoneSource: string | null = null) => {
+    n += 1
+    return db.driver.select<{ id: string }>(
+      `INSERT INTO contacts (org_id, company_id, email, phone, email_source, phone_source)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [orgId, companyId, `p${n}@127atelier.in`, `+9198765${String(n).padStart(5, '0')}`, emailSource, phoneSource],
+    )
+  }
+
+  describe('contacts.email_source and phone_source — who or what put the address there', () => {
+    it('accepts every shape core names, and NULL — "not recorded"', async () => {
+      for (const source of [
+        null, 'person', 'import', 'inbound', 'chat', 'connector:exa', 'connector:my-server-2',
+        'https://127atelier.in/pages/contact', 'http://127atelier.in/', `https://127atelier.in/${'a'.repeat(2000)}`,
+      ]) {
+        expect(await contact(source, source), String(source)).toHaveLength(1)
+      }
+    })
+
+    it('REFUSES a source that is not one of them', async () => {
+      for (const source of [
+        '', 'Person', 'typed', 'agent', ' person', 'person ', 'connector:', 'connector:Exa', 'connector:-x',
+        'connector:exa tools', 'https://', 'https://127atelier.in/a b', 'ftp://127atelier.in/', 'mailto:p@127atelier.in',
+        'guessed from first@domain',
+      ]) {
+        const e = await reject(
+          `INSERT INTO contacts (org_id, company_id, email, email_source) VALUES ($1, $2, 'shape@127atelier.in', $3)`,
+          [orgId, companyId, source],
+        )
+        expect(e, source).toContain('contacts_email_source_is_known')
+        const p = await reject(
+          `INSERT INTO contacts (org_id, company_id, phone, phone_source) VALUES ($1, $2, '+919800000001', $3)`,
+          [orgId, companyId, source],
+        )
+        expect(p, source).toContain('contacts_phone_source_is_known')
+      }
+    })
+
+    it('REFUSES a page longer than 2,048 characters — the length is its own CHECK, the regex cannot bound it', async () => {
+      const long = `https://127atelier.in/${'a'.repeat(2048)}`
+      const e = await reject(
+        `INSERT INTO contacts (org_id, company_id, email, email_source) VALUES ($1, $2, 'long@127atelier.in', $3)`,
+        [orgId, companyId, long],
+      )
+      expect(e).toContain('contacts_email_source_is_known')
+    })
+
+    it('REFUSES a source with no address to be about, on INSERT and on UPDATE', async () => {
+      const a = await reject(
+        `INSERT INTO contacts (org_id, company_id, phone, email_source) VALUES ($1, $2, '+919800000002', 'person')`,
+        [orgId, companyId],
+      )
+      expect(a).toContain('contacts_email_source_needs_an_email')
+      const b = await reject(
+        `INSERT INTO contacts (org_id, company_id, email, phone_source) VALUES ($1, $2, 'nophone@127atelier.in', 'person')`,
+        [orgId, companyId],
+      )
+      expect(b).toContain('contacts_phone_source_needs_a_phone')
+      // An address cleared while its source stays is the edit that must clear both.
+      const [{ id }] = await contact('chat', 'chat')
+      expect(await reject(`UPDATE contacts SET email = NULL WHERE id = $1`, [id])).toContain('contacts_email_source_needs_an_email')
+      expect(await reject(`UPDATE contacts SET phone = NULL WHERE id = $1`, [id])).toContain('contacts_phone_source_needs_a_phone')
+      const cleared = await db.driver.select<{ id: string }>(
+        `UPDATE contacts SET email = NULL, email_source = NULL WHERE id = $1 RETURNING id`, [id],
+      )
+      expect(cleared).toHaveLength(1)
+    })
+
+    it('leaves a contact written before 0029 — an address, no source — updatable: nothing REQUIRES a source', async () => {
+      const [{ id }] = await contact(null, null)
+      // The writes every older row still meets: a reply's pause, a bounce, a resume.
+      const rows = await db.driver.select<{ id: string }>(
+        `UPDATE contacts SET paused_at = now(), paused_reason = 'replied 2026-10-13T09:00:00.000Z',
+                email_bounced_at = now(), email_bounce_code = '5.1.1' WHERE id = $1 RETURNING id`,
+        [id],
+      )
+      expect(rows).toHaveLength(1)
+    })
+  })
+
+  describe('connectors.last_failure_* — a connector that refused a call', () => {
+    const connector = async () => {
+      n += 1
+      const [row] = await db.driver.select<{ id: string }>(
+        `INSERT INTO connectors (org_id, name, kind, config) VALUES ($1, $2, 'http', '{}'::jsonb) RETURNING id`,
+        [orgId, `server-${n}`],
+      )
+      return row!.id
+    }
+
+    it('accepts no refusal, and a refusal with its time and an auth or quota kind', async () => {
+      const id = await connector()
+      for (const kind of ['auth', 'quota']) {
+        const rows = await db.driver.select<{ id: string }>(
+          `UPDATE connectors SET last_failure_at = now(), last_failure_kind = $2 WHERE id = $1 RETURNING id`, [id, kind],
+        )
+        expect(rows, kind).toHaveLength(1)
+      }
+      const cleared = await db.driver.select<{ id: string }>(
+        `UPDATE connectors SET last_failure_at = NULL, last_failure_kind = NULL WHERE id = $1 RETURNING id`, [id],
+      )
+      expect(cleared).toHaveLength(1)
+    })
+
+    it('REFUSES a kind nobody defined — and the server’s own words above all', async () => {
+      const id = await connector()
+      for (const kind of ['unauthorized', 'HTTP 401: Unauthorized', 'rate', 'Auth', '']) {
+        const e = await reject(
+          `UPDATE connectors SET last_failure_at = now(), last_failure_kind = $2 WHERE id = $1`, [id, kind],
+        )
+        expect(e, kind).toContain('connectors_failure_kind_is_known')
+      }
+    })
+
+    it('REFUSES a time without its kind, and a kind without its time', async () => {
+      const id = await connector()
+      expect(await reject(`UPDATE connectors SET last_failure_at = now() WHERE id = $1`, [id]))
+        .toContain('connectors_failure_has_its_time')
+      expect(await reject(`UPDATE connectors SET last_failure_kind = 'auth' WHERE id = $1`, [id]))
+        .toContain('connectors_failure_has_its_time')
+    })
+  })
+})

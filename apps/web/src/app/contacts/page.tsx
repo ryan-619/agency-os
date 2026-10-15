@@ -11,6 +11,7 @@ import { deployment, noRepliesReadNote } from '@/lib/deployment'
 import {
   consentStateClass, consentStateLabel, suppressionClass, suppressionLabel, zoneLabel,
 } from '@/lib/consent-view'
+import { contactAddressSources } from '@/lib/address-source'
 
 /**
  * Contacts — every person, and the per-channel truth about them (§2.1).
@@ -20,7 +21,10 @@ import {
  * reads, and "Why can't I reach them?" runs `previewSend`, the sender's own
  * dry run — so this page cannot say a person is reachable while the send path
  * refuses them. Never-asked, refused and granted are three different facts,
- * and each is shown as exactly one of them.
+ * and each is shown as exactly one of them. And under each address, where
+ * it came from (0029): a page it was seen on, a teammate, an import — or,
+ * for one the assistant added before sources were kept, a warning to check
+ * it before anything is sent there.
  *
  * Bounded to a hundred people a page: each row asks the suppression list its
  * own question, and a page that asked it ten thousand times would be the
@@ -74,6 +78,9 @@ export default async function ContactsPage({
     // Deleted between the two reads: not shown, rather than shown half-known.
     if (!ledger) return
     const name = [r.firstName, r.lastName].filter(Boolean).join(' ') || r.email || '(no name recorded)'
+    // Where each address came from (0029), in core's words, with the page to
+    // open when it was seen on one — under the address it is about.
+    const from = contactAddressSources(r)
     views.push({
       id: r.id,
       name,
@@ -82,6 +89,8 @@ export default async function ContactsPage({
       title: r.title,
       email: r.email,
       phone: r.phone,
+      emailFrom: from.email,
+      phoneFrom: from.phone,
       linkedinUrl: r.linkedinUrl,
       companyDomain: r.companyDomain,
       companyName: r.companyName,

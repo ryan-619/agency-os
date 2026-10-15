@@ -77,17 +77,51 @@ export function briefDue(input: {
   return { due: true, localDate: today }
 }
 
+/** A zone that IS universal time, whatever it is called: its local time needs no UTC beside it. */
+const UTC_ZONE = /^(?:etc\/)?(?:utc|uct|gmt|zulu|universal|greenwich)$/i
+
+/**
+ * The brief's first line: the day, the local time it starts in the agency's
+ * zone with the zone named, and the same instant in UTC beside it.
+ *
+ * It used to read "(12:28, Asia/Kolkata)", and a brief headed itself "12:28
+ * UTC (Asia/Kolkata)" when 12:28 was India time and the UTC time was 06:58 —
+ * a model fills in the zone it expects. So the line now says which clock each
+ * number is on, gives the UTC instant (with its own date when that differs),
+ * and tells the model which zone to write in.
+ */
+export function briefHeader(input: { readonly localDate: string; readonly timeZone: string; readonly startedAt: Date }): string {
+  const utc = localWallClock(input.startedAt, 'UTC') ?? input.startedAt.toISOString().slice(11, 16)
+  const utcDate = input.startedAt.toISOString().slice(0, 10)
+  const local = localWallClock(input.startedAt, input.timeZone)
+  if (local === null || UTC_ZONE.test(input.timeZone)) {
+    // A zone the runtime does not know (briefsDue never hands one over) or UTC itself: one clock only.
+    return `MORNING BRIEF for ${input.localDate} — it is ${utc} UTC on ${utcDate}. Write every time in UTC and say so.`
+  }
+  const utcDay = localDateIn(input.startedAt, input.timeZone) === utcDate ? '' : ` on ${utcDate}`
+  return (
+    `MORNING BRIEF for ${input.localDate} — it is ${local} in ${input.timeZone} (${utc} UTC${utcDay}). ` +
+    `Write every time in ${input.timeZone} and name the zone; never call a local time UTC.`
+  )
+}
+
 /**
  * What the brief's unattended turn is asked to do. Every tool it names reads
  * or scans: in an unattended turn the gate declines everything else — writes
  * included — so the brief lists that work as a next step for a person.
  *
- * `at` is the local time the brief STARTS, which is later than the time set
- * when the worker was asleep at it, or any time for one somebody asked for.
+ * `startedAt` is the moment the brief STARTS, which is later than the time set
+ * when the worker was asleep at it, or any time for one somebody asked for;
+ * `localDate` is the agency's day it was claimed for.
  */
-export function morningBriefPrompt(input: { readonly localDate: string; readonly at: string; readonly timeZone: string }): string {
+export function morningBriefPrompt(input: {
+  readonly localDate: string
+  readonly timeZone: string
+  readonly startedAt: Date
+}): string {
   return [
-    `MORNING BRIEF for ${input.localDate} (${input.at}, ${input.timeZone}). Nobody is watching this run.`,
+    briefHeader(input),
+    'Nobody is watching this run.',
     'This run may only read and scan. Anything that would change a record or need a person — a note, a',
     'task, a deal move, a pause, a draft, a connector, a helper — is declined, so do not try it another',
     'way: list those as next steps for a person instead. Do not add notes or tasks: everything you find',
@@ -104,6 +138,9 @@ export function morningBriefPrompt(input: { readonly localDate: string; readonly
     '6. Today\'s targets: search_companies for qualified companies not yet contacted, and the night\'s finds. For',
     '   the best three, read get_company or get_opportunities and get_company_timeline and work out the angle:',
     '   one thing they can see for themselves — on their own site or listing — and why it matters to them.',
+    '   Say what was seen and when ("their homepage sent no Content-Security-Policy header on 9 October"):',
+    '   a scan reads their homepage from the outside, so never claim anything about their API, app or data,',
+    '   and never state a harm as fact.',
     '',
     'Then write the brief. Open with the three things most worth doing today. Then the replies waiting,',
     'the pipeline items, what was re-scanned, what the night shift found, and the three companies with their angles. Short and',

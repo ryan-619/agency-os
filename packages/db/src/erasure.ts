@@ -143,6 +143,11 @@ export interface ContactRecord {
   readonly format: 'agency-os.contact-record'
   readonly version: 1
   readonly generatedAt: Date
+  /**
+   * The whole row — where their email and phone came from included
+   * (`emailSource`, `phoneSource`, 0029: a page they were seen on, a
+   * connector, a form), because that is something held about them too.
+   */
   readonly contact: ContactRow
   readonly company: { readonly id: string; readonly domain: string; readonly name: string | null } | null
   /** One row per channel with a recorded answer. A channel with no row was never asked. */

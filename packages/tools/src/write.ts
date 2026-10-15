@@ -8,14 +8,21 @@
  * the one high-risk tool Phase 2 ships.
  */
 import { z } from 'zod'
-import { isStale, parseIcpDefinition, staleAfterDaysOf, type IcpDefinition } from '@agency/core'
+import { isNoSiteDomain, isStale, parseIcpDefinition, staleAfterDaysOf, type IcpDefinition } from '@agency/core'
 import {
   activeIcpProfile, findCompanyByDomain, importCompanies, latestScanWithFindings,
   recordScan, type AgencyDb,
 } from '@agency/db'
-import { UnscannableHostError, normaliseDomain, scanDomain } from '@agency/scanner'
+import { UnscannableHostError, isScannableHost, normaliseDomain, scanDomain } from '@agency/scanner'
 import * as schema from '@agency/db/schema'
 import { bounded, fail, ok, type AgencyToolSpec, type OpsScan, type ToolContext, type ToolOutcome } from './spec.js'
+import { deadline, websiteCheck } from './web.js'
+
+/**
+ * How long scan_company may spend asking whether a domain it would ADD was
+ * shown and answers, before the scan itself spends the rest of the call.
+ */
+const ADD_CHECK_MS = 8_000
 
 /** The active ICP, parsed — or null when there is none or it does not parse. Shared with ops.ts. */
 export async function requireIcp(
@@ -78,7 +85,8 @@ export const scanCompany: AgencyToolSpec<typeof scanShape> = {
     '/security and /.well-known/security.txt, and its TLS certificate — and record what came ' +
     'back, then score it against the ICP. This is posture review from the outside, not a ' +
     'security test: nothing private is accessed and no port is scanned. Adds the company to the ' +
-    'CRM if it is not already there.',
+    'CRM if it is not already there — only a domain this conversation showed, or whose homepage names ' +
+    'the business; never one you composed.',
   shape: scanShape,
   async handler(input, ctx): Promise<ToolOutcome<unknown>> {
     const domain = normaliseDomain(input.domain)
@@ -89,6 +97,23 @@ export const scanCompany: AgencyToolSpec<typeof scanShape> = {
 
     let company = await findCompanyByDomain(ctx.db, ctx.orgId, domain)
     if (!company) {
+      // A domain this call would ADD meets add_company's rules first (true
+      // data only, 2026-10-13): a public name the scanner would request, never
+      // a no-website placeholder, never a host nobody can reach any more, and
+      // one this conversation showed — or whose homepage names the business.
+      // An invented domain used to be filed here with an "unreachable" scan.
+      // The booking page's `<address>.inbound` placeholder names a person, not a website, as add_company says.
+      if (!isScannableHost(domain) || isNoSiteDomain(domain) || domain.endsWith('.inbound')) {
+        return fail('not_permitted', `"${domain}" is not a public website the scanner may read. Nothing was added or scanned.`)
+      }
+      const clock = deadline(ADD_CHECK_MS)
+      let check: Awaited<ReturnType<typeof websiteCheck>>
+      try {
+        check = await websiteCheck(ctx, domain, input.name?.trim() || null, clock.signal)
+      } finally {
+        clock.stop()
+      }
+      if (!check.ok) return fail(check.late ? 'unreachable' : 'not_permitted', `${check.why} Nothing was added or scanned.`)
       // Source: 'agent', so the CRM records that a model put this row here.
       await importCompanies(ctx.db, ctx.orgId, [{ domain, name: input.name }], 'agent')
       company = await findCompanyByDomain(ctx.db, ctx.orgId, domain)

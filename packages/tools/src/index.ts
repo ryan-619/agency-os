@@ -13,7 +13,7 @@ export { getScanHistory, getEvidenceChanges, getStaleCompanies } from './evidenc
 export { getReplies, classifyReply } from './replies.js'
 export { getPipelineMetrics, getCompanyTimeline, getComplianceSummary, searchCrm } from './reporting.js'
 export { addNote, createTask, listTasks } from './tasks.js'
-export { listContacts, addCompany, updateCompany, importCompanies, addContact, updateContact, pauseContact, resumeContact, addSuppression } from './records.js'
+export { listContacts, addCompany, updateCompany, importCompanies, makeImportCompanies, addContact, updateContact, pauseContact, resumeContact, addSuppression } from './records.js'
 export { listCampaigns, createCampaign, updateCampaign, enrolContacts, listDrafts, getDraft, editDraftTool } from './campaigns.js'
 export { generateProposalTool, getProposal, listMeetings, rescheduleMeetingTool, cancelMeetingTool, recordMeetingOutcome, setDealOwnerTool, completeTask } from './proposals.js'
 export { workerStatus, recentErrors, queueStatus, rescanStale } from './ops.js'
@@ -31,6 +31,11 @@ export { getEvidenceSignals } from './signals.js'
 export { getResearch, recordResearch } from './research.js'
 export { getWhatsWorking } from './insights.js'
 export { businessFromListing, placesSearchesToday } from './opportunities.js'
+export {
+  readPage, findContactDetails, checkContacts, makeReadPage, makeFindContactDetails, makeCheckContacts,
+  keepFound, foundByHandle, foundByValue, forgetFound, FOUND_KEEP_MS, READ_PAGE_EXCERPT, WEB_WORK_MS,
+  AGENCY_OUTSIDE_READERS, showsIt, type FoundAddress,
+} from './web.js'
 
 import { AGENCY_TOOL_NAMES } from '@agency/core'
 import type { AgencyToolSpec } from './spec.js'
@@ -55,6 +60,7 @@ import { getNightFinds } from './night-read.js'
 import { getEvidenceSignals } from './signals.js'
 import { getResearch, recordResearch } from './research.js'
 import { getWhatsWorking } from './insights.js'
+import { checkContacts, findContactDetails, readPage } from './web.js'
 
 /**
  * Every tool the `agency` MCP server exposes.
@@ -140,6 +146,9 @@ export const AGENCY_TOOLS: readonly AgencyToolSpec[] = [
   recordResearch,
   getResearch,
   getWhatsWorking,
+  readPage,
+  findContactDetails,
+  checkContacts,
 ] as unknown as readonly AgencyToolSpec[]
 
 export { AGENCY_TOOL_NAMES }

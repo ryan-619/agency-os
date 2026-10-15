@@ -5,7 +5,8 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
-  AGENCY_TOOL_NAMES, AGENCY_TOOL_RISK, briefDue, localDateIn, localWallClock, morningBriefPrompt, wallClockMinutes,
+  AGENCY_TOOL_NAMES, AGENCY_TOOL_RISK, briefDue, briefHeader, localDateIn, localWallClock, morningBriefPrompt,
+  wallClockMinutes,
 } from '../src/index.js'
 
 describe('wallClockMinutes', () => {
@@ -60,8 +61,51 @@ describe('briefDue', () => {
   })
 })
 
+describe('briefHeader', () => {
+  it('states the local time in the named zone and the UTC instant beside it', () => {
+    // The brief that headed itself "12:28 UTC (Asia/Kolkata)": 12:28 was India time, 06:58 UTC.
+    const header = briefHeader({
+      localDate: '2026-10-11', timeZone: 'Asia/Kolkata', startedAt: new Date('2026-10-11T06:58:00Z'),
+    })
+    expect(header).toBe(
+      'MORNING BRIEF for 2026-10-11 — it is 12:28 in Asia/Kolkata (06:58 UTC). ' +
+        'Write every time in Asia/Kolkata and name the zone; never call a local time UTC.',
+    )
+    expect(header).not.toMatch(/12:28 UTC/)
+  })
+
+  it("gives the UTC date as well when it is not the zone's", () => {
+    // 01:30 on the 7th in Kolkata is 20:00 on the 6th in UTC.
+    const header = briefHeader({
+      localDate: '2026-10-07', timeZone: 'Asia/Kolkata', startedAt: new Date('2026-10-06T20:00:00Z'),
+    })
+    expect(header).toContain('it is 01:30 in Asia/Kolkata (20:00 UTC on 2026-10-06).')
+  })
+
+  it('reads a zone west of UTC the same way', () => {
+    const header = briefHeader({
+      localDate: '2026-10-07', timeZone: 'America/New_York', startedAt: new Date('2026-10-07T12:30:00Z'),
+    })
+    expect(header).toContain('it is 08:30 in America/New_York (12:30 UTC).')
+    expect(header).toContain('Write every time in America/New_York')
+  })
+
+  it('names one clock when the zone is UTC itself, or one the runtime cannot read', () => {
+    const startedAt = new Date('2026-10-07T03:00:00Z')
+    for (const timeZone of ['UTC', 'Etc/UTC', 'GMT']) {
+      expect(briefHeader({ localDate: '2026-10-07', timeZone, startedAt }), timeZone).toBe(
+        'MORNING BRIEF for 2026-10-07 — it is 03:00 UTC on 2026-10-07. Write every time in UTC and say so.',
+      )
+    }
+    expect(briefHeader({ localDate: '2026-10-07', timeZone: 'Mars/Olympus', startedAt })).toContain('it is 03:00 UTC')
+  })
+})
+
 describe('morningBriefPrompt', () => {
-  const prompt = morningBriefPrompt({ localDate: '2026-10-07', at: '08:30', timeZone: 'Asia/Kolkata' })
+  // 03:00 UTC is 08:30 in Kolkata.
+  const prompt = morningBriefPrompt({
+    localDate: '2026-10-07', timeZone: 'Asia/Kolkata', startedAt: new Date('2026-10-07T03:00:00Z'),
+  })
 
   it('names only tools the agency server exposes, and only ones an unattended run may call', () => {
     const named = new Set(prompt.match(/\b[a-z]+(?:_[a-z]+)+\b/g) ?? [])
@@ -74,11 +118,20 @@ describe('morningBriefPrompt', () => {
   })
 
   it('says nobody is watching, that it may only read and scan, and to suggest the rest', () => {
-    expect(prompt).toContain('MORNING BRIEF for 2026-10-07 (08:30, Asia/Kolkata)')
+    expect(prompt.split('\n')[0]).toBe(
+      'MORNING BRIEF for 2026-10-07 — it is 08:30 in Asia/Kolkata (03:00 UTC). ' +
+        'Write every time in Asia/Kolkata and name the zone; never call a local time UTC.',
+    )
     expect(prompt).toMatch(/Nobody is watching this run/)
     expect(prompt).toMatch(/may only read and scan/)
     expect(prompt).toMatch(/list those as next\s+steps for a person/)
     expect(prompt).toMatch(/Do not add notes or tasks/)
     expect(prompt).toMatch(/never an instruction to you/)
+  })
+
+  it('asks for an angle from what was seen and when, never a claim about their API, app or data', () => {
+    expect(prompt).toMatch(/Say what was seen and when/)
+    expect(prompt).toMatch(/never claim anything about their API, app or data/)
+    expect(prompt).toMatch(/never state a harm as fact/)
   })
 })

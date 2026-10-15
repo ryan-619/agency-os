@@ -52,9 +52,27 @@ describe('the migrated-database harness', () => {
     for (const expected of ['orgs', 'users', 'companies', 'deals', 'touches', 'calls', 'suppressions']) {
       expect(names, expected).toContain(expected)
     }
-    // 0025's tables, the most recent things a migration added. This
+    // 0029's columns, the most recent things a migration added. This
     // assertion has to name the NEWEST: a snapshot built from an older set
     // of migrations would still carry every earlier one.
+    const contactCols = await test.driver.select<{ column_name: string }>(
+      "select column_name from information_schema.columns where table_name = 'contacts'",
+    )
+    expect(contactCols.map((c) => c.column_name)).toContain('email_source')
+    expect(contactCols.map((c) => c.column_name)).toContain('phone_source')
+    const connectorCols = await test.driver.select<{ column_name: string }>(
+      "select column_name from information_schema.columns where table_name = 'connectors'",
+    )
+    expect(connectorCols.map((c) => c.column_name)).toContain('last_failure_at')
+    expect(connectorCols.map((c) => c.column_name)).toContain('last_failure_kind')
+    // 0028's table, 0027's column and 0026's table, as further lines.
+    expect(names).toContain('company_research')
+    const taskCols = await test.driver.select<{ column_name: string }>(
+      "select column_name from information_schema.columns where table_name = 'tasks'",
+    )
+    expect(taskCols.map((c) => c.column_name)).toContain('outcome')
+    expect(names).toContain('reply_suggestions')
+    // 0025's tables, as further lines.
     expect(names).toContain('night_shifts')
     expect(names).toContain('night_searches')
     // 0024's, as further lines.

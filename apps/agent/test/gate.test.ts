@@ -147,6 +147,22 @@ describe('canUseTool always settles', () => {
       { disabledTools: new Set([connectorToolsEveryTool('zapier')]) },
       'mcp__zapier__gmail_send_email',
     ],
+    [
+      'a connector that refused a call earlier this turn',
+      { connectors: { refused: (server: string) => (server === 'jina' ? 'auth' : null) } },
+      'mcp__jina__search_web',
+    ],
+    [
+      'a refusal watch that throws',
+      {
+        connectors: {
+          refused: () => {
+            throw new Error('watch down')
+          },
+        },
+      },
+      'mcp__jina__search_web',
+    ],
   ]
 
   it.each(scenarios)('returns a decision for %s', async (_label, over, toolName) => {
@@ -360,6 +376,38 @@ describe('a connector tool that was turned off', () => {
     const { deps } = makeDeps({ disabledTools: new Set(['mcp__agency__get_icp']) })
     const result = await makeCanUseTool(deps)('mcp__agency__get_icp', {}, options())
     expect(result?.behavior).toBe('deny')
+  })
+
+  /**
+   * A connector that refused earlier in this turn (gate/connector-watch.ts):
+   * refused after the disabled list — which keeps its own words — and before
+   * the research allow, which would otherwise run it again.
+   */
+  it('refuses a server that already refused this turn, after the disabled list and before the research allow', async () => {
+    const watch = { refused: (server: string) => (server === 'tavily' ? ('quota' as const) : null) }
+    const disabled = makeDeps({ connectors: watch, disabledTools: new Set(['mcp__tavily__tavily_crawl']) })
+    expect(await makeCanUseTool(disabled.deps)('mcp__tavily__tavily_crawl', { url: 'https://acme.in' }, options())).toMatchObject({
+      behavior: 'deny',
+      message: expect.stringMatching(/disabled in Settings → Connectors/),
+    })
+    expect(disabled.audited).toEqual(['agent.tool_disabled'])
+
+    const ensureApproval = vi.fn(async () => approvalRow())
+    const allowed = makeDeps({ connectors: watch, ensureApproval, readsWithoutCard: new Set(['mcp__tavily__*']) })
+    const out = await makeCanUseTool(allowed.deps)('mcp__tavily__tavily_search', { query: 'x' }, options())
+    expect(out).toEqual({
+      behavior: 'deny',
+      message:
+        'tavily refused that call — it is rate-limited or out of quota. It will refuse again this turn: do not call it again; ' +
+        'tell the person it needs attention in Settings → Connectors, and use read_page or another connector instead.',
+    })
+    expect(allowed.audited).toEqual(['agent.tool_refused'])
+    expect(allowed.ledger.outstanding).toBe(0)
+    expect(ensureApproval).not.toHaveBeenCalled()
+
+    // The agency's own tools, and another server, are not touched by it.
+    const others = makeDeps({ connectors: { refused: () => 'auth' as const }, readsWithoutCard: new Set(['mcp__exa__*']) })
+    expect(await makeCanUseTool(others.deps)('mcp__agency__get_icp', {}, options())).toEqual({ behavior: 'allow' })
   })
 
   it('still refuses when the audit write fails', async () => {
@@ -660,6 +708,27 @@ describe('the PreToolUse backstop', () => {
       tool_response: { secret: 'a company’s evidence' },
     })
     expect(JSON.stringify(seen)).not.toContain('evidence')
+  })
+
+  it('never records a body either when it reads one — for the ledger, or a connector’s refusal', async () => {
+    const seen: Array<Record<string, unknown>> = []
+    const hook = makePostToolUse({
+      audit: async (_a, detail) => {
+        seen.push(detail)
+      },
+      log: { error: () => {} },
+      disabledTools: new Set(),
+      ledger: { addPerson: () => {}, addToolResult: () => {}, find: async () => [] },
+      connectors: { refused: () => null, fail: () => {}, ok: () => {} },
+    })
+    await hook({
+      hook_event_name: 'PostToolUse',
+      tool_name: 'mcp__jina__search_web',
+      tool_input: { query: 'acme founder' },
+      tool_use_id: 'toolu_1',
+      tool_response: [{ type: 'text', text: 'Error: Search failed for query "acme founder": Unauthorized' }],
+    })
+    expect(seen).toEqual([{ toolName: 'mcp__jina__search_web', toolUseId: 'toolu_1' }])
   })
 })
 

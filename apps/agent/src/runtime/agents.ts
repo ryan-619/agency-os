@@ -33,7 +33,7 @@
  */
 import type { AgentDefRow } from '@agency/db'
 import type { Logger } from '../logger.js'
-import { playbookSection } from './options.js'
+import { TRUE_DATA_SECTION, playbookSection } from './options.js'
 
 /** Exactly what a database row may set. Frozen; see the test. */
 export const ALLOWED_AGENT_KEYS = Object.freeze([
@@ -75,6 +75,12 @@ export function buildAgents(rows: readonly AgentDefRow[], log: Logger, playbook 
   // The agency's own description, under the same header the main agent reads
   // it under: a helper drafting an opener should sound like the agency too.
   const section = playbookSection(playbook)
+  // Every helper's prompt ends with the same rule about data the main agent
+  // reads (2026-10-13), then the playbook, which stays last. A helper does not
+  // inherit the main prompt, and a row's own prompt is an owner's text in
+  // Settings → Agents that a live database never re-seeds — so this is the one
+  // way the rule reaches every helper there is.
+  const tail = section ? `${TRUE_DATA_SECTION}\n\n${section}` : TRUE_DATA_SECTION
   const agents: Record<string, BuiltAgent> = {}
   const skipped: { slug: string; why: string }[] = []
 
@@ -91,7 +97,7 @@ export function buildAgents(rows: readonly AgentDefRow[], log: Logger, playbook 
     // Built key by key. NOT a spread of the row, and not a spread of anything.
     const built: BuiltAgent = {
       description: row.description,
-      prompt: section ? `${row.systemPrompt}\n\n${section}` : row.systemPrompt,
+      prompt: `${row.systemPrompt}\n\n${tail}`,
       // Omitted entirely when empty: the SDK reads an absent `tools` as
       // "inherit the parent's", and an EMPTY ARRAY as "no tools at all" — a
       // subagent that can do nothing but talk. A row with no tools listed

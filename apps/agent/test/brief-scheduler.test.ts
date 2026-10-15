@@ -70,8 +70,11 @@ describe('runDueBriefs', () => {
     expect(calls).toHaveLength(1)
     const call = calls[0]!
     expect(call.userId).toBe(owner)
-    // Asked at the time it STARTED (09:10), not the time it was set for.
-    expect(call.text).toContain('MORNING BRIEF for 2026-10-07 (09:10, Asia/Kolkata)')
+    // Asked at the time it STARTED (09:10), not the time it was set for — in the agency's zone,
+    // named, with the UTC instant beside it so neither is taken for the other.
+    expect(call.text).toContain('MORNING BRIEF for 2026-10-07 — it is 09:10 in Asia/Kolkata (03:40 UTC).')
+    expect(call.text).toContain('never call a local time UTC')
+    expect(call.text).not.toMatch(/09:10 UTC/)
 
     const [thread] = await db.select().from(schema.chatSessions).where(eq(schema.chatSessions.id, call.chatSessionId))
     expect(thread).toMatchObject({ orgId, userId: owner, title: 'Morning brief · 2026-10-07' })
@@ -111,7 +114,7 @@ describe('runDueBriefs', () => {
     expect(await runDueBriefs({ db, log, now: () => early, start })).toBe(0)
     await requestBrief(db, { orgId, actor: owner })
     expect(await runDueBriefs({ db, log, now: () => early, start })).toBe(1)
-    expect(calls[0]!.text).toContain('(07:00, Asia/Kolkata)')
+    expect(calls[0]!.text).toContain('it is 07:00 in Asia/Kolkata (01:30 UTC)')
     expect((await auditRows('assistant.brief_started'))[0]?.detail).toEqual({ date: '2026-10-07', requested: true })
     // That was the day's brief: 08:30 starts no second one.
     expect(await runDueBriefs({ db, log, now: () => morning, start })).toBe(0)
@@ -139,6 +142,26 @@ describe('runDueBriefs', () => {
     expect(await run).toBe(2)
     expect(order[1]).toBe('end first')
     expect(order).toHaveLength(3)
+  })
+
+  it('heads a brief that waited on another org’s with the time it actually starts', async () => {
+    const [org2] = await db.insert(schema.orgs).values({ name: 'Second' }).returning({ id: schema.orgs.id })
+    const [u2] = await db.insert(schema.users).values({ orgId: org2!.id, email: 'two@second.test', role: 'owner' }).returning({ id: schema.users.id })
+    await saveBrief(db, { orgId, actor: owner, enabled: true, at: '08:30', timeZone: 'Asia/Kolkata' })
+    await saveBrief(db, { orgId: org2!.id, actor: u2!.id, enabled: true, at: '08:30', timeZone: 'Asia/Kolkata' })
+
+    let clock = morning
+    const texts: string[] = []
+    const start: BriefStarter = async (req) => {
+      texts.push(req.text)
+      // The first brief runs for twenty minutes before the second may start.
+      if (texts.length === 1) clock = new Date('2026-10-07T04:00:00Z')
+      return { ok: true, finished: Promise.resolve() }
+    }
+    const { log } = capture()
+    expect(await runDueBriefs({ db, log, now: () => clock, start })).toBe(2)
+    expect(texts[0]).toContain('it is 09:10 in Asia/Kolkata (03:40 UTC)')
+    expect(texts[1]).toContain('it is 09:30 in Asia/Kolkata (04:00 UTC)')
   })
 
   it('logs a failing look once per streak, by class, and once when it works again', async () => {

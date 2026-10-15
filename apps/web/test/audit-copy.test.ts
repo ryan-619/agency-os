@@ -118,7 +118,11 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   // `fromIsContact: false` and `filedUnder` — the contact never as the
   // subject or a `contactId` (FROM_SOMEBODY_ELSE below).
   'contact.opt_out_not_recorded': { touchId: SUBJECT, channel: 'email', why: 'unparseable' },
-  'contact.created': { companyId: SUBJECT, source: 'manual', hasTimeZone: true },
+  // Since 0029 each writer says where the email and the phone came from as a
+  // KIND word — `page`, `chat`, `connector`, `person` or null — never the source.
+  'contact.created': {
+    companyId: SUBJECT, source: 'manual', hasTimeZone: true, emailSourceKind: 'person', phoneSourceKind: null,
+  },
   // The contacts route's shape, over a reply's own pause. `denyDraft` writes
   // `{ reason, alreadyPaused, inboundTouchId }` (DENIED_ANSWER_PAUSE below),
   // and an answer that failed, was refused at sending or was cancelled by a
@@ -337,6 +341,15 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   },
   // --- end records.ts ---
 
+  // --- the contact-evidence tools (0029): read_page, find_contact_details, check_contacts ---
+  // Counts, a host and an id — never an address, a number or a page's path.
+  'agent.read_page': { host: 'rentman.io', ok: true, emails: 1, phones: 2, turnId: SUBJECT },
+  'agent.find_contact_details': { companyId: SUBJECT, pages: 3, emails: 1, phones: 1, turnId: SUBJECT },
+  'agent.check_contacts': {
+    companyId: SUBJECT, contacts: 3, published: 1, unpublished: 1, noMail: 1, turnId: SUBJECT,
+  },
+  // --- end contact-evidence tools ---
+
   // --- campaigns.ts tools (2026-10-06): this file's actions go below ---
   'agent.list_campaigns': { status: null, matched: 3, returned: 3, turnId: SUBJECT },
   'agent.create_campaign': { campaignId: SUBJECT, channel: 'email', status: 'draft', autoSend: false, turnId: SUBJECT },
@@ -433,6 +446,48 @@ describe('sentenceFor', () => {
     // A tool with its own sentence keeps it.
     expect(sentenceFor(line('agent.check_send', WRITTEN['agent.check_send'], { actor: 'agent' }), lookups)).toBe(
       'checked whether a message about rentman.io may be sent: it may; nothing was queued',
+    )
+  })
+
+  it('says where a new contact’s addresses came from by kind, and never the source (0029)', () => {
+    expect(sentenceFor(line('contact.created', WRITTEN['contact.created']), lookups)).toBe(
+      'added a contact at rentman.io — its email typed in by hand',
+    )
+    expect(
+      sentenceFor(line('contact.created', { companyId: SUBJECT, source: 'agent', emailSourceKind: 'page', phoneSourceKind: 'chat' }), lookups),
+    ).toBe(
+      'added a contact at rentman.io — its email seen on a page, its phone typed in chat by the person the assistant was helping',
+    )
+    expect(
+      sentenceFor(line('contact.created', { emailSourceKind: 'connector', phoneSourceKind: 'connector' }), lookups),
+    ).toBe('added a contact at rentman.io — its email and phone returned by a connector')
+    // A row from before 0029, a kind nobody writes, and a source written where a kind belongs say nothing more.
+    for (const detail of [
+      { companyId: SUBJECT, source: 'manual', hasTimeZone: true },
+      { emailSourceKind: 'constructor', phoneSourceKind: '__proto__' },
+      { emailSourceKind: 'https://acme.in/team/jo', phoneSourceKind: null },
+    ]) {
+      expect(sentenceFor(line('contact.created', detail), lookups)).toBe('added a contact at rentman.io')
+    }
+  })
+
+  it('says what the contact-evidence tools read by counts, never an address (0029)', () => {
+    expect(sentenceFor(line('agent.read_page', WRITTEN['agent.read_page'], { actor: 'agent' }), lookups)).toBe(
+      'read a public page on rentman.io — it showed 1 email address and 2 phone numbers; nothing was written',
+    )
+    expect(
+      sentenceFor(line('agent.read_page', { host: 'rentman.io', ok: false, emails: 0, phones: 0 }, { actor: 'agent' }), lookups),
+    ).toBe('tried to read a public page on rentman.io, which could not be read; nothing was written')
+    // A host that is not a plain host name is left out rather than printed.
+    expect(
+      sentenceFor(line('agent.read_page', { host: 'https://x.in/team/jo', ok: true, emails: 1, phones: 0 }, { actor: 'agent' }), lookups),
+    ).toBe('read a public page — it showed 1 email address and 0 phone numbers; nothing was written')
+    expect(
+      sentenceFor(line('agent.find_contact_details', WRITTEN['agent.find_contact_details'], { actor: 'agent' }), lookups),
+    ).toBe('read rentman.io’s own site (3 pages) for how to reach them — it publishes 1 email address and 1 phone number; nothing was written')
+    expect(sentenceFor(line('agent.check_contacts', WRITTEN['agent.check_contacts'], { actor: 'agent' }), lookups)).toBe(
+      'checked where 3 contacts’ addresses at rentman.io came from: 1 published on a page, 1 found on no page that could ' +
+        'be read, 1 at a domain that receives no mail; nothing was written',
     )
   })
 

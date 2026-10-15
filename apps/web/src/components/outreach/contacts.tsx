@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { When } from '@/components/when'
 import { SharedNumberHolderNote } from '@/components/shared-number-note'
 import { isSharedNumberOptOutPause } from '@/lib/shared-number-pause'
+import type { AddressSourceLine } from '@/lib/address-source'
 import { toast } from '../toast/toast'
 
 /**
@@ -20,6 +21,12 @@ import { toast } from '../toast/toast'
  * reads what lifts theirs (review round 9): a text from a number they share
  * asked to stop and could not be recorded, so the number goes on the
  * suppression list first — the words /contacts uses.
+ *
+ * Under each email and phone, where it came from (0029), in the words
+ * /contacts and /approvals use: the page it was seen on, linked; a teammate;
+ * an import — and a warning for an address the assistant added before
+ * sources were kept, the likeliest to be a guess. A teammate's own Add is
+ * recorded as typed by them; the route says so, not this form.
  */
 
 export interface ContactView {
@@ -28,11 +35,37 @@ export interface ContactView {
   readonly title: string | null
   readonly email: string | null
   readonly phone: string | null
+  /** Where the email and the phone came from (0029), worded on the server; null for an address they lack. */
+  readonly emailFrom: AddressSourceLine | null
+  readonly phoneFrom: AddressSourceLine | null
   readonly linkedinUrl: string | null
   readonly timeZone: string | null
   readonly pausedAt: string | null
   readonly pausedReason: string | null
   readonly consents: readonly { readonly channel: string; readonly granted: boolean; readonly source: string }[]
+}
+
+/**
+ * Where an address came from, under it (0029): a page it was seen on is a
+ * link, opened as the Research card opens a source; a source nobody can
+ * vouch for reads as a warning.
+ */
+function AddressFrom({ from }: { from: AddressSourceLine | null }) {
+  if (!from) return null
+  return (
+    <span className={from.tone === 'warn' ? 'address-source err-line' : 'address-source'}>
+      {from.href ? (
+        <>
+          {from.before}
+          <a href={from.href} target="_blank" rel="noopener noreferrer nofollow" title={from.href}>
+            {from.linkText}
+          </a>
+        </>
+      ) : (
+        from.words
+      )}
+    </span>
+  )
 }
 
 /** A consent channel as the pop-up names it. */
@@ -152,12 +185,24 @@ export function ContactsPanel({
               </div>
 
               <div className="muted" style={{ fontSize: 12.5 }}>
-                {c.email ? <code>{c.email}</code> : null}
-                {c.phone ? <code style={{ marginLeft: 8 }}>{c.phone}</code> : null}
+                {c.email ? (
+                  <div>
+                    <code>{c.email}</code>
+                    <AddressFrom from={c.emailFrom} />
+                  </div>
+                ) : null}
+                {c.phone ? (
+                  <div style={{ marginTop: c.email ? 3 : 0 }}>
+                    <code>{c.phone}</code>
+                    <AddressFrom from={c.phoneFrom} />
+                  </div>
+                ) : null}
                 {c.linkedinUrl ? (
-                  <a href={c.linkedinUrl} style={{ marginLeft: 8 }} target="_blank" rel="noreferrer">
-                    LinkedIn
-                  </a>
+                  <div style={{ marginTop: c.email || c.phone ? 3 : 0 }}>
+                    <a href={c.linkedinUrl} target="_blank" rel="noreferrer">
+                      LinkedIn
+                    </a>
+                  </div>
                 ) : null}
               </div>
 

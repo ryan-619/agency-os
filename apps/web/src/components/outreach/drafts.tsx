@@ -10,6 +10,7 @@ import {
   type AddressedBy, type Approvability, type CandidateDecision, type CheckedUnder, type DraftEvidence,
   type DraftTemplate,
 } from '@/lib/approval-view'
+import type { RecipientAddressSource } from '@/lib/address-source'
 
 /**
  * Message drafts waiting for a person (PROMPT.md §2.4, §8.4).
@@ -47,6 +48,12 @@ export interface DraftCandidate {
   readonly label: string
   /** `previewSend` under `DraftView.checkedUnder`; null when there was no campaign to check under. */
   readonly decision: CandidateDecision | null
+  /**
+   * Where the address this draft would use came from (0029), worded on the
+   * server; null on LinkedIn and for a person without the address. Shown
+   * beside the chosen person — an <option> holds text only.
+   */
+  readonly addressSource?: RecipientAddressSource | null
 }
 
 export interface DraftView {
@@ -68,6 +75,32 @@ export interface DraftView {
   readonly evidence: DraftEvidence | null
   /** The registered template an SMS draft was rendered from (0019); absent on every other channel. */
   readonly template?: DraftTemplate | null
+}
+
+/**
+ * Where the chosen person's address came from (0029), under the recipient:
+ * a page it was seen on is a link, opened as the Research card opens a
+ * source; a source nobody can vouch for reads as a warning — somebody is
+ * about to approve a message to it.
+ */
+function RecipientFrom({ source }: { source: RecipientAddressSource }) {
+  const { label, line } = source
+  return (
+    <span className={line.tone === 'warn' ? 'address-source err-line' : 'address-source'}>
+      {label}:{' '}
+      {line.href ? (
+        <>
+          {line.before}
+          <a href={line.href} target="_blank" rel="noopener noreferrer nofollow" title={line.href}>
+            {line.linkText}
+          </a>
+        </>
+      ) : (
+        line.words
+      )}
+      .
+    </span>
+  )
 }
 
 export interface CampaignChoice {
@@ -532,6 +565,7 @@ export function DraftQueue({
                           {decision?.reason && decision.code !== 'unchecked' ? <> The rule: {decision.reason}</> : null}
                         </span>
                       ) : null}
+                      {chosenPerson?.addressSource ? <RecipientFrom source={chosenPerson.addressSource} /> : null}
                       {d.candidates.length === 0 && companyHref ? (
                         <span className="hint">
                           Add a contact on <a href={companyHref}>the company page</a> first — with their timezone, or

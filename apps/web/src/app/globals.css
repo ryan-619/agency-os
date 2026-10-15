@@ -710,6 +710,13 @@ input[type=search]:focus { outline: none; border-color: var(--accent); box-shado
 .ledger-state.none { color: var(--warn); }
 .ledger-state.unknown { color: var(--muted); font-style: italic; }
 
+/* Where a contact's email or phone came from (0029), a small line under the
+ * address on /contacts, the People panel and /approvals. A source nobody can
+ * vouch for wears the warning line's colour (`err-line`), kept this size. */
+.address-source { display: block; font-size: 11.5px; line-height: 1.35; color: var(--muted); margin-top: 1px; white-space: normal; }
+.address-source.err-line { color: var(--warn); }
+.address-source a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+
 /* A pipeline card nobody has touched for too long, and its due date (pipeline/board.tsx). */
 .kcard.rotten { border-left: 3px solid var(--warn); }
 .kcard-due { font-size: 11.5px; color: var(--muted); }

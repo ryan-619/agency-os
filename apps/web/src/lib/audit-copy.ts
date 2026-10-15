@@ -1,6 +1,7 @@
 import {
   AGENCY_TOOL_NAMES, AGENCY_TOOL_RISK, SENSITIVE_KEY, SENSITIVE_VALUE, redact, type SuppressionSource,
 } from '@agency/core'
+import { ADDRESS_SOURCE_KIND_WORDS } from './address-source'
 import { inZone } from './format'
 import { REFUSAL_WORDS, refusalWords } from './refusal-words'
 
@@ -569,7 +570,19 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     }
     return `could not record an opt-out from a contact at ${c.co} — it is NOT on the suppression list; follow up by hand`
   },
-  'contact.created': (c) => `added a contact at ${c.co}`,
+  // Two writers: the contacts route (a teammate) and add_contact (the
+  // assistant). Since 0029 each says where the email and the phone came from
+  // as a KIND word — `page`, `chat`, `connector`, `person` — never the source
+  // itself, which can be a page's address naming the person (§2.3).
+  'contact.created': (c) => {
+    const email = own(ADDRESS_SOURCE_KIND_WORDS, word(c.d, 'emailSourceKind'))
+    const phone = own(ADDRESS_SOURCE_KIND_WORDS, word(c.d, 'phoneSourceKind'))
+    const from =
+      email && email === phone
+        ? `its email and phone ${email}`
+        : [email ? `its email ${email}` : null, phone ? `its phone ${phone}` : null].filter(Boolean).join(', ')
+    return `added a contact at ${c.co}${from ? ` — ${from}` : ''}`
+  },
   // Two writers. The contacts route, a person's reason, naming the reply's
   // pause it replaced by CLASS (`replacedPauseFor`) — answering that reply no
   // longer resumes them. And `denyDraft`, putting a reply's pause back when
@@ -795,6 +808,47 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     return `searched the companies${matched !== null && returned !== null ? ` (${matched} matched, ${returned} returned)` : ''}`
   },
   'agent.get_company': (c) => `read ${domainLabel(c.d) ?? 'a company'}`,
+  // The contact-evidence tools (0029): counts, a host and an id — never an
+  // address, a number or a page's path, which can name the person.
+  'agent.read_page': (c) => {
+    const host = matching(c.d, 'host', /^(?=.{1,253}$)[a-z0-9-]+(\.[a-z0-9-]+)+$/i)
+    const on = host ? ` on ${host}` : ''
+    if (flag(c.d, 'ok') === false) return `tried to read a public page${on}, which could not be read; nothing was written`
+    const emails = num(c.d, 'emails')
+    const phones = num(c.d, 'phones')
+    const shown =
+      emails === null || phones === null
+        ? ''
+        : ` — it showed ${plural(emails, 'email address', 'email addresses')} and ${plural(phones, 'phone number')}`
+    return `read a public page${on}${shown}; nothing was written`
+  },
+  'agent.find_contact_details': (c) => {
+    const pages = num(c.d, 'pages')
+    const emails = num(c.d, 'emails')
+    const phones = num(c.d, 'phones')
+    const site = c.hasCo ? `${c.co}’s own site` : 'a company’s own site'
+    const read = pages === null ? '' : ` (${plural(pages, 'page')})`
+    const found =
+      emails === null || phones === null
+        ? ''
+        : ` — it publishes ${plural(emails, 'email address', 'email addresses')} and ${plural(phones, 'phone number')}`
+    return `read ${site}${read} for how to reach them${found}; nothing was written`
+  },
+  'agent.check_contacts': (c) => {
+    const contacts = num(c.d, 'contacts')
+    const published = num(c.d, 'published')
+    const unpublished = num(c.d, 'unpublished')
+    const noMail = num(c.d, 'noMail')
+    const whose = c.hasCo ? ` at ${c.co}` : ''
+    const parts = [
+      published !== null ? `${published} published on a page` : null,
+      unpublished !== null ? `${unpublished} found on no page that could be read` : null,
+      noMail !== null ? `${noMail} at a domain that receives no mail` : null,
+    ].filter((p): p is string => p !== null)
+    return `checked where ${contacts !== null ? plural(contacts, 'contact’s', 'contacts’') : 'contacts’'} addresses${whose} came from${
+      parts.length > 0 ? `: ${parts.join(', ')}` : ''
+    }; nothing was written`
+  },
   'agent.scan_company': (c) => {
     const score = num(c.d, 'score')
     return `scanned the public pages of ${domainLabel(c.d) ?? 'a company'}${score !== null ? ` (score ${score})` : ''}`

@@ -19,7 +19,8 @@
  * own idea of what a valid address or zone is: the email is folded the way
  * the suppression list folds it, the zone is checked against the runtime, and
  * a row with no way to reach anybody is refused with the same sentence the
- * form gives.
+ * form gives. Each address it stores is recorded as from an import (0029's
+ * `import` source), which is what /contacts says beside it.
  *
  * No transaction around the batch, deliberately. `createContact` answers a
  * duplicate that races in by catching the unique violation, and inside a
@@ -415,6 +416,10 @@ export async function importContacts(
       linkedinUrl: row.linkedinUrl,
       timeZone: row.timeZone,
       source,
+      // Where each address came from (0029): this file, for every address it
+      // stores — and only for those, so a dropped phone carries no source.
+      emailSource: row.email ? 'import' : null,
+      phoneSource: phone ? 'import' : null,
     })
     if (!input.success) {
       // Named by the file's column, not the code's field — the person fixing

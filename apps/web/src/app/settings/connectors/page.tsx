@@ -25,6 +25,12 @@ import { agentConfigured } from '@/lib/agent'
  * the boundary, and it is the reason this page holds a mapping function rather
  * than passing rows straight through.
  *
+ * Beside "Last answered", the last time the server REFUSED a call in a chat
+ * turn (0029): Test connection only lists tools, so a keyless server passes it
+ * and then answers every real call "unauthorized" or "rate-limited". The
+ * worker records when and which kind; the server's own words never reach this
+ * page, the worker or the log.
+ *
  * The catalog crosses the same way, through `browserPresets`: the fields a
  * card renders and the `config` Install posts, never a URL with a query
  * string, and the decision about whether there is an Install button at all
@@ -84,6 +90,13 @@ function toView(row: ConnectorRow): ConnectorView {
     hasCredential: row.secretRef !== null,
     lastOkAt: row.lastOkAt ? row.lastOkAt.toISOString() : null,
     lastError: row.lastError,
+    // The last time it refused a call in a turn (0029): when, and our own word
+    // for why — `auth` or `quota`, never the server's text, which the worker
+    // does not keep. Both or neither, as the database holds them.
+    lastFailure:
+      row.lastFailureAt && (row.lastFailureKind === 'auth' || row.lastFailureKind === 'quota')
+        ? { at: row.lastFailureAt.toISOString(), kind: row.lastFailureKind }
+        : null,
     summary: summarise(row),
     // Tool NAMES and who turned them off — derived from the row by the same
     // function the worker's gate uses, so this page cannot show a list the
