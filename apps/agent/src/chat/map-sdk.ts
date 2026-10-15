@@ -20,7 +20,7 @@
  */
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import {
-  classifyRisk, truncateJson, type ChatEventBody, type TurnEndReason,
+  classifyRisk, correctedCostUsd, truncateJson, type ChatEventBody, type TurnEndReason,
 } from '@agency/core'
 
 /** Tool input and result bodies are capped; an approval payload never is. */
@@ -278,6 +278,7 @@ export function mapSdkMessage(msg: SDKMessage, ctx: MapContext): ChatEventBody[]
         subtype: string
         session_id: string
         total_cost_usd?: number
+        modelUsage?: unknown
         num_turns?: number
         usage?: {
           input_tokens?: number
@@ -289,7 +290,11 @@ export function mapSdkMessage(msg: SDKMessage, ctx: MapContext): ChatEventBody[]
       // A DELTA, not the raw value. Phase 2 runs one query() per turn so the
       // two are usually the same, but the documented shape is cumulative and
       // a resumed session that carried a total forward would bill it twice.
-      const turnUsd = Math.max(0, (result.total_cost_usd ?? 0) - ctx.costSeenUsd)
+      // And re-priced for a model the bundled CLI does not know: it charges
+      // Sonnet 5.5 and Opus 5.5 at its Opus 4.x fallback rate
+      // (`correctedCostUsd`, packages/core/src/model-prices.ts).
+      const totalUsd = correctedCostUsd(result.total_cost_usd ?? 0, result.modelUsage)
+      const turnUsd = Math.max(0, totalUsd - ctx.costSeenUsd)
       return [
         {
           kind: 'cost',

@@ -6825,21 +6825,40 @@ nothing and is the path both Definition-of-Done gates were passed on. The key
 is for the DEPLOYED worker, where teammates' turns run and a personal
 subscription cannot legitimately stand behind a shared service.
 
-`AGENT_MODEL` defaults to `claude-haiku-4-5` in `.env.example` for the same
-reason: Haiku is $1/$5 per MTok against Opus-tier's $5/$25, and "score the
-pipeline, draft an opener" sits well inside what it does. `./tools/spend.sh`
-reports what has actually been spent — per day, per person, and a run rate —
-from `chat_messages.cost_usd`, which is the SDK's own figure rather than an
-estimate.
+**Chat runs on Claude Sonnet 5.5 (2026-10-15).** `AGENT_MODEL` is
+`claude-sonnet-5-5` in `.env.example` and in `./tools/run-worker.sh`'s
+default — $2/$10 per MTok, cache reads $0.20. Haiku 4.5 ran the chat until
+then, and it was Haiku that wrote down people, addresses and websites nobody
+had shown it (§2, "True data only"); with the system prompt cached a Sonnet
+5.5 turn costs about what a Haiku 4.5 turn did. `./tools/spend.sh` reports
+what has actually been spent — per day, per person, and a run rate — from
+`chat_messages.cost_usd`.
+
+**That figure is re-priced for the 5.5 models.** The CLI the SDK bundles
+(2.1.269) predates them: it sends them valid requests — adaptive thinking,
+effort `high`, measured against a fake API that recorded each request, no
+credit spent — but warns it does not know the model and prices it at its
+$5/$25 fallback, marking the result's `modelUsage` entry `costBasis:
+"unknown"`. Recorded as it came, a Sonnet turn read about 2.5 times its price
+on Settings → Spend and against the thread's budget. `correctedCostUsd`
+(`packages/core/src/model-prices.ts`, pure) re-prices an entry whose
+`costBasis` is not `"list"` and whose model `MODEL_PRICES_PER_MTOK` lists,
+from its own token counts, keeping the rest of `total_cost_usd`;
+`mapSdkMessage`'s `result` case takes the delta of the corrected cumulative
+figure. The CLI's own `maxBudgetUsd` cap still counts the fallback rate, so a
+turn stops earlier than its real price would — the safe direction. An SDK
+upgrade whose CLI lists the 5.5 models makes the correction a no-op.
 
 **A person can ask for more, one message at a time (2026-10-07).** "Think
 harder" under the chat box sends `deep: true` with that message — the route
 and the worker's `parseStartTurn` both take only an exact `true` — and that
-turn runs on `AGENT_DEEP_MODEL` (default `sonnet`; `opus` is stronger and
-dearer) through `modelForTurn` in `worker.ts`; every other turn stays on
-`AGENT_MODEL`. The box clears after each message, so the dearer model is
-never left on by accident. Compose passes the variable and `.env.example`
-documents it.
+turn runs on `AGENT_DEEP_MODEL` (default `claude-opus-5-5` since 2026-10-15,
+$4/$20; it was the alias `sonnet`, which the bundled CLI resolves to an
+older and dearer model, as `opus` does) through `modelForTurn` in
+`worker.ts`; every other turn stays on `AGENT_MODEL`. The box clears after
+each message, so the dearer model is never left on by accident. Compose
+passes the variable and `.env.example` documents it. A subagent's model is
+still one of `AGENT_MODELS`' aliases; `inherit` runs it on the turn's model.
 
 **`tokens_in` counted only the UNCACHED input, which is not a small number but
 a wrong one.** `usage.input_tokens` excludes what the cache served, and this

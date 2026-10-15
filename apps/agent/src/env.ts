@@ -160,11 +160,13 @@ const schema = z.object({
   AGENT_MODEL: z.preprocess(blankIsUnset, z.string().optional()),
   /**
    * The model a turn runs on when the person ticks "Think harder" in chat —
-   * one turn at a time, never the default. An alias the CLI resolves
-   * (`sonnet`, `opus`) or a full model id; Sonnet reasons far better than
-   * Haiku at several times the price, and Opus better again at more.
+   * one turn at a time, never the default. A full model id or an alias the
+   * CLI resolves. Claude Opus 5.5 by default (2026-10-15): twice Sonnet
+   * 5.5's price, for the turns a person says need more. The bare aliases
+   * `sonnet` and `opus` resolve, in the CLI the SDK bundles, to OLDER and
+   * dearer models, so the default names the id.
    */
-  AGENT_DEEP_MODEL: z.preprocess(blankIsUnset, z.string().default('sonnet')),
+  AGENT_DEEP_MODEL: z.preprocess(blankIsUnset, z.string().default('claude-opus-5-5')),
 
   /**
    * Google, for the opportunity tools (2026-10-08): one key with the Places

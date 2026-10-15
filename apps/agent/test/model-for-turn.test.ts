@@ -9,15 +9,15 @@ import { modelForTurn } from '../src/worker.js'
 
 describe('modelForTurn', () => {
   it('runs an ordinary turn on AGENT_MODEL and a deep one on AGENT_DEEP_MODEL', () => {
-    const env = { AGENT_MODEL: 'claude-haiku-4-5', AGENT_DEEP_MODEL: 'opus' }
-    expect(modelForTurn(env, false)).toBe('claude-haiku-4-5')
+    const env = { AGENT_MODEL: 'claude-sonnet-5-5', AGENT_DEEP_MODEL: 'opus' }
+    expect(modelForTurn(env, false)).toBe('claude-sonnet-5-5')
     expect(modelForTurn(env, true)).toBe('opus')
   })
 
-  it('defaults the deep model to Sonnet, and reads a blank as unset', () => {
+  it('defaults the deep model to Opus 5.5 by its full id, and reads a blank as unset', () => {
     const base = { DATABASE_URL: 'postgres://u:p@localhost:5432/db', AGENT_INTERNAL_TOKEN: 't'.repeat(40) }
-    expect(loadEnv(base).AGENT_DEEP_MODEL).toBe('sonnet')
-    expect(loadEnv({ ...base, AGENT_DEEP_MODEL: '' }).AGENT_DEEP_MODEL).toBe('sonnet')
+    expect(loadEnv(base).AGENT_DEEP_MODEL).toBe('claude-opus-5-5')
+    expect(loadEnv({ ...base, AGENT_DEEP_MODEL: '' }).AGENT_DEEP_MODEL).toBe('claude-opus-5-5')
     expect(loadEnv({ ...base, AGENT_DEEP_MODEL: 'opus' }).AGENT_DEEP_MODEL).toBe('opus')
   })
 })

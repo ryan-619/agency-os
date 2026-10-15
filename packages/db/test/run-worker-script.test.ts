@@ -451,7 +451,7 @@ describe('tools/run-worker.sh', () => {
       const worker = calls()[1]!.env
       expect(worker.ANTHROPIC_API_KEY).toBe(ANTHROPIC_KEY)
       expect(worker.AGENT_INTERNAL_TOKEN).toBe(CHAT_TOKEN)
-      expect(worker.AGENT_MODEL).toBe('claude-haiku-4-5')
+      expect(worker.AGENT_MODEL).toBe('claude-sonnet-5-5')
       expect(worker.AGENT_BIND).toBe('127.0.0.1')
       // The API port, on the domain, with the request inspector OFF: on, it
       // keeps every forwarded request — the bearer included — on an

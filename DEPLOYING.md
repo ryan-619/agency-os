@@ -639,8 +639,9 @@ and shows ngrok's last lines, and the worker is handed no key — with chat off
 it never is. A small watcher stops ngrok within two seconds of the worker
 exiting, however it exits — Ctrl-C, closing the window, a crash or a refusal
 to boot — and every run first stops a tunnel an earlier run left on the
-worker's port. The worker runs on `claude-haiku-4-5` unless `AGENT_MODEL`
-says otherwise.
+worker's port. Chat runs on `claude-sonnet-5-5` unless `AGENT_MODEL`
+says otherwise, and a "Think harder" message on `AGENT_DEEP_MODEL`
+(`claude-opus-5-5` unless set).
 
 **A value Vercel cannot use turns chat off, not the site.** `AGENT_URL` must
 be a full address starting `https://`, and `AGENT_INTERNAL_TOKEN` the whole

@@ -1057,8 +1057,10 @@ echo
 # with chat off the worker is not handed an Anthropic key at all.
 if [ "$CHAT" = yes ]; then
   WORKER_TOKEN="$AGENT_INTERNAL_TOKEN"
-  # Haiku unless told otherwise: about an eighth of the default model's price.
-  export AGENT_MODEL="${AGENT_MODEL:-claude-haiku-4-5}"
+  # Sonnet 5.5 unless told otherwise (2026-10-15): it keeps to what it was
+  # shown far better than Haiku did, at $2 / $10 per million tokens. "Think
+  # harder" runs one message on AGENT_DEEP_MODEL (Opus 5.5 by default).
+  export AGENT_MODEL="${AGENT_MODEL:-claude-sonnet-5-5}"
 else
   WORKER_TOKEN="$(openssl rand -base64 32)"
   unset ANTHROPIC_API_KEY
