@@ -7,7 +7,7 @@
  * "must be re-verified before appearing in any outbound draft" forbids.
  */
 import { describe, it, expect } from 'vitest'
-import { meetingBrief, type BriefInput } from '../src/index.js'
+import { meetingBrief, postureFrom, type BriefInput } from '../src/index.js'
 
 const RAN = new Date('2026-09-10T08:00:00.000Z')
 const signals = {
@@ -144,5 +144,30 @@ describe('missing pieces', () => {
     expect(b.conversation).toEqual([])
     // With no ICP the gap is named by its key rather than dropped.
     expect(b.posture.gaps[0]!.why).toBe('csp')
+  })
+})
+
+/**
+ * The posture rule was lifted out of `meetingBrief` (2026-10-16) so the
+ * company page's "At a glance" card reads a scan the same way. Moved
+ * verbatim: the brief's gaps and strengths are `postureFrom`'s, for every
+ * state a scan can be in.
+ */
+describe('postureFrom is the brief’s own rule', () => {
+  const informational = { signalKey: 'cross_origin_policies', observed: true, gap: true, weight: 0, detail: 'none sent', scored: false }
+  it.each([
+    ['fresh', { ranAt: RAN, stale: false, ok: true }],
+    ['stale', { ranAt: RAN, stale: true, ok: true }],
+    ['failed', { ranAt: RAN, stale: false, ok: false }],
+    ['never scanned', null],
+  ] as const)('%s', (_label, scan) => {
+    const findings = [...input().findings, informational]
+    for (const sigs of [signals, {}]) {
+      const b = meetingBrief(input({ scan, findings, signals: sigs }))
+      const p = postureFrom({ signals: sigs, findings, scan })
+      expect(p.gaps).toEqual(b.posture.gaps)
+      expect(p.strengths).toEqual(b.posture.strengths)
+      expect(p.fresh).toBe(scan !== null && scan.ok && !scan.stale)
+    }
   })
 })

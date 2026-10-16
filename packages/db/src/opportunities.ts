@@ -416,7 +416,13 @@ export async function servicesAddSuggested(
 type ScanLike = { readonly ranAt: Date; readonly ok: boolean }
 type FindingLike = { readonly signalKey: string; readonly observed: boolean; readonly gap: boolean | null; readonly detail: string | null }
 
-function factsFrom(
+/**
+ * One company's rows as `needsOf` reads them. Exported (2026-10-16) for the
+ * company page's "At a glance" card, which hands it the scan row it ALSO
+ * reads the posture from: two reads of "the latest scan" can straddle a new
+ * one, and the card would put one scan's gaps beside another's needs.
+ */
+export function opportunityFactsFrom(
   company: CompanyRow,
   scan: (ScanLike & { readonly findings: readonly FindingLike[] }) | null,
   audit: SiteAuditRow | null,
@@ -463,7 +469,8 @@ export interface CompanyOpportunity {
   readonly services: readonly { readonly name: string; readonly answers: readonly NeedKey[]; readonly suggested: boolean; readonly id: string | null }[]
 }
 
-function matched(reading: NeedsReading, catalogue: readonly ServiceRow[]): CompanyOpportunity['services'] {
+/** The catalogue's services that answer a reading, most first; the suggestions, labelled, while there is no catalogue. */
+export function servicesMatched(reading: NeedsReading, catalogue: readonly ServiceRow[]): CompanyOpportunity['services'] {
   if (catalogue.length > 0) {
     return servicesFor(reading.needs, catalogue).map((m) => ({ name: m.service.name, answers: m.answers, suggested: false, id: m.service.id }))
   }
@@ -482,8 +489,8 @@ export async function companyOpportunity(
     servicesList(db, args.orgId, { activeOnly: true }),
   ])
   const scan = latest ? { ranAt: latest.scan.ranAt, ok: latest.scan.ok, findings: latest.findings } : null
-  const reading = needsOf(factsFrom(args.company, scan, audit, staleAfterDaysOf(icp?.definition)), args.now)
-  return { company: args.company, reading, services: matched(reading, catalogue) }
+  const reading = needsOf(opportunityFactsFrom(args.company, scan, audit, staleAfterDaysOf(icp?.definition)), args.now)
+  return { company: args.company, reading, services: servicesMatched(reading, catalogue) }
 }
 
 /** How many companies the CRM-wide reading looks at, most recently added first. */
@@ -542,10 +549,10 @@ export async function opportunitiesAcross(
   const results = companies
     .map((company): CompanyOpportunity => {
       const reading = needsOf(
-        factsFrom(company, scanByCompany.get(company.id) ?? null, auditByCompany.get(company.id) ?? null, staleAfterDays),
+        opportunityFactsFrom(company, scanByCompany.get(company.id) ?? null, auditByCompany.get(company.id) ?? null, staleAfterDays),
         args.now,
       )
-      return { company, reading, services: matched(reading, catalogue) }
+      return { company, reading, services: servicesMatched(reading, catalogue) }
     })
     .filter((o) => o.reading.needs.length > 0)
     .filter((o) => !args.need || o.reading.needs.some((n) => n.key === args.need))

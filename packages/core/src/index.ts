@@ -34,6 +34,8 @@ export * from './normalise.js'
 export * from './send.js'
 export * from './proposal.js'
 export * from './brief.js'
+// At a glance (2026-10-16): the company page's card, composed from the readings above.
+export * from './company-summary.js'
 export * from './voice.js'
 export * from './llm/provider.js'
 export * from './suppression-source.js'

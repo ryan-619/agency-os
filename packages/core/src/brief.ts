@@ -78,8 +78,30 @@ const QUESTIONS: Readonly<Record<string, string>> = {
   frame_protection: 'Does anything legitimately embed your app in a frame?',
 }
 
-export function meetingBrief(input: BriefInput): Brief {
-  const companyName = input.company.name ?? input.company.domain
+/** What a scan says about a company's posture, read by `postureFrom`. */
+export interface Posture {
+  /** A scan that reached the site and is inside its deadline. Nothing below is read without one. */
+  readonly fresh: boolean
+  /** Heaviest first, worded with the ICP's `why`. */
+  readonly gaps: readonly { readonly signalKey: string; readonly why: string; readonly detail: string | null }[]
+  /** Signal KEYS, never `why`. */
+  readonly strengths: readonly string[]
+}
+
+/**
+ * The posture rule, in one place (2026-10-16). It was `meetingBrief`'s own
+ * code; the company page's "At a glance" card (`companySummary`) reads a
+ * scan the same way, so it was lifted out rather than written a second time
+ * — two copies of "only a current, scored observation is a talking point"
+ * would drift, and the one that drifted would quote a gap the other refused.
+ * Moved verbatim: the brief's behaviour is unchanged, and brief.test.ts pins
+ * it.
+ */
+export function postureFrom(input: {
+  readonly signals: Readonly<Record<string, { readonly why: string }>>
+  readonly findings: readonly BriefFinding[]
+  readonly scan: { readonly ranAt: Date; readonly ok: boolean; readonly stale: boolean } | null
+}): Posture {
   const signals = input.signals
 
   const fresh = input.scan !== null && input.scan.ok && !input.scan.stale
@@ -105,6 +127,13 @@ export function meetingBrief(input: BriefInput): Brief {
         .filter((f) => f.observed && f.gap === false)
         .map((f) => f.signalKey)
     : []
+  return { fresh, gaps, strengths }
+}
+
+export function meetingBrief(input: BriefInput): Brief {
+  const companyName = input.company.name ?? input.company.domain
+
+  const { fresh, gaps, strengths } = postureFrom({ signals: input.signals, findings: input.findings, scan: input.scan })
 
   // §2.2. A stale scan is not quoted; it is named as the reason the posture
   // section is thin, and the fix is in the caveat.

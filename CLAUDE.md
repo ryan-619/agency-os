@@ -296,6 +296,15 @@ connector" — it was keyed by bare names and handed full ones — and "Tools
 waiting on you" on /approvals reads a card as chat does. The `agency` server
 has seventy-seven tools.
 
+**Then at a glance (2026-10-16), on no migration** (§2, "At a glance: the
+company page in a dozen lines"): the company page opens with one card that
+says, from the readings the cards below it already make, what the latest
+scan says and whether it is current, its gaps and what is in place, what
+the business needs and what answers it, how the deal stands, what is
+recorded and how much research is on file. Derived on every load — never
+stored, never printed by a tool, read by nothing outbound — and no model is
+asked. The `agency` server still has seventy-seven tools.
+
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
 machine"), which needs no public address, because everything but chat is
@@ -2702,6 +2711,98 @@ landing between a writer's check and its delete is caught by the read after
 the writes, and is not tested: PGlite has one session. And CI's Postgres 16
 job is what proves the writers there.
 
+### At a glance: the company page in a dozen lines (2026-10-16)
+
+**A card that composes the page's readings and adds no rule about
+evidence.** `SummarySlot` (`apps/web/src/components/company/summary.tsx`)
+sits at the top of the company page, under "Ask the assistant", and renders
+`companySummary(facts, now)` (`packages/core/src/company-summary.ts`, pure):
+a headline, then the evidence state with its date and score, the gaps in
+the ICP's `why` (heaviest first, five, then "+N more"), what is in place by
+signal KEY, each need with its source and date, the services that answer
+them (suggestions labelled), the deal in `get_pipeline`'s words ("needs a
+person", "drifting", "on track", with its reasons), what is recorded from
+research, the research count, and at most three not-assessed sentences —
+every line cut at `SUMMARY_LINE_MAX` (240) code points, under
+`COMPANY_SUMMARY_NOTE`: "never evidence", and a quote comes from the
+current scan's cards. The posture is `postureFrom`, lifted verbatim out of
+`meetingBrief` so the brief and the card share one rule — a third copy of
+it, beside the brief's and `get_company`'s, is what the card would
+otherwise have been; the needs are `needsOf`'s, the services
+`servicesMatched`'s, the deal `dealHealth` over `dealHealthFacts` and
+`rottingState` exactly as `get_pipeline` reads it, and currency `isStale` on
+`ran_at`. The evidence state is in `needsOf`'s order — an `.inbound`
+placeholder, a no-website placeholder, never scanned, past its deadline
+(failed or not), did not reach the site, current — so the card and the
+needs card below it never disagree about one scan. A scan that did not
+reach the site claims no posture and keeps `needsOf`'s dated `site_down`;
+a stale scan shows no gap, no strength and no score; a placeholder is never
+told to scan, because the scanner refuses both, and an `.inbound` lead
+shows no needs at all. **Its words claim no more than the readings do**
+(review, 2026-10-16). A stale or missing scan speaks for the scan alone —
+"none of its findings is current", "nothing a scan would observe is
+claimed" — because a PageSpeed audit is current on its own clock and its
+dated need is listed beside it; the card said nothing about the site was
+current above a current "Slow on phones". A no-website placeholder is
+worded from `needsOf`'s reading of its listing, never from the placeholder
+alone (`noSiteWords`): "Google Maps lists no website for them (read D)"
+only beside the dated `no_website` need; a listing that names a profile or
+a builder address is named as it names it; one that names a site of its
+own — filed under the placeholder because the host could not be used, or
+added to Google since and refreshed by place id — reads "Filed without a
+website, but its Google listing names one (host)"; and with no listing, or
+one past `LISTING_STALE_DAYS`, "whether they have one is not established".
+And a placeholder's remedy is the one that exists: a company's domain
+cannot be changed (`PATCH /api/companies/[id]` answers 400 to `domain`), so
+an `.inbound` lead and a placeholder whose listing names a site are told to
+add that domain as a company of its own, never to "set the real domain".
+
+**The latest scan is read once.** `companySummaryFacts`
+(`packages/db/src/company-summary.ts`) reads the company in its org, then
+in one `Promise.all` the latest scan with its findings and score
+(`latestScanWithFindings`), the latest audit, the active ICP, the
+catalogue, the open deal and the research count — and that one scan row
+feeds both the posture and `needsOf`, through `opportunityFactsFrom`,
+exported from `opportunities.ts` beside `servicesMatched` for it (both were
+private, and `companyOpportunity` and `opportunitiesAcross` call them by the
+new names). Two reads of "the latest scan" can straddle a new one, and the
+card would set one scan's gaps beside another scan's needs. The ICP is read
+as `get_company` reads it — one that does not parse is no profile, signals
+`{}` — and the threshold through `staleAfterDaysOf`. A read that fails costs
+its own line, never a claim: a research count it could not read is null and
+no line (never "0"), a deal whose health could not be read is its stage
+alone. A fault anywhere costs the card alone: the slot catches it, logs the
+error's class and nothing else, and renders nothing, because an error
+escaping a server component renders `app/error.tsx` for the whole page.
+Reads only — nothing is written or audited by looking.
+
+**Never stored, never in a tool, never outbound.** `get_company` is
+unchanged: it already prints the score, the gaps, what is in place, what is
+recorded and the research count; needs are `get_opportunities`' and a
+deal's health `get_pipeline`'s; and a glance there would cost tokens on
+every call, in chat and in the unattended brief, while its `data` never
+reaches the model — only the summary does. The card leaves out the
+company's description (unbounded free text from research, on the edit card)
+and its domain (an `.inbound` placeholder is named after a person). Nothing
+outbound imports it. `packages/core/test/company-summary.test.ts` holds the
+words and the edges, and the agreement with the brief's posture and with
+`needsOf`; `packages/db/test/company-summary-facts.test.ts` holds the one
+read against `companyOpportunity`'s needs for the same rows, the failed scan
+over an older good one, the deal, another org's rows, a profile that does
+not parse and the absence of writes.
+
+**Stated residuals.** About ten more queries per company page, through
+Vercel's one-connection pool, some repeating `OpportunitiesSlot`'s — React
+`cache()` can share them later; the lede above the card still shows a stale
+scan's score unmarked, while the card says the scan is past its deadline,
+and still reads "no website of its own" for every placeholder (since 0022,
+pinned by `services-settings.test.ts`); `needsOf`'s never-scanned sentence,
+which the card repeats as a not-assessed line, still says to scan "before
+saying anything about it" beside a current PageSpeed need;
+and a teammate can copy the card's words into a message by hand, as from
+any card, and the send path then judges the draft by the scan its
+`created_at` names, whatever the words' origin.
+
 ### Editing a draft's words (2026-10-08)
 
 **A person changes the words; the send path still judges them.** `editDraft`
@@ -3045,6 +3146,7 @@ quiet stretch. Every panel dates evidence from `scans.ran_at` through
 | 0026 ✅ | the suggested answer's prompt and guard (`reply-draft.ts`: `replyDraftPrompt`, `parseReplyDraft`, `replyDraftProblems`, `amountsIn`), and the sixth `LlmTask`, `draft_reply`, carrying lead data |
 | 0029 ✅ | what a page or a text SHOWS (`contact-evidence.ts`: `findEmailsIn`, `findPhonesIn`, `textShowsEmail`, `textShowsPhone`, `textNamesPerson`, `textShowsDomain`, `isShutDownHost`, `isRoleAddress`, `maskAddress`, `maskPhone`, `pageLinks`, `ADDRESS_SOURCE_PATTERN`, `addressSourceWords`, `readablePathProblem`, `connectorFailureKind`, `connectorResultFailure`), and the brief's two clocks (`briefHeader`) |
 | delete (2026-10-15) ✅ | the `deletes_records` rule (`risk.ts`): the four deletes are high and carded, and `runsWithoutApproval` names no new rule |
+| at a glance (2026-10-16) ✅ | the posture rule lifted out of the brief (`brief.ts`: `postureFrom`, which `meetingBrief` now calls) and the company page's card composed over it (`company-summary.ts`: `companySummary`, `COMPANY_SUMMARY_NOTE`, `SUMMARY_LINE_MAX`) |
 
 ---
 
@@ -5569,9 +5671,27 @@ button passes none. The model is switched on by `./tools/run-worker.sh
 --ai` (`LLM_PROVIDER=anthropic`, `LLM_MODEL`, `LLM_ALLOW_REMOTE_LEAD_DATA=true`,
 saved like the other answers and handed to the worker only on a chat-on
 run, which is the one that hands it the Anthropic key), and it also powers
-reply triage. `summarise_findings` has its task key and no caller yet; wiring it is
-adding an `attemptText` call beside the deterministic answer that already
-exists, never in place of it. (The agent TOOL named `classify_reply` is a
+reply triage. **`summarise_findings` has its task key and no caller, on
+purpose** (2026-10-16). Its deterministic answer exists now —
+`companySummary`, the company page's "At a glance" card (§2) — and no model
+call was built beside it: a model shown only those lines could only reword
+them, storing a rewording would take a table, a queue and a sweep to say
+nothing new, and prose from a model about a company is already one click
+away, "Ask the assistant about this company", under chat's budget and gate.
+If the operator, having used the card, asks for model prose, the smallest
+correct shape is synchronous and stores nothing: `POST
+/internal/companies/:id/summary` on the worker, beside the connector probe
+in `apps/agent/src/http/server.ts` and behind the same bearer; the worker
+gathers `companySummaryFacts` itself and trusts no material from the web; a
+per-org daily cap, counted under `pg_advisory_xact_lock` from
+`summary.asked` audit rows written BEFORE the call; `attemptText` with
+`task: 'summarise_findings'` and `maxTokens` about 300, beside the card and
+never in place of it; its words checked as a suggested answer's are
+(`amountsIn`, links, and the testing words — `replyDraftProblems`'
+`TESTING_RE`, exported then); and the text handed back to the browser and
+shown once, labelled a reading for the team. No migration, no table, no
+poller: it is there exactly when chat is, because the laptop worker holds a
+model key only on a chat-on run. (The agent TOOL named `classify_reply` is a
 different thing: it records a kind a model or a person chose, and calls no
 model itself.)
 

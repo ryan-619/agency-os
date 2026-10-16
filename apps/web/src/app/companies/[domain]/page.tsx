@@ -19,6 +19,7 @@ import { NotesSlot } from '@/components/company/notes'
 import { OpportunitiesSlot } from '@/components/company/opportunities'
 import { QuotesSlot } from '@/components/company/quotes'
 import { ShareSlot } from '@/components/company/share'
+import { SummarySlot } from '@/components/company/summary'
 import { ResearchSlot } from '@/components/company/research'
 import type { CompanySlotProps } from '@/components/company/slot'
 import { ContactsPanel } from '@/components/outreach/contacts'
@@ -190,6 +191,8 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
           </a>
         </p>
       ) : null}
+      {/* At a glance (2026-10-16): the cards below, in a dozen lines — derived, never evidence. */}
+      <SummarySlot {...slot} />
       <CompanyEditSlot {...slot} />
       <OpportunitiesSlot {...slot} />
       <ShareSlot {...slot} />

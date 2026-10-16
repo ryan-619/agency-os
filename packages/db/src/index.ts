@@ -70,6 +70,8 @@ export * from './notes.js'
 export * from './research.js'
 export * from './tasks.js'
 export * from './opportunities.js'
+// At a glance (2026-10-16): the company page card's facts, the latest scan read once.
+export * from './company-summary.js'
 export * from './unsubscribe.js'
 export * from './unsubscribe-mint.js'
 export * from './icp-profiles.js'
