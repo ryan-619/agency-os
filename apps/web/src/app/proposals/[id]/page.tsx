@@ -105,7 +105,12 @@ export default async function ProposalPage({ params }: { params: Promise<{ id: s
           {row.status === 'draft' ? ' Regenerate it before marking it sent.' : null}
         </div>
       ) : null}
-      <ProposalStatus id={row.id} status={row.status} canWrite={canWrite} />
+      <ProposalStatus
+        id={row.id}
+        status={row.status}
+        canWrite={canWrite}
+        companyHref={`/companies/${encodeURIComponent(company.domain)}`}
+      />
       <ProposalLinksSlot {...slot} evidenceSuperseded={evidenceSuperseded} />
       <ProposalShareSlot {...slot} />
 

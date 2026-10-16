@@ -61,12 +61,15 @@ export default async function ContactsPage({
   const paused = pausedParam === 'yes' ? true : pausedParam === 'no' ? false : undefined
   const companyParam = one(params['company'])
   const companyId = UUID.test(companyParam) ? companyParam : undefined
+  // "Added by the assistant" (2026-10-15): the people the chat agent filed,
+  // to find and clear the ones it invented before 0029.
+  const source = one(params['source']) === 'agent' ? 'agent' : undefined
   const page = Math.max(1, Math.min(1000, Number.parseInt(one(params['page']) || '1', 10) || 1))
   const limit = LEDGER_DEFAULT_LIMIT
 
   const db = getDb() as unknown as AgencyDb
   const [rows, campaigns] = await Promise.all([
-    contactsLedger(db, user.orgId, { q: q || undefined, paused, companyId, limit, offset: (page - 1) * limit }),
+    contactsLedger(db, user.orgId, { q: q || undefined, paused, companyId, source, limit, offset: (page - 1) * limit }),
     listCampaigns(db, user.orgId),
   ])
   // One ledger read per person on the page — at most `limit` of them.
@@ -94,6 +97,7 @@ export default async function ContactsPage({
       linkedinUrl: r.linkedinUrl,
       companyDomain: r.companyDomain,
       companyName: r.companyName,
+      addedByAssistant: r.source === 'agent',
       zone: zoneLabel(r.timeZone, r.companyTimeZone),
       zoneMissing: !r.timeZone && !r.companyTimeZone,
       pausedAt: r.pausedAt ? r.pausedAt.toISOString() : null,
@@ -126,6 +130,7 @@ export default async function ContactsPage({
     if (q) sp.set('q', q)
     if (paused !== undefined) sp.set('paused', paused ? 'yes' : 'no')
     if (companyId) sp.set('company', companyId)
+    if (source) sp.set('source', source)
     if (p > 1) sp.set('page', String(p))
     const s = sp.toString()
     return s ? `/contacts?${s}` : '/contacts'
@@ -169,10 +174,23 @@ export default async function ContactsPage({
           <option value="yes">Only paused</option>
           <option value="no">Only not paused</option>
         </select>
+        <select name="source" defaultValue={source ?? ''} style={{ padding: '6px 8px' }} aria-label="Added by">
+          <option value="">Added by anyone</option>
+          <option value="agent">Added by the assistant</option>
+        </select>
         {companyId ? <input type="hidden" name="company" value={companyId} /> : null}
         <button type="submit" style={{ padding: '6px 12px', fontSize: 13 }}>Filter</button>
-        {q || paused !== undefined || companyId ? <a href="/contacts" style={{ fontSize: 13 }}>Clear</a> : null}
+        {q || paused !== undefined || companyId || source ? <a href="/contacts" style={{ fontSize: 13 }}>Clear</a> : null}
       </form>
+
+      {source ? (
+        <div className="note" style={{ marginTop: 12 }}>
+          <strong>Added by the assistant.</strong> Until 13 October it could write down a person nobody had shown it —
+          an invented name, an address guessed from a pattern — so “check it before sending” under an address is a
+          warning to take seriously. Choose the people to remove and press Delete selected: anybody something went to
+          or came from, or who said no, is kept, and the answer says why — an owner erases them instead.
+        </div>
+      ) : null}
 
       <ContactsLedger
         rows={views}

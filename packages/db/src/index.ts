@@ -78,6 +78,8 @@ export * from './digest.js'
 export * from './linkedin-step.js'
 export * from './proposal-shares.js'
 export * from './erasure.js'
+// Delete, and what it will not delete (2026-10-15): each refuses what an erasure, a withdraw or a cancel is for.
+export * from './deletes.js'
 export * from './connector-tools.js'
 export * from './templates.js'
 export * from './sms.js'

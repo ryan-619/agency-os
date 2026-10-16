@@ -210,6 +210,13 @@ describe('the qualification data core', () => {
       expect(gamma.score).toBeNull()
       expect(gamma.lastScanAt).toBeNull()
     })
+
+    it('says how each company was filed — /companies’ “Added by the assistant” reads it (2026-10-15)', async () => {
+      await db.insert(schema.companies).values({ orgId, domain: 'invented.test', source: 'agent' })
+      const rows = await companyList(db, orgId)
+      expect(rows.find((r) => r.domain === 'invented.test')!.source).toBe('agent')
+      expect(rows.find((r) => r.domain === 'gamma.test')!.source).not.toBe('agent')
+    })
   })
 
   describe('freshness (§2.2)', () => {

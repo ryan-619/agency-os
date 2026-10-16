@@ -16,7 +16,7 @@ import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import { z } from 'zod'
 import { type Principal } from '@agency/core'
-import type { AgencyDb } from '@agency/db'
+import { companyDelete, type AgencyDb } from '@agency/db'
 import * as schema from '@agency/db/schema'
 import type { DomainAnswer, PageRead } from '@agency/scanner'
 import seed from '../../db/seed/icp-security-gap-saas.json' with { type: 'json' }
@@ -394,6 +394,26 @@ describe('the web tools', () => {
       const out = await run(scanCompany, { domain: 'jo-gmail-com.inbound', name: 'Jo' }, { web: fakeWeb({}) })
       expect(refusalOf(out)).toMatchObject({ code: 'not_permitted', message: expect.stringContaining('Nothing was added or scanned.') })
       expect(await db.select().from(schema.companies).where(eq(schema.companies.domain, 'jo-gmail-com.inbound'))).toEqual([])
+    })
+
+    /** Delete (2026-10-15): the agent does not file again a company a teammate deleted, however it was shown. */
+    it('refuses a domain a teammate deleted, before reading anything, even one the person typed', async () => {
+      const [farmley] = await db.insert(schema.companies).values({ orgId, domain: 'farmley.in', name: 'Farmley' }).returning()
+      expect(await companyDelete(db, { orgId, companyId: farmley!.id, actor: ownerId })).toMatchObject({ ok: true })
+      const web = fakeWeb({ 'https://farmley.in/': htmlPage('https://farmley.in/', '<title>Farmley</title><h1>Farmley snacks</h1>') })
+      const out = await run(scanCompany, { domain: 'farmley.in', name: 'Farmley' }, {
+        web,
+        conversation: fakeLedger([{ text: 'scan farmley.in please', origin: PERSON }]),
+      })
+      expect(refusalOf(out)).toEqual({
+        code: 'not_permitted',
+        message: expect.stringMatching(
+          /^farmley\.in was deleted by a teammate on \d{4}-\d{2}-\d{2}; a person can add it again on \/companies\. Nothing was added or scanned\.$/,
+        ),
+      })
+      expect(web.asked).toEqual([])
+      expect(await db.select().from(schema.companies).where(eq(schema.companies.domain, 'farmley.in'))).toEqual([])
+      expect(await db.select().from(schema.scans)).toEqual([])
     })
   })
 })

@@ -63,8 +63,8 @@ import {
 import {
   COMPLIANCE_UNSENT_STATUSES, addSuppression as addSuppressionRow, appendAudit, auditSuppressionAdded, companiesSetReachFacts,
   companiesUpdate, companyPatchInput, consentLedgerFor, contactInput, contactPatchInput, contactPauseByHand,
-  contactResumeByHand, contactsLedger, contactsUpdate, createContact, findCompanyByDomain,
-  importCompanies as importCompanyRows, isKnownTimeZone, isSharedNumberOptOutPause, updateContactTimeZone,
+  contactResumeByHand, contactsLedger, contactsUpdate, createContact, deletedCompanyAt, deletedCompanyKeys,
+  deletedCompanyWords, findCompanyByDomain, importCompanies as importCompanyRows, isKnownTimeZone, isSharedNumberOptOutPause, updateContactTimeZone,
   type ConsentLedger, type ContactPauseOutcome, type ContactResumeOutcome, type ContactRow,
   type ContactsUpdateOutcome, type LedgerRow,
 } from '@agency/db'
@@ -1051,6 +1051,18 @@ export const addCompany: AgencyToolSpec<typeof addCompanyShape> = {
       )
     }
 
+    // A company a teammate deleted is not filed again by the agent (2026-10-15);
+    // a person adds one with a website back on /companies, which is a person
+    // deciding. A business with no website is known by its placeholder, which
+    // the same name in the same city or at the same address rebuilds.
+    const deletedAt = deletedCompanyAt(await deletedCompanyKeys(ctx.db, ctx.orgId), { domain })
+    if (deletedAt) {
+      const words = target.none
+        ? deletedCompanyWords(oneLine(input.name ?? '', 80) || 'This business', deletedAt, true)
+        : deletedCompanyWords(domain, deletedAt)
+      return fail('not_permitted', `${words} Nothing was added.`)
+    }
+
     // True data only: the phone was shown, and the website was shown and answers.
     const phoneOpts = phoneOptsFor({ country: input.country ?? null, domain })
     let note: string | null = null
@@ -1389,7 +1401,18 @@ export function makeImportCompanies(opts: { readonly budgetMs?: number } = {}): 
       // shown, and its website was shown and answers — six at a time, inside
       // the call's time. A line not checked in time is refused, never let through.
       const verdicts = new Map<string, { readonly refused: string } | { readonly phone: string | null }>()
-      const queue = candidates.filter((c) => !present.has(c.domain))
+      // A company a teammate deleted is not filed again by the agent — one with
+      // no website by its placeholder; a person adds one with a website back on /companies.
+      const deleted = await deletedCompanyKeys(ctx.db, ctx.orgId)
+      for (const c of candidates) {
+        const at = present.has(c.domain) ? null : deletedCompanyAt(deleted, { domain: c.domain })
+        if (!at) continue
+        const words = c.none
+          ? deletedCompanyWords(oneLine(c.row.name ?? '', 80) || 'This business', at, true)
+          : deletedCompanyWords(c.domain, at)
+        verdicts.set(c.domain, { refused: words })
+      }
+      const queue = candidates.filter((c) => !present.has(c.domain) && !verdicts.has(c.domain))
       const clock = deadline(budgetMs)
       try {
         const check = async (c: Candidate): Promise<{ refused: string } | { phone: string | null }> => {

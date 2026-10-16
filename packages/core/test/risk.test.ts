@@ -268,8 +268,9 @@ describe('the registry cannot drift from what is reachable', () => {
       expect(AGENCY_TOOL_RISK[read].slice(0, 2), read).toEqual(['low', 'read_only'])
       expect(runsWithoutApproval(call(`mcp__agency__${read}`)), read).toBe(true)
     }
-    expect(AGENCY_TOOL_NAMES).toHaveLength(23 + 26 + 3 + 2 + 5 + 4 + 1 + 1 + 1 + 1 + 1 + 2 + 3)
-    expect(AGENCY_TOOL_NAMES).toHaveLength(73)
+    // Delete, and what it will not delete (2026-10-15): four carded deletes.
+    expect(AGENCY_TOOL_NAMES).toHaveLength(23 + 26 + 3 + 2 + 5 + 4 + 1 + 1 + 1 + 1 + 1 + 2 + 3 + 4)
+    expect(AGENCY_TOOL_NAMES).toHaveLength(77)
   })
 
   it('never lets a write run without a person: every non-read tool but the scans is medium or high', () => {
@@ -316,7 +317,30 @@ describe('runsWithoutApproval', () => {
    */
   it('keeps a card on exactly the agency tools that reach a person, lift a pause or change how scans are scored', () => {
     const carded = AGENCY_TOOL_NAMES.filter((name) => !runsWithoutApproval(verdictFor(name))).sort()
-    expect(carded).toEqual(['activate_icp', 'edit_draft', 'enrol_contacts', 'queue_touch', 'resume_contact', 'set_campaign_steps'])
+    expect(carded).toEqual([
+      'activate_icp', 'delete_companies', 'delete_contacts', 'delete_meeting', 'delete_task', 'edit_draft',
+      'enrol_contacts', 'queue_touch', 'resume_contact', 'set_campaign_steps',
+    ])
+  })
+
+  /**
+   * Delete, and what it will not delete (2026-10-15). A delete touches only
+   * the agency's own records, as an internal write does, and still keeps its
+   * card: it cannot be undone, and what chat is asked to delete is what it
+   * is most likely to have misread. No card-free tool deletes anything.
+   */
+  it('keeps a card on every delete, under its own rule, at the high tier', () => {
+    const deletes = AGENCY_TOOL_NAMES.filter((n) => AGENCY_TOOL_RISK[n][1] === 'deletes_records').sort()
+    expect(deletes).toEqual(['delete_companies', 'delete_contacts', 'delete_meeting', 'delete_task'])
+    for (const name of deletes) {
+      const v = verdictFor(name)
+      expect(v, name).toMatchObject({ risk: 'high', rule: 'deletes_records', refuse: false })
+      expect(runsWithoutApproval(v), name).toBe(false)
+    }
+    // And nothing else whose name says it deletes runs without one.
+    for (const name of AGENCY_TOOL_NAMES.filter((n) => /delete|remove|erase/.test(n))) {
+      expect(runsWithoutApproval(verdictFor(name)), name).toBe(false)
+    }
   })
 
   /**

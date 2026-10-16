@@ -267,7 +267,34 @@ does its domain take mail). A business with no website is filed under its
 placeholder (`website: "none"`), never an invented domain. A connector that
 refuses a call (a missing key, a quota) is not called again that turn, is
 recorded on its row and shown on Settings → Connectors, and is named to the
-model the next turn. The `agency` server has seventy-three tools.
+model the next turn. The `agency` server had seventy-three tools.
+
+**Then delete everywhere (2026-10-15), on no migration** (§2, "Delete, and
+what it will not delete"): the operator asked for a delete everywhere in the
+CRM, above all to take out what the chat agent invented before 0029 — the
+people, the guessed addresses and the `business.site` cafés above, and the
+meetings and deals it made for them, which until now only an owner's
+erasure could remove, and that writes a guessed address onto the
+suppression list for good. A delete removes a record nothing outside the
+building ever depended on; where something did — a message went or may
+have, a reply or a call came in, somebody said no, or an opt-out could not
+be recorded — it refuses with a sentence naming the act that does apply
+(erase, withdraw, cancel, close the deal as lost, switch off), and nothing
+is written. Ten writers (`packages/db/src/deletes.ts`: a contact, a company,
+a deal, a meeting, a draft proposal, a draft quote, a task, a campaign, a
+template and an inactive profile), each one transaction, locked, audited
+inside it; a Delete on every page that shows one of them, a company's an
+owner's with its domain typed back, and bulk deletes with an "Added by the
+assistant" filter on /companies and /contacts; and four carded tools for
+chat under a new rule, `deletes_records` — `delete_contacts`,
+`delete_companies`, `delete_meeting` and `delete_task`. A deleted company is
+not filed again by the night shift or the agent — by its domain, its place
+id, or a no-website business's placeholder — and the pipeline's
+analytics stop counting a deleted deal's moves. On the way, the approval
+card stopped calling every agency tool "Run queue_touch on the agency
+connector" — it was keyed by bare names and handed full ones — and "Tools
+waiting on you" on /approvals reads a card as chat does. The `agency` server
+has seventy-seven tools.
 
 **For now the agency runs the worker on the operator's own machine**
 (`./tools/run-worker.sh`, DEPLOYING.md "Running the worker on your own
@@ -504,8 +531,14 @@ one.
   `UNIQUE (contact_id, channel)`, `granted` and `source` are both NOT NULL,
   `consents_source_is_not_blank` rejects an empty or whitespace-only source
   (NOT NULL alone accepts `''`), and no row is ever created by default. There
-  is no "unknown" state to misread. Deleting a contact removes their consent
-  rows, so a re-imported contact correctly starts from NO.
+  is no "unknown" state to misread. What no row means depends on the
+  channel: on SMS, voice and WhatsApp it is NO, because they need a granted
+  row; on email and LinkedIn, the cold channels, it means a message may go,
+  and only a recorded refusal stops one (`decideSend`'s consent step). So a
+  contact's delete, which takes their consent rows with them, refuses a
+  contact with a recorded refusal — on a cold channel it would lift the no
+  with no record, and `contactsLiftRefusal` is the one audited lift — and an
+  owner erases them instead (§2, "Delete, and what it will not delete").
 - **Suppression wins over everything.** `UNIQUE (org_id, kind, value)`, checked
   in the send path — never in the campaign builder. The send path does one
   indexed equality lookup, so `suppressions_value_is_normalised` makes the
@@ -775,7 +808,11 @@ Two more §2.2 links, both added in 0006 and after:
   the URL into a message they write, and a link can only be minted from a
   proposal a person already marked `sent`. Erasing a contact is owner-only and
   needs the contact's id typed back. Every SMS is drafted for one person from
-  a registered template and approved by a person on `/approvals`.
+  a registered template and approved by a person on `/approvals`. A delete
+  (2026-10-15) is a person's on the web, a company's an owner's with its
+  domain typed back, and chat's four deletes keep their card under
+  `deletes_records`; none removes a record anything outside the building
+  depended on (§2, "Delete, and what it will not delete").
 - **A run nobody is watching changes nothing but scan evidence (0020).** The
   morning brief's turn may call only low-tier tools — reads and scans — and
   the gate declines every other call at once, internal writes included, with
@@ -1082,7 +1119,7 @@ recorded-session mode, so anything needing the SDK to be *defined* is also
 untestable — and a package that CANNOT import the SDK cannot drag it into the
 Next module graph, which CI builds with no secrets on purpose.
 
-Seventy-three tools ship (`AGENCY_TOOL_NAMES`) — `read_page`, `find_contact_details` and `check_contacts` (low, reads of the open web from the worker) with true data only (0029), `record_research` (medium, an internal write) and `get_research` (low) with research (0028), `get_evidence_signals` (low, a read) with what changed (2026-10-09), `get_whats_working` (low, a read) with the field tools, since 0025 `get_night_finds` (low, a read), since 0024 `set_campaign_steps` (high, `leaves_the_building`,
+Seventy-seven tools ship (`AGENCY_TOOL_NAMES`) — `delete_contacts`, `delete_companies`, `delete_meeting` and `delete_task` (high, `deletes_records`, carded: a delete cannot be undone) with delete everywhere (2026-10-15), `read_page`, `find_contact_details` and `check_contacts` (low, reads of the open web from the worker) with true data only (0029), `record_research` (medium, an internal write) and `get_research` (low) with research (0028), `get_evidence_signals` (low, a read) with what changed (2026-10-09), `get_whats_working` (low, a read) with the field tools, since 0025 `get_night_finds` (low, a read), since 0024 `set_campaign_steps` (high, `leaves_the_building`,
 carded: its steps are words that will reach people), since 0023 `create_quote` and `update_quote` (medium,
 internal writes), `get_quote` and `list_quotes` (low) and `create_share_link` (medium, an internal write: a link
 sends nothing), the opportunity finder's five since 2026-10-08
@@ -1104,8 +1141,10 @@ and the operator's fifteen (below). Three are high: `queue_touch`,
 `enrol_contacts` — the other tool that drafts for somebody outside the
 company — and `resume_contact`, which lets campaigns write to a person again.
 The registry pins both directions (`packages/core/test/risk.test.ts`): the
-only `leaves_the_building` tools are `queue_touch` and `enrol_contacts`, both
-high, and no write but the three scans is low.
+only `leaves_the_building` tools are `queue_touch`, `enrol_contacts`,
+`set_campaign_steps` and `edit_draft`, all high; the only `deletes_records`
+tools are the four deletes, all high; and no write is low but the four
+derived writes (the three scans and `audit_website`).
 `get_pipeline` and `update_deal` arrived with Phase 5, once `deals` was a
 table something writes — before that a tool that reliably returned `[]` would
 have taught the model a false shape of the business. `draft_outreach` is the
@@ -2310,7 +2349,358 @@ of it; the ledger is memory, so after a worker restart a value shown only
 by a tool must be read again; a teammate cannot clear the "check it before
 sending" warning by retyping the same address, which is no change; and the
 contacts already invented before 0029 are still on file — `check_contacts`
-names them, and a person removes them.
+names them, and a person deletes them, or chat does with a card (§2,
+"Delete, and what it will not delete").
+
+### Delete, and what it will not delete (2026-10-15)
+
+**A delete removes a record nothing outside the building ever depended
+on.** The operator asked for a delete everywhere in the CRM, and the
+records that made it urgent were the chat agent's own from before 0029:
+people who do not exist, guessed addresses, cafés filed under a dead
+`business.site` domain, and the meetings, deals and tasks it made for them.
+"A person removes them", true data only said, and no path did but an
+owner's erasure — the wrong tool, because it writes the guessed address,
+which may be a real person's, onto the suppression list for good. Where
+something outside did depend on a record — a message went or may have, a
+reply or a call came in, somebody said no, or an opt-out could not be
+recorded — the delete refuses with a sentence naming the act that does
+apply (erase, withdraw, cancel, close the deal as lost, switch off), and
+nothing is written. No migration.
+
+**Never deleted, by anybody:** a message that went or may have gone
+(`sending`, `sent`, `failed`, and the older `delivered`, `bounced` and
+`replied`), an inbound reply, a call, a suppression, a consent refusal, an
+approval, a user, the audit log, and a scan, finding or score on its own. A
+never-sent outbound row (`awaiting_approval`, `approved`, `queued`) goes with
+what it was for, and the tasks hanging off it cascade; a `refused` row is
+kept — it never went, and it is the record that it was stopped — unless the
+delete would leave it naming nothing (0008's `touches_names_a_subject`),
+when it goes too. A kept row that named only the person is given their
+company first, as an erasure does.
+
+**Ten writers** (`packages/db/src/deletes.ts`, exported from `@agency/db`
+and `@agency/db/queries`). Each is one transaction that locks its row `FOR
+UPDATE` and asks its refusals again under that lock; reads again after its
+writes, so a worker's claim between the check and the delete — a draft
+turned `sending` — throws and rolls everything back; and appends its audit
+row inside the transaction, never caught, because a delete with no record
+that it happened must not exist. A missing id, a malformed one and another
+org's are all `not_found`. Every id is read through `uuidOf` first —
+lower-cased, as the database prints one — and so is every single-record
+DELETE route's: Postgres matches a uuid whatever its case, but the keep
+reasons are read from Maps keyed by the ids it RETURNS, so `DELETE
+/api/contacts/<ID IN CAPITALS>` once deleted a person with a refusal on
+file, a call, or an opt-out nobody could record (review, 2026-10-15); the
+chat tools lower-case the model's ids before they look them up and count
+them once, because `z.uuid()` takes capitals and an existing record was
+reported "no such … — it may already have been deleted". A
+refusal decided by a row's state locks that row whatever its state and
+reads the state in JS, because a status filter would not wait for a row a
+teammate is changing. The detail is ids, counts and kinds. The refusals:
+
+- `contactDelete` — `in_flight` (a message to them is `sending`: try again
+  in a minute); `shared_number` (a text from a number they share asked to
+  stop and could not be recorded — held hard for it,
+  `isSharedNumberOptOutPause`, asked before the pause's class, or listed by
+  a governing row, `heldForUnrecordedSharedNumber`): "they may not have sent
+  it. Record the number on /suppressions; if that text paused them, Resume
+  them on /contacts too; then they can be deleted." — the weakest reason,
+  and never an erasure, which would put the email of somebody who may
+  never have asked on the suppression list for good (review, 2026-10-15:
+  it was read as their own unrecorded opt-out, and worded so); else
+  `must_erase`, worded by why: something went to them or came from them, a
+  call named them, or an answer to a reply of theirs is waiting; an opt-out
+  or an erasure of THEIRS could not be recorded (an audit row in
+  `DIGEST_OPT_OUT_FAILURES` naming them, or a pause of class
+  `opt_out_not_recorded` or `erasure` that is not the hard hold); or a
+  consent row says no. That last is
+  why a delete is not a quiet Lift refusal: consents cascade, and on email
+  and LinkedIn — cold channels, where no row means a message may go — it
+  would lift the no with no record, which only `contactsLiftRefusal` does,
+  audited. Their consent rows are locked `FOR UPDATE` after the person,
+  every one whatever it says (review, 2026-10-15): a "no" recorded during
+  the delete is the upsert's `ON CONFLICT DO UPDATE` of a row that said yes,
+  which takes no lock on the contact, and the cascade took it with no
+  trace; now it waits, then falls back to an INSERT whose foreign key fails,
+  so whoever records it is told. For an unrecorded opt-out the sentence
+  says to record it on /suppressions SO NOTHING REACHES THEM, and that an
+  owner erases the person to remove them — it said "record it, or erase
+  them", and recording it never lets the delete through (the audit row is
+  permanent, and Resume refuses the pause of their own unrecorded opt-out
+  or an unfinished erasure outright). Otherwise their drafts go, then the contact; consents, notes
+  about them and follow-up runs cascade, and meetings and quotes keep their
+  rows with the person taken off. `contact.deleted { companyId,
+  draftsRemoved, consentsRemoved, notesRemoved }`.
+- `companyDelete` — `in_flight`; `has_history` (anything inbound, anything
+  that went or may have, or a call, for the company or anybody there);
+  `call_record` (a done call or visit task whose outcome was "asked to
+  stop" — `taskDelete`'s own predicate, `recordsAnAskToStop`: that is where
+  the number's suppression came from, and the cascade took it while
+  `delete_task` refused it; review, 2026-10-15);
+  `contact_must_be_erased` (a person there the contact's delete would keep
+  for an erasure, read by the same `contactKeepReasons`, so the two cannot
+  disagree about a person), and `shared_number` for a person there holding
+  such a number, in the same words; `deal_won`; `quote_sent` (any quote past draft, by number — and
+  one sent and revised back to a draft, `quotesEverSent`, below);
+  `proposal_sent`; `meeting_held` (an outcome recorded). Otherwise its
+  people, their drafts and its own (an agent's company-only draft, a quote's
+  or a link's draft email), then the company: scans with their findings and
+  scores, deals, meetings, draft quotes and proposals, share links, notes,
+  tasks, research and site audits cascade. It locks its people, then the
+  company, then its people again — contact before company, the order an
+  erasure and a reply hold them, and once the company is locked nobody can
+  be added under it — then its quotes, proposals, meetings, tasks (every
+  kind) and deals, every row whatever its state, and decides from them in
+  JS (review, 2026-10-15): read with a status filter, a teammate's "Mark as
+  sent", drag to Won, recorded outcome or "asked to stop" landing in
+  between was cascaded away. Quotes, proposals and meetings before deals,
+  the order their own writers take them; the counts on the audit row come
+  from the locked rows. `company.deleted { domain, name, placeId, contacts,
+  drafts, deals, meetings, quotes, proposals, scans }` — `domain` and `name`
+  null for a booking page's `.inbound` placeholder, which is a person's
+  address and their name; a no-website business's `.nosite.invalid`
+  placeholder IS stored (review, 2026-10-15: it is built from the
+  business's own name and place, never anybody's address, and it is the
+  only key one add_company filed with website "none" has), and `/audit`
+  names such a row by the business's name.
+- `dealDelete` — `deal_won` (move it off Won first); its meetings,
+  proposals and tasks stay with the deal taken off, and the next automatic
+  move opens a new one. It locks the proposals, meetings and tasks naming
+  the deal before the deal (review, 2026-10-15): the company's order, child
+  before deal — locked deal-first, its SET NULL waited on a meeting a
+  company's delete held while that delete waited on the deal.
+  `deal.deleted { companyId, stage }`.
+- `meetingDelete` — `outcome_recorded`, and `replaces_rescheduled` for a
+  meeting that replaced a rescheduled one (`meetingsThatReplacedOne`: its
+  `meeting.booked` row names `rescheduledFrom`, or the original's uncaught
+  `meeting.outcome_recorded` row names it as `rescheduledTo`) — "It
+  replaced a rescheduled meeting; cancel it instead." Deleted, it left the
+  original "rescheduled" to nothing, which no screen can correct (review,
+  2026-10-15); the meeting page (`links.from`) and the company page's row
+  offer no Delete on one. The deal does not move back.
+  `meeting.deleted { companyId, startsAt, source }`.
+- `proposalDelete`, `quoteDelete` — `not_draft` (withdraw it instead).
+  A quote that ever went out is not deletable either (`quotesEverSent`: a
+  `quote.sent` row naming it, or any link made for it, revoked included —
+  a link is minted only for a sent quote): editing a sent quote makes it a
+  draft again and clears `sent_at` (`quoteUpdate`), and deleted, its number
+  went to the next quote raised while a buyer held it (review,
+  2026-10-15). The quote page passes `everSent`, so the editor offers no
+  Delete after a revision, and the confirm says to mark it sent and
+  withdraw it instead if its Print/PDF went to a buyer. `proposal.deleted
+  { companyId }`, `quote.deleted { companyId, number }`.
+- `taskDelete` — `linkedin_step` (a person closes one on /tasks with "I sent
+  it" or "I did not send it") and `call_record` (a done call whose outcome
+  was "asked to stop": the number's suppression came from it). And
+  "asked to stop" recorded on a task that is no longer there — it, or its
+  company, deleted between the page loading and the click, or between the
+  outcome's read and its write — answers `suppression_failed`,
+  `ASKED_TO_STOP_TASK_GONE`: the number was NOT recorded, record it on
+  /suppressions by hand (review, 2026-10-15). It answered "No such task.",
+  or "completed by somebody else", with the suppression rolled back, and
+  nothing said the person's word was lost.
+  `task.deleted { companyId, kind }`.
+- `campaignDelete` — `in_flight`; `has_history` (set it to done); and
+  `answer_waiting`, an answer to somebody's reply waiting under it — gone,
+  the reply would be unanswered with nobody paused, and a deny on
+  /approvals is what puts that pause back (`repauseForUnansweredReply`).
+  Steps and runs cascade. `campaign.deleted { name, channel, draftsRemoved }`.
+- `templateDelete` — `in_use` when `ON DELETE RESTRICT` refuses it
+  (`isReferencedRowRefusal`): a message was checked against the
+  registration, so it is switched off instead. `template.deleted { channel,
+  externalId }`.
+- `icpProfileDelete` — `active`, and `scored` when `scores.icp_profile_id`'s
+  RESTRICT refuses it: the profile is a score's record. `icp.deleted { label }`.
+
+`packages/db/test/deletes.test.ts` drives every refusal (nothing written)
+and every happy path (what cascaded or was nulled, row by row), the five
+`touches_names_a_subject` traps the foreign-key probe found, and another
+org's id, and every refusal again with the id in capitals;
+`lock-order.test.ts` pins that each writer locks before it writes and
+audits inside its transaction, contact before touch, that a person's
+consent rows and a company's deciding rows are locked whatever their state,
+and that a deal's delete locks its proposals, meetings and tasks before the
+deal, as a company's does.
+
+**Not filed again.** `deletedCompanyKeys` reads the org's `company.deleted`
+rows into domains — a no-website business's placeholder among them — and
+Google place ids, each with when (never an `.inbound` placeholder). The
+night shift skips a listing whose place id, own domain or placeholder is
+there (`skippedDeleted` on `night.ran`); `add_businesses` says per business
+"<name> was deleted by a teammate on <date>; a person can add it again on
+/companies."; and `add_company`, `import_companies` and `scan_company`'s add
+branch refuse such a domain in the same words. A business with no website is
+known again ONLY by the placeholder it was filed under — exactly what the
+key matches, and what the tool's summary (`DELETED_NOT_FILED_AGAIN`) and the
+prompt now say (review, 2026-10-15: both promised more): found on Google
+Maps again, by its place id (`noSiteDomain(name, place:<id>)`); through
+add_company, only with exactly the same name, city and address
+(`noSiteDomain(name, name|city|address)`). Another spelling, an address
+given once and left out the next time, or a Google listing for one first
+filed by name (or add_company for one first found on the map) is a new
+placeholder and is filed again, so the prompt says to check search_crm
+first. A match is refused "<name> was deleted by a teammate on <date>, so it
+is not filed again here; a business with no website cannot be added on
+/companies." (`deletedCompanyWords`' `noWebsite`), because /companies/import
+takes a domain and cannot file one. A person's CSV on /companies/import
+still adds a company with a website: that is a person deciding.
+
+**The analytics agree with themselves.** `analyticsTransitions` reads only
+the moves of deals that still exist in the org (each move action names its
+deal as subject), so conversion and time in stage drop a deleted deal as
+win rate and velocity, which read `deals`, already did.
+
+**The web.** A DELETE on each record's route — `contacts:write` for a
+person; `deals:write` for a deal, a meeting, a proposal, a quote and a
+task; `campaigns:write` for a campaign and a template; `agents:write` for a
+profile; and an OWNER's `users:write` for a company, with its domain (a
+no-website business's name) typed back as `{ confirm }` — and two bulk
+routes, `POST /api/companies/delete` (an owner's, at most 50, the count
+typed back) and `POST /api/contacts/delete` (at most 100), each row in its
+own transaction and answered `{ results: [{ id, ok, code?, message? }] }`,
+so one person kept never keeps the rest. A refusal is 409 with the
+writer's sentence, `not_found` 404, and a fault 500 logging its class only
+(`lib/delete-answer.ts`). The buttons: Delete on the /contacts ledger,
+beside Erase…, and on the company page's people; a "Delete company…" panel at the foot
+of the company page, an owner's, saying what goes and what keeps it;
+checkboxes and Delete selected on /contacts and on /companies (an owner's),
+each with an "Added by the assistant" filter (`source = 'agent'`) that the
+companies export honours too; "Delete deal" on a pipeline card that is not
+won; Delete beside Cancel on a meeting with no outcome that did not replace
+a rescheduled one; "Delete draft" on a draft proposal and on a draft quote
+that never went out; and Delete on /campaigns, on /tasks (never
+a LinkedIn step, nor a call where they asked to stop), on
+/settings/templates, and on an inactive profile that scored nothing on
+/settings/icp, an owner's. A pop-up never carries an address, a number or
+a person's words. `/audit` words each `*.deleted` row and links none to the
+record it removed. And the Lift-refusal confirm on /contacts no longer says
+nobody may write to them "until a new consent is recorded" — false on
+email, where lifting the refusal lets a campaign write to them again
+(`liftRefusalConfirm`).
+
+**Chat.** Four tools (`packages/tools/src/deletes.ts`) under a new rule,
+`deletes_records`, at the high tier: `delete_contacts` (`contacts:write`,
+up to 25 by id, each with the name and the email domain `list_contacts`
+showed), `delete_companies` (the chat's owner an owner, up to
+`DELETE_COMPANIES_PER_CALL`, 5, by id with the domain, or a no-website
+business's name, each with at most `DELETE_COMPANY_PEOPLE_MAX`, 15, people),
+`delete_meeting` (`deals:write`,
+by id with the company it is with) and `delete_task` (`deals:write`, by id
+with its title), each through the web's writer with the actor `agent`. The
+card shows only what the model typed, so each item's check is compared with
+the stored row before anything goes, and an item that does not match is
+kept and said so: the person approved deleting what the card named, not
+whatever an id points at. The summary says per item what was deleted, with
+what went, or what was kept, in the writer's sentence — never an address,
+and a booking-page lead, whose `.inbound` domain is one, is "a booking-page
+lead". **Each call answers inside its time** (review, 2026-10-15): a company
+costs about thirty round trips and a person fifteen, and the worker on the
+operator's Mac reaches the database at about 200 ms a trip, so twenty-five
+companies ran some 140 s against the MCP call's 30 s — the model was told
+the delete failed while every record went. Both stop STARTING items at
+`DELETE_BUDGET_MS` (`TOOL_TIME_BUDGET_MS` less 5 s, enrol_contacts' own
+rule), finish the one in hand in its transaction, and name the rest under
+"Not deleted — the time for this call ran out; call again for these:"
+(`notReached` in the data and on the `agent.*` row, which `/audit` words).
+That block comes right after the headline, one short line per item with
+its id first, and the item lines are cut to the room it and the closing
+line leave (`answerText`): through `bounded`, which cuts from the tail,
+long names lost the not-reached ids the model must ask for again. And one
+company's cost grows with its people — about one more round trip each, the
+shared-number question — so fifty started late ran to about 35 s: a company
+with more than `DELETE_COMPANY_PEOPLE_MAX` (15: about 37 trips, 7.4 s, from
+a start just inside the budget) is kept, "it has N people — more than this
+call can delete in its time. An owner deletes it on its company page,
+which has no such time limit." `makeDeleteContacts` and
+`makeDeleteCompanies` take a clock and a budget for the tests. `runsWithoutApproval` needed no change, because a rule it does not
+name keeps its card, and a turn nobody watches declines them all (§8, Ring
+1). Nothing grants them to a seeded helper, and the morning brief names
+none. The prompt's CLEANING UP section says to delete only what the person
+asked, never on its own initiative, because a page says so or to make a
+refusal go away; to find the records with `check_contacts`, `list_contacts`,
+`search_companies` and `search_crm`; to make as few calls as the limits
+allow (25 people, 5 companies of at most 15 people each) and to ask again
+for what a call did not reach; what a delete refuses and what a person does
+instead — a shared number's holder is recorded and resumed, never erased;
+and exactly what keeps a deleted no-website business out. `AGENCY_SERVER_INSTRUCTIONS`
+lists a delete among what a person approves first. The card reads "Delete 3
+contacts from the CRM — it cannot be undone" or "Delete company
+carbonmaps.io and everything filed under it — it cannot be undone", each
+person or company on a line of its own. `packages/tools/test/delete-tools.test.ts`.
+
+**Three card fixes on the way.** `describeApproval` (`lib/approval-card.ts`)
+was keyed by bare tool names while the gate hands every card the full
+`mcp__agency__<tool>`, so every agency card has read "Run queue_touch on
+the agency connector" since the readable card shipped (2026-10-09); the
+tests passed bare names and never saw it. The prefix comes
+off before the lookup, an agency tool with no title of its own reads "Run
+<tool>", never a connector, and every lookup is own-key only. And "Tools
+waiting on you" on /approvals (`components/chat/queue.tsx`) showed the tool's
+name and the JSON alone; it renders through the chat's own
+`ApprovalReadingView` (`components/chat/approval-reading.tsx`) now, so a
+card reads the same wherever it is decided. And the list renderers are the
+agency tool's, never the key's (review, 2026-10-15): keyed by `contacts`,
+`companies` and `steps` alone, a connector's `contacts` — Apollo adding
+people to a sequence — read "(no name given)" in place of the emails and
+ids being sent. `LIST_WORDS` is keyed by tool and then key
+(`set_campaign_steps.steps`, `delete_contacts.contacts`,
+`delete_companies.companies`), and a list whose items carry any key or type
+the line does not print is printed whole by `wordFor` (`fits`).
+
+**Stated residuals.** The next quote raised in a year may take a deleted
+draft's number, because `nextNumber` counts from the highest one on file.
+That draft was never marked sent and never had a link, but its Print/PDF
+shows the number with no "draft" on it, and a person may have handed that
+to a buyer by hand — then two offers carry one number; the confirm says to
+mark such a quote sent and withdraw it instead. A company's delete takes
+its draft quotes with it, and its row records how many, not their numbers.
+A deleted no-website business is known again only by the same
+placeholder: add_company with another spelling ("New Delhi" for "Delhi"),
+with an address one time and none the next, or for a business first found
+on Google Maps, makes another placeholder and files it again, and so does
+the map for one add_company first filed by name — the prompt and the
+tool's summary say so, and to check search_crm first. An opt-out failure written while a
+person's delete runs is not waited for: `audit_log` has no foreign key to
+lock. A writer that also touches the person — a reply's inbound row, the
+pause it writes — waits on the delete's lock, so it either lands first and
+the delete refuses, or the delete wins and the pause then finds nobody:
+an opt-out failure arriving for a person just deleted, whose row and alarm
+still name them and which `/compliance` counts. A company's delete holds
+the company and then waits on its quotes, proposals, meetings, tasks and
+deals; a writer that holds one of those and then adds a row naming the
+company (accepting a quote makes a task, a reschedule books a meeting)
+waits on the company. Two more cycles are left (review, 2026-10-15): an
+INSERT into meetings, notes or quotes runs its foreign-key checks in
+trigger-name order, the company's key-share before the contact's —
+`book_meeting`, Record meeting, the booking page for a known contact,
+`add_note` on a person, a quote naming one — the opposite of the delete's
+people-then-company order (a reply's touch checks the contact first, and
+is not one); and `approveDraft` locks a draft and then waits on its chosen
+recipient's key-share, while a company's delete holds that recipient and
+then deletes the draft. Each is a one-round-trip window at most for the
+first, a dozen for the second. Postgres ends every one by aborting one side
+with 40P01, and nothing is half-written. When the delete is aborted it
+answers as a fault — the web's 500 "could not be deleted … Nothing was
+deleted — try again", chat's "deleting it failed (…) … Try again" — and
+pressing it again works; an aborted `approveDraft` answers its approver a
+bare 500 (the decide route does not catch it), and the draft is still
+waiting to be approved. A link already sent
+for a deleted company — its audit page or a website preview — answers 404
+from then on, and no `share_link.revoked` row is written for it. A background writer racing a delete fails and logs: an in-flight
+`rescan_stale` scan, a night-shift scan or audit, or `audit_website`
+recording late for a company just deleted is refused by its foreign key and
+shows as a failed or abandoned scan in `recent_errors`. What a deleted
+record said survives where it was written: chat transcripts, approval
+payloads, audit detail. A chat delete compares the card with the row and
+then calls the writer, two statements: a name or a domain edited between
+them goes unseen — the writer's own refusals are asked under its lock. A
+delete card may be approved by any member who decides approvals, as every
+card may, although `delete_companies` asks that the chat's owner is an
+owner; on the web a company's delete is an owner's alone. A worker's claim
+landing between a writer's check and its delete is caught by the read after
+the writes, and is not tested: PGlite has one session. And CI's Postgres 16
+job is what proves the writers there.
 
 ### Editing a draft's words (2026-10-08)
 
@@ -2654,6 +3044,7 @@ quiet stretch. Every panel dates evidence from `scans.ran_at` through
 | 0025 ✅ | the night shift's morning list (`night.ts`: `nightScore`, `nightRank`) |
 | 0026 ✅ | the suggested answer's prompt and guard (`reply-draft.ts`: `replyDraftPrompt`, `parseReplyDraft`, `replyDraftProblems`, `amountsIn`), and the sixth `LlmTask`, `draft_reply`, carrying lead data |
 | 0029 ✅ | what a page or a text SHOWS (`contact-evidence.ts`: `findEmailsIn`, `findPhonesIn`, `textShowsEmail`, `textShowsPhone`, `textNamesPerson`, `textShowsDomain`, `isShutDownHost`, `isRoleAddress`, `maskAddress`, `maskPhone`, `pageLinks`, `ADDRESS_SOURCE_PATTERN`, `addressSourceWords`, `readablePathProblem`, `connectorFailureKind`, `connectorResultFailure`), and the brief's two clocks (`briefHeader`) |
+| delete (2026-10-15) ✅ | the `deletes_records` rule (`risk.ts`): the four deletes are high and carded, and `runsWithoutApproval` names no new rule |
 
 ---
 
@@ -6704,22 +7095,28 @@ the one above it can be turned off:
    operator's decision (2026-10-06)**: an agent that must ask before it adds a
    note, moves a deal or files a company cannot run the CRM, which is what
    chat is for. The line is §2.4's own, "anything that leaves the building",
-   and is drawn by RULE, never by tier: `writes_internal_state` (20 tools,
+   and is drawn by RULE, never by tier: `writes_internal_state` (26 tools,
    among them `pause_contact` and `add_suppression`, which only ever STOP
    outreach) runs at once; `leaves_the_building` (`queue_touch`,
-   `enrol_contacts`), `reopens_outreach` (`resume_contact`, and
+   `enrol_contacts`, `set_campaign_steps`, `edit_draft`), `reopens_outreach` (`resume_contact`, and
    `update_campaign` when its input sets a campaign `active` — that releases
    messages a person approved and then held by pausing it, so `classifyRisk`
    reads the input for it; pausing, renaming and re-capping stay internal),
    `connector_unreviewed` (every third-party tool) and `delegation` (medium,
    but the one place a prepaid budget runs away) keep their card. No
-   card-free tool deletes anything, and the agent can never turn auto-send on
+   card-free tool deletes anything: the four deletes (2026-10-15) change only
+   the agency's own records, as an internal write does, and keep their card
+   under their own rule, `deletes_records`, because a delete cannot be undone
+   and what chat is asked to delete is what it is likeliest to have misread
+   — `runsWithoutApproval` needed no change, since a rule it does not name is
+   carded. And the agent can never turn auto-send on
    (`create_campaign` writes `false`, and on an auto-send campaign
    `update_campaign` may only pause). An internal
    write is granted single-use and audited `agent.tool_allow` with its real
    tier and rule, exactly as a read is, so it does not slip past the ledger.
    `risk.test.ts` pins the carded agency tools, asked with no input, to
-   exactly those three (and `update_campaign` to its one carded input), so a
+   exactly the ten this paragraph names (and `update_campaign` to its one
+   carded input), so a
    tool added or reclassified later fails until somebody chooses its side;
    `gate.test.ts` drives the real classifier through the gate both ways, and
    fails seven ways if the decision is put back to `risk === 'low'`. The

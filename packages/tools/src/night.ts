@@ -15,10 +15,15 @@
  * It sends nothing and contacts nobody. A search Google refuses, a scan that
  * fails or a quota that runs out costs that one step, never the night, and is
  * counted in the report.
+ *
+ * A business a teammate deleted (`deletedCompanyKeys`, by its place id, its
+ * own domain or its no-website placeholder) is not filed again when a search
+ * returns it: it is skipped and counted (`skippedDeleted`). A person adds one
+ * with a website back on /companies.
  */
 import {
   NIGHT_AUDITS_PER_RUN, NIGHT_SCANS_PER_RUN, NIGHT_SEARCHES_PER_RUN, NIGHT_TOP, activeIcpProfile, addBusinesses, appendAudit,
-  companyOpportunity, nightSearchesToRun, recordScan, recordSiteAudit, type AgencyDb,
+  companyOpportunity, deletedCompanyKeys, nightSearchesToRun, recordScan, recordSiteAudit, type AgencyDb,
 } from '@agency/db'
 import { isNoSiteDomain, nightRank, parseIcpDefinition } from '@agency/core'
 import * as schema from '@agency/db/schema'
@@ -33,6 +38,8 @@ export interface NightRunResult {
   readonly found: number
   readonly added: number
   readonly refreshed: number
+  /** Returned by a search, not on file, and deleted by a teammate before: not filed again. */
+  readonly skippedDeleted: number
   readonly scanned: number
   readonly scanFailed: number
   readonly audited: number
@@ -58,7 +65,10 @@ export async function runNightShift(deps: {
   let failedSearches = 0
   let found = 0
   let refreshed = 0
+  let skippedDeleted = 0
   const added: { domain: string; name: string }[] = []
+  // Read once for the night; a company deleted while the night runs is kept out from the next one.
+  const deleted = await deletedCompanyKeys(db, orgId)
 
   for (const s of searches.slice(0, left)) {
     let returned = 0
@@ -75,10 +85,12 @@ export async function runNightShift(deps: {
         businesses: open.map((l) => businessFromListing(l, { timeZone: india ? 'Asia/Kolkata' : null, country: s.region ?? 'IN', city: s.city })),
         checkedAt: deps.now(),
         actor: 'night_shift',
+        deleted,
       })
       added.push(...r.added)
       addedHere = r.added.length
       refreshed += r.refreshed.length
+      skippedDeleted += r.skipped.length
     } catch {
       failed = true
       failedSearches += 1
@@ -163,6 +175,7 @@ export async function runNightShift(deps: {
     found,
     added: added.length,
     refreshed,
+    skippedDeleted,
     scanned,
     scanFailed,
     audited,

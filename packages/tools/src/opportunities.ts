@@ -27,8 +27,9 @@ import {
   NEED_KEYS, NEEDS, can, classifyWebsite, isNoSiteDomain, noSiteDomain, type NeedKey,
 } from '@agency/core'
 import {
-  addBusinesses, companyOpportunity, findCompanyByDomain, isKnownTimeZone, opportunitiesAcross, recordSiteAudit,
-  servicesList, type AgencyDb, type BusinessToAdd, type CompanyOpportunity, type ServiceRow,
+  addBusinesses, companyOpportunity, deletedCompanyKeys, deletedCompanyWords, findCompanyByDomain, isKnownTimeZone,
+  opportunitiesAcross, recordSiteAudit, servicesList, type AgencyDb, type BusinessToAdd, type CompanyOpportunity,
+  type ServiceRow,
 } from '@agency/db'
 import * as schema from '@agency/db/schema'
 import { isScannableHost, normaliseDomain } from '@agency/scanner'
@@ -248,7 +249,8 @@ export const addBusinessesTool: AgencyToolSpec<typeof addShape> = {
     'File businesses found with find_businesses in the CRM, by place id, with what their listing shows — phone, ' +
     'address, rating, reviews, category, the website it names — dated. One with a website of its own is filed by ' +
     'its domain (scan it and audit it next); one without is filed under a placeholder that is never scanned. ' +
-    'Already here: its listing is refreshed. Neither scans nor contacts anybody. Nothing is sent.',
+    'Already here: its listing is refreshed. One a teammate deleted is not filed again. ' +
+    'Neither scans nor contacts anybody. Nothing is sent.',
   shape: addShape,
   async handler(input, ctx): Promise<ToolOutcome<unknown>> {
     if (!can(ctx.principal, 'companies:write')) return fail('not_permitted', 'The person you are helping cannot add companies.')
@@ -275,8 +277,13 @@ export const addBusinessesTool: AgencyToolSpec<typeof addShape> = {
         `None of those place ids is from a search in the last two hours. Search again with find_businesses, then add. Nothing was added.`,
       )
     }
-    const r = await addBusinesses(ctx.db, { orgId: ctx.orgId, businesses, checkedAt, actor: 'agent' })
-    await ctx.audit('agent.add_businesses', { asked: input.placeIds.length, added: r.added.length, refreshed: r.refreshed.length, missing: missing.length })
+    // A company a teammate deleted is not filed again by the agent; a person adds it back on /companies.
+    const deleted = await deletedCompanyKeys(ctx.db, ctx.orgId)
+    const r = await addBusinesses(ctx.db, { orgId: ctx.orgId, businesses, checkedAt, actor: 'agent', deleted })
+    await ctx.audit('agent.add_businesses', {
+      asked: input.placeIds.length, added: r.added.length, refreshed: r.refreshed.length, missing: missing.length,
+      ...(r.skipped.length ? { skippedDeleted: r.skipped.length } : {}),
+    })
     const describe = (domain: string, name: string | null) =>
       isNoSiteDomain(domain) ? `${name ?? 'a business'} — no website of its own (filed as ${domain})` : `${name ?? domain} — ${domain}`
     const withSite = r.added.filter((a) => !isNoSiteDomain(a.domain)).length
@@ -286,6 +293,7 @@ export const addBusinessesTool: AgencyToolSpec<typeof addShape> = {
         `Added ${r.added.length} ${r.added.length === 1 ? 'business' : 'businesses'} from Google Maps${r.refreshed.length ? `, refreshed ${r.refreshed.length} already here` : ''}.`,
         ...r.added.map((a) => `  + ${describe(a.domain, a.name)}`),
         ...r.refreshed.map((a) => `  ~ ${describe(a.domain, a.name)} (listing refreshed)`),
+        ...r.skipped.map((a) => `  - Not added: ${deletedCompanyWords(a.name, a.deletedAt, isNoSiteDomain(a.domain))}`),
         ...(missing.length ? [`Not from a recent search, so not added: ${missing.join(', ')}.`] : []),
         withSite > 0
           ? `Next: scan_company and audit_website for the ${withSite} with a website, then get_opportunities.`

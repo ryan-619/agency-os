@@ -4,13 +4,18 @@ import { useMemo, useState } from 'react'
 import { QUOTE_UNITS, quoteItemFromService, quoteTotals, type QuoteItem, type QuoteUnit, type QuotableService } from '@agency/core'
 import { money, unitWords } from '@/lib/quote-view'
 import { ToastOn } from '../../../components/toast/toast-on'
+import { DeleteButton } from '../../../components/delete/delete-button'
+import { CONFIRM_WORDS, mayDeleteQuote } from '../../../lib/delete-view'
 
 /**
  * Editing a quote (0023): the title, the opening words, every line, the
  * contact, the advance, the validity and the terms — with the totals worked
  * out as you type, exactly as the server will (core's `quoteTotals`).
  * Saving a SENT quote turns it back into a draft and its links stop opening;
- * the page says so before anything is saved.
+ * the page says so before anything is saved. A draft may be deleted
+ * (2026-10-15); a sent one is withdrawn instead, and stays — and so does one
+ * sent and then revised back to a draft (`everSent`), whose number a buyer
+ * holds.
  */
 export interface EditorQuote {
   readonly id: string
@@ -26,6 +31,8 @@ export interface EditorQuote {
   readonly updatedAt: string
   readonly lapsed: boolean
   readonly acceptedByName: string | null
+  /** It went out at least once (a `quote.sent` row, or a link made for it): never offered a Delete. */
+  readonly everSent: boolean
 }
 
 interface LinkView {
@@ -60,6 +67,7 @@ export function QuoteEditor({
   const [terms, setTerms] = useState(initial.terms)
   const [updatedAt, setUpdatedAt] = useState(initial.updatedAt)
   const [status, setStatus] = useState(initial.status)
+  const [everSent, setEverSent] = useState(initial.everSent)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -122,6 +130,8 @@ export function QuoteEditor({
     const answer = await call(`/api/quotes/${initial.id}/send`, 'POST')
     if (answer) {
       setStatus('sent')
+      // Once sent, a revision back to a draft does not make it deletable.
+      setEverSent(true)
       setNotice('Marked sent. Copy its link, or draft the email that carries it.')
     }
   }
@@ -176,6 +186,15 @@ export function QuoteEditor({
           <a className="button-like" href={`/quotes/${initial.id}/print`} target="_blank" rel="noreferrer">Print / PDF</a>
           {editable ? <button type="button" disabled={busy || !dirty} onClick={() => void save()}>Save</button> : null}
           {canWrite && status === 'draft' ? <button type="button" disabled={busy} onClick={() => void send()}>Mark as sent</button> : null}
+          {canWrite && mayDeleteQuote(status, everSent) ? (
+            <DeleteButton
+              url={`/api/quotes/${initial.id}`}
+              kind="quote"
+              confirm={CONFIRM_WORDS.quote}
+              label="Delete draft"
+              then="/quotes"
+            />
+          ) : null}
           {canWrite && status === 'sent' ? (
             <>
               <button type="button" disabled={busy} onClick={() => void share()}>Copy link</button>

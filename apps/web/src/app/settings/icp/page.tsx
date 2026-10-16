@@ -1,9 +1,12 @@
 import { redirect } from 'next/navigation'
+import { can } from '@agency/core'
 import { icpProfilesList, type AgencyDb, type IcpProfileRow } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
+import { DeleteButton } from '@/components/delete/delete-button'
 import { Shell } from '@/components/shell'
 import { When } from '@/components/when'
 import { getDb } from '@/lib/db'
+import { CONFIRM_WORDS, ICP_KEPT_WORDS, icpDeleteOffer } from '@/lib/delete-view'
 import { activeProfilesNote, icpView, type IcpView } from '@/lib/icp-view'
 
 /**
@@ -23,6 +26,12 @@ import { activeProfilesNote, icpView, type IcpView } from '@/lib/icp-view'
  * `active` had no partial-unique index and the scanner reads the first active
  * row with no ORDER BY, so two active rows were a choice nobody made; 0021's
  * index allows one, and the page still says so if more than one is active.
+ *
+ * An owner may DELETE a profile (2026-10-15) — one created by mistake —
+ * only while it is inactive and no stored score names it: a profile that
+ * scored anything stays as that number's record (`ON DELETE RESTRICT`), and
+ * the active one is replaced by activating another first. Where Delete is
+ * not offered, the profile says why.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -34,6 +43,8 @@ export default async function IcpPage() {
 
   const rows = await icpProfilesList(getDb() as unknown as AgencyDb, user.orgId)
   const warning = activeProfilesNote(rows)
+  // Creating and activating a profile are an owner's; so is deleting one.
+  const canDelete = can({ id: user.id, orgId: user.orgId, role: user.role }, 'agents:write')
 
   const signOutAction = async () => {
     'use server'
@@ -65,14 +76,15 @@ export default async function IcpPage() {
       ) : null}
 
       {rows.map((row) => (
-        <Profile key={row.id} row={row} />
+        <Profile key={row.id} row={row} canDelete={canDelete} />
       ))}
     </Shell>
   )
 }
 
-function Profile({ row }: { row: IcpProfileRow }) {
+function Profile({ row, canDelete }: { row: IcpProfileRow; canDelete: boolean }) {
   const result = icpView(row.definition)
+  const offer = icpDeleteOffer(row)
   return (
     <section style={{ marginTop: 30 }}>
       <h2 style={{ marginTop: 0 }}>
@@ -88,6 +100,15 @@ function Profile({ row }: { row: IcpProfileRow }) {
         Created <When iso={row.createdAt.toISOString()} mode="date" />
         {row.updatedAt ? <> · last changed <When iso={row.updatedAt.toISOString()} mode="date" /></> : null}.
       </p>
+      {canDelete ? (
+        offer === 'delete' ? (
+          <div className="row-actions" style={{ margin: '0 0 12px' }}>
+            <DeleteButton url={`/api/settings/icp/${row.id}`} kind="icp" confirm={CONFIRM_WORDS.icp(row.name)} label="Delete this profile" />
+          </div>
+        ) : (
+          <p className="muted" style={{ fontSize: 12.5, margin: '0 0 12px' }}>{ICP_KEPT_WORDS[offer]}</p>
+        )
+      ) : null}
       {result.ok ? (
         <Definition v={result.view} />
       ) : (

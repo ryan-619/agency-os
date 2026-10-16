@@ -1,11 +1,13 @@
 import { NextResponse } from 'next/server'
 import { assertCan } from '@agency/core'
 import {
-  appendAudit, contactPatchInput, contactPauseByHand, contactResumeByHand, contactsUpdate,
+  appendAudit, contactDelete, contactPatchInput, contactPauseByHand, contactResumeByHand, contactsUpdate,
   readContact, updateContactTimeZone, type AgencyDb,
 } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
+import { deleteAnswer } from '@/lib/delete-answer'
+import { log } from '@/lib/logger'
 
 /**
  * Change a contact (PROMPT.md §8.4).
@@ -43,6 +45,8 @@ import { getDb } from '@/lib/db'
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export async function PATCH(
   request: Request,
@@ -158,4 +162,37 @@ export async function PATCH(
   }
 
   return NextResponse.json({ error: 'action must be pause, resume, timeZone or update' }, { status: 400 })
+}
+
+/**
+ * Delete a person nothing ever went to or came from (2026-10-15) — any
+ * member who may change contacts, as adding one is. `contactDelete` refuses
+ * everybody else with a sentence (409): a message went or may have, a reply
+ * or a call came in, they said no, or an opt-out of theirs could not be
+ * recorded — each a case for an owner's erasure, which keeps their
+ * addresses on the suppression list. The audit row is the writer's, in its
+ * own transaction.
+ */
+export async function DELETE(
+  _request: Request,
+  context: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const session = await auth()
+  const user = session?.user
+  if (!user) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
+  try {
+    assertCan({ id: user.id, orgId: user.orgId, role: user.role }, 'contacts:write')
+  } catch {
+    return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+  }
+  const { id } = await context.params
+  if (!UUID.test(id)) return NextResponse.json({ error: 'not_found', message: 'No such contact.' }, { status: 404 })
+  // Lower-cased, as the database prints an id — and the writer does it again
+  // (review, 2026-10-15): an id in capitals skipped every keep reason.
+  const a = await deleteAnswer(
+    'contact',
+    () => contactDelete(getDb() as unknown as AgencyDb, { orgId: user.orgId, contactId: id.toLowerCase(), actor: user.id }),
+    log,
+  )
+  return NextResponse.json(a.body, { status: a.status })
 }

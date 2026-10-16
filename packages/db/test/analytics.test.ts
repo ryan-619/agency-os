@@ -10,7 +10,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { pipelineMetrics } from '@agency/core'
 import {
-  analyticsTransitions, advanceDeal, appendAudit, listDeals, schema, setDealStage, type AgencyDb,
+  analyticsTransitions, advanceDeal, appendAudit, dealDelete, listDeals, schema, setDealStage, type AgencyDb,
 } from '../src/index.js'
 import { migratedDb, type TestDb } from './helpers.js'
 
@@ -93,11 +93,49 @@ describe('analyticsTransitions', () => {
     await bad('deal.moved', { from: 'toString', to: 'replied' }) // not an own stage
     await bad('deal.advanced', { from: 3, to: 'replied' })
     await bad('deal.moved', ['contacted', 'replied']) // not an object
-    await bad('deal.moved', { from: 'contacted', to: 'replied' }, null) // no deal named
+    // A row naming no deal is not the move of a deal that exists: not read,
+    // so not counted as unreadable either.
+    await bad('deal.moved', { from: 'contacted', to: 'replied' }, null)
 
     const moves = await analyticsTransitions(db, orgId)
     expect(moves.map((m) => m.to)).toEqual(['contacted'])
-    expect(moves.skipped).toBe(7)
+    expect(moves.skipped).toBe(6)
+  })
+
+  /**
+   * A deleted deal's audit rows outlive it, and `pipelineMetrics` reads win
+   * rate from `deals`: its moves must leave conversion with it, or the page
+   * disagrees with itself (2026-10-15).
+   */
+  it('reads only the moves of deals that still exist', async () => {
+    const gone = await advanceDeal(db, { orgId, companyId, to: 'contacted' })
+    await boardMove(orgId, gone.deal.id, 'contacted', 'meeting')
+    expect(await analyticsTransitions(db, orgId)).toHaveLength(2)
+
+    const deleted = await dealDelete(db, { orgId, dealId: gone.deal.id, actor: 'user-1' })
+    expect(deleted.ok).toBe(true)
+    const stays = await advanceDeal(db, { orgId, companyId, to: 'new' })
+
+    const moves = await analyticsTransitions(db, orgId)
+    expect(moves.map((m) => m.dealId)).toEqual([stays.deal.id])
+    expect(moves.skipped).toBe(0)
+    // …and the two halves agree: no deal, no move.
+    const m = pipelineMetrics(await listDeals(db, orgId), moves, new Date(), { minSample: 1 })
+    expect(m.conversion.find((c) => c.from === 'contacted')).toMatchObject({ entered: 0, advanced: 0 })
+  })
+
+  /** A deal of the same id in another org does not make this org's row count. */
+  it('asks for the deal in this org', async () => {
+    const [theirCompany] = await db
+      .insert(schema.companies).values({ orgId: otherOrgId, domain: 'theirs.test' })
+      .returning({ id: schema.companies.id })
+    const theirs = await advanceDeal(db, { orgId: otherOrgId, companyId: theirCompany!.id, to: 'contacted' })
+    // A row in THIS org naming the other org's deal: nothing a writer does, but the boundary is the org.
+    await appendAudit(db, {
+      orgId, actor: 'user-1', action: 'deal.moved', subjectType: 'deal', subjectId: theirs.deal.id,
+      detail: { companyId, from: 'contacted', to: 'meeting' },
+    })
+    expect(await analyticsTransitions(db, orgId)).toHaveLength(0)
   })
 
   /**

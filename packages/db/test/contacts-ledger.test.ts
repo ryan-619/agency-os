@@ -478,6 +478,15 @@ describe('the contacts ledger and the contact edit', () => {
       expect((await contactsLedger(db, orgId, { q: 'theirs' }))).toEqual([])
     })
 
+    it('keeps only the people added one way — /contacts’ “Added by the assistant” (2026-10-15)', async () => {
+      await db.update(schema.contacts).set({ source: 'agent' }).where(eq(schema.contacts.id, samId))
+      expect((await contactsLedger(db, orgId, { source: 'agent' })).map((r) => r.id)).toEqual([samId])
+      expect((await contactsLedger(db, orgId, { source: 'agent', paused: false })).map((r) => r.id)).toEqual([])
+      expect((await contactsLedger(db, orgId)).map((r) => r.id)).toEqual([samId, priyaId])
+      // The row carries its source, which the page tags.
+      expect((await contactsLedger(db, orgId)).map((r) => r.source)).toEqual(['agent', 'manual'])
+    })
+
     it('pages with a bounded limit', async () => {
       expect((await contactsLedger(db, orgId, { limit: 1 })).map((r) => r.id)).toEqual([samId])
       expect((await contactsLedger(db, orgId, { limit: 1, offset: 1 })).map((r) => r.id)).toEqual([priyaId])

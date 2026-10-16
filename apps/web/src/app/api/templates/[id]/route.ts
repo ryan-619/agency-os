@@ -1,8 +1,10 @@
 import { NextResponse } from 'next/server'
-import { templatesSetActive, type AgencyDb } from '@agency/db/queries'
+import { templateDelete, templatesSetActive, type AgencyDb } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
 import { TEMPLATE_MAX_REQUEST_BYTES, firstIssue, mayWriteTemplates, templatePatchSchema, templateView } from '../rules'
+import { deleteAnswer } from '@/lib/delete-answer'
+import { log } from '@/lib/logger'
 
 /**
  * Switch one template on or off (0019) — the only change a recorded template
@@ -54,4 +56,30 @@ export async function PATCH(
   })
   if (!r.ok) return NextResponse.json({ error: 'No such template.' }, { status: 404 })
   return NextResponse.json({ template: templateView(r.template), changed: r.changed })
+}
+
+/**
+ * Delete a registered template no message names (2026-10-15) —
+ * `campaigns:write`, as switching one is. One that any message was checked
+ * against, a draft's included, is refused (409): it is the evidence the
+ * words matched, and it is switched off instead.
+ */
+export async function DELETE(
+  _request: Request,
+  context: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const session = await auth()
+  const user = session?.user
+  if (!user) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
+  if (!mayWriteTemplates({ id: user.id, orgId: user.orgId, role: user.role })) {
+    return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+  }
+  const { id } = await context.params
+  if (!UUID.test(id)) return NextResponse.json({ error: 'not_found', message: 'No such template.' }, { status: 404 })
+  const a = await deleteAnswer(
+    'template',
+    () => templateDelete(getDb() as unknown as AgencyDb, { orgId: user.orgId, templateId: id.toLowerCase(), actor: user.id }),
+    log,
+  )
+  return NextResponse.json(a.body, { status: a.status })
 }

@@ -30,6 +30,10 @@ export { getNightFinds } from './night-read.js'
 export { getEvidenceSignals } from './signals.js'
 export { getResearch, recordResearch } from './research.js'
 export { getWhatsWorking } from './insights.js'
+export {
+  deleteContacts, deleteCompanies, deleteMeeting, deleteTask, makeDeleteCompanies, makeDeleteContacts, DELETE_BUDGET_MS,
+  DELETE_COMPANIES_PER_CALL, DELETE_COMPANY_PEOPLE_MAX, DELETE_PER_CALL, DELETED_NOT_FILED_AGAIN, type DeleteToolOptions,
+} from './deletes.js'
 export { businessFromListing, placesSearchesToday } from './opportunities.js'
 export {
   readPage, findContactDetails, checkContacts, makeReadPage, makeFindContactDetails, makeCheckContacts,
@@ -61,6 +65,7 @@ import { getEvidenceSignals } from './signals.js'
 import { getResearch, recordResearch } from './research.js'
 import { getWhatsWorking } from './insights.js'
 import { checkContacts, findContactDetails, readPage } from './web.js'
+import { deleteCompanies, deleteContacts, deleteMeeting, deleteTask } from './deletes.js'
 
 /**
  * Every tool the `agency` MCP server exposes.
@@ -149,6 +154,10 @@ export const AGENCY_TOOLS: readonly AgencyToolSpec[] = [
   readPage,
   findContactDetails,
   checkContacts,
+  deleteContacts,
+  deleteCompanies,
+  deleteMeeting,
+  deleteTask,
 ] as unknown as readonly AgencyToolSpec[]
 
 export { AGENCY_TOOL_NAMES }

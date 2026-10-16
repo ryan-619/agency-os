@@ -16,7 +16,8 @@ import { and, eq } from 'drizzle-orm'
 import { z } from 'zod'
 import { pauseReasonClass, type Principal } from '@agency/core'
 import {
-  companiesSetReachFacts, contactResumeByHand, contactsUpdate, sharedNumberOptOutReason, type AgencyDb,
+  companiesSetReachFacts, companyDelete, contactResumeByHand, contactsUpdate, importCompanies as importCompanyRows,
+  sharedNumberOptOutReason, type AgencyDb,
 } from '@agency/db'
 import * as schema from '@agency/db/schema'
 import { migratedDb, type TestDb } from '../../db/test/helpers.js'
@@ -310,6 +311,35 @@ describe('the records tools', () => {
       expect(await run(addCompany, { domain: 'acme-robotics.io' }, stranger())).toMatchObject({ ok: false, code: 'not_permitted' })
       expect(await companyRow(orgId, 'acme-robotics.io')).toBeUndefined()
     })
+
+    /**
+     * Delete (2026-10-15): a company a teammate deleted is not filed again by
+     * the agent. A person adding it back is a person deciding, and then it is
+     * on file like any other.
+     */
+    it('does not file again a company a teammate deleted, until a person adds it back', async () => {
+      const [acme] = await db.insert(schema.companies).values({ orgId, domain: 'acme-robotics.io', name: 'Acme' }).returning()
+      expect(await companyDelete(db, { orgId, companyId: acme!.id, actor: userId })).toMatchObject({ ok: true })
+
+      const out = await run(addCompany, { domain: 'https://www.acme-robotics.io/', name: 'Acme' })
+      expect(refusalOf(out)).toEqual({
+        code: 'not_permitted',
+        message: expect.stringMatching(
+          /^acme-robotics\.io was deleted by a teammate on \d{4}-\d{2}-\d{2}; a person can add it again on \/companies\. Nothing was added\.$/,
+        ),
+      })
+      expect(await companyRow(orgId, 'acme-robotics.io')).toBeUndefined()
+      expect(audited).toEqual([])
+
+      // Another org's deletion is not this org's.
+      const [theirs] = await db.insert(schema.companies).values({ orgId: otherOrgId, domain: 'beta-labs.com' }).returning()
+      expect(await companyDelete(db, { orgId: otherOrgId, companyId: theirs!.id, actor: 'agent' })).toMatchObject({ ok: true })
+      expect(dataOf(await run(addCompany, { domain: 'beta-labs.com' }))).toMatchObject({ created: true })
+
+      // A person adds it back on /companies: on file, so the agent finds it there.
+      await importCompanyRows(db, orgId, [{ domain: 'acme-robotics.io', name: 'Acme' }], 'import')
+      expect(dataOf(await run(addCompany, { domain: 'acme-robotics.io' }))).toMatchObject({ created: false })
+    })
   })
 
   // -------------------------------------------------------------------------
@@ -399,6 +429,20 @@ describe('the records tools', () => {
         action: 'agent.import_companies', detail: { added: 2, alreadyPresent: 1, refused: 2, duplicates: 1 },
       }])
       idsOnly(audited[0]!.detail)
+    })
+
+    it('refuses, line by line, a company a teammate deleted, and adds the rest', async () => {
+      const [acme] = await db.insert(schema.companies).values({ orgId, domain: 'acme-robotics.io', name: 'Acme' }).returning()
+      expect(await companyDelete(db, { orgId, companyId: acme!.id, actor: userId })).toMatchObject({ ok: true })
+      const out = await run(importCompanies, { companies: [{ domain: 'acme-robotics.io' }, { domain: 'beta-labs.com' }] })
+      const data = dataOf<{ lines: Array<{ line: number; domain: string; outcome: string; why: string | null }> }>(out)
+      expect(data.lines.map((l) => [l.line, l.domain, l.outcome])).toEqual([
+        [1, 'acme-robotics.io', 'refused'],
+        [2, 'beta-labs.com', 'added'],
+      ])
+      expect(data.lines[0]!.why).toMatch(/^acme-robotics\.io was deleted by a teammate on \d{4}-\d{2}-\d{2}; a person can add it again on \/companies\.$/)
+      expect(await companyRow(orgId, 'acme-robotics.io')).toBeUndefined()
+      expect(await companyRow(orgId, 'beta-labs.com')).toMatchObject({ source: 'agent' })
     })
 
     it('never reaches another org: a domain they hold is added here as this org’s own', async () => {
@@ -1270,6 +1314,43 @@ describe('the records tools', () => {
         const r = await run(addCompany, input, { web: site(), conversation })
         expect(refusalOf(r).message, JSON.stringify(input)).toContain(words)
       }
+    })
+
+    /**
+     * Delete (review, 2026-10-15): a business with no website, filed this way
+     * and then deleted, was filed again by the very next call — its
+     * placeholder was kept out of the `company.deleted` row and out of the
+     * match, and it has no place id. The placeholder is the key now: the
+     * same name in the same city or at the same address is refused, by
+     * add_company and line by line by import_companies, in words that promise
+     * no re-add on /companies, which takes a domain.
+     */
+    it('does not file again a business with no website that a teammate deleted', async () => {
+      const conversation = ledger(['Yummy Bites café, Hauz Khas, Delhi · no website', EXA])
+      const filed = await run(addCompany, { website: 'none', name: 'Yummy Bites', city: 'Delhi' }, { web: site(), conversation })
+      const { companyId, domain } = dataOf<{ companyId: string; domain: string }>(filed)
+      expect(await companyDelete(db, { orgId, companyId, actor: userId })).toMatchObject({ ok: true })
+      audited.length = 0
+
+      const again = await run(addCompany, { website: 'none', name: 'Yummy  Bites', city: 'delhi' }, { web: site(), conversation })
+      expect(refusalOf(again)).toEqual({
+        code: 'not_permitted',
+        message: expect.stringMatching(
+          /^Yummy Bites was deleted by a teammate on \d{4}-\d{2}-\d{2}, so it is not filed again here; a business with no website cannot be added on \/companies\. Nothing was added\.$/,
+        ),
+      })
+      expect(await companyRow(orgId, domain)).toBeUndefined()
+      expect(audited).toEqual([])
+
+      const listed = await run(
+        importCompanies,
+        { companies: [{ website: 'none', name: 'Yummy Bites', city: 'Delhi' }, { website: 'none', name: 'Lotus Cafe', city: 'Delhi' }] },
+        { web: site(), conversation },
+      )
+      const lines = dataOf<{ lines: Array<{ line: number; outcome: string; why: string | null }> }>(listed).lines
+      expect(lines.map((l) => [l.line, l.outcome])).toEqual([[1, 'refused'], [2, 'added']])
+      expect(lines[0]!.why).toMatch(/^Yummy Bites was deleted by a teammate on \d{4}-\d{2}-\d{2}, so it is not filed again here; a business with no website cannot be added on \/companies\.$/)
+      expect(await companyRow(orgId, domain)).toBeUndefined()
     })
 
     it('imports line by line under the same rules, refusing a line not checked in time', async () => {

@@ -9,8 +9,8 @@ import { askAboutCompany, askLink } from '@/lib/ask-link'
 import { contactAddressSources } from '@/lib/address-source'
 import { can, isNoSiteDomain } from '@agency/core'
 import {
-  companyThread, linkedinThreadWithheld, listContactsForCompany, meetingsForCompany, openDealFor, proposalsForCompany,
-  type AgencyDb, type LinkedinThreadWithheld,
+  companyThread, linkedinThreadWithheld, listContactsForCompany, meetingsForCompany, meetingsThatReplacedOne, openDealFor,
+  proposalsForCompany, type AgencyDb, type LinkedinThreadWithheld,
 } from '@agency/db/queries'
 import { CompanyEditSlot } from '@/components/company/edit'
 import { EvidencePanelsSlot } from '@/components/company/evidence'
@@ -23,6 +23,9 @@ import { ResearchSlot } from '@/components/company/research'
 import type { CompanySlotProps } from '@/components/company/slot'
 import { ContactsPanel } from '@/components/outreach/contacts'
 import { CompanyActions } from '@/components/pipeline/company-actions'
+import { DeleteCompany } from '@/components/company/delete-company'
+import { DeleteButton } from '@/components/delete/delete-button'
+import { CONFIRM_WORDS, mayDeleteMeeting, mayDeleteProposal } from '@/lib/delete-view'
 import { When } from '@/components/when'
 import { getDb } from '@/lib/db'
 import { deliveryLine } from '@/lib/delivery-view'
@@ -84,6 +87,9 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
   ])
   // LinkedIn words this panel may not print — /tasks' rule, read once.
   const withheld = await linkedinThreadWithheld(db, user.orgId, thread)
+  // A meeting that replaced a rescheduled one is cancelled, never deleted:
+  // the original points at it (`meetingDelete` refuses it too).
+  const replacements = await meetingsThatReplacedOne(db, user.orgId, meetings.map((m) => m.id))
   // A profile that does not parse is read as no profile, as every other page
   // reads it: one bad ICP edit must not make the company page a 500.
   let icp: ReturnType<typeof parseIcpDefinition> | null
@@ -337,7 +343,15 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
                       <td className="mono">{inZone(m.startsAt, m.timeZone)}</td>
                       <td>{m.title ?? '—'}{m.cancelledAt ? <span className="pill pill-stale">cancelled</span> : null}</td>
                       <td className="mono">{m.source.replace(/_/g, ' ')}</td>
-                      <td><a href={`/meetings/${m.id}`}>Brief →</a></td>
+                      <td>
+                        <span className="row-actions">
+                          <a href={`/meetings/${m.id}`}>Brief →</a>
+                          {/* No outcome recorded: one booked by mistake, or with somebody who does not exist. */}
+                          {can(principal, 'deals:write') && mayDeleteMeeting(m.outcome, replacements.has(m.id)) ? (
+                            <DeleteButton url={`/api/meetings/${m.id}`} kind="meeting" confirm={CONFIRM_WORDS.meeting} />
+                          ) : null}
+                        </span>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -348,7 +362,7 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
             <>
               <h2 style={{ marginTop: meetings.length > 0 ? 22 : 0 }}>Proposals</h2>
               <table>
-                <thead><tr><th>Title</th><th>Status</th><th>Estimate</th><th>Generated</th></tr></thead>
+                <thead><tr><th>Title</th><th>Status</th><th>Estimate</th><th>Generated</th><th></th></tr></thead>
                 <tbody>
                   {proposals.map((p) => (
                     <tr key={p.id}>
@@ -360,6 +374,11 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
                           : 'effort only'}
                       </td>
                       <td className="mono"><When iso={p.generatedAt.toISOString()} mode="date" /></td>
+                      <td>
+                        {can(principal, 'deals:write') && mayDeleteProposal(p.status) ? (
+                          <DeleteButton url={`/api/proposals/${p.id}`} kind="proposal" confirm={CONFIRM_WORDS.proposal} />
+                        ) : null}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -452,6 +471,11 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
           </div>
         )}
       </section>
+
+      {/* An owner's, as the route is: a company and everything filed under it (2026-10-15). */}
+      {can(principal, 'users:write') ? (
+        <DeleteCompany companyId={company.id} domain={company.domain} name={company.name} />
+      ) : null}
     </Shell>
   )
 }

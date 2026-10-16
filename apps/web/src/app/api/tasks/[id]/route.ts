@@ -2,10 +2,13 @@ import { NextResponse } from 'next/server'
 import { and, eq } from 'drizzle-orm'
 import { assertCan } from '@agency/core'
 import {
-  TASK_OUTCOMES, schema, tasksAssign, tasksComplete, tasksRecordOutcome, tasksReopen, tasksSetDue, type AgencyDb, type TaskOutcome,
+  TASK_OUTCOMES, schema, taskDelete, tasksAssign, tasksComplete, tasksRecordOutcome, tasksReopen, tasksSetDue, type AgencyDb,
+  type TaskOutcome,
 } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
+import { deleteAnswer } from '@/lib/delete-answer'
+import { log } from '@/lib/logger'
 
 /**
  * Change one task: mark it done, reopen it, hand it to somebody, or move its
@@ -113,4 +116,32 @@ export async function PATCH(
       return NextResponse.json({ id, dueAt: r.task.dueAt ? r.task.dueAt.toISOString() : null })
     }
   }
+}
+
+/**
+ * Delete a task (2026-10-15) — `deals:write`, as changing one is. Not a
+ * LinkedIn step, which is closed with "I sent it" or "I did not send it",
+ * and not a done call whose outcome was "asked not to be called": that is
+ * where the number's suppression came from (409 for each).
+ */
+export async function DELETE(
+  _request: Request,
+  context: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const session = await auth()
+  const user = session?.user
+  if (!user) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
+  try {
+    assertCan({ id: user.id, orgId: user.orgId, role: user.role }, 'deals:write')
+  } catch {
+    return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+  }
+  const { id } = await context.params
+  if (!UUID.test(id)) return NextResponse.json({ error: 'not_found', message: 'No such task.' }, { status: 404 })
+  const a = await deleteAnswer(
+    'task',
+    () => taskDelete(getDb() as unknown as AgencyDb, { orgId: user.orgId, taskId: id.toLowerCase(), actor: user.id }),
+    log,
+  )
+  return NextResponse.json(a.body, { status: a.status })
 }

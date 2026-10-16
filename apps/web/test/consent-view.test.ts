@@ -6,8 +6,9 @@
  * says "clear", a company's timezone passed off as the person's own.
  */
 import { describe, expect, it } from 'vitest'
+import { COLD_CHANNELS, type Channel } from '@agency/core'
 import {
-  consentStateClass, consentStateLabel, maskRecipient, maskSuppressionKey, sendCheckSentence,
+  consentStateClass, consentStateLabel, liftRefusalConfirm, maskRecipient, maskSuppressionKey, sendCheckSentence,
   shortDate, suppressionClass, suppressionLabel, zoneLabel, type SuppressionStandingName,
 } from '../src/lib/consent-view'
 
@@ -126,5 +127,29 @@ describe('shortDate', () => {
   it('is the same on any machine: UTC and a fixed month name', () => {
     expect(shortDate('2026-09-01T00:30:00.000Z')).toBe('1 Sep 2026')
     expect(shortDate('not a date')).toBe('an unknown date')
+  })
+})
+
+describe('liftRefusalConfirm', () => {
+  it('says a cold channel is writable again once its refusal is lifted, and never that a consent is needed there', () => {
+    const words = liftRefusalConfirm('email')
+    expect(words).toContain('a campaign may write to them again')
+    expect(words).not.toContain('until a new consent is recorded')
+  })
+
+  it('says SMS, voice and WhatsApp still need a recorded consent', () => {
+    for (const c of ['sms', 'voice', 'whatsapp']) {
+      expect(liftRefusalConfirm(c)).toBe(
+        `Lift the ${c} refusal? They go back to never asked — on ${c} that still means no, so nothing goes to them ` +
+          'there until a new consent is recorded.',
+      )
+    }
+  })
+
+  it('words a consent channel as cold exactly when the send path treats it as one', () => {
+    // The four channels a consent row can be about (0003's CHECK).
+    for (const c of ['email', 'sms', 'voice', 'whatsapp'] as const) {
+      expect(liftRefusalConfirm(c).includes('may write to them again'), c).toBe(COLD_CHANNELS.has(c as Channel))
+    }
   })
 })

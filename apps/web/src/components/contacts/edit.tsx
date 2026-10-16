@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { liftRefusalConfirm } from '../../lib/consent-view'
 import { toast } from '../toast/toast'
 
 /**
@@ -194,7 +195,7 @@ function ConsentForm({
   }
 
   const lift = async (): Promise<void> => {
-    if (!window.confirm(`Lift ${channel} refusal? They go back to never asked — nobody may contact them on ${channel} until a new consent is recorded.`)) return
+    if (!window.confirm(liftRefusalConfirm(channel))) return
     setBusy(true)
     setError('')
     const err = await post(`/api/contacts/${contactId}/consent`, 'POST', { action: 'lift', channel, reason: liftReason })

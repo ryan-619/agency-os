@@ -194,6 +194,21 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'listing.coordinates_pruned': { companies: 3, olderThanDays: 30 },
   'research.recorded': { companyId: SUBJECT, recorded: 3, skipped: 1, recordedBy: ORG_USER },
   'research.deleted': { companyId: SUBJECT, researchId: SUBJECT },
+  // Delete (2026-10-15): ids, counts and kinds; a company's own domain, name
+  // and place id, null for a placeholder (`packages/db/src/deletes.ts`).
+  'contact.deleted': { companyId: SUBJECT, draftsRemoved: 2, consentsRemoved: 1, notesRemoved: 1 },
+  'company.deleted': {
+    domain: 'carbonmaps.io', name: 'Carbon Maps', placeId: 'ChIJcarbon', contacts: 2, drafts: 3, deals: 1, meetings: 1,
+    quotes: 0, proposals: 0, scans: 2,
+  },
+  'deal.deleted': { companyId: SUBJECT, stage: 'meeting' },
+  'meeting.deleted': { companyId: SUBJECT, startsAt: '2026-10-02T09:00:00.000Z', source: 'agent' },
+  'proposal.deleted': { companyId: SUBJECT },
+  'quote.deleted': { companyId: SUBJECT, number: 'Q-2026-0004' },
+  'task.deleted': { companyId: SUBJECT, kind: 'call' },
+  'campaign.deleted': { name: 'Q4 dentists', channel: 'email', draftsRemoved: 3 },
+  'template.deleted': { channel: 'sms', externalId: '1107160000000012345' },
+  'icp.deleted': { label: 'Security-gap SaaS (US/EU)' },
   'agent.record_research': { companyId: SUBJECT, recorded: 3, skipped: 0, turnId: SUBJECT },
   'agent.get_research': { companyId: SUBJECT, returned: 3, turnId: SUBJECT },
   'task.outcome_recorded': { outcome: 'asked_to_stop', kind: 'call', companyId: SUBJECT, callBackTaskId: SUBJECT, suppressed: true },
@@ -398,6 +413,11 @@ const WRITTEN: Readonly<Record<string, Record<string, unknown>>> = {
   'sequence.step_skipped': { campaignId: SUBJECT, position: 3, kind: 'call', why: 'invalid' },
   'sequence.stopped': { campaignId: SUBJECT, reason: 'deal_closed', position: 3, returnedTouchId: SUBJECT },
   'agent.edit_draft': { draftId: SUBJECT, edited: true, reapprove: false, reason: 'changed_meanwhile', turnId: SUBJECT },
+  // The agent's deletes (2026-10-15): ids and counts, never a name or an address.
+  'agent.delete_contacts': { asked: 3, deleted: 2, kept: 1, turnId: SUBJECT },
+  'agent.delete_companies': { asked: 1, deleted: 1, kept: 0, turnId: SUBJECT },
+  'agent.delete_meeting': { meetingId: SUBJECT, companyId: SUBJECT, turnId: SUBJECT },
+  'agent.delete_task': { taskId: SUBJECT, kind: 'call', companyId: SUBJECT, turnId: SUBJECT },
   // --- end campaigns.ts ---
 
   // --- proposals.ts tools (2026-10-06): this file's actions go below ---
@@ -685,6 +705,53 @@ describe('sentenceFor', () => {
     expect(say({ toolName: 'mcp__agency__add_note', toolUseId: 't1', risk: 'medium', rule: 'writes_internal_state' })).toBe(
       "ran mcp__agency__add_note without asking — it changes only the agency's own records, and sends nothing",
     )
+  })
+
+  it('says what a delete took, by counts, and names a deleted company from its own row (2026-10-15)', () => {
+    const say = (a: string, d: unknown = WRITTEN[a]) => sentenceFor(line(a, d), lookups)
+    expect(say('contact.deleted')).toBe(
+      'deleted a contact at rentman.io nothing had gone to or come from: 2 drafts that never went removed with them; ' +
+        '1 consent removed; 1 note about them removed',
+    )
+    expect(say('contact.deleted', { companyId: SUBJECT, draftsRemoved: 0, consentsRemoved: 0, notesRemoved: 0 })).toBe(
+      'deleted a contact at rentman.io nothing had gone to or come from',
+    )
+    expect(say('company.deleted')).toBe(
+      'deleted “carbonmaps.io” and what was filed under it: 2 contacts; 3 drafts that never went; 1 deal; 1 meeting; ' +
+        '2 scans; it is not filed again automatically',
+    )
+    // A no-website business is named by its name; a placeholder by neither.
+    expect(say('company.deleted', { domain: null, name: 'Yummy Bites', placeId: 'ChIJyummy', contacts: 0 })).toBe(
+      'deleted “Yummy Bites” and what was filed under it; it is not filed again automatically',
+    )
+    expect(say('company.deleted', { domain: null, name: null, placeId: null })).toBe(
+      'deleted a company and what was filed under it; it is not filed again automatically',
+    )
+    // Its row keeps a no-website business's placeholder as a key (review, 2026-10-15) — named by its name.
+    expect(say('company.deleted', { domain: 'yummy-bites-k3x9q1.nosite.invalid', name: 'Yummy Bites', placeId: null, contacts: 0 })).toBe(
+      'deleted “Yummy Bites” and what was filed under it; it is not filed again automatically',
+    )
+    expect(say('deal.deleted')).toBe('deleted the meeting deal for rentman.io; its meetings, proposals and tasks stay')
+    expect(say('meeting.deleted')).toBe(
+      'deleted a meeting with rentman.io set for 2026-10-02 09:00 UTC that had no outcome recorded; the deal did not move back',
+    )
+    expect(say('proposal.deleted')).toBe('deleted a draft proposal for rentman.io')
+    expect(say('quote.deleted')).toBe('deleted draft quote Q-2026-0004 for rentman.io')
+    expect(say('task.deleted')).toBe('deleted a call task for rentman.io')
+    expect(say('campaign.deleted')).toBe(
+      'deleted the campaign “Q4 dentists”, under which nothing had gone out; 3 drafts that never went removed with it',
+    )
+    expect(say('template.deleted')).toBe('deleted an SMS template (1107160000000012345) no message had been checked against')
+    expect(say('icp.deleted')).toBe('deleted the ICP profile “Security-gap SaaS (US/EU)”, which had scored nothing')
+    // The agent's, each behind a card a person approved.
+    expect(say('agent.delete_contacts')).toBe('deleted 2 of 3 contacts, as a person approved; 1 kept, each with why in the chat')
+    expect(say('agent.delete_companies')).toBe('deleted 1 of 1 company, as a person approved')
+    // A call that ran out of time says what it did not reach (review, 2026-10-15).
+    expect(say('agent.delete_companies', { asked: 5, deleted: 3, kept: 0, notReached: 2, turnId: SUBJECT })).toBe(
+      "deleted 3 of 5 companies, as a person approved; 2 not reached before the call's time ran out",
+    )
+    expect(say('agent.delete_meeting')).toBe('deleted a meeting with rentman.io, as a person approved; nobody was told')
+    expect(say('agent.delete_task')).toBe('deleted a call task for rentman.io, as a person approved')
   })
 
   it('says what a template and an SMS row did, by ids and counts alone (0019)', () => {
@@ -1337,6 +1404,21 @@ describe('around the sentence', () => {
     expect(subjectHref(row('touch'), null)).toBeNull()
     expect(subjectHref(row('suppression', null), null)).toBe('/suppressions')
     expect(subjectHref(row('meeting', 'not-a-uuid'), null)).toBeNull()
+  })
+
+  it('never links a delete row to the record it removed (2026-10-15)', () => {
+    const gone = (action: string, subjectType: string): AuditLine =>
+      line(action, WRITTEN[action], { subjectType, subjectId: SUBJECT })
+    expect(subjectHref(gone('meeting.deleted', 'meeting'), COMPANY)).toBeNull()
+    expect(subjectHref(gone('proposal.deleted', 'proposal'), COMPANY)).toBeNull()
+    expect(subjectHref(gone('quote.deleted', 'quote'), COMPANY)).toBeNull()
+    // The company is gone too: nothing resolves it, so nothing links.
+    expect(subjectHref(gone('company.deleted', 'company'), null)).toBeNull()
+    // A deleted person or deal links to their company while it is there.
+    expect(subjectHref(gone('contact.deleted', 'contact'), COMPANY)).toBe('/companies/rentman.io')
+    expect(subjectHref(gone('deal.deleted', 'deal'), COMPANY)).toBe('/companies/rentman.io')
+    // A quote that still exists still links to itself.
+    expect(subjectHref(line('quote.sent', {}, { subjectType: 'quote', subjectId: SUBJECT }), null)).toBe(`/quotes/${SUBJECT}`)
   })
 
   it('raises the §2.1 failures rather than rendering them like every other line', () => {

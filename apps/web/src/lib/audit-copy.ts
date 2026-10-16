@@ -323,6 +323,20 @@ const theNamed = (d: unknown, noun: string, key = 'name'): string => {
 }
 const who = (c: Ctx): string => (c.row.subjectId ? c.person(c.row.subjectId) : null) ?? 'a teammate'
 
+/** "deleted 2 of 3 contacts, as a person approved; 1 kept, each with why in the chat". */
+function deletedOfAsked(c: Ctx, one: string, many: string): string {
+  const deleted = num(c.d, 'deleted') ?? 0
+  const asked = num(c.d, 'asked')
+  const kept = num(c.d, 'kept') ?? 0
+  // Left untouched when the call's time ran out (review, 2026-10-15).
+  const notReached = num(c.d, 'notReached') ?? 0
+  const of = asked !== null ? `${deleted} of ${asked} ${asked === 1 ? one : many}` : plural(deleted, one, many)
+  return (
+    `deleted ${of}, as a person approved${kept > 0 ? `; ${kept} kept, each with why in the chat` : ''}` +
+    (notReached > 0 ? `; ${notReached} not reached before the call's time ran out` : '')
+  )
+}
+
 function exported(c: Ctx, what: string): string {
   const rows = num(c.d, 'rows')
   return `downloaded ${what} as CSV${rows !== null ? ` (${plural(rows, 'row')})` : ''}`
@@ -759,6 +773,60 @@ const SENTENCES: Readonly<Record<string, Template>> = {
     return `recorded ${n} research claim${n === 1 ? '' : 's'} with sources about ${c.co}${skipped ? ` (${skipped} already on file)` : ''} — research, never evidence`
   },
   'research.deleted': (c) => `removed a research claim about ${c.co}`,
+  // --- delete (2026-10-15): only what nothing outside the building depended on --
+  'contact.deleted': (c) => {
+    const n = (k: string): number => num(c.d, k) ?? 0
+    return `deleted a contact at ${c.co} nothing had gone to or come from${tail([
+      n('draftsRemoved') > 0 && `${plural(n('draftsRemoved'), 'draft')} that never went removed with them`,
+      n('consentsRemoved') > 0 && `${plural(n('consentsRemoved'), 'consent')} removed`,
+      n('notesRemoved') > 0 && `${plural(n('notesRemoved'), 'note')} about them removed`,
+    ])}`
+  },
+  // The company is gone, so the sentence names it from the row: its domain,
+  // or a no-website business's name. A placeholder carries neither.
+  'company.deleted': (c) => {
+    const n = (k: string): number => num(c.d, k) ?? 0
+    // A no-website business's row carries its `.nosite.invalid` placeholder
+    // (review, 2026-10-15) — a key, not a name anybody would recognise — so
+    // it is named by its name.
+    const domain = text(c.d, 'domain', 120)
+    const named = (domain && !/\.nosite\.invalid$/i.test(domain) ? domain : null) ?? text(c.d, 'name', 80) ?? domain
+    return `deleted ${named ? quoted(named) : 'a company'} and what was filed under it${tail([
+      n('contacts') > 0 && plural(n('contacts'), 'contact'),
+      n('drafts') > 0 && `${plural(n('drafts'), 'draft')} that never went`,
+      n('deals') > 0 && plural(n('deals'), 'deal'),
+      n('meetings') > 0 && plural(n('meetings'), 'meeting'),
+      n('quotes') > 0 && `${plural(n('quotes'), 'draft quote')}`,
+      n('proposals') > 0 && `${plural(n('proposals'), 'draft proposal')}`,
+      n('scans') > 0 && plural(n('scans'), 'scan'),
+    ])}; it is not filed again automatically`
+  },
+  'deal.deleted': (c) => {
+    const stage = word(c.d, 'stage')
+    return `deleted the ${stage ? `${spaced(stage)} ` : ''}deal for ${c.co}; its meetings, proposals and tasks stay`
+  },
+  'meeting.deleted': (c) => {
+    const at = when(c.d)
+    return `deleted a meeting with ${c.co}${at ? ` set for ${at}` : ''} that had no outcome recorded; the deal did not move back`
+  },
+  'proposal.deleted': (c) => `deleted a draft proposal for ${c.co}`,
+  'quote.deleted': (c) => `deleted draft quote ${word(c.d, 'number') ?? ''} for ${c.co}`.replace(/\s+/g, ' ').trim(),
+  'task.deleted': (c) => {
+    const kind = word(c.d, 'kind')
+    const what = kind === 'call' || kind === 'visit' ? `${kind} task` : 'task'
+    return `deleted a ${what}${c.hasCo ? ` for ${c.co}` : ''}`
+  },
+  'campaign.deleted': (c) => {
+    const drafts = num(c.d, 'draftsRemoved') ?? 0
+    return `deleted ${theNamed(c.d, 'campaign')}, under which nothing had gone out${
+      drafts > 0 ? `; ${plural(drafts, 'draft')} that never went removed with it` : ''
+    }`
+  },
+  'template.deleted': (c) => {
+    const id = text(c.d, 'externalId', 64)
+    return `deleted ${aChannel(word(c.d, 'channel'))} template${id ? ` (${id})` : ''} no message had been checked against`
+  },
+  'icp.deleted': (c) => `deleted ${theNamed(c.d, 'ICP profile', 'label')}, which had scored nothing`,
   // --- Google's coordinates kept thirty days (2026-10-09) ---------------------
   'listing.coordinates_pruned': (c) => {
     const n = num(c.d, 'companies') ?? 0
@@ -870,6 +938,15 @@ const SENTENCES: Readonly<Record<string, Template>> = {
   'agent.book_meeting': (c) => {
     const at = when(c.d)
     return `recorded a meeting with ${domainLabel(c.d) ?? 'a company'}${at ? ` for ${at}` : ''}; no invitation was sent`
+  },
+  // The agent's deletes (2026-10-15): each ran only once a person approved its card.
+  'agent.delete_contacts': (c) => deletedOfAsked(c, 'contact', 'contacts'),
+  'agent.delete_companies': (c) => deletedOfAsked(c, 'company', 'companies'),
+  'agent.delete_meeting': (c) => `deleted a meeting with ${c.co}, as a person approved; nobody was told`,
+  'agent.delete_task': (c) => {
+    const kind = word(c.d, 'kind')
+    const what = kind === 'call' || kind === 'visit' ? `${kind} task` : 'task'
+    return `deleted a ${what}${c.hasCo ? ` for ${c.co}` : ''}, as a person approved`
   },
   'agent.edit_draft': (c) => {
     if (flag(c.d, 'edited') !== true) return 'tried to rewrite an email draft, and nothing was changed'
@@ -1633,10 +1710,15 @@ export function actorLabel(
 /**
  * Where the row's subject lives in the app, or null. Deals, contacts and
  * messages have no page of their own; they link to their company. A subject
- * that is gone links nowhere rather than to a 404.
+ * that is gone links nowhere rather than to a 404 — and the subject of a
+ * `*.deleted` row is gone by definition (2026-10-15), so such a row never
+ * links to that record's own page: a deleted meeting, proposal or quote
+ * links nowhere, and a deleted contact or deal to its company while the
+ * company is still there.
  */
 export function subjectHref(row: AuditLine, company: AuditCompanyRef | null): string | null {
-  const id = row.subjectId && UUID.test(row.subjectId) ? row.subjectId : null
+  const gone = row.action.endsWith('.deleted')
+  const id = !gone && row.subjectId && UUID.test(row.subjectId) ? row.subjectId : null
   const companyPage = company ? `/companies/${encodeURIComponent(company.domain)}` : null
   switch (row.subjectType) {
     case 'meeting':
@@ -1674,7 +1756,7 @@ export function subjectHref(row: AuditLine, company: AuditCompanyRef | null): st
     case 'org':
       return '/settings'
     case 'quote':
-      return id ? `/quotes/${id}` : '/quotes'
+      return id ? `/quotes/${id}` : gone ? null : '/quotes'
     default:
       return companyPage
   }

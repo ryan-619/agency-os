@@ -10,8 +10,8 @@
 import { z } from 'zod'
 import { isNoSiteDomain, isStale, parseIcpDefinition, staleAfterDaysOf, type IcpDefinition } from '@agency/core'
 import {
-  activeIcpProfile, findCompanyByDomain, importCompanies, latestScanWithFindings,
-  recordScan, type AgencyDb,
+  activeIcpProfile, deletedCompanyAt, deletedCompanyKeys, deletedCompanyWords, findCompanyByDomain, importCompanies,
+  latestScanWithFindings, recordScan, type AgencyDb,
 } from '@agency/db'
 import { UnscannableHostError, isScannableHost, normaliseDomain, scanDomain } from '@agency/scanner'
 import * as schema from '@agency/db/schema'
@@ -106,6 +106,9 @@ export const scanCompany: AgencyToolSpec<typeof scanShape> = {
       if (!isScannableHost(domain) || isNoSiteDomain(domain) || domain.endsWith('.inbound')) {
         return fail('not_permitted', `"${domain}" is not a public website the scanner may read. Nothing was added or scanned.`)
       }
+      // Nor a company a teammate deleted (2026-10-15): a person adds it back on /companies.
+      const deletedAt = deletedCompanyAt(await deletedCompanyKeys(ctx.db, ctx.orgId), { domain })
+      if (deletedAt) return fail('not_permitted', `${deletedCompanyWords(domain, deletedAt)} Nothing was added or scanned.`)
       const clock = deadline(ADD_CHECK_MS)
       let check: Awaited<ReturnType<typeof websiteCheck>>
       try {

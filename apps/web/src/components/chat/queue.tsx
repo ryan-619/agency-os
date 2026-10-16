@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { When } from '@/components/when'
+import { ApprovalReadingView } from './approval-reading'
 
 /**
  * The approval queue's interactive half.
@@ -9,6 +10,12 @@ import { When } from '@/components/when'
  * Small on purpose. The page does the reading; this does the deciding, and the
  * only state it keeps is what has already been answered in this tab — so a row
  * someone else answered a second ago stops offering buttons that cannot work.
+ *
+ * Each card reads its payload the way the chat's card does
+ * (`ApprovalReadingView`, through `describeApproval`): a title, the words,
+ * every key as a fact and the whole JSON a click away. It showed the tool's
+ * name and the JSON alone, and a delete decided here named nothing a person
+ * could check (2026-10-15).
  */
 export interface QueueItem {
   readonly id: string
@@ -59,15 +66,15 @@ export function ApprovalQueue({
         return (
           <div key={item.id} className={`approval ${outcome ? `approval-${outcome}` : ''}`}>
             <div className="approval-head">
-              <strong>{item.toolName}</strong>
               <span className="pill pill-risk">{item.risk} risk</span>
+              <span className="mono muted" style={{ fontSize: 12 }}>{item.toolName}</span>
               <span className="muted" style={{ fontSize: 12 }}>
                 asked <When iso={item.createdAt} mode="time" /> · expires{' '}
                 <When iso={item.expiresAt} mode="time" />
               </span>
             </div>
 
-            <pre className="mono approval-payload">{JSON.stringify(item.payload, null, 2)}</pre>
+            <ApprovalReadingView toolName={item.toolName} payload={item.payload} />
 
             {outcome ? (
               <p className="muted">{describe(outcome)}</p>

@@ -1,11 +1,13 @@
 import { NextResponse } from 'next/server'
 import { assertCan, can } from '@agency/core'
 import {
-  appendAudit, campaignEditInput, isUniqueViolation, readCampaign, updateCampaign, type AgencyDb, type CampaignUpdate,
+  appendAudit, campaignDelete, campaignEditInput, isUniqueViolation, readCampaign, updateCampaign, type AgencyDb,
+  type CampaignUpdate,
 } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { log } from '@/lib/logger'
 import { getDb } from '@/lib/db'
+import { deleteAnswer } from '@/lib/delete-answer'
 
 /**
  * Edit a campaign (PROMPT.md §8.4).
@@ -28,6 +30,8 @@ import { getDb } from '@/lib/db'
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export async function PATCH(
   request: Request,
@@ -152,4 +156,33 @@ function refusedSave(saved: Exclude<CampaignUpdate, { ok: true } | { reason: 'no
     case 'changed':
       return 'This campaign changed while you were editing. Reload and try again; nothing was saved.'
   }
+}
+
+/**
+ * Delete a campaign nothing went out under (2026-10-15) — `campaigns:write`.
+ * Its steps, its follow-up runs and the drafts waiting under it go with it.
+ * One that sent anything is refused (409): it is set to done instead; so is
+ * one with an answer to somebody's reply waiting under it, which is denied
+ * on /approvals first so the reply's pause goes back on.
+ */
+export async function DELETE(
+  _request: Request,
+  context: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const session = await auth()
+  const user = session?.user
+  if (!user) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
+  try {
+    assertCan({ id: user.id, orgId: user.orgId, role: user.role }, 'campaigns:write')
+  } catch {
+    return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+  }
+  const { id } = await context.params
+  if (!UUID.test(id)) return NextResponse.json({ error: 'not_found', message: 'No such campaign.' }, { status: 404 })
+  const a = await deleteAnswer(
+    'campaign',
+    () => campaignDelete(getDb() as unknown as AgencyDb, { orgId: user.orgId, campaignId: id.toLowerCase(), actor: user.id }),
+    log,
+  )
+  return NextResponse.json(a.body, { status: a.status })
 }

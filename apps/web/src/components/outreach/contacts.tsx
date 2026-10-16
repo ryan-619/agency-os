@@ -5,7 +5,9 @@ import { When } from '@/components/when'
 import { SharedNumberHolderNote } from '@/components/shared-number-note'
 import { isSharedNumberOptOutPause } from '@/lib/shared-number-pause'
 import type { AddressSourceLine } from '@/lib/address-source'
+import { CONFIRM_WORDS } from '@/lib/delete-view'
 import { toast } from '../toast/toast'
+import { DeleteButton } from '../delete/delete-button'
 
 /**
  * The people at a company (PROMPT.md §2.1, §8.4).
@@ -27,6 +29,11 @@ import { toast } from '../toast/toast'
  * an import — and a warning for an address the assistant added before
  * sources were kept, the likeliest to be a guess. A teammate's own Add is
  * recorded as typed by them; the route says so, not this form.
+ *
+ * Delete (2026-10-15) takes a person nothing ever went to or came from —
+ * somebody added by mistake, or invented by the assistant before 0029. The
+ * route refuses anybody else with its sentence: an owner erases them on
+ * /contacts instead.
  */
 
 export interface ContactView {
@@ -180,6 +187,13 @@ export function ContactsPanel({
                         Pause
                       </button>
                     )}
+                    <DeleteButton
+                      url={`/api/contacts/${c.id}`}
+                      kind="contact"
+                      confirm={CONFIRM_WORDS.contact(c.name)}
+                      title="For somebody nothing ever went to or came from. Anybody else is kept — an owner erases them on /contacts."
+                      onRefused={(f) => setErrors((e) => ({ ...e, [c.id]: f.message }))}
+                    />
                   </div>
                 ) : null}
               </div>

@@ -740,7 +740,15 @@ export async function tasksRecordOutcome(
     .leftJoin(schema.companies, eq(schema.companies.id, schema.tasks.companyId))
     .where(and(eq(schema.tasks.orgId, args.orgId), eq(schema.tasks.id, args.id)))
     .limit(1)
-  if (!task) return { ok: false, reason: 'not_found', message: 'No such task.' }
+  if (!task) {
+    // Somebody on the phone just heard "stop calling", and the task — or its
+    // company, which a delete takes with it — went in the meantime (review,
+    // 2026-10-15). "No such task." lost their word: nothing said the number
+    // was not recorded.
+    return args.outcome === 'asked_to_stop'
+      ? { ok: false, reason: 'suppression_failed', message: ASKED_TO_STOP_TASK_GONE }
+      : { ok: false, reason: 'not_found', message: 'No such task.' }
+  }
   if (task.task.kind !== 'call' && task.task.kind !== 'visit') {
     return { ok: false, reason: 'invalid', message: 'Only a call or a visit has an outcome; tick any other task done.' }
   }
@@ -787,7 +795,22 @@ export async function tasksRecordOutcome(
       .set({ doneAt: now, doneBy: args.byUserId, outcome: args.outcome })
       .where(and(eq(schema.tasks.orgId, args.orgId), eq(schema.tasks.id, args.id), isNull(schema.tasks.doneAt)))
       .returning()
-    if (!done) throw new OutcomeRefused('already_done', 'That task was completed by somebody else a moment ago.')
+    if (!done) {
+      // Matched nothing: done by somebody else, or deleted after the read —
+      // then "completed by somebody else" is false, and the suppression above
+      // rolls back with this refusal, so the person must be told to record it.
+      const [still] = await tx
+        .select({ id: schema.tasks.id })
+        .from(schema.tasks)
+        .where(and(eq(schema.tasks.orgId, args.orgId), eq(schema.tasks.id, args.id)))
+        .limit(1)
+      if (!still) {
+        throw args.outcome === 'asked_to_stop'
+          ? new OutcomeRefused('suppression_failed', ASKED_TO_STOP_TASK_GONE)
+          : new OutcomeRefused('not_found', 'No such task — it was deleted a moment ago.')
+      }
+      throw new OutcomeRefused('already_done', 'That task was completed by somebody else a moment ago.')
+    }
 
     let callBackTaskId: string | null = null
     if (callBackAt && task.company) {
@@ -823,8 +846,17 @@ export async function tasksRecordOutcome(
   })
 }
 
+/**
+ * What "asked to stop" on a task that is no longer there answers: the
+ * number was NOT recorded, and a person records it by hand. Never the
+ * number itself.
+ */
+export const ASKED_TO_STOP_TASK_GONE =
+  'This task is no longer on file — it, or its company, was deleted a moment ago — so the number they asked us to ' +
+  'stop calling was NOT recorded. Record it on /suppressions by hand.'
+
 class OutcomeRefused extends Error {
-  constructor(readonly reason: 'suppression_failed' | 'already_done', message: string) {
+  constructor(readonly reason: 'suppression_failed' | 'already_done' | 'not_found', message: string) {
     super(message)
     this.name = 'OutcomeRefused'
   }

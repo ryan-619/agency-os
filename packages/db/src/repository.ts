@@ -331,6 +331,11 @@ export interface CompanyListRow {
   readonly disqualifiedReason: string | null
   readonly lastScanAt: Date | null
   readonly lastScanOk: boolean | null
+  /**
+   * How it was filed (`companies.source`): `agent` for the chat agent, which
+   * /companies offers as "Added by the assistant" (2026-10-15).
+   */
+  readonly source: string
 }
 
 /**
@@ -357,6 +362,7 @@ export async function companyList(db: AgencyDb, orgId: string): Promise<CompanyL
       headcount: schema.companies.headcount,
       industry: schema.companies.industry,
       city: schema.companies.city,
+      source: schema.companies.source,
     })
     .from(schema.companies)
     .where(eq(schema.companies.orgId, orgId))
@@ -419,6 +425,7 @@ export async function companyList(db: AgencyDb, orgId: string): Promise<CompanyL
       disqualifiedReason: s?.disqualifiedReason ?? null,
       lastScanAt: scan?.ranAt ?? null,
       lastScanOk: scan?.ok ?? null,
+      source: c.source,
     }
   })
 }

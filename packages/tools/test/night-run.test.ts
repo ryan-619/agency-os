@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import { parseIcpDefinition, type Observation, type SiteProfile } from '@agency/core'
-import { appendAudit, nightReportLatest, nightSearchAdd, type AgencyDb } from '@agency/db'
+import { appendAudit, companyDelete, nightReportLatest, nightSearchAdd, type AgencyDb } from '@agency/db'
 import * as schema from '@agency/db/schema'
 import seed from '../../db/seed/icp-security-gap-saas.json' with { type: 'json' }
 import { migratedDb, type TestDb } from '../../db/test/helpers.js'
@@ -106,6 +106,42 @@ describe('the night shift’s run', () => {
     const [searchedRow] = await db.select().from(schema.auditLog).where(eq(schema.auditLog.action, 'night.searched'))
     expect(searchedRow).toMatchObject({ actor: 'night_shift' })
     expect(searchedRow!.detail).toMatchObject({ returned: 3, added: 2 })
+  })
+
+  /**
+   * Delete (2026-10-15): a business a teammate deleted is not filed again by
+   * the night — by its place id, or by its own domain — while one a person
+   * added back since is on file and refreshed like any other.
+   */
+  it('does not file again what a teammate deleted, and counts it', async () => {
+    await save('dentists in Indiranagar, Bengaluru')
+    const gone = await db
+      .insert(schema.companies)
+      .values([
+        { orgId, domain: 'old-name-000000.nosite.invalid', name: 'Kumar Dental', googlePlaceId: 'p2', listingCheckedAt: NOW },
+        { orgId, domain: 'smiledental.in', name: 'Smile Dental', googlePlaceId: 'p-before', listingCheckedAt: NOW },
+        { orgId, domain: 'backagain.in', name: 'Back Again', googlePlaceId: 'p4', listingCheckedAt: NOW },
+      ])
+      .returning({ id: schema.companies.id, domain: schema.companies.domain })
+    for (const c of gone) expect(await companyDelete(db, { orgId, companyId: c.id, actor: ownerId })).toMatchObject({ ok: true })
+    // A person added this one back on /companies.
+    await db.insert(schema.companies).values({ orgId, domain: 'backagain.in', name: 'Back Again', source: 'import' })
+
+    const r = await run(places({
+      'dentists in Indiranagar, Bengaluru': [
+        listing({ placeId: 'p1', name: 'Smile Dental', website: 'https://smiledental.in' }),
+        listing({ placeId: 'p2', name: 'Kumar Dental' }),
+        listing({ placeId: 'p3', name: 'New Dental' }),
+        listing({ placeId: 'p4', name: 'Back Again', website: 'https://backagain.in' }),
+      ],
+    }))
+    expect(r).toMatchObject({ found: 4, added: 1, refreshed: 1, skippedDeleted: 2 })
+    expect(scanned).toEqual([])
+    const rows = await db.select().from(schema.companies).where(eq(schema.companies.orgId, orgId))
+    expect(rows.map((c) => c.name).sort()).toEqual(['Back Again', 'New Dental'])
+    expect(rows.find((c) => c.name === 'Back Again')).toMatchObject({ googlePlaceId: 'p4', source: 'import' })
+    const [ran] = await db.select().from(schema.auditLog).where(eq(schema.auditLog.action, 'night.ran'))
+    expect(ran!.detail).toMatchObject({ skippedDeleted: 2 })
   })
 
   it('stays inside the daily Places cap chat shares, and a search Google refuses costs only that search', async () => {

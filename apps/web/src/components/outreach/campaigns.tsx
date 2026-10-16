@@ -8,6 +8,8 @@ import { REFUSAL_WORDS, campaignAutoPausedWords } from '@/lib/refusal-words'
 import { CHANNEL_HINT, SMS_AUTO_SEND_OFF, SMS_NOT_ENROLLED } from '@/components/campaigns/sms-words'
 import { toast } from '../toast/toast'
 import { CampaignSteps, type RunsView, type StepView } from './campaign-steps'
+import { DeleteButton } from '../delete/delete-button'
+import { CONFIRM_WORDS } from '@/lib/delete-view'
 
 /**
  * Campaigns (PROMPT.md §8.4).
@@ -31,6 +33,10 @@ import { CampaignSteps, type RunsView, type StepView } from './campaign-steps'
  * A campaign the WORKER paused says so, with the numbers it paused on: too
  * many of its addresses bounced. Nothing un-pauses it but a person setting
  * it active again from the form below, after fixing the list.
+ *
+ * Delete (2026-10-15) takes a campaign nothing went out under — a mistake,
+ * or an empty one — with its steps and the drafts waiting under it. One
+ * that sent anything is refused with the route's sentence: set it to done.
  */
 
 export interface CampaignView {
@@ -121,6 +127,14 @@ export function CampaignsPanel({
                       <button type="button" onClick={() => setEditing(c.id)}>
                         Edit
                       </button>
+                    ) : null}
+                    {canWrite ? (
+                      <DeleteButton
+                        url={`/api/campaigns/${c.id}`}
+                        kind="campaign"
+                        confirm={CONFIRM_WORDS.campaign(c.name)}
+                        title="Only one nothing went out under; set any other to done."
+                      />
                     ) : null}
                   </div>
                 ) : null}

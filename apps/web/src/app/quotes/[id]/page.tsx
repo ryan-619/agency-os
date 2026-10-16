@@ -2,7 +2,7 @@ import { notFound, redirect } from 'next/navigation'
 import { and, eq } from 'drizzle-orm'
 import { can, quoteLapsed } from '@agency/core'
 import {
-  orgProfileRead, quoteItemsOf, quoteNeedsOf, quoteRead, schema, servicesList, shareLinksFor, type AgencyDb,
+  orgProfileRead, quoteItemsOf, quoteNeedsOf, quoteRead, quotesEverSent, schema, servicesList, shareLinksFor, type AgencyDb,
 } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
@@ -28,7 +28,7 @@ export default async function QuotePage({ params }: { params: Promise<{ id: stri
   const db = getDb() as unknown as AgencyDb
   const quote = await quoteRead(db, user.orgId, id)
   if (!quote) notFound()
-  const [[company], contacts, catalogue, profile, links] = await Promise.all([
+  const [[company], contacts, catalogue, profile, links, everSent] = await Promise.all([
     db.select({ name: schema.companies.name, domain: schema.companies.domain })
       .from(schema.companies)
       .where(and(eq(schema.companies.orgId, user.orgId), eq(schema.companies.id, quote.companyId)))
@@ -39,6 +39,9 @@ export default async function QuotePage({ params }: { params: Promise<{ id: stri
     servicesList(db, user.orgId, { activeOnly: true }),
     orgProfileRead(db, user.orgId),
     shareLinksFor(db, { orgId: user.orgId, quoteId: quote.id }),
+    // Whether it ever went out — sent, then revised back to a draft, it is a
+    // number a buyer holds, and is not offered a Delete (`quoteDelete` refuses it).
+    quotesEverSent(db, user.orgId, [quote.id]).then((sent) => sent.has(quote.id)),
   ])
 
   const signOutAction = async () => {
@@ -68,6 +71,7 @@ export default async function QuotePage({ params }: { params: Promise<{ id: stri
           updatedAt: (quote.updatedAt ?? quote.createdAt).toISOString(),
           lapsed: quoteLapsed(quote.validUntil, now),
           acceptedByName: quote.acceptedByName,
+          everSent,
         }}
         needs={quoteNeedsOf(quote).map((n) => ({ label: n.label, evidence: [...n.evidence] }))}
         gstRate={Number(quote.taxRate) || profile.gstRate}

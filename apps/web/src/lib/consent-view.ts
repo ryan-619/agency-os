@@ -67,6 +67,29 @@ export function consentStateLabel(s: ConsentStateView, channel: string): string 
   return channel === 'email' ? 'never asked — cold email allowed' : 'never asked — cannot be used'
 }
 
+/**
+ * What "Lift refusal" asks before it sends anything (an owner's, audited
+ * `consent.refusal_lifted`). Worded by channel for the same reason as the
+ * label above: a lifted refusal returns the person to NEVER ASKED, and on
+ * email — a cold channel (§2.1) — never asked is a message that may go,
+ * while on SMS, voice and WhatsApp it is still a no. It used to say nobody
+ * may contact them "until a new consent is recorded" on every channel, which
+ * is false of email, the one channel where lifting it matters most
+ * (2026-10-15).
+ */
+export function liftRefusalConfirm(channel: string): string {
+  if (channel === 'email') {
+    return (
+      'Lift the email refusal? They go back to never asked, and email is a cold channel: with no refusal on ' +
+      'record, a campaign may write to them again. Lift it only if the refusal was recorded by mistake.'
+    )
+  }
+  return (
+    `Lift the ${channel} refusal? They go back to never asked — on ${channel} that still means no, so nothing ` +
+    'goes to them there until a new consent is recorded.'
+  )
+}
+
 /** The `.ledger-state` modifier: green for a yes, amber for anything that stops a send. */
 export function consentStateClass(s: Pick<ConsentStateView, 'state'>, channel: string): 'yes' | 'no' | 'none' | 'unknown' {
   if (s.state === 'granted') return 'yes'

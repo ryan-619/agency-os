@@ -9,7 +9,7 @@ import { drizzle } from 'drizzle-orm/pglite'
 import { eq } from 'drizzle-orm'
 import { z } from 'zod'
 import { isNoSiteDomain } from '@agency/core'
-import { appendAudit, serviceCreate, type AgencyDb, type SiteAuditResult } from '@agency/db'
+import { appendAudit, companyDelete, serviceCreate, type AgencyDb, type SiteAuditResult } from '@agency/db'
 import * as schema from '@agency/db/schema'
 import seed from '../../db/seed/icp-security-gap-saas.json' with { type: 'json' }
 import { migratedDb, type TestDb } from '../../db/test/helpers.js'
@@ -133,6 +133,41 @@ describe('the opportunity tools', () => {
       const kumar = rows.find((r) => r.name === 'Kumar Dental Clinic')!
       expect(isNoSiteDomain(kumar.domain)).toBe(true)
       expect(kumar).toMatchObject({ source: 'google_maps', phone: '+918041234567', timeZone: 'Asia/Kolkata', city: 'Bengaluru' })
+    })
+
+    /**
+     * Delete (2026-10-15): a business a teammate deleted is not filed again
+     * when a search returns it — by its place id, or by its own domain under
+     * another place — and the summary says so, by name.
+     */
+    it('does not file again a business a teammate deleted, by its place or its own domain', async () => {
+      await run(findBusinesses, { query: 'dentists' }, {
+        places: places([
+          listing(),
+          listing({ placeId: 'ChIJsmile', name: 'Smile Dental', website: 'https://www.smiledental.in/' }),
+          listing({ placeId: 'ChIJnew', name: 'New Dental' }),
+        ]),
+      })
+      const filed = await db
+        .insert(schema.companies)
+        .values([
+          { orgId, domain: 'kumar-dental-clinic-old000.nosite.invalid', name: 'Kumar Dental Clinic', googlePlaceId: 'ChIJkumar', listingCheckedAt: NOW },
+          { orgId, domain: 'smiledental.in', name: 'Smile Dental', googlePlaceId: 'ChIJsmile-before', listingCheckedAt: NOW },
+        ])
+        .returning({ id: schema.companies.id })
+      for (const c of filed) expect(await companyDelete(db, { orgId, companyId: c.id, actor: ownerId })).toMatchObject({ ok: true })
+
+      const summary = summaryOf(await run(addBusinessesTool, { placeIds: ['ChIJkumar', 'ChIJsmile', 'ChIJnew'] }))
+      expect(summary).toMatch(/Added 1 business from Google Maps\./)
+      expect(summary).toMatch(/New Dental — no website of its own/)
+      // No website of its own: nothing on /companies can file one, so nothing promises it there.
+      expect(summary).toMatch(
+        /Not added: Kumar Dental Clinic was deleted by a teammate on \d{4}-\d{2}-\d{2}, so it is not filed again here; a business with no website cannot be added on \/companies\./,
+      )
+      expect(summary).toMatch(/Not added: Smile Dental was deleted by a teammate on \d{4}-\d{2}-\d{2}; a person can add it again on \/companies\./)
+      const rows = await db.select().from(schema.companies).where(eq(schema.companies.orgId, orgId))
+      expect(rows.map((r) => r.name)).toEqual(['New Dental'])
+      expect(audited.at(-1)).toEqual({ action: 'agent.add_businesses', detail: { asked: 3, added: 1, refreshed: 0, missing: 0, skippedDeleted: 2 } })
     })
 
     it('adds nothing from place ids no recent search returned', async () => {

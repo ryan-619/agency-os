@@ -4,6 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type DragEvent } from 're
 import { Flip, MOTION_OK, gsap } from '@/components/motion/gsap'
 import { toast } from '@/components/toast/toast'
 import { When } from '@/components/when'
+import { CONFIRM_WORDS, DELETED_WORDS, mayDeleteDeal, sendDelete } from '@/lib/delete-view'
 
 /**
  * The pipeline board (PROMPT.md §8.6).
@@ -37,6 +38,11 @@ import { When } from '@/components/when'
  * (there is no such column), so it never says "in stage for". Any change
  * made here — a move, a next action, an owner, a due date — touches the row,
  * so the card's count restarts when one lands.
+ *
+ * "Delete deal" (2026-10-15) takes a deal that is not won off the board —
+ * one opened by mistake, or for a company the assistant invented. The
+ * company and its meetings, proposals and tasks stay; a card on the wrong
+ * column is fixed by moving it. The card leaves in place, with no reload.
  */
 
 export const STAGES = ['new', 'contacted', 'replied', 'meeting', 'proposal', 'won', 'lost'] as const
@@ -299,6 +305,22 @@ export function PipelineBoard({
     } finally {
       setBusy(null)
     }
+  }
+
+  const remove = async (deal: DealCard): Promise<void> => {
+    if (!canWrite || !mayDeleteDeal(deal.stage)) return
+    if (!window.confirm(CONFIRM_WORDS.deal(deal.companyName ?? deal.companyDomain))) return
+    setBusy(deal.id)
+    setError(null)
+    const r = await sendDelete(`/api/deals/${deal.id}`, { kind: 'deal' })
+    setBusy(null)
+    if (!r.ok) {
+      setError(r.failure.message)
+      return
+    }
+    capture()
+    setDeals((ds) => ds.filter((d) => d.id !== deal.id))
+    toast.success(DELETED_WORDS.deal)
   }
 
   const editNext = async (deal: DealCard): Promise<void> => {
@@ -577,6 +599,17 @@ export function PipelineBoard({
                             <option key={m.id} value={m.id}>{shortName(m)}</option>
                           ))}
                         </select>
+                      ) : null}
+                      {mayDeleteDeal(deal.stage) ? (
+                        <button
+                          type="button"
+                          className="linkish"
+                          disabled={busy === deal.id}
+                          title="The company and its meetings, proposals and tasks stay."
+                          onClick={() => void remove(deal)}
+                        >
+                          delete deal
+                        </button>
                       ) : null}
                     </div>
                   ) : null}

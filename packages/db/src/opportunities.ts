@@ -27,6 +27,7 @@ import * as schema from './schema.js'
 import { activeIcpProfile, latestScanWithFindings, type AgencyDb } from './repository.js'
 import { appendAudit } from './approvals.js'
 import { isUniqueViolation } from './pg-errors.js'
+import { deletedCompanyAt, type DeletedCompanyKeys } from './deletes.js'
 
 type CompanyRow = typeof schema.companies.$inferSelect
 export type ServiceRow = typeof schema.services.$inferSelect
@@ -61,6 +62,12 @@ export interface AddBusinessesResult {
   readonly added: readonly { readonly placeId: string; readonly domain: string; readonly name: string }[]
   /** Already in the CRM — by place, or by domain — with its listing facts refreshed. */
   readonly refreshed: readonly { readonly placeId: string; readonly domain: string; readonly name: string | null }[]
+  /**
+   * Not on file, and deleted by a teammate before — by its place id, its own
+   * domain or its no-website placeholder — so not filed again (`deleted`). A
+   * person adds one with a website back on /companies.
+   */
+  readonly skipped: readonly { readonly placeId: string; readonly domain: string; readonly name: string; readonly deletedAt: Date }[]
 }
 
 const clip = (text: string | null | undefined, max: number): string | null => {
@@ -95,13 +102,27 @@ function listingColumns(b: BusinessToAdd, checkedAt: Date) {
  * a third party's current record, dated by `listing_checked_at` — and is
  * reported as refreshed; nothing else about it changes. A new one is added
  * with source `google_maps`. Audited by counts.
+ *
+ * With `deleted` (`deletedCompanyKeys`), a business that is NOT on file and
+ * that a teammate deleted — by its place id, its own domain, or the
+ * no-website placeholder it would be filed under — is skipped and reported, never filed again: the night shift and the agent's
+ * `add_businesses` pass it, so a company somebody removed does not come back
+ * with the next search. One a person has added again since is on file, and
+ * is refreshed like any other.
  */
 export async function addBusinesses(
   db: AgencyDb,
-  args: { readonly orgId: string; readonly businesses: readonly BusinessToAdd[]; readonly checkedAt: Date; readonly actor: string },
+  args: {
+    readonly orgId: string
+    readonly businesses: readonly BusinessToAdd[]
+    readonly checkedAt: Date
+    readonly actor: string
+    readonly deleted?: DeletedCompanyKeys
+  },
 ): Promise<AddBusinessesResult> {
   const added: { placeId: string; domain: string; name: string }[] = []
   const refreshed: { placeId: string; domain: string; name: string | null }[] = []
+  const skipped: { placeId: string; domain: string; name: string; deletedAt: Date }[] = []
   for (const b of args.businesses) {
     const domain = b.domain.trim().toLowerCase()
     const listing = listingColumns(b, args.checkedAt)
@@ -124,6 +145,11 @@ export async function addBusinesses(
         if (!isUniqueViolation(err)) throw err
       }
       refreshed.push({ placeId: b.placeId, domain: existing.domain, name: existing.name })
+      continue
+    }
+    const deletedAt = args.deleted ? deletedCompanyAt(args.deleted, { domain, placeId: b.placeId }) : null
+    if (deletedAt) {
+      skipped.push({ placeId: b.placeId, domain, name: b.name, deletedAt })
       continue
     }
     const rows = await db
@@ -149,9 +175,9 @@ export async function addBusinesses(
     action: 'company.listings_added',
     subjectType: 'org',
     subjectId: null,
-    detail: { added: added.length, refreshed: refreshed.length },
+    detail: { added: added.length, refreshed: refreshed.length, ...(skipped.length ? { skippedDeleted: skipped.length } : {}) },
   }).catch(() => {})
-  return { added, refreshed }
+  return { added, refreshed, skipped }
 }
 
 // ---------------------------------------------------------------------------

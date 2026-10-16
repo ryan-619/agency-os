@@ -67,6 +67,8 @@ describe('every page and route that exports dynamic runs on the Node runtime, sa
       'settings/templates/page.tsx', 'api/templates/route.ts', 'api/templates/[id]/route.ts',
       'api/templates/import/route.ts', 'api/contacts/[id]/sms/route.ts',
       'api/inbound/dovesoft/dlr/route.ts', 'api/inbound/dovesoft/sms/route.ts',
+      // Delete (2026-10-15): the two bulk routes and the ICP profile's.
+      'api/companies/delete/route.ts', 'api/contacts/delete/route.ts', 'api/settings/icp/[id]/route.ts',
     ]) {
       expect(DYNAMIC).toContain(p)
     }
@@ -160,6 +162,14 @@ describe('the new routes check an id’s full shape, so a malformed one is a 404
     // DoveSoft (0019): a template switched by id, and an SMS drafted to a contact.
     'api/templates/[id]/route.ts',
     'api/contacts/[id]/sms/route.ts',
+    // Delete (2026-10-15): every route a record is deleted through.
+    'api/contacts/[id]/route.ts',
+    'api/companies/[id]/route.ts',
+    'api/deals/[id]/route.ts',
+    'api/proposals/[id]/route.ts',
+    'api/quotes/[id]/route.ts',
+    'api/campaigns/[id]/route.ts',
+    'api/settings/icp/[id]/route.ts',
   ]
   const MALFORMED = [
     '------------------------------------',

@@ -923,7 +923,11 @@ describe('internal writes run without a card; what reaches a person keeps one', 
     },
   )
 
-  it.each(['queue_touch', 'enrol_contacts', 'resume_contact'])('still parks %s on a person', async (tool) => {
+  // The deletes (2026-10-15) change only the agency's own records and still
+  // wait: a delete cannot be undone.
+  it.each([
+    'queue_touch', 'enrol_contacts', 'resume_contact', 'delete_contacts', 'delete_companies', 'delete_meeting', 'delete_task',
+  ])('still parks %s on a person', async (tool) => {
     const ensureApproval = vi.fn(async () => approvalRow())
     const { deps, emitted } = makeDeps({ ensureApproval })
     await makeCanUseTool(deps)(`mcp__agency__${tool}`, { channel: 'email' }, options())
@@ -961,7 +965,8 @@ describe('internal writes run without a card; what reaches a person keeps one', 
     const declined = [
       'mcp__agency__queue_touch', 'mcp__agency__enrol_contacts', 'mcp__agency__resume_contact',
       'mcp__agency__add_note', 'mcp__agency__add_suppression', 'mcp__agency__pause_contact',
-      'mcp__agency__update_deal', 'mcp__exa__web_search_exa', 'Agent',
+      'mcp__agency__update_deal', 'mcp__agency__delete_contacts', 'mcp__agency__delete_companies',
+      'mcp__agency__delete_meeting', 'mcp__agency__delete_task', 'mcp__exa__web_search_exa', 'Agent',
     ]
     for (const tool of declined) {
       const result = await canUseTool(

@@ -109,6 +109,8 @@ describe('the agency tools the model is shown', () => {
     expect(AGENCY_SERVER_INSTRUCTIONS).toMatch(/changes to the team’s own records run at once/)
     expect(AGENCY_SERVER_INSTRUCTIONS).toMatch(/A person approves first/)
     expect(AGENCY_SERVER_INSTRUCTIONS).not.toMatch(/every change asks a person/)
+    // A delete is the team's own record and still waits (2026-10-15): it cannot be undone.
+    expect(AGENCY_SERVER_INSTRUCTIONS).toMatch(/A person approves first [^—]*or deletes a record —/)
   })
 
   /**

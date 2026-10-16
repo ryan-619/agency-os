@@ -25,6 +25,13 @@
  * before `advanceDeal` wrote its own rows. So every count built from this is
  * a lower bound, and `pipelineMetrics` says so.
  *
+ * Only the moves of deals that still EXIST are read (2026-10-15). A deal can
+ * be deleted now (`dealDelete`, and with its company), and its audit rows
+ * outlive it; `pipelineMetrics` reads win rate and velocity from `deals`, so
+ * counting a deleted deal's moves in conversion and time in stage would make
+ * the page disagree with itself. Every action here names the deal as its
+ * subject, so the filter is the subject.
+ *
  * `detail` is jsonb that nothing validates on the way in, so it is parsed
  * defensively: a row whose shape is not a move is skipped and COUNTED, and
  * the count travels with the moves so a page can say how many it could not
@@ -88,6 +95,9 @@ export async function analyticsTransitions(
           eq(schema.auditLog.action, 'deal.moved'),
           sql`(${schema.auditLog.detail} -> 'to') IS NOT NULL`,
         ),
+        // A deal that was deleted is not on the board, and its moves are not
+        // counted beside a win rate that no longer includes it (see the header).
+        sql`EXISTS (SELECT 1 FROM deals d WHERE d.id = audit_log.subject_id AND d.org_id = ${orgId})`,
         ...(since ? [gte(schema.auditLog.createdAt, since)] : []),
       ),
     )

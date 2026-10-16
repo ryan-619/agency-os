@@ -6,6 +6,8 @@ import { EmptyState } from '../empty-state'
 import { When } from '@/components/when'
 import { toast } from '../toast/toast'
 import { ToastOn } from '../toast/toast-on'
+import { DeleteButton } from '../delete/delete-button'
+import { CONFIRM_WORDS, mayDeleteTask } from '../../lib/delete-view'
 
 /**
  * Tasks as a person works them: tick one off, hand it to somebody, move its
@@ -21,6 +23,12 @@ import { ToastOn } from '../toast/toast-on'
  * pre-filled from the stored instant: which local day an instant falls on
  * differs between the server's render and the browser's, and that is a
  * hydration error (see <When>).
+ *
+ * Delete (2026-10-15) takes a task made by mistake, or one the assistant
+ * made about somebody who does not exist. Never a LinkedIn step — closing
+ * one says whether a message went — and never a done call that recorded
+ * "asked not to be called", which is where the number's suppression came
+ * from (`mayDeleteTask`, and the route refuses both again).
  */
 
 export interface TaskItem {
@@ -263,6 +271,11 @@ export function TaskList({
               ) : (
                 <span className="muted">{t.assigneeLabel ?? 'unassigned'}</span>
               )}
+              {canWrite && mayDeleteTask(t) ? (
+                <div style={{ marginTop: 4, textAlign: 'right' }}>
+                  <DeleteButton url={`/api/tasks/${t.id}`} kind="task" confirm={CONFIRM_WORDS.task} />
+                </div>
+              ) : null}
             </div>
           </div>
         )

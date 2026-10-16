@@ -250,6 +250,12 @@ export interface LedgerQuery {
   readonly paused?: boolean
   /** Matched against name, address and company, case-insensitively. */
   readonly q?: string
+  /**
+   * Only people added this way (`contacts.source`) — `agent` is the filter
+   * /contacts offers as "Added by the assistant" (2026-10-15), to find what
+   * the chat agent filed before 0029 and decide what to delete.
+   */
+  readonly source?: string
   /** Default 100, at most 500 — the page reads a suppression answer per row. */
   readonly limit?: number
   readonly offset?: number
@@ -285,6 +291,7 @@ export async function contactsLedger(
   if (q.companyId) where.push(eq(schema.contacts.companyId, q.companyId))
   if (q.paused === true) where.push(isNotNull(schema.contacts.pausedAt))
   if (q.paused === false) where.push(isNull(schema.contacts.pausedAt))
+  if (q.source) where.push(eq(schema.contacts.source, q.source))
   const text = q.q?.trim()
   if (text) {
     const term = likeTerm(text.slice(0, 200))

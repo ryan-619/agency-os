@@ -49,6 +49,12 @@ export interface CompanyQuery {
   readonly state: ScanState | null
   readonly qualified: 'yes' | 'no' | null
   readonly openDeal: OpenDealFilter | null
+  /**
+   * `agent`: only companies the chat agent filed (`companies.source`) — the
+   * "Added by the assistant" filter (2026-10-15), for finding what it filed
+   * before 0029 and deciding what to delete. The export honours it too.
+   */
+  readonly source: 'agent' | null
   readonly sort: CompanySort
   readonly dir: 'asc' | 'desc'
 }
@@ -133,6 +139,7 @@ export function parseCompanyQuery(params: Params): CompanyQuery {
     state: oneOf(read(params, 'state'), SCAN_STATES),
     qualified: oneOf(read(params, 'qualified'), ['yes', 'no'] as const),
     openDeal: oneOf<OpenDealFilter>(read(params, 'openDeal'), ['yes', 'no', ...OPEN_DEAL_STAGES]),
+    source: oneOf(read(params, 'source'), ['agent'] as const),
     sort,
     dir: oneOf(read(params, 'dir'), ['asc', 'desc'] as const) ?? defaultDir(sort),
   }
@@ -149,6 +156,7 @@ export function companyQueryString(query: CompanyQuery): string {
   if (query.state) p.set('state', query.state)
   if (query.qualified) p.set('qualified', query.qualified)
   if (query.openDeal) p.set('openDeal', query.openDeal)
+  if (query.source) p.set('source', query.source)
   if (query.sort !== 'domain') p.set('sort', query.sort)
   if (query.dir !== defaultDir(query.sort)) p.set('dir', query.dir)
   return p.toString()
@@ -195,6 +203,7 @@ function matches(row: CompanyListItem, query: CompanyQuery, clock: CompanyListCl
     if (row.score === null) return false
     if (row.qualified !== (query.qualified === 'yes')) return false
   }
+  if (query.source !== null && row.source !== query.source) return false
   if (query.openDeal !== null) {
     if (query.openDeal === 'yes') {
       if (row.openDealStage === null) return false

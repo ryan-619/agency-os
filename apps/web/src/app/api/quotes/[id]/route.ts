@@ -1,10 +1,11 @@
 import { NextResponse } from 'next/server'
 import { z } from 'zod'
-import { quoteUpdate, type AgencyDb } from '@agency/db/queries'
+import { quoteDelete, quoteUpdate, type AgencyDb } from '@agency/db/queries'
 import { getDb } from '@/lib/db'
 import { log } from '@/lib/logger'
 import { bodyOf, principalFor, statusFor } from '../shared'
 import { itemsFrom, quoteItemsInput } from '../items'
+import { deleteAnswer } from '@/lib/delete-answer'
 
 /**
  * Change a quote (0023): a draft, or a sent one — which returns to a draft
@@ -12,6 +13,8 @@ import { itemsFrom, quoteItemsInput } from '../items'
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 const input = z.object({
   title: z.string().max(200).optional(),
@@ -48,4 +51,22 @@ export async function PATCH(request: Request, { params }: { params: Promise<{ id
     log.error('quote could not be saved', { error: err instanceof Error ? err.name : 'UnknownError' })
     return NextResponse.json({ error: 'The quote could not be saved. Nothing changed; try again.' }, { status: 500 })
   }
+}
+
+/**
+ * Delete a draft quote (2026-10-15) — `deals:write`, as editing one is. A
+ * sent quote is refused (409): it is withdrawn instead, and stays. The next
+ * quote raised this year may take a deleted draft's number.
+ */
+export async function DELETE(_request: Request, { params }: { params: Promise<{ id: string }> }): Promise<NextResponse> {
+  const who = await principalFor('deals:write')
+  if (!who.ok) return who.response
+  const { id } = await params
+  if (!UUID.test(id)) return NextResponse.json({ error: 'not_found', message: 'No such quote.' }, { status: 404 })
+  const a = await deleteAnswer(
+    'quote',
+    () => quoteDelete(getDb() as unknown as AgencyDb, { orgId: who.user.orgId, quoteId: id.toLowerCase(), actor: who.user.id }),
+    log,
+  )
+  return NextResponse.json(a.body, { status: a.status })
 }

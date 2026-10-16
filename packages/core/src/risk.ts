@@ -38,6 +38,7 @@ export type RiskRule =
   | 'leaves_the_building'
   | 'reopens_outreach'
   | 'changes_scoring'
+  | 'deletes_records'
   | 'delegation'
   | 'connector_unreviewed'
 
@@ -230,6 +231,13 @@ export const AGENCY_TOOL_RISK = {
   list_icps: ['low', 'read_only', 'Reads every ideal-customer profile: which is active, and the markets and size band each targets.'],
   create_icp: ['medium', 'writes_internal_state', 'Creates a new, inactive ideal-customer profile for a market or size band. Nothing is scored under it until it is activated.'],
   activate_icp: ['medium', 'changes_scoring', 'Switches the active ideal-customer profile, so every later scan is scored under it — a person decides that.'],
+  // deletes.ts — Delete, and what it will not delete (2026-10-15). A delete cannot be
+  // undone, so each keeps a card (`deletes_records`) and is declined in a turn nobody
+  // watches; each refuses what the web's Delete refuses, through the same writer.
+  delete_contacts: ['high', 'deletes_records', 'Deletes people nothing was ever sent to or received from, with their unsent drafts. It cannot be undone.'],
+  delete_companies: ['high', 'deletes_records', 'Deletes companies nothing was ever sent to or received from, with their people, scans, deals and drafts. It cannot be undone.'],
+  delete_meeting: ['high', 'deletes_records', 'Deletes a recorded meeting whose outcome is not recorded. Nobody is told, and it cannot be undone.'],
+  delete_task: ['high', 'deletes_records', 'Deletes a task from the CRM. Nothing is sent, and it cannot be undone.'],
 } as const satisfies Readonly<Record<string, readonly [Risk, RiskRule, string]>>
 
 export type AgencyToolName = keyof typeof AGENCY_TOOL_RISK
@@ -451,6 +459,12 @@ export function classifyRisk(call: ToolCall): RiskVerdict {
  *    the agency's own records, but it changes how every LATER scan is judged
  *    — and every company then needs a re-scan before its next proposal — so
  *    the switch is a person's, like a campaign set active.
+ *  - `deletes_records` (`delete_contacts`, `delete_companies`,
+ *    `delete_meeting`, `delete_task`, 2026-10-15) keeps its card. It touches
+ *    only the agency's own records, as an internal write does, but a delete
+ *    cannot be undone, and the records chat is asked to delete are the ones
+ *    it is most likely to have misread — so no card-free tool deletes
+ *    anything, and the person approving sees each record named.
  *
  * Keyed on the rule rather than `risk !== 'high'` because the tier is a
  * statement about danger and the rule is a statement about WHO is affected —

@@ -60,7 +60,7 @@ describe('listings, audits, services and opportunities', () => {
     it('adds a business with its listing facts, dated, its phone as E.164, from Google Maps', async () => {
       const b = business()
       const r = await addBusinesses(db, { orgId, businesses: [b], checkedAt: NOW, actor: 'agent' })
-      expect(r).toEqual({ added: [{ placeId: 'ChIJkumar', domain: b.domain, name: 'Kumar Dental' }], refreshed: [] })
+      expect(r).toEqual({ added: [{ placeId: 'ChIJkumar', domain: b.domain, name: 'Kumar Dental' }], refreshed: [], skipped: [] })
       expect(await company(b.domain)).toMatchObject({
         source: 'google_maps', phone: '+918041234567', googleRating: '4.6', googleReviewCount: 12, googleCategory: 'dentist',
         listingCheckedAt: NOW, timeZone: 'Asia/Kolkata', city: 'Bengaluru',

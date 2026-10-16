@@ -11,7 +11,10 @@ import { SharedNumberHolderNote } from '@/components/shared-number-note'
 import { sendCheckSentence, type SendCheckView } from '@/lib/consent-view'
 import type { AddressSourceLine } from '@/lib/address-source'
 import { offersResume, resumeOfferFor } from '@/lib/shared-number-pause'
+import { CONFIRM_WORDS } from '@/lib/delete-view'
 import { toast } from '../toast/toast'
+import { DeleteButton } from '../delete/delete-button'
+import { BulkCheck, BulkSelectAll, BulkSelection } from '../delete/bulk'
 
 /**
  * The consent ledger (§2.1): one row per person, and per row the facts the
@@ -59,6 +62,12 @@ import { toast } from '../toast/toast'
  * owners only, and asks for the contact's id typed back before it will send
  * anything: an erasure cannot be undone, and it keeps the suppression — the
  * panel says exactly what goes, what stays, and what is not scrubbed.
+ *
+ * And "Delete" (2026-10-15), for a person nothing ever went to or came from
+ * — what the chat agent invented before 0029, mostly — beside a checkbox per
+ * row for deleting several at once. The writer decides who may go
+ * (`contactDelete`); anybody else is refused with its sentence, and an owner
+ * is pointed at Erase….
  */
 
 export interface LedgerChannelView {
@@ -93,6 +102,8 @@ export interface LedgerView {
   readonly linkedinUrl: string | null
   readonly companyDomain: string
   readonly companyName: string | null
+  /** Filed by the chat agent (`contacts.source`), tagged so it can be checked and cleared. */
+  readonly addedByAssistant?: boolean
   readonly zone: string
   readonly zoneMissing: boolean
   readonly pausedAt: string | null
@@ -172,6 +183,9 @@ export function ContactsLedger({
   const [open, setOpen] = useState<{ id: string; panel: Panel } | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
+  /** Rows a Delete was refused on because they must be erased instead — an owner is pointed at Erase…. */
+  const [mustErase, setMustErase] = useState<ReadonlySet<string>>(new Set())
+  const columns = canWrite ? 7 : 6
 
   const toggle = (id: string, panel: Panel) =>
     setOpen((o) => (o && o.id === id && o.panel === panel ? null : { id, panel }))
@@ -216,9 +230,11 @@ export function ContactsLedger({
   }
 
   return (
+    <BulkSelection kind="contacts" enabled={canWrite} items={rows.map((r) => ({ id: r.id, label: r.name }))}>
     <table style={{ marginTop: 14 }}>
       <thead>
         <tr>
+          {canWrite ? <th style={{ width: 28 }}><BulkSelectAll /></th> : null}
           <th>Person</th>
           <th>Addresses</th>
           <th>Timezone</th>
@@ -237,8 +253,14 @@ export function ContactsLedger({
           return (
             <Fragment key={r.id}>
               <tr>
+                {canWrite ? <td><BulkCheck id={r.id} label={r.name} /></td> : null}
                 <td>
                   <strong>{r.name}</strong>
+                  {r.addedByAssistant ? (
+                    <span className="tag" title="Filed by the chat agent. Check where each address came from before relying on it.">
+                      assistant
+                    </span>
+                  ) : null}
                   {r.pausedAt ? <span className="tag warn">paused</span> : null}
                   {r.emailBouncedAt ? <span className="tag warn">bounced</span> : null}
                   {r.title ? <div className="muted" style={{ fontSize: 12.5 }}>{r.title}</div> : null}
@@ -371,6 +393,18 @@ export function ContactsLedger({
                         ) : null}
                       </>
                     ) : null}
+                    {canWrite ? (
+                      <DeleteButton
+                        url={`/api/contacts/${r.id}`}
+                        kind="contact"
+                        confirm={CONFIRM_WORDS.contact(r.name)}
+                        title="For somebody nothing ever went to or came from. Anybody else is kept — an owner erases them."
+                        onRefused={(f) => {
+                          setErrors((e) => ({ ...e, [r.id]: f.message }))
+                          setMustErase((m) => (f.code === 'must_erase' ? new Set([...m, r.id]) : m))
+                        }}
+                      />
+                    ) : null}
                     {isOwner ? (
                       <button type="button" className="linkish" style={{ color: 'var(--warn)' }} onClick={() => toggle(r.id, 'erase')}>
                         Erase…
@@ -378,11 +412,16 @@ export function ContactsLedger({
                     ) : null}
                   </div>
                   {errors[r.id] ? <div className="err-line">{errors[r.id]}</div> : null}
+                  {isOwner && mustErase.has(r.id) && panel !== 'erase' ? (
+                    <button type="button" className="linkish" style={{ color: 'var(--warn)' }} onClick={() => toggle(r.id, 'erase')}>
+                      Open Erase… for them
+                    </button>
+                  ) : null}
                 </td>
               </tr>
               {panel ? (
                 <tr>
-                  <td colSpan={6} style={{ background: 'var(--bg)' }}>
+                  <td colSpan={columns} style={{ background: 'var(--bg)' }}>
                     {panel === 'check' ? (
                       <SendCheck contactId={r.id} campaigns={campaigns} />
                     ) : panel === 'erase' ? (
@@ -418,6 +457,7 @@ export function ContactsLedger({
         })}
       </tbody>
     </table>
+    </BulkSelection>
   )
 }
 

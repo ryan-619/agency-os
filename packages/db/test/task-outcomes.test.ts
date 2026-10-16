@@ -10,7 +10,7 @@ import { and, eq } from 'drizzle-orm'
 import { migratedDb, expectRejection, type TestDb } from './helpers.js'
 import * as schema from '../src/schema.js'
 import type { AgencyDb } from '../src/repository.js'
-import { TASK_OUTCOMES, tasksCreate, tasksRecordOutcome, tasksReopen } from '../src/tasks.js'
+import { ASKED_TO_STOP_TASK_GONE, TASK_OUTCOMES, tasksCreate, tasksRecordOutcome, tasksReopen } from '../src/tasks.js'
 
 const NOW = new Date('2026-10-09T09:00:00.000Z')
 
@@ -95,6 +95,58 @@ describe('what came of a call', () => {
     expect(await task(id)).toMatchObject({ doneAt: null, outcome: null })
     expect(await suppressions()).toEqual([])
     expect(await audit('task.outcome_recorded')).toEqual([])
+  })
+
+  /**
+   * Delete (review, 2026-10-15): somebody on the phone hears "stop calling"
+   * on a call task whose company — or the task itself — was just deleted.
+   * "No such task." lost their word: nothing said the number was not
+   * recorded. Gone before the read, or between the read and the write (when
+   * "completed by somebody else" was false, and the suppression rolled back
+   * with it), the answer says so and says to record it by hand.
+   */
+  it('says the number was NOT recorded when the task went before an asked-to-stop, and never names it', async () => {
+    const id = await call()
+    await db.delete(schema.companies).where(eq(schema.companies.id, companyId))
+    const r = await record(id, 'asked_to_stop')
+    expect(r).toEqual({ ok: false, reason: 'suppression_failed', message: ASKED_TO_STOP_TASK_GONE })
+    expect(ASKED_TO_STOP_TASK_GONE).toMatch(/was NOT recorded\. Record it on \/suppressions by hand\.$/)
+    expect(ASKED_TO_STOP_TASK_GONE).not.toMatch(/\+91|8041/)
+    expect(await suppressions()).toEqual([])
+    // Any other outcome on a task that is gone is simply not found.
+    expect(await record(id, 'no_answer')).toEqual({ ok: false, reason: 'not_found', message: 'No such task.' })
+  })
+
+  it('says so too when the task goes between the read and the write, rolling the suppression back', async () => {
+    const id = await call()
+    /** The task is deleted after the outcome's read and before its transaction — a company delete committing. */
+    const racing = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== 'transaction') return Reflect.get(target, prop, receiver)
+        return async (work: (tx: unknown) => Promise<unknown>) => {
+          await target.delete(schema.tasks).where(eq(schema.tasks.id, id))
+          return target.transaction(work as never)
+        }
+      },
+    }) as AgencyDb
+    const r = await tasksRecordOutcome(racing, { orgId, id, byUserId: ownerId, actor: ownerId, outcome: 'asked_to_stop', now: NOW })
+    expect(r).toEqual({ ok: false, reason: 'suppression_failed', message: ASKED_TO_STOP_TASK_GONE })
+    expect(await suppressions()).toEqual([])
+    expect(await audit('suppression.added')).toEqual([])
+
+    const other = await call()
+    const gone = new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== 'transaction') return Reflect.get(target, prop, receiver)
+        return async (work: (tx: unknown) => Promise<unknown>) => {
+          await target.delete(schema.tasks).where(eq(schema.tasks.id, other))
+          return target.transaction(work as never)
+        }
+      },
+    }) as AgencyDb
+    expect(await tasksRecordOutcome(gone, { orgId, id: other, byUserId: ownerId, actor: ownerId, outcome: 'reached', now: NOW })).toEqual({
+      ok: false, reason: 'not_found', message: 'No such task — it was deleted a moment ago.',
+    })
   })
 
   it('takes an outcome only on an open call or visit, and the database agrees', async () => {

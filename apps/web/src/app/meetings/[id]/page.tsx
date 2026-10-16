@@ -89,6 +89,8 @@ export default async function MeetingBriefPage({ params }: { params: Promise<{ i
         cancelled={meeting.cancelledAt !== null}
         outcome={meeting.outcome}
         canWrite={can(principal, 'deals:write')}
+        companyHref={`/companies/${encodeURIComponent(company.domain)}`}
+        replacesRescheduled={links.from !== null}
       />
 
       {brief.posture.caveat ? (
