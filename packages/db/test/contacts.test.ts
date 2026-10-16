@@ -10,8 +10,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { drizzle } from 'drizzle-orm/pglite'
 import {
-  createContact, isKnownTimeZone, listContactsForCompany, recordConsent, schema,
-  updateContactTimeZone, type AgencyDb,
+  createContact, isKnownTimeZone, linkedinIsReadable, linkedinUnreadable, listContactsForCompany, phoneNotInternational,
+  recordConsent, schema, updateContactTimeZone, type AgencyDb,
 } from '../src/index.js'
 import { migratedDb,type TestDb } from './helpers.js'
 
@@ -77,6 +77,30 @@ describe('contacts', () => {
     const loser = [a, b].find((r) => !r.ok)!
     if (loser.ok) return
     expect(loser.message).toMatch(/already a contact/)
+  })
+
+  /**
+   * An edit stores a phone as E.164, and so does the import; the form's
+   * route stored it as typed, so a contact added there carried a number no
+   * suppression key and no text sent back could ever match — a STOP from it
+   * found nobody. It is normalised here now, or refused in the edit's words.
+   */
+  it('stores a phone as E.164, as an edit does', async () => {
+    const r = await create({ phone: '+1 (415) 555-0100' })
+    if (!r.ok) throw new Error(r.message)
+    expect(r.contact.phone).toBe('+14155550100')
+  })
+
+  it('refuses a phone with no country code, in the words an edit uses', async () => {
+    const r = await create({ phone: '(415) 555-0100' })
+    expect(r).toEqual({ ok: false, message: phoneNotInternational('(415) 555-0100') })
+    expect(await listContactsForCompany(db, orgId, companyId)).toEqual([])
+  })
+
+  it('reads a LinkedIn URL the way an edit does, for the route to ask first', () => {
+    expect(linkedinIsReadable('https://www.linkedin.com/in/jane-doe')).toBe(true)
+    expect(linkedinIsReadable('jane-doe')).toBe(false)
+    expect(linkedinUnreadable('jane-doe')).toMatch(/could not be read as a LinkedIn profile/)
   })
 
   it('accepts a slash-less zone the runtime knows, which 0010 refused', async () => {

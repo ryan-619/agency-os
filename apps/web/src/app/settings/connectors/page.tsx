@@ -1,7 +1,8 @@
 import { redirect } from 'next/navigation'
 import { can, CONNECTOR_CATALOG } from '@agency/core'
 import {
-  connectorToolsState, listConnectors, parseConnectorConfig, secretsKeyFromEnv, type AgencyDb, type ConnectorRow,
+  connectorReadsState, connectorToolsState, listConnectors, parseConnectorConfig, secretsKeyFromEnv,
+  type AgencyDb, type ConnectorRow,
 } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
@@ -23,6 +24,12 @@ import { agentConfigured } from '@/lib/agent'
  * whose only purpose is to be dereferenced by the worker. `toView` below is
  * the boundary, and it is the reason this page holds a mapping function rather
  * than passing rows straight through.
+ *
+ * Beside "Last answered", the last time the server REFUSED a call in a chat
+ * turn (0029): Test connection only lists tools, so a keyless server passes it
+ * and then answers every real call "unauthorized" or "rate-limited". The
+ * worker records when and which kind; the server's own words never reach this
+ * page, the worker or the log.
  *
  * The catalog crosses the same way, through `browserPresets`: the fields a
  * card renders and the `config` Install posts, never a URL with a query
@@ -53,7 +60,8 @@ export default async function ConnectorsPage() {
         start of every message, so a server added here is usable immediately — no restart. Its tools
         are not pre-approved: a third-party tool nobody here has reviewed asks a person every time
         the agent calls it. An owner can also turn a tool off, and then it is refused without asking
-        anyone.
+        anyone — and can let a server that only searches and reads (Exa, Firecrawl, Tavily, Jina, the
+        documentation servers) run without asking, so research does not need a click per search.
       </p>
       <ConnectorsPanel
         connectors={rows.map(toView)}
@@ -82,11 +90,21 @@ function toView(row: ConnectorRow): ConnectorView {
     hasCredential: row.secretRef !== null,
     lastOkAt: row.lastOkAt ? row.lastOkAt.toISOString() : null,
     lastError: row.lastError,
+    // The last time it refused a call in a turn (0029): when, and our own word
+    // for why — `auth` or `quota`, never the server's text, which the worker
+    // does not keep. Both or neither, as the database holds them.
+    lastFailure:
+      row.lastFailureAt && (row.lastFailureKind === 'auth' || row.lastFailureKind === 'quota')
+        ? { at: row.lastFailureAt.toISOString(), kind: row.lastFailureKind }
+        : null,
     summary: summarise(row),
     // Tool NAMES and who turned them off — derived from the row by the same
     // function the worker's gate uses, so this page cannot show a list the
     // gate is not enforcing. The config it reads never crosses.
     disabledTools: connectorToolsState(row),
+    // The same derivation the worker's gate reads: eligible only for a server
+    // the catalog marks read-only, on only while an owner's switch is.
+    reads: (({ eligible, on }) => ({ eligible, on }))(connectorReadsState(row)),
   }
 }
 

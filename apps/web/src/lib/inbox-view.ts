@@ -207,8 +207,15 @@ export const answerSchema = z.object({
     .min(1, 'Write the answer first.')
     .max(ANSWER_BODY_MAX, `An answer is at most ${ANSWER_BODY_MAX} characters.`),
   campaignId: z.uuid('That is not a campaign.').nullish(),
+  /** The suggestion the composer started from (0026), so it is marked used. Optional: an answer is an answer. */
+  suggestionId: z.uuid('That is not a suggestion.').nullish(),
 })
 export type AnswerInput = z.infer<typeof answerSchema>
+
+/** What the inbox says above a suggested answer. */
+export const SUGGESTION_LABEL = 'Suggested answer'
+export const SUGGESTION_NOTE =
+  'Written by the assistant from their reply, your message, the current scan and the playbook. It is a starting point: read every word and change it before you draft. Nothing is sent from here.'
 
 /** A zod failure as one sentence for the person who pressed the button. */
 export function firstIssue(error: z.ZodError): string {

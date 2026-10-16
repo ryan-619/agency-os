@@ -301,10 +301,12 @@ const REMOVAL_OR_DEPARTURE = new RegExp(
  * with / at / working", "has / have left", "left the company /
  * organisation / business". Case-insensitive, over `ownWords` only.
  *
- * It decides ONE thing: whether a mail whose headers say it is automatic
- * may skip the pause. A hit makes it an ordinary reply — pause, cancel,
- * advance. It never decides an opt-out and never writes a suppression; that
- * is `looksLikeOptOut`, and only that.
+ * It decides two things: whether a mail whose headers say it is automatic
+ * may skip the pause — a hit makes it an ordinary reply: pause, cancel,
+ * advance — and, since 2026-10-08, that `laterAsk` reads no day to call
+ * back from a reply that asks to be removed or says they have left. It never
+ * decides an opt-out and never writes a suppression; that is
+ * `looksLikeOptOut`, and only that.
  */
 export function mentionsRemovalOrDeparture(body: string | null | undefined): boolean {
   const own = ownWords(body)

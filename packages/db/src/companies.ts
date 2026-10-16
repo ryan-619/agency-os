@@ -17,6 +17,7 @@
  */
 import { and, count, eq, isNull } from 'drizzle-orm'
 import { z } from 'zod'
+import { COMPANY_STAGES, normalisePhone } from '@agency/core'
 import * as schema from './schema.js'
 import type { Company } from './schema.js'
 import { isKnownTimeZone } from './contacts.js'
@@ -35,13 +36,30 @@ export const companyPatchInput = z
     name: z.string().trim().max(160).nullable().optional(),
     country: z.string().trim().max(80).nullable().optional(),
     timeZone: z.string().trim().max(64).nullable().optional(),
+    // 0021: what the company is, from research. A headcount is a claim, so it
+    // is stored with where it came from (`headcountSource`), and a source
+    // never stands without a headcount.
+    headcount: z
+      .number('A headcount is a whole number of people.')
+      .int('A headcount is a whole number of people.')
+      .min(1, 'A headcount is at least 1.')
+      .max(10_000_000, 'A headcount is at most 10,000,000.')
+      .nullable()
+      .optional(),
+    headcountSource: z.string().trim().max(300, 'Where the headcount came from is at most 300 characters.').nullable().optional(),
+    industry: z.string().trim().max(80, 'An industry is at most 80 characters.').nullable().optional(),
+    city: z.string().trim().max(80, 'A city is at most 80 characters.').nullable().optional(),
+    stage: z.enum(COMPANY_STAGES, `A stage is one of: ${COMPANY_STAGES.join(', ')}.`).nullable().optional(),
+    description: z.string().trim().max(600, 'A description is at most 600 characters.').nullable().optional(),
   })
   .strict()
 
 export type CompanyPatchInput = z.infer<typeof companyPatchInput>
 
 /** The fields an edit may touch, in the order `changed` lists them. */
-export const COMPANY_EDITABLE_FIELDS = ['name', 'country', 'timeZone'] as const
+export const COMPANY_EDITABLE_FIELDS = [
+  'name', 'country', 'timeZone', 'industry', 'city', 'stage', 'headcount', 'headcountSource', 'description',
+] as const
 
 export type CompanyEditableField = (typeof COMPANY_EDITABLE_FIELDS)[number]
 
@@ -82,10 +100,16 @@ export async function companiesUpdate(
   }
   const blankIsNull = (v: string | null | undefined): string | null | undefined =>
     v === undefined ? undefined : v === null || v === '' ? null : v
-  const next = {
+  const next: { [K in CompanyEditableField]: Company[K] | undefined } = {
     name: blankIsNull(parsed.data.name),
     country: blankIsNull(parsed.data.country),
     timeZone: blankIsNull(parsed.data.timeZone),
+    industry: blankIsNull(parsed.data.industry),
+    city: blankIsNull(parsed.data.city),
+    stage: parsed.data.stage,
+    headcount: parsed.data.headcount,
+    headcountSource: blankIsNull(parsed.data.headcountSource),
+    description: blankIsNull(parsed.data.description),
   }
 
   if (next.timeZone && !isKnownTimeZone(next.timeZone)) {
@@ -104,11 +128,27 @@ export async function companiesUpdate(
   const current = rows[0]
   if (!current) return notFound
 
+  // A headcount cleared takes its source with it; a source with no headcount
+  // is refused, because it would be a citation for nothing (0021's CHECK says
+  // so too — this says it in a sentence first).
+  if (next.headcount === null && next.headcountSource === undefined && current.headcountSource !== null) {
+    next.headcountSource = null
+  }
+  const headcountAfter = next.headcount !== undefined ? next.headcount : current.headcount
+  const sourceAfter = next.headcountSource !== undefined ? next.headcountSource : current.headcountSource
+  if (sourceAfter !== null && headcountAfter === null) {
+    return {
+      ok: false,
+      message: 'headcountSource: a source needs the headcount it is for. Give the headcount as well, or no source.',
+      reason: 'invalid',
+    }
+  }
+
   const changed = COMPANY_EDITABLE_FIELDS.filter((f) => next[f] !== undefined && next[f] !== current[f])
   if (changed.length === 0) return { ok: true, company: current, changed: [] }
 
-  const set: Partial<Record<CompanyEditableField, string | null>> = {}
-  for (const f of changed) set[f] = next[f] ?? null
+  const set: Partial<{ [K in CompanyEditableField]: Company[K] }> = {}
+  for (const f of changed) (set as Record<string, unknown>)[f] = next[f] ?? null
   const updated = await db
     .update(schema.companies)
     .set(set)
@@ -116,6 +156,73 @@ export async function companiesUpdate(
     .returning()
   const company = updated[0]
   // Deleted between the read and the write.
+  if (!company) return notFound
+  return { ok: true, company, changed }
+}
+
+/**
+ * A business's main phone line and its street address, as something real
+ * showed them (2026-10-13): what the assistant files for a business with no
+ * website of its own, which is how it is reached — a call or a visit.
+ *
+ * Neither is a listing fact here: 0022 ties Google's reading to
+ * `listing_checked_at`, and these two stand on their own (0022's
+ * `companies_phone_is_e164` and `companies_address_is_bounded`), so a number
+ * read from a directory page is stored without claiming a Google listing was
+ * read. The phone is stored E.164 or refused, because a call task dials it and
+ * a suppression is matched on it; the address is trimmed, one line, at most
+ * 300 characters. Only the fields given are written; `changed` names those
+ * whose stored value is now different, and the caller audits them.
+ */
+export async function companiesSetReachFacts(
+  db: AgencyDb,
+  orgId: string,
+  companyId: string,
+  facts: { readonly phone?: string | null; readonly address?: string | null },
+): Promise<
+  | { ok: true; company: Company; changed: Array<'phone' | 'address'> }
+  | { ok: false; reason: 'not_found' | 'invalid'; message: string }
+> {
+  const notFound = { ok: false as const, reason: 'not_found' as const, message: 'That company is not in the CRM.' }
+  if (!UUID.safeParse(companyId).success) return notFound
+  const set: { phone?: string | null; address?: string | null } = {}
+  if (facts.phone !== undefined) {
+    const raw = facts.phone?.trim() ?? ''
+    if (raw === '') set.phone = null
+    else {
+      const phone = normalisePhone(raw)
+      if (!phone) {
+        return {
+          ok: false,
+          reason: 'invalid',
+          message: `"${raw.slice(0, 40)}" is not a phone number in international form. Include the country code, like +91 80 4123 4567.`,
+        }
+      }
+      set.phone = phone
+    }
+  }
+  if (facts.address !== undefined) {
+    const address = (facts.address ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ').replace(/\s+/g, ' ').trim()
+    if (Array.from(address).length > 300) {
+      return { ok: false, reason: 'invalid', message: 'An address is at most 300 characters.' }
+    }
+    set.address = address === '' ? null : address
+  }
+  const rows = await db
+    .select()
+    .from(schema.companies)
+    .where(and(eq(schema.companies.orgId, orgId), eq(schema.companies.id, companyId)))
+    .limit(1)
+  const current = rows[0]
+  if (!current) return notFound
+  const changed = (['phone', 'address'] as const).filter((f) => set[f] !== undefined && set[f] !== current[f])
+  if (changed.length === 0) return { ok: true, company: current, changed: [] }
+  const updated = await db
+    .update(schema.companies)
+    .set(Object.fromEntries(changed.map((f) => [f, set[f] ?? null])))
+    .where(and(eq(schema.companies.orgId, orgId), eq(schema.companies.id, companyId)))
+    .returning()
+  const company = updated[0]
   if (!company) return notFound
   return { ok: true, company, changed }
 }

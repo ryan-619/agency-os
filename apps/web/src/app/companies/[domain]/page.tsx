@@ -4,18 +4,29 @@ import {
 } from '@agency/core'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
-import { can } from '@agency/core'
+import { Sparkles } from 'lucide-react'
+import { askAboutCompany, askLink } from '@/lib/ask-link'
+import { contactAddressSources } from '@/lib/address-source'
+import { can, isNoSiteDomain } from '@agency/core'
 import {
-  companyThread, linkedinThreadWithheld, listContactsForCompany, meetingsForCompany, openDealFor, proposalsForCompany,
-  type AgencyDb, type LinkedinThreadWithheld,
+  companyThread, linkedinThreadWithheld, listContactsForCompany, meetingsForCompany, meetingsThatReplacedOne, openDealFor,
+  proposalsForCompany, type AgencyDb, type LinkedinThreadWithheld,
 } from '@agency/db/queries'
 import { CompanyEditSlot } from '@/components/company/edit'
 import { EvidencePanelsSlot } from '@/components/company/evidence'
 import { InformationalSlot } from '@/components/company/informational'
 import { NotesSlot } from '@/components/company/notes'
+import { OpportunitiesSlot } from '@/components/company/opportunities'
+import { QuotesSlot } from '@/components/company/quotes'
+import { ShareSlot } from '@/components/company/share'
+import { SummarySlot } from '@/components/company/summary'
+import { ResearchSlot } from '@/components/company/research'
 import type { CompanySlotProps } from '@/components/company/slot'
 import { ContactsPanel } from '@/components/outreach/contacts'
 import { CompanyActions } from '@/components/pipeline/company-actions'
+import { DeleteCompany } from '@/components/company/delete-company'
+import { DeleteButton } from '@/components/delete/delete-button'
+import { CONFIRM_WORDS, mayDeleteMeeting, mayDeleteProposal } from '@/lib/delete-view'
 import { When } from '@/components/when'
 import { getDb } from '@/lib/db'
 import { deliveryLine } from '@/lib/delivery-view'
@@ -77,6 +88,9 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
   ])
   // LinkedIn words this panel may not print — /tasks' rule, read once.
   const withheld = await linkedinThreadWithheld(db, user.orgId, thread)
+  // A meeting that replaced a rescheduled one is cancelled, never deleted:
+  // the original points at it (`meetingDelete` refuses it too).
+  const replacements = await meetingsThatReplacedOne(db, user.orgId, meetings.map((m) => m.id))
   // A profile that does not parse is read as no profile, as every other page
   // reads it: one bad ICP edit must not make the company page a 500.
   let icp: ReturnType<typeof parseIcpDefinition> | null
@@ -157,8 +171,8 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
       <p className="crumb"><a href="/companies">← Companies</a></p>
       <h1>{company.name ?? company.domain}</h1>
       <p className="lede">
-        <span className="mono">{company.domain}</span>
-        {score ? (
+        {isNoSiteDomain(company.domain) ? <span>no website of its own</span> : <span className="mono">{company.domain}</span>}
+        {isNoSiteDomain(company.domain) ? null : score ? (
           <>
             {' · '}
             {score.disqualifiedReason
@@ -169,9 +183,28 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
           ' · never scanned'
         )}
       </p>
+      {can(principal, 'chat:use') ? (
+        <p style={{ margin: '-4px 0 14px' }}>
+          <a className="cta cta-secondary" href={askLink(askAboutCompany(company.domain, company.name))}>
+            <Sparkles aria-hidden="true" style={{ width: 14, height: 14, verticalAlign: '-2px', marginRight: 6 }} />
+            Ask the assistant about this company
+          </a>
+        </p>
+      ) : null}
+      {/* At a glance (2026-10-16): the cards below, in a dozen lines — derived, never evidence. */}
+      <SummarySlot {...slot} />
       <CompanyEditSlot {...slot} />
+      <OpportunitiesSlot {...slot} />
+      <ShareSlot {...slot} />
+      <ResearchSlot {...slot} isOwner={user.role === 'owner'} />
+      <QuotesSlot {...slot} />
 
-      {!found ? (
+      {isNoSiteDomain(company.domain) ? (
+        <div className="note" style={{ marginTop: 18 }}>
+          This business has no website of its own on record, so there is nothing to scan. What it needs is read from its
+          listing, above.
+        </div>
+      ) : !found ? (
         <div className="note">
           <strong>This company has never been scanned.</strong> There are no findings, and none are
           invented to fill the space. Run <code>npm run scan -- {company.domain}</code>.
@@ -313,7 +346,15 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
                       <td className="mono">{inZone(m.startsAt, m.timeZone)}</td>
                       <td>{m.title ?? '—'}{m.cancelledAt ? <span className="pill pill-stale">cancelled</span> : null}</td>
                       <td className="mono">{m.source.replace(/_/g, ' ')}</td>
-                      <td><a href={`/meetings/${m.id}`}>Brief →</a></td>
+                      <td>
+                        <span className="row-actions">
+                          <a href={`/meetings/${m.id}`}>Brief →</a>
+                          {/* No outcome recorded: one booked by mistake, or with somebody who does not exist. */}
+                          {can(principal, 'deals:write') && mayDeleteMeeting(m.outcome, replacements.has(m.id)) ? (
+                            <DeleteButton url={`/api/meetings/${m.id}`} kind="meeting" confirm={CONFIRM_WORDS.meeting} />
+                          ) : null}
+                        </span>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -324,7 +365,7 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
             <>
               <h2 style={{ marginTop: meetings.length > 0 ? 22 : 0 }}>Proposals</h2>
               <table>
-                <thead><tr><th>Title</th><th>Status</th><th>Estimate</th><th>Generated</th></tr></thead>
+                <thead><tr><th>Title</th><th>Status</th><th>Estimate</th><th>Generated</th><th></th></tr></thead>
                 <tbody>
                   {proposals.map((p) => (
                     <tr key={p.id}>
@@ -336,6 +377,11 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
                           : 'effort only'}
                       </td>
                       <td className="mono"><When iso={p.generatedAt.toISOString()} mode="date" /></td>
+                      <td>
+                        {can(principal, 'deals:write') && mayDeleteProposal(p.status) ? (
+                          <DeleteButton url={`/api/proposals/${p.id}`} kind="proposal" confirm={CONFIRM_WORDS.proposal} />
+                        ) : null}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -348,18 +394,24 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
       <ContactsPanel
         companyId={company.id}
         canWrite={can(principal, 'contacts:write')}
-        contacts={contacts.map((c) => ({
-          id: c.id,
-          name: [c.firstName, c.lastName].filter(Boolean).join(' ') || c.email || 'unnamed',
-          title: c.title,
-          email: c.email,
-          phone: c.phone,
-          linkedinUrl: c.linkedinUrl,
-          timeZone: c.timeZone,
-          pausedAt: c.pausedAt ? c.pausedAt.toISOString() : null,
-          pausedReason: c.pausedReason,
-          consents: c.consents.map((k) => ({ channel: k.channel, granted: k.granted, source: k.source })),
-        }))}
+        contacts={contacts.map((c) => {
+          // Where each address came from (0029), worded once for every screen.
+          const from = contactAddressSources(c)
+          return {
+            id: c.id,
+            name: [c.firstName, c.lastName].filter(Boolean).join(' ') || c.email || 'unnamed',
+            title: c.title,
+            email: c.email,
+            phone: c.phone,
+            emailFrom: from.email,
+            phoneFrom: from.phone,
+            linkedinUrl: c.linkedinUrl,
+            timeZone: c.timeZone,
+            pausedAt: c.pausedAt ? c.pausedAt.toISOString() : null,
+            pausedReason: c.pausedReason,
+            consents: c.consents.map((k) => ({ channel: k.channel, granted: k.granted, source: k.source })),
+          }
+        })}
       />
       <NotesSlot {...slot} />
 
@@ -422,6 +474,11 @@ export default async function CompanyDetail({ params }: { params: Promise<{ doma
           </div>
         )}
       </section>
+
+      {/* An owner's, as the route is: a company and everything filed under it (2026-10-15). */}
+      {can(principal, 'users:write') ? (
+        <DeleteCompany companyId={company.id} domain={company.domain} name={company.name} />
+      ) : null}
     </Shell>
   )
 }

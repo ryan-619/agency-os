@@ -1,10 +1,10 @@
 import {
-  smsTextAsksToStop,
-  type InboundLog, type InboundSmsOutcome, type SmsDeliveryOutcome, type SmsDeliveryStatus,
+  SmsOptOutNotRecorded, SmsRedeliveryIncomplete, smsTextAsksToStop,
+  type InboundLog, type InboundSmsOutcome, type SmsDeliveryOutcome, type SmsDeliveryStatus, type SmsOptOutLost,
 } from '@agency/db/queries'
 import { secretMatches } from '../../../../lib/secret-compare'
 import type { NotificationEvent } from '../../../../lib/slack-message'
-import { smsOptOutNotRecordedNotification, smsReplyNotification, smsUnplacedOptOutNotification } from './notification'
+import { smsLostOptOutNotification, smsOptOutAlarms, smsReplyNotification, smsUnplacedOptOutNotification } from './notification'
 
 /**
  * DoveSoft's two pushes, the pure half (0019): who may post, what a payload
@@ -418,8 +418,9 @@ export interface DoveSoftDeps {
     readonly orgId: string
     readonly actor: 'system'
     readonly action: string
-    readonly subjectType: null
-    readonly subjectId: null
+    /** A contact only for a STOP whose recording threw, when the recorder had said whose it was. */
+    readonly subjectType: 'contact' | null
+    readonly subjectId: string | null
     readonly detail: Record<string, unknown>
   }) => Promise<void>
   readonly log: WebhookLog
@@ -527,24 +528,50 @@ export async function handleDoveSoftDlr(
  * suppression — and the answer depends on what it did:
  *
  *  - filed under a contact: 200, because the inbound row is written first
- *    and a retry is a duplicate that records nothing more. If it asked to
- *    stop and the suppression could not be written, the `opt_out_not_recorded`
- *    alarm is AWAITED first (never `after()`, which a host without
- *    `waitUntil` drops) in place of the ordinary reply notice;
+ *    and a retry is a duplicate. Unless it asked to stop and a phone
+ *    suppression could not be written — in the org it was filed under, or
+ *    in another org holding the number: then the `opt_out_not_recorded`
+ *    alarm is AWAITED (never `after()`, which a host without `waitUntil`
+ *    drops) — one per org where it failed (`smsOptOutAlarms`, review round
+ *    6): the filed contact's own in place of the ordinary reply notice, and
+ *    one for each OTHER org, beside the notice, which stays when the filed
+ *    contact's own was written — and the answer is 500 (review round 7), so
+ *    DoveSoft redelivers. The redelivery is a duplicate: it holds and pauses
+ *    nobody, announces nothing, and writes only the suppressions still
+ *    missing (`finishRedelivered`), raising the alarm again where one fails
+ *    again. A 200 here meant no retry ever came, and the code that writes
+ *    them on a retry was never reached. Except for a push that carried no
+ *    message id (review round 8): the recorder tells a redelivery by its id
+ *    alone, so its retry would be recorded as a new text — a second inbound
+ *    row, a second reply notice, a second loud path, on every retry while
+ *    the write keeps failing. That is answered 200 after the same alarms,
+ *    with an error line saying the missing suppression is a person's to
+ *    record;
  *  - a number that could not be read: 400, so DoveSoft retries and the
  *    error log repeats until somebody looks — the recorder has already
  *    audited it, and taken the loud path if it was a STOP;
  *  - a STOP from a number no single contact holds whose suppression could
- *    not be written: 500, because nothing was written for it and a retry
- *    re-attempts the suppression. The recorder's `contact.opt_out_not_recorded`
- *    row and the error line are the record, and /compliance counts it;
+ *    not be written: 500, because a retry re-attempts the suppression. The
+ *    recorder's `contact.opt_out_not_recorded` row and the error line are
+ *    the record, and /compliance counts it. Except, as above, for a push
+ *    with no message id (review round 9): such a text is known on a
+ *    redelivery by a hash of its id alone, so every retry held every holder
+ *    again — undoing a teammate's Resume and cancelling drafts written
+ *    since — and wrote another set of rows. 200 after the alarms, and the
+ *    error line says the missing suppression is a person's to record. Only
+ *    where contacts hold the number, or no org is named (review round 10):
+ *    a STOP from a number NO contact holds, filed in `DOVESOFT_ORG_ID`'s
+ *    org, keeps its 500 with no id too, because its retry holds nobody and
+ *    only writes the suppression;
  *
  *  and for both of those, when the text was a STOP that nobody recorded,
  *  the `opt_out_not_recorded` alarm is AWAITED before the answer, with no
- *  touch and no contact (there is no message row), filed under
- *  `DOVESOFT_ORG_ID`. With no org named it cannot be filed, and the error
- *  line says `alarm: 'not_raised_no_org'`. Each delivery that fails again
- *  raises it again, as it writes the audit row again;
+ *  touch (there is no message row), one in each org where it failed —
+ *  naming a contact there who holds the number, or nobody in the org a
+ *  number no contact holds is filed under (`DOVESOFT_ORG_ID`). With no org
+ *  at all it cannot be filed, and the error line says `alarm:
+ *  'not_raised_no_org'`. Each delivery that fails again raises it again, as
+ *  it writes the audit row again;
  *  - anything else it filed under nobody: 200, the answer to a delivery.
  *
  * Unreadable (no sender or no words) → 400, `sms.inbound_unreadable` in the
@@ -556,9 +583,33 @@ export async function handleDoveSoftDlr(
  * parameter, the number and the words, and Next logs an escaping error
  * whole. The error line names the fault's class only. And when the words
  * asked to stop (`smsTextAsksToStop`, the recorder's own reader) the loud
- * path runs as it does for a STOP filed under nobody: a
- * `contact.opt_out_not_recorded` row and the AWAITED alarm, under
- * `DOVESOFT_ORG_ID`, with no contact — nothing says whose it was.
+ * path runs. Whose it was comes from the recorder itself (review round 6):
+ * the contact it was filing the text under — named by the error it throws
+ * once it has written anything (`SmsOptOutNotRecorded`, review round 7), or
+ * by the line `recordInboundReply` writes when it rolls a reply back
+ * (`keepingRolledBackSmsOptOut`) — so nothing is read again from a database
+ * that just failed; and then the `contact.opt_out_not_recorded` row is
+ * written under that contact in THEIR org (what /compliance, the digest
+ * and /inbox read), they are paused saying so, best-effort, and the AWAITED
+ * alarm names them. Every other org the error names, where the recorder
+ * has already taken the loud path for the contacts holding the number, gets
+ * an alarm of its own (review round 7): it used to get nothing, and its
+ * holders kept a hold anyone could lift. Only a fault before the recorder
+ * wrote anything or named anybody — the duplicate check, the match —
+ * takes the subject-less path: the row and the alarm under
+ * `DOVESOFT_ORG_ID`, with no contact, because nothing says whose it was. It
+ * used to take that path always, so a known contact's STOP was alarmed as
+ * "nothing in the app holds the number" and audited in an org that was not
+ * theirs, or nowhere; and until round 7 it took it for holds that had
+ * committed in one org before another's faulted, too.
+ *
+ * A REDELIVERY that faults while finishing a text recorded the first time
+ * (`SmsRedeliveryIncomplete`) is a 500, so DoveSoft retries, with an error
+ * line — and no `contact.opt_out_not_recorded` row and no alarm (review
+ * round 7): the STOP was recorded, and the first delivery raised the alarm
+ * for any org it could not suppress it in. It took the subject-less path,
+ * which said nothing had been written while the suppression and the pause
+ * stood.
  */
 export async function handleDoveSoftMo(
   read: FieldsRead,
@@ -578,6 +629,12 @@ export async function handleDoveSoftMo(
     readonly alarm: (event: NotificationEvent) => Promise<void>
     /** Scheduled after the answer: the ordinary reply notice. May throw where the host cannot schedule. */
     readonly later: (event: NotificationEvent) => void
+    /**
+     * Pause a contact OVER any earlier reason (`pauseContactOverriding`):
+     * for a STOP whose recording threw, once the recorder has said whose it
+     * was. Best-effort — the database just failed — and a throw is caught.
+     */
+    readonly pause: (args: { readonly orgId: string; readonly contactId: string; readonly reason: string; readonly now: Date }) => Promise<unknown>
   },
 ): Promise<WebhookAnswer> {
   const mo = read.ok ? readMo(read.fields, now) : null
@@ -594,6 +651,7 @@ export async function handleDoveSoftMo(
   }
 
   let outcome: InboundSmsOutcome
+  const recorder = keepingRolledBackSmsOptOut({ error: (message, fields) => deps.log.error(message, { ...fields }) })
   try {
     outcome = await deps.record({
       from: mo.from,
@@ -602,15 +660,23 @@ export async function handleDoveSoftMo(
       providerMessageId: mo.providerMessageId,
       ...(mo.receivedAt ? { receivedAt: mo.receivedAt } : {}),
       orgId: deps.orgId,
-      log: { error: (message, fields) => deps.log.error(message, { ...fields }) },
+      log: recorder,
     })
   } catch (err) {
-    return moNotRecorded(smsTextAsksToStop(mo.text), faultName(err), shape, deps)
+    if (err instanceof SmsRedeliveryIncomplete) return redeliveryNotFinished(err, shape, deps)
+    if (err instanceof SmsOptOutNotRecorded) {
+      return moNotRecorded(true, err.filingUnder ?? recorder.rolledBack(), err.fault, shape, now, deps, {
+        lostIn: err.optOutNotRecordedIn,
+        heldIn: err.heldIn,
+      })
+    }
+    return moNotRecorded(smsTextAsksToStop(mo.text), recorder.rolledBack(), faultName(err), shape, now, deps)
   }
 
+  // One alarm per org where the STOP could not be suppressed, each AWAITED.
+  const alarms = smsOptOutAlarms(outcome)
   if (outcome.matched === 'contact') {
-    const alarm = smsOptOutNotRecordedNotification(outcome, deps.orgId)
-    if (alarm) await deps.alarm(alarm)
+    for (const alarm of alarms) await deps.alarm(alarm)
     const event = smsReplyNotification(outcome)
     if (event) {
       try {
@@ -619,18 +685,41 @@ export async function handleDoveSoftMo(
         deps.log.warn('reply notification not scheduled', { error: err instanceof Error ? err.name : 'UnknownError' })
       }
     }
-    return {
-      status: 200,
-      body: { matched: 'contact', duplicate: outcome.duplicate, paused: outcome.paused, suppressed: outcome.suppressed },
+    const body = { matched: 'contact', duplicate: outcome.duplicate, paused: outcome.paused, suppressed: outcome.suppressed }
+    if (outcome.optOutNotRecorded || outcome.optOutNotRecordedIn.length > 0) {
+      // A suppression the recorder could not write, somewhere. Refused, so
+      // DoveSoft's retry comes and writes it (review round 7) — but only
+      // when the push carried a message id (review round 8). The recorder
+      // knows a redelivery by its id alone: without one, the retry is a
+      // new text, recorded again — a second inbound row under the contact,
+      // a second reply notice, a second loud path — every time the write
+      // fails again. So a push with no id is answered 200 once the alarms
+      // have gone, and a person records what is missing.
+      if (mo.providerMessageId === null) {
+        deps.log.error('OPT-OUT NOT RECORDED — a STOP filed under a contact could not be suppressed in every org holding the number, and the push carried no message id, so a redelivery could not be told from a new text: it was answered 200, and what is missing must be recorded by hand', {
+          duplicate: outcome.duplicate,
+          orgs: alarms.length,
+          alarm: 'raised',
+          messageId: false,
+        })
+        return { status: 200, body }
+      }
+      deps.log.error('OPT-OUT NOT RECORDED — a STOP filed under a contact could not be suppressed in every org holding the number; it was refused so DoveSoft retries', {
+        duplicate: outcome.duplicate,
+        orgs: alarms.length,
+        alarm: 'raised',
+      })
+      return { status: 500, body: { error: 'opt-out not recorded', ...body } }
     }
+    return { status: 200, body }
   }
 
   // A STOP filed under nobody that could not be suppressed reaches a person
-  // as the filed one does: AWAITED, before the answer, under the org the
-  // deployment names. Without one there is no org to file the alarm under,
-  // and the error line says so.
-  const alarm = smsOptOutNotRecordedNotification(outcome, deps.orgId)
-  const alarmed = alarm ? 'raised' : outcome.optOutNotRecorded ? 'not_raised_no_org' : null
+  // as the filed one does: AWAITED, before the answer, in each org where it
+  // failed. With no org anywhere — no contact holds the number and the
+  // deployment names none — there is nowhere to file the alarm, and the
+  // error line says so.
+  const alarmed = alarms.length > 0 ? 'raised' : outcome.optOutNotRecorded ? 'not_raised_no_org' : null
   if (outcome.why === 'unreadable_number') {
     deps.log.error('DoveSoft inbound text came from a number that could not be read as E.164; nothing was filed', {
       optOut: outcome.optOut,
@@ -638,35 +727,198 @@ export async function handleDoveSoftMo(
       ...(alarmed ? { alarm: alarmed } : {}),
       ...shapeOf(shape),
     })
-    if (alarm) await deps.alarm(alarm)
+    for (const alarm of alarms) await deps.alarm(alarm)
     return { status: 400, body: { error: 'unreadable sender number', matched: 'none', why: outcome.why } }
   }
   if (outcome.optOutNotRecorded) {
+    // The filed branch's rule (review round 9, [11]): a text filed under
+    // nobody is known on a redelivery by a hash of its message id alone
+    // (`messageHash`), so a push with no id comes back as a NEW text — every
+    // holder held again, a teammate's Resume undone, drafts written since
+    // cancelled, and another set of rows — on every retry while a write kept
+    // failing. Answered 200 once the alarms have gone, and the line says
+    // what is left to a person.
+    //
+    // Only where that is what a retry would do (review round 10, [5]): a
+    // STOP from a number NO contact holds is held under nobody, so its retry
+    // holds and releases nobody and only re-attempts the suppression in the
+    // deployment's org — the write a 200 gave up on for good. It keeps the
+    // 500 below. With no org named either, a retry has nowhere to write, so
+    // it is answered 200 as before.
+    const retryOnlyRecords = outcome.why === 'no_contact' && deps.orgId !== null
+    if (mo.providerMessageId === null && !retryOnlyRecords) {
+      deps.log.error('OPT-OUT NOT RECORDED — a STOP from a number no single contact holds could not be suppressed, and the push carried no message id, so a redelivery could not be told from a new text: it was answered 200, and what is missing must be recorded by hand', {
+        why: outcome.why,
+        orgConfigured: deps.orgId !== null,
+        alarm: alarmed,
+        ...(alarms.length > 1 ? { orgs: alarms.length } : {}),
+        messageId: false,
+      })
+      for (const alarm of alarms) await deps.alarm(alarm)
+      return { status: 200, body: { matched: 'none', why: outcome.why, optOut: outcome.optOut, suppressed: outcome.suppressed } }
+    }
     deps.log.error('OPT-OUT NOT RECORDED — a STOP from a number no single contact holds could not be suppressed', {
       why: outcome.why,
       orgConfigured: deps.orgId !== null,
       alarm: alarmed,
+      ...(alarms.length > 1 ? { orgs: alarms.length } : {}),
     })
-    if (alarm) await deps.alarm(alarm)
+    for (const alarm of alarms) await deps.alarm(alarm)
     return { status: 500, body: { error: 'opt-out not recorded', matched: 'none', why: outcome.why } }
   }
   return { status: 200, body: { matched: 'none', why: outcome.why, optOut: outcome.optOut, suppressed: outcome.suppressed } }
 }
 
+/** What the recorder said about a STOP whose recording it rolled back: ids only. */
+export interface RolledBackSmsOptOut {
+  readonly orgId: string
+  readonly contactId: string
+}
+
+/**
+ * The line `recordInboundReply` writes when it rolls back a reply that
+ * asked to stop. Matched by its own opening words, because the recorder
+ * says `OPT-OUT NOT RECORDED` for other reasons too — a suppression that
+ * failed in ANOTHER org names that org's contact, and is no evidence of
+ * whose text this was.
+ */
+export const ROLLED_BACK_OPT_OUT_LINE = 'OPT-OUT NOT RECORDED — the reply was rolled back'
+
+/**
+ * The recorder's log, forwarded line for line to `forward` — and the last
+ * rolled-back line that names an org and a contact, kept: the one line that
+ * says whose a STOP was when recording it threw (review round 6). The
+ * email route keeps the same line its own way (`../email/fault.ts`); this
+ * one is local so the two routes do not share a module two groups edit.
+ */
+export function keepingRolledBackSmsOptOut(
+  forward: InboundLog,
+): InboundLog & { readonly rolledBack: () => RolledBackSmsOptOut | null } {
+  let kept: RolledBackSmsOptOut | null = null
+  return {
+    error(message, fields) {
+      forward.error(message, fields)
+      const orgId = fields?.['orgId']
+      const contactId = fields?.['contactId']
+      if (message.startsWith(ROLLED_BACK_OPT_OUT_LINE) && typeof orgId === 'string' && typeof contactId === 'string') {
+        kept = { orgId, contactId }
+      }
+    },
+    rolledBack: () => kept,
+  }
+}
+
+/**
+ * A redelivered text the recorder had recorded the first time, whose
+ * finishing faulted (`SmsRedeliveryIncomplete`, review round 7). 500 so
+ * DoveSoft retries; an error line with the fault's class and the text's ids.
+ * No `contact.opt_out_not_recorded` row and no alarm: the STOP was recorded
+ * — its suppression and its pause stand — and the first delivery raised the
+ * alarm for any org it could not suppress it in.
+ */
+function redeliveryNotFinished(err: SmsRedeliveryIncomplete, shape: RequestShape, deps: DoveSoftDeps): WebhookAnswer {
+  deps.log.error('DoveSoft redelivered a text already recorded, and finishing it failed; it was refused so DoveSoft retries', {
+    error: err.fault,
+    orgId: err.orgId,
+    contactId: err.contactId,
+    ...shapeOf(shape),
+  })
+  return { status: 500, body: { error: 'inbound text not finished' } }
+}
+
+/**
+ * What the recorder had already done when a STOP's recording threw
+ * (`SmsOptOutNotRecorded`): every other org where it took the loud path for
+ * the contacts holding the number, and the orgs whose holds committed.
+ */
+interface WrittenBeforeTheFault {
+  readonly lostIn: readonly SmsOptOutLost[]
+  readonly heldIn: readonly string[]
+}
+
 /**
  * An inbound text whose recording threw. 500 either way, so DoveSoft
- * retries; a STOP also takes the loud path, because nothing was written for
- * it and a retry may fail the same way.
+ * retries; a STOP also takes the loud path, because it was not recorded and
+ * a retry may fail the same way — under the contact the recorder was
+ * filing it under when it said so (`placed`), with an alarm besides for
+ * every other org it had already taken the loud path in (`written`); and
+ * otherwise under nobody, in `DOVESOFT_ORG_ID` — only when the recorder had
+ * written nothing, because that row says nothing was.
  */
 async function moNotRecorded(
   optOut: boolean,
+  placed: RolledBackSmsOptOut | null,
   error: string,
   shape: RequestShape,
-  deps: DoveSoftDeps & { readonly alarm: (event: NotificationEvent) => Promise<void> },
+  now: Date,
+  deps: DoveSoftDeps & {
+    readonly alarm: (event: NotificationEvent) => Promise<void>
+    readonly pause: (args: { readonly orgId: string; readonly contactId: string; readonly reason: string; readonly now: Date }) => Promise<unknown>
+  },
+  written: WrittenBeforeTheFault | null = null,
 ): Promise<WebhookAnswer> {
   if (!optOut) {
     deps.log.error('DoveSoft inbound text could not be recorded; it was refused so DoveSoft retries', { error, ...shapeOf(shape) })
     return { status: 500, body: { error: 'inbound text not recorded' } }
+  }
+  const others = written?.lostIn ?? []
+  if (placed) {
+    // Their org, their row: what /compliance, the digest and /inbox read.
+    let audited = true
+    try {
+      await deps.audit({
+        orgId: placed.orgId,
+        actor: 'system',
+        action: 'contact.opt_out_not_recorded',
+        subjectType: 'contact',
+        subjectId: placed.contactId,
+        detail: { channel: 'sms', why: 'record_failed' },
+      })
+    } catch {
+      audited = false
+    }
+    // Paused OVER any earlier reason, as the recorder's own loud path does:
+    // left live, their approved text would go on the next tick to the
+    // number that just said STOP. Best-effort — the database just failed.
+    let paused = true
+    try {
+      await deps.pause({
+        orgId: placed.orgId,
+        contactId: placed.contactId,
+        reason: `opt-out not recorded: reply ${now.toISOString()} (record_failed)`,
+        now,
+      })
+    } catch {
+      paused = false
+    }
+    deps.log.error('OPT-OUT NOT RECORDED — a text that asked to stop could not be recorded; follow up by hand', {
+      error,
+      orgId: placed.orgId,
+      contactId: placed.contactId,
+      audited,
+      paused,
+      alarm: 'raised',
+      ...(others.length > 0 ? { otherOrgs: others.length } : {}),
+    })
+    // No message row: the reply was rolled back. The contact's record holds
+    // the number, so the alarm links /suppressions.
+    await deps.alarm({ kind: 'opt_out_not_recorded', orgId: placed.orgId, touchId: null, contactId: placed.contactId, path: 'reply' })
+    for (const lost of others) await deps.alarm(smsLostOptOutNotification(lost))
+    return { status: 500, body: { error: 'opt-out not recorded' } }
+  }
+  if (written && others.length > 0) {
+    // Filed under nobody, and the recorder had held contacts and taken the
+    // loud path for every one of them before the fault — each row is under
+    // its contact, in its org. A subject-less row here would say nothing
+    // was written and nobody paused, which is false (review round 7).
+    deps.log.error('OPT-OUT NOT RECORDED — a text that asked to stop could not be recorded; follow up by hand', {
+      error,
+      heldIn: written.heldIn.length,
+      orgs: others.length,
+      alarm: 'raised',
+    })
+    for (const lost of others) await deps.alarm(smsLostOptOutNotification(lost))
+    return { status: 500, body: { error: 'opt-out not recorded' } }
   }
   const audited = await auditQuietly(deps, {
     action: 'contact.opt_out_not_recorded',

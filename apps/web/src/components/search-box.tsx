@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import type { SearchHit, SearchKind } from '@agency/db/queries'
 
 /**
@@ -104,6 +104,20 @@ export function searchBoxEnter(hits: readonly SearchHit[], active: number): stri
   return chosen ? chosen.href : null
 }
 
+/**
+ * ⌘K or Ctrl+K from anywhere, or "/" from anywhere a person is not typing,
+ * jumps to search (2026-10-09) — the two keys most tools use for it. Not
+ * with Alt (other shortcuts), and not ⌘⇧K.
+ */
+export function isSearchShortcut(
+  e: { readonly key: string; readonly metaKey: boolean; readonly ctrlKey: boolean; readonly altKey: boolean; readonly shiftKey: boolean },
+  typing: boolean,
+): boolean {
+  if (e.altKey) return false
+  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === 'k') return true
+  return e.key === '/' && !e.metaKey && !e.ctrlKey && !typing
+}
+
 type Answer =
   | { readonly state: 'none' }
   | { readonly state: 'done'; readonly q: string; readonly hits: readonly SearchHit[]; readonly truncated: boolean }
@@ -122,8 +136,31 @@ export function SearchBox(): React.ReactNode {
   const [answer, setAnswer] = useState<Answer>({ state: 'none' })
   const [active, setActive] = useState(-1)
   const [open, setOpen] = useState(false)
+  const box = useRef<HTMLInputElement>(null)
+  /** The shortcut as this keyboard writes it, once the browser says which; nothing on the server's render. */
+  const [shortcut, setShortcut] = useState('')
 
   const q = searchBoxQuery(typed)
+
+  useEffect(() => {
+    setShortcut(/Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? '⌘K' : 'Ctrl K')
+    const onKey = (e: KeyboardEvent): void => {
+      const t = e.target instanceof HTMLElement ? e.target : null
+      const typing = t !== null && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))
+      const input = box.current
+      if (!input || !isSearchShortcut(e, typing)) return
+      e.preventDefault()
+      // On a phone the box is folded away with the menu: open the menu first.
+      if (input.offsetParent === null) {
+        const menu = document.getElementById('nav-toggle')
+        if (menu instanceof HTMLInputElement) menu.checked = true
+      }
+      input.focus()
+      input.select()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [])
 
   useEffect(() => {
     if (q.length < SEARCH_BOX_MIN_CHARS) {
@@ -217,9 +254,11 @@ export function SearchBox(): React.ReactNode {
       }}
     >
       <input
+        ref={box}
         type="search"
         placeholder="Search companies, people, deals…"
         aria-label="Search"
+        aria-keyshortcuts="Meta+K Control+K /"
         autoComplete="off"
         spellCheck={false}
         role="combobox"
@@ -235,6 +274,7 @@ export function SearchBox(): React.ReactNode {
         onFocus={() => setOpen(true)}
         onKeyDown={onKeyDown}
       />
+      {shortcut && !typed ? <kbd className="search-kbd" aria-hidden="true">{shortcut}</kbd> : null}
       {showing ? (
         // mousedown would move focus off the input before the click lands, and
         // some browsers do not focus a link on click at all — so the list

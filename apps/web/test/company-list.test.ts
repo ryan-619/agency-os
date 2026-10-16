@@ -23,12 +23,17 @@ function row(over: Partial<CompanyListItem> & { domain: string }): CompanyListIt
   return {
     companyId: `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`,
     name: null,
+    country: null,
+    headcount: null,
+    industry: null,
+    city: null,
     score: null,
     tier: null,
     qualified: false,
     disqualifiedReason: null,
     lastScanAt: null,
     lastScanOk: null,
+    source: 'import',
     openDealStage: null,
     ...over,
   }
@@ -37,8 +42,8 @@ function row(over: Partial<CompanyListItem> & { domain: string }): CompanyListIt
 const ROWS: readonly CompanyListItem[] = [
   row({ domain: 'acme.example', name: 'Acme', score: 82, tier: 'A — call first', qualified: true, lastScanAt: daysAgo(2), lastScanOk: true, openDealStage: 'meeting' }),
   row({ domain: 'beta.example', name: 'Beta Labs', score: 30, tier: null, qualified: false, lastScanAt: daysAgo(20), lastScanOk: true }),
-  row({ domain: 'never.example', name: 'Never Scanned' }),
-  row({ domain: 'down.example', lastScanAt: daysAgo(1), lastScanOk: false }),
+  row({ domain: 'never.example', name: 'Never Scanned', source: 'agent' }),
+  row({ domain: 'down.example', lastScanAt: daysAgo(1), lastScanOk: false, source: 'agent' }),
   row({ domain: 'gamma.example', name: 'Gamma', score: 58, tier: 'B — sequence', qualified: true, lastScanAt: daysAgo(14.5), lastScanOk: true, openDealStage: 'replied' }),
   row({ domain: 'delta.example', name: 'Delta', score: 71, tier: 'A — call first', qualified: false, disqualifiedReason: 'headcount over 500', lastScanAt: daysAgo(3), lastScanOk: true }),
 ]
@@ -48,7 +53,7 @@ const domains = (params: Record<string, string>) => applyCompanyQuery(ROWS, q(pa
 
 describe('parseCompanyQuery', () => {
   it('defaults to every company by domain, ascending', () => {
-    expect(q({})).toEqual({ q: '', tier: null, state: null, qualified: null, openDeal: null, sort: 'domain', dir: 'asc' })
+    expect(q({})).toEqual({ q: '', tier: null, state: null, qualified: null, openDeal: null, source: null, sort: 'domain', dir: 'asc' })
   })
 
   it('reads URLSearchParams and a Next searchParams record the same way, taking the first of a repeated key', () => {
@@ -66,7 +71,7 @@ describe('parseCompanyQuery', () => {
   })
 
   it('ignores a value it does not know rather than guessing at one', () => {
-    expect(q({ state: 'old', qualified: 'maybe', openDeal: 'won', sort: 'revenue', dir: 'up' })).toEqual(q({}))
+    expect(q({ state: 'old', qualified: 'maybe', openDeal: 'won', source: 'import', sort: 'revenue', dir: 'up' })).toEqual(q({}))
   })
 
   it('refuses a closed stage as an open-deal filter — no company ever has an open deal at won', () => {
@@ -155,6 +160,14 @@ describe('applyCompanyQuery — filtering', () => {
     expect(domains({ tier: 'disqualified' })).toEqual(['delta.example'])
     expect(domains({ tier: 'below threshold' })).toEqual(['beta.example'])
     expect(tierLabel({ score: null, tier: null, disqualifiedReason: null })).toBeNull()
+  })
+
+  it('keeps only what the assistant filed under "Added by the assistant" (2026-10-15), and carries it to the export', () => {
+    expect(domains({ source: 'agent' })).toEqual(['down.example', 'never.example'])
+    expect(q({ source: 'agent' }).source).toBe('agent')
+    // The companies export reads the same query string, so "export this view" is these rows.
+    expect(companyQueryFilters(q({ source: 'agent', state: 'never' }))).toEqual({ state: 'never', source: 'agent' })
+    expect(parseCompanyQuery(new URLSearchParams(companyQueryString(q({ source: 'agent' }))))).toEqual(q({ source: 'agent' }))
   })
 
   it('combines filters', () => {

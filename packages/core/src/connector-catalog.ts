@@ -75,6 +75,19 @@ export interface ConnectorPreset {
    * nothing. `['*']` means every tool the server has.
    */
   readonly sendTools: readonly string[]
+  /**
+   * The server only searches and reads: the public web (Exa, Firecrawl,
+   * Tavily, Jina) or public documentation (Context7, DeepWiki, Cloudflare's
+   * docs). Nothing it exposes sends, posts or changes anything anywhere.
+   *
+   * It is what makes a connector ELIGIBLE for an owner's switch — "runs
+   * without asking" (`readsWithoutCard`, connector-reads) — and nothing else:
+   * the switch defaults off, only an owner turns it on, and a server this flag
+   * is not on can never be switched (2026-10-07). Matched by the row's
+   * endpoint, as `sendTools` is, so a hand-typed URL for the same server is the
+   * same server, and a URL that is not this one's is not.
+   */
+  readonly readOnly?: true
 }
 
 /** The measured caveat every stdio preset carries (connectors-and-agents-settings §7.3). */
@@ -122,6 +135,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorPreset[] = Object.freeze([
       'Never the ?exaApiKey= query form the README still documents.',
     ],
     sendTools: [],
+    readOnly: true,
   },
   {
     id: 'firecrawl',
@@ -141,6 +155,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorPreset[] = Object.freeze([
       '/v2/mcp-search is OAuth-only.',
     ],
     sendTools: [],
+    readOnly: true,
   },
   {
     id: 'tavily',
@@ -155,6 +170,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorPreset[] = Object.freeze([
     installable: true,
     notes: ['Never the ?tavilyApiKey= query form — it is the first form on the docs page.'],
     sendTools: [],
+    readOnly: true,
   },
   {
     id: 'jina',
@@ -173,6 +189,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorPreset[] = Object.freeze([
       'The key is optional and checked at call time.',
     ],
     sendTools: [],
+    readOnly: true,
   },
   {
     id: 'context7',
@@ -188,6 +205,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorPreset[] = Object.freeze([
     keylessAtInitialize: true,
     notes: ['The key is optional; a garbage key is accepted at initialize.'],
     sendTools: [],
+    readOnly: true,
   },
   {
     id: 'deepwiki',
@@ -205,6 +223,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorPreset[] = Object.freeze([
       'Private repositories need the Devin MCP server and a Devin API key, which this preset is not.',
     ],
     sendTools: [],
+    readOnly: true,
   },
   {
     id: 'huggingface',
@@ -359,6 +378,7 @@ export const CONNECTOR_CATALOG: readonly ConnectorPreset[] = Object.freeze([
     installable: true,
     notes: ['No authentication; documentation search only.'],
     sendTools: [],
+    readOnly: true,
   },
   {
     id: 'neon',

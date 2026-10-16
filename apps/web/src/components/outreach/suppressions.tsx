@@ -1,7 +1,13 @@
 'use client'
 
 import { useState } from 'react'
+import { Ban, CirclePause } from 'lucide-react'
+import { EmptyState } from '../empty-state'
 import { When } from '@/components/when'
+import { SharedNumberHolderNote } from '@/components/shared-number-note'
+import { SHARED_NUMBER_LABEL, isSharedNumberOptOutPause } from '@/lib/shared-number-pause'
+import { toast } from '../toast/toast'
+import { ToastOn } from '../toast/toast-on'
 
 /**
  * The suppression list, and who is paused (PROMPT.md §2.1, §8.4).
@@ -17,6 +23,15 @@ import { When } from '@/components/when'
  * Each row carries its source as a tag — how it came to be on the list — in
  * words the page mapped on the server. "unrecorded" is a row from before the
  * source was tracked, and says so rather than borrowing another tag.
+ *
+ * The paused list offers Resume for every pause; the route refuses, with
+ * its sentence, the ones a person may not lift. A shared number's holder
+ * reads what lifts theirs beside it (review round 9): this page is where
+ * the number they share is recorded, and Resume works once it is. Every row
+ * names the person, and a holder's row shows the number the note asks for,
+ * with a button that fills it into the form above (review round 10, [7]):
+ * a holder imported with a phone and no email was a bare id here, beside a
+ * note telling the reader to record a number nothing on the page showed.
  */
 
 export interface SourceView {
@@ -36,7 +51,11 @@ export interface SuppressionView {
 
 export interface PausedView {
   readonly id: string
+  /** Their name, or "(no name recorded)". */
+  readonly name: string
   readonly email: string | null
+  /** As stored on their record; shown on a shared number's holder's row. */
+  readonly phone: string | null
   readonly pausedAt: string | null
   readonly pausedReason: string | null
 }
@@ -84,10 +103,12 @@ export function SuppressionsPanel({
         return
       }
       if (body.alreadyPresent) {
-        setNotice(`${body.value} was already on the list. Nothing changed.`)
+        // Never the value: a pop-up is no place for an address or a number.
+        setNotice('Already on the list. Nothing changed.')
         setValue('')
         return
       }
+      toast.afterReload('Suppression added.')
       window.location.reload()
     } catch {
       setError('The request did not complete. Try again.')
@@ -113,6 +134,7 @@ export function SuppressionsPanel({
         setError(body.error ?? 'That did not work.')
         return
       }
+      toast.afterReload('Suppression removed.')
       window.location.reload()
     } finally {
       setBusy(null)
@@ -131,6 +153,7 @@ export function SuppressionsPanel({
         body: JSON.stringify({ action: 'resume', pausedReason: p.pausedReason }),
       })
       if (res.ok) {
+        toast.afterReload('Pause lifted.')
         window.location.reload()
         return
       }
@@ -178,7 +201,7 @@ export function SuppressionsPanel({
             </span>
           </label>
           {error ? <div className="err-line">{error}</div> : null}
-          {notice ? <div className="ok-line">{notice}</div> : null}
+          <ToastOn message={notice} tone="info" />
           <div className="row-actions" style={{ marginTop: 10 }}>
             <button type="button" disabled={busy === 'add' || !value || !reason} onClick={() => void add()}>
               {busy === 'add' ? 'Adding…' : 'Add'}
@@ -198,7 +221,10 @@ export function SuppressionsPanel({
         ))}
       </p>
       {suppressions.length === 0 ? (
-        <p className="muted" style={{ fontSize: 13 }}>Nobody is suppressed.</p>
+        <EmptyState icon={Ban} title="Nobody is suppressed" compact>
+          A reply that asks to stop, a click on an unsubscribe link, or somebody adding one above puts an address here,
+          and the send path checks this list before every message.
+        </EmptyState>
       ) : (
         <div className="rows">
           {suppressions.map((s) => (
@@ -228,17 +254,18 @@ export function SuppressionsPanel({
 
       <h2 style={{ fontSize: 15, margin: '22px 0 8px' }}>Paused</h2>
       <p className="muted" style={{ fontSize: 12.5, marginTop: 0 }}>
-        A contact who replied. Nothing further goes to them in any campaign until a person resumes them.
+        Held from every campaign — most often because they replied; each row says why. Nothing further goes to them
+        until the pause is lifted.
       </p>
       {paused.length === 0 ? (
-        <p className="muted" style={{ fontSize: 13 }}>Nobody is paused.</p>
+        <EmptyState icon={CirclePause} title="Nobody is paused" compact />
       ) : (
         <div className="rows">
           {paused.map((p) => (
             <div key={p.id} className="row-card slim">
               <div className="row-head">
                 <div>
-                  <code>{p.email ?? p.id}</code>
+                  <strong>{p.name}</strong> <code>{p.email ?? p.phone ?? p.id}</code>
                 </div>
                 {canWrite ? (
                   <button type="button" disabled={busy === p.id} onClick={() => void resume(p)}>
@@ -248,6 +275,34 @@ export function SuppressionsPanel({
               </div>
               <div className="muted" style={{ fontSize: 12.5 }}>
                 {p.pausedReason} · {p.pausedAt ? <When iso={p.pausedAt} /> : null}
+                {isSharedNumberOptOutPause(p.pausedReason) ? (
+                  <div style={{ marginTop: 2 }}>
+                    <SharedNumberHolderNote />
+                    {p.phone ? (
+                      <div style={{ marginTop: 2 }}>
+                        {SHARED_NUMBER_LABEL} <code>{p.phone}</code>
+                        {canWrite ? (
+                          <>
+                            {' '}
+                            <button
+                              type="button"
+                              className="linkish"
+                              onClick={() => {
+                                setKind('phone')
+                                setValue(p.phone ?? '')
+                                setError('')
+                                setNotice('')
+                                window.scrollTo({ top: 0, behavior: 'smooth' })
+                              }}
+                            >
+                              Fill it in above
+                            </button>
+                          </>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             </div>
           ))}

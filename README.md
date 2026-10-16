@@ -136,7 +136,7 @@ which rejects `--env-file`. One file, linked, rather than two that drift.
 | `packages/core` | domain logic — pure, no I/O, no framework, no database |
 | `packages/scanner` | the public-surface collector, and the port of the Python engine |
 | `packages/db` | schema, reversible SQL migrations (`0001`–`0019`), typed queries, seed |
-| `packages/tools` | the agent's twenty-three typed tools, as plain data |
+| `packages/tools` | the agent's forty-nine typed tools, as plain data |
 | `packages/llm` | the single-shot model clients behind §5.5's seam — optional; lead data stays local by default |
 
 ### Migrations

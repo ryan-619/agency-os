@@ -11,7 +11,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import { randomBytes } from 'node:crypto'
 import { drizzle } from 'drizzle-orm/pglite'
 import {
-  createConnector, deleteConnector, disabledToolNames, enabledConnectors, FORBIDDEN_SECRET_ENV,
+  CONNECTOR_DISABLED_TOOLS_MAX, createConnector, deleteConnector, disabledToolNames, enabledConnectors, FORBIDDEN_SECRET_ENV,
   isReachableConnectorUrl, listConnectors, parseConnectorConfig, putSecret, readConnector,
   recordConnectorProbe, schema, secretEnvName, secretPlacement, setConnectorEnabled, updateConnector,
   type AgencyDb, type HttpConfig, type StdioConfig,
@@ -183,9 +183,10 @@ describe('parseConnectorConfig', () => {
       expect(http({ disabledTools: [bad] }).ok).toBe(false)
     })
 
-    it('refuses 65 entries', () => {
-      expect(http({ disabledTools: Array.from({ length: 65 }, (_, i) => `t${i}`) }).ok).toBe(false)
-      expect(http({ disabledTools: Array.from({ length: 64 }, (_, i) => `t${i}`) }).ok).toBe(true)
+    it('refuses one entry past the cap, and takes the cap', () => {
+      const n = CONNECTOR_DISABLED_TOOLS_MAX
+      expect(http({ disabledTools: Array.from({ length: n + 1 }, (_, i) => `t${i}`) }).ok).toBe(false)
+      expect(http({ disabledTools: Array.from({ length: n }, (_, i) => `t${i}`) }).ok).toBe(true)
     })
 
     it('yields the gate’s fully-qualified names, and nothing for a config that does not parse', () => {

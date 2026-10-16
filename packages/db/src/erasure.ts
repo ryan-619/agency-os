@@ -143,6 +143,11 @@ export interface ContactRecord {
   readonly format: 'agency-os.contact-record'
   readonly version: 1
   readonly generatedAt: Date
+  /**
+   * The whole row — where their email and phone came from included
+   * (`emailSource`, `phoneSource`, 0029: a page they were seen on, a
+   * connector, a form), because that is something held about them too.
+   */
   readonly contact: ContactRow
   readonly company: { readonly id: string; readonly domain: string; readonly name: string | null } | null
   /** One row per channel with a recorded answer. A channel with no row was never asked. */
@@ -681,6 +686,12 @@ export async function erasureErase(
       // (4) Notes about them, and tasks hanging off their messages. Notes
       // would cascade with the contact; deleted here so they can be counted.
       const touchIds = touches.map((t) => t.id)
+      // A suggested answer (0026) paraphrases their reply and is about them
+      // by name; it hangs off the message, which SET NULL keeps, so it is
+      // deleted here rather than left behind the placeholder.
+      if (touchIds.length) {
+        await tx.delete(schema.replySuggestions).where(inArray(schema.replySuggestions.touchId, touchIds))
+      }
       const tasks = touchIds.length
         ? await tx
             .delete(schema.tasks)

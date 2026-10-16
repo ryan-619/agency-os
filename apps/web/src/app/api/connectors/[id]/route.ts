@@ -1,8 +1,9 @@
 import { NextResponse } from 'next/server'
 import { assertCan } from '@agency/core'
 import {
-  LEGACY_AGENCY_CONNECTOR_MESSAGE, appendAudit, connectorToolsCheck, connectorToolsSetDisabled, connectorToolsState,
-  deleteConnector, isLegacyAgencyConnectorRefusal, readConnector, setConnectorEnabled, type AgencyDb,
+  LEGACY_AGENCY_CONNECTOR_MESSAGE, appendAudit, connectorReadsSet, connectorToolsCheck, connectorToolsSetDisabled,
+  connectorToolsState, deleteConnector, isLegacyAgencyConnectorRefusal, readConnector, setConnectorEnabled,
+  type AgencyDb,
 } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
@@ -26,6 +27,12 @@ import { getDb } from '@/lib/db'
  * write that switched the connector off would punish the person making it
  * safer. It can only ever refuse more or refuse less; nothing sent here
  * makes any tool run without a person.
+ *
+ * `{ readsWithoutCard: true|false }` is the one switch that lets anything run
+ * without a person (connector-reads, 2026-10-07): only on a server the catalog
+ * marks read-only — search and read, nothing that sends — refused for any
+ * other with a 409, and it too changes one key and nothing else. Off is always
+ * allowed. Owners only, as every write here is.
  *
  * A connector named `agency` from before 0018 can do neither — the name
  * CHECK is evaluated on every UPDATE — and gets a 409 saying to delete it
@@ -51,7 +58,20 @@ export async function PATCH(
   } catch {
     return NextResponse.json({ error: 'invalid_json' }, { status: 400 })
   }
-  const patch = (body && typeof body === 'object' ? body : {}) as { enabled?: unknown; disabledTools?: unknown }
+  const patch = (body && typeof body === 'object' ? body : {}) as {
+    enabled?: unknown
+    disabledTools?: unknown
+    readsWithoutCard?: unknown
+  }
+  if ('readsWithoutCard' in patch) {
+    if ('enabled' in patch || 'disabledTools' in patch) {
+      return NextResponse.json({ error: 'Send readsWithoutCard on its own.' }, { status: 400 })
+    }
+    if (typeof patch.readsWithoutCard !== 'boolean') {
+      return NextResponse.json({ error: 'readsWithoutCard must be true or false' }, { status: 400 })
+    }
+    return setReadsWithoutCard(db, user, id, patch.readsWithoutCard)
+  }
   if ('disabledTools' in patch) {
     if ('enabled' in patch) {
       return NextResponse.json({ error: 'Send enabled or disabledTools, not both.' }, { status: 400 })
@@ -147,6 +167,51 @@ async function setDisabledTools(
   }).catch(() => {})
 
   return NextResponse.json({ id, enabled: updated.enabled, disabledTools: connectorToolsState(updated) })
+}
+
+/**
+ * Let a read-only research server run without a card, or stop it. The audit
+ * row says which server and which way; a change that changes nothing writes
+ * none.
+ */
+async function setReadsWithoutCard(
+  db: AgencyDb,
+  user: { id: string; orgId: string },
+  id: string,
+  on: boolean,
+): Promise<NextResponse> {
+  let r
+  try {
+    r = await connectorReadsSet(db, user.orgId, id, on)
+  } catch (err) {
+    if (isLegacyAgencyConnectorRefusal(err)) {
+      return NextResponse.json({ error: LEGACY_AGENCY_CONNECTOR_MESSAGE }, { status: 409 })
+    }
+    throw err
+  }
+  if (!r.ok) {
+    return r.reason === 'not_found'
+      ? NextResponse.json({ error: 'No such connector.' }, { status: 404 })
+      : NextResponse.json(
+          {
+            error:
+              'Only a server that only searches and reads — Exa, Firecrawl, Tavily, Jina or a documentation ' +
+              'server from the catalog — can run without asking. Every call to this one asks a person.',
+          },
+          { status: 409 },
+        )
+  }
+  if (r.before !== on) {
+    await appendAudit(db, {
+      orgId: user.orgId,
+      actor: user.id,
+      action: 'connector.reads_without_card',
+      subjectType: 'connector',
+      subjectId: id,
+      detail: { name: r.row.name, on },
+    }).catch(() => {})
+  }
+  return NextResponse.json({ id, readsWithoutCard: on })
 }
 
 export async function DELETE(

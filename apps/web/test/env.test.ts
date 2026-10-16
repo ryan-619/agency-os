@@ -39,7 +39,7 @@ beforeEach(() => {
   // Start from a known-empty slate for the variables under test, so a value in
   // the developer's own shell cannot make a case pass or fail.
   for (const k of [
-    ...Object.keys(BASE), 'AUTH_TRUST_HOST', 'DATABASE_POOL_MAX', 'AGENT_URL',
+    ...Object.keys(BASE), 'AUTH_TRUST_HOST', 'DATABASE_POOL_MAX', 'AGENT_URL', 'AGENT_INTERNAL_TOKEN',
     'CRON_SECRET', 'RESCAN_BATCH_SIZE', 'SLACK_WEBHOOK_URL', 'UNSUBSCRIBE_SECRET',
     'RESEND_WEBHOOK_SECRET', 'RESEND_API_KEY', 'SECRETS_KEY', 'VERCEL_ENV',
     'INBOUND_WEBHOOK_SECRET', 'DOVESOFT_WEBHOOK_SECRET', 'DOVESOFT_ORG_ID',
@@ -318,5 +318,45 @@ describe('DOVESOFT_ORG_ID', () => {
   it('refuses something that is not one, and names the variable', async () => {
     const env = await loadWith({ ...BASE, DOVESOFT_ORG_ID: 'agency' })
     expect(() => env()).toThrow(/DOVESOFT_ORG_ID/)
+  })
+})
+
+/**
+ * The chat variables are read loosely here and judged by agentConfigFrom: a
+ * malformed one used to throw for every route, the one-click unsubscribe and
+ * the inbound webhooks included (production, 2026-10-02; review round 15).
+ */
+describe('AGENT_URL and AGENT_INTERNAL_TOKEN', () => {
+  it.each([
+    ['an AGENT_URL with no scheme', { AGENT_URL: 'calm-otter-42.ngrok-free.app' }],
+    ['a short AGENT_INTERNAL_TOKEN', { AGENT_INTERNAL_TOKEN: 'short' }],
+    ['both', { AGENT_URL: 'calm-otter-42.ngrok-free.app', AGENT_INTERNAL_TOKEN: 'short' }],
+  ])('%s does not stop the app', async (_label, vars) => {
+    const env = await loadWith({ ...BASE, ...vars })
+    expect(() => env()).not.toThrow()
+  })
+
+  it('reads a blank one as unset', async () => {
+    const env = await loadWith({ ...BASE, AGENT_URL: '', AGENT_INTERNAL_TOKEN: '  ' })
+    expect(env().AGENT_URL).toBeUndefined()
+    expect(env().AGENT_INTERNAL_TOKEN).toBeUndefined()
+  })
+})
+
+describe('what env() throws', () => {
+  it('is an InvalidEnvironmentError naming the variables, never a value', async () => {
+    const env = await loadWith({ ...BASE, DATABASE_URL: undefined, AUTH_URL: 'no-scheme-value.example' })
+    let thrown: unknown
+    try {
+      env()
+    } catch (err) {
+      thrown = err
+    }
+    expect(thrown).toBeInstanceOf(Error)
+    const e = thrown as Error & { variables?: readonly string[] }
+    expect(e.name).toBe('InvalidEnvironmentError')
+    expect(e.variables).toEqual(expect.arrayContaining(['DATABASE_URL', 'AUTH_URL']))
+    expect(e.message).toMatch(/^Invalid environment configuration:/)
+    expect(e.message).not.toContain('no-scheme-value.example')
   })
 })

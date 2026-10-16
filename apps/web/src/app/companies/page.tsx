@@ -1,5 +1,5 @@
 import { redirect } from 'next/navigation'
-import { can } from '@agency/core'
+import { can, isNoSiteDomain } from '@agency/core'
 import { exportsOpenDealStages, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
@@ -9,6 +9,9 @@ import {
 } from '@/lib/company-list'
 import { getDb } from '@/lib/db'
 import { listCompaniesForOrg, icpForOrg } from '@/lib/queries'
+import { Building, SearchX } from 'lucide-react'
+import { EmptyState } from '@/components/empty-state'
+import { BulkCheck, BulkSelectAll, BulkSelection } from '@/components/delete/bulk'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -77,7 +80,8 @@ export default async function Companies({
   // The counts describe the whole pipeline; "shown" is what the filters left.
   const scanned = all.filter((r) => r.score !== null)
   const qualified = scanned.filter((r) => r.qualified)
-  const unscanned = all.filter((r) => r.lastScanAt === null)
+  // A business with no website (0022) has nothing to scan, so it is not "never scanned".
+  const unscanned = all.filter((r) => r.lastScanAt === null && !isNoSiteDomain(r.domain))
 
   // The tiers on offer are the ones the list can show, so no option is a view
   // that is always empty. A tier in the URL that no row has is kept, so the
@@ -87,6 +91,13 @@ export default async function Companies({
 
   const filtered = shown.length !== all.length
   const qs = companyQueryString(query)
+  // What the chat agent filed (`companies.source`), to find and clear what it
+  // filed before 0029 (2026-10-15). An owner may delete several at once.
+  const byAssistant = all.filter((r) => r.source === 'agent').length
+  const canDelete = can(principal, 'users:write')
+  /** How a row is named in a delete's answer: a no-website business by its name, never its placeholder. */
+  const rowLabel = (r: { readonly domain: string; readonly name: string | null }): string =>
+    isNoSiteDomain(r.domain) ? (r.name ?? 'a business with no website') : r.name ? `${r.name} (${r.domain})` : r.domain
 
   return (
     <Shell
@@ -113,6 +124,9 @@ export default async function Companies({
         {shown.length} of {all.length} shown · {scanned.length} scanned · {qualified.length} qualified
         {qualifyAt === undefined ? null : <> at {qualifyAt}/100</>}
         {unscanned.length ? <> · {unscanned.length} never scanned</> : null}
+        {byAssistant > 0 && query.source !== 'agent' ? (
+          <> · <a href={hrefFor({ ...query, source: 'agent' })}>{byAssistant} added by the assistant</a></>
+        ) : null}
       </p>
 
       {unreadable ? (
@@ -154,6 +168,10 @@ export default async function Companies({
           <option value="no">No open deal</option>
           {OPEN_DEAL_STAGES.map((s) => <option key={s} value={s}>Open deal at {s}</option>)}
         </select>
+        <select name="source" defaultValue={query.source ?? ''} aria-label="Added by" style={control}>
+          <option value="">Added by anyone</option>
+          <option value="agent">Added by the assistant</option>
+        </select>
         <select name="sort" defaultValue={query.sort} aria-label="Sort by" style={control}>
           <option value="domain">Sort: domain</option>
           <option value="name">Sort: name</option>
@@ -171,9 +189,26 @@ export default async function Companies({
         {qs ? <a href="/companies" style={{ fontSize: 13 }}>Clear</a> : null}
       </form>
 
+      {query.source === 'agent' ? (
+        <div className="note" style={{ marginBottom: 16 }}>
+          <strong>Filed by the assistant.</strong> Until 13 October it could file a business nobody had shown it — a
+          guessed domain, a café under a dead business.site address — so check one before relying on it.{' '}
+          {canDelete
+            ? 'Choose the ones to remove and press Delete selected: a company anything went to or came from is kept, and the answer says why.'
+            : 'An owner can delete the ones to remove; a company anything went to or came from is kept.'}
+        </div>
+      ) : null}
+
+      {shown.length > 0 ? (
+      <BulkSelection
+        kind="companies"
+        enabled={canDelete}
+        items={shown.map((r) => ({ id: r.companyId, label: rowLabel(r) }))}
+      >
       <table>
         <thead>
           <tr>
+            {canDelete ? <th style={{ width: 28 }}><BulkSelectAll /></th> : null}
             <SortHeader query={query} sort="name" label="Company" />
             <SortHeader query={query} sort="domain" label="Domain" />
             <SortHeader query={query} sort="score" label="Score" right />
@@ -185,8 +220,10 @@ export default async function Companies({
         <tbody>
           {shown.map((r) => (
             <tr key={r.companyId}>
-              <td><a href={`/companies/${r.domain}`}>{r.name ?? r.domain}</a></td>
-              <td className="mono">{r.domain}</td>
+              {canDelete ? <td><BulkCheck id={r.companyId} label={rowLabel(r)} /></td> : null}
+              <td><a href={`/companies/${encodeURIComponent(r.domain)}`}>{r.name ?? r.domain}</a></td>
+              {/* A business with no website keeps a placeholder (0022); say so, not the placeholder. */}
+              <td className={isNoSiteDomain(r.domain) ? 'muted' : 'mono'}>{isNoSiteDomain(r.domain) ? 'no website' : r.domain}</td>
               <td className="mono" style={{ textAlign: 'right' }}>
                 {/* Never scanned means no number — not a zero that reads as a result. */}
                 {r.score === null ? <span className="muted">—</span> : r.score}
@@ -195,7 +232,7 @@ export default async function Companies({
                 {r.disqualifiedReason ? (
                   <span className="pill" title={r.disqualifiedReason}>disqualified</span>
                 ) : r.score === null ? (
-                  <span className="muted">not scanned</span>
+                  <span className="muted">{isNoSiteDomain(r.domain) ? 'nothing to scan' : 'not scanned'}</span>
                 ) : (
                   <span className={tierClass(r.tier, r.qualified)}>{r.tier || 'below threshold'}</span>
                 )}
@@ -213,15 +250,23 @@ export default async function Companies({
           ))}
         </tbody>
       </table>
+      </BulkSelection>
+      ) : null}
 
       {all.length === 0 ? (
-        <p className="muted" style={{ marginTop: 16 }}>
-          No companies yet. <a href="/companies/import">Import a list</a> to start.
-        </p>
+        <EmptyState
+          icon={Building}
+          title="No companies yet"
+          actions={[
+            { href: '/companies/import', label: 'Import a list' },
+            { href: '/chat', label: 'Ask Chat to find businesses', secondary: true },
+          ]}
+        >
+          Every scan, person, deal and quote hangs off a company. Bring in a list of websites, or ask Chat to find
+          businesses on the map that need what you sell.
+        </EmptyState>
       ) : filtered && shown.length === 0 ? (
-        <p className="muted" style={{ marginTop: 16 }}>
-          No company matches these filters. <a href="/companies">Clear them</a>.
-        </p>
+        <EmptyState icon={SearchX} title="No company matches these filters" compact actions={[{ href: '/companies', label: 'Clear the filters', secondary: true }]} />
       ) : null}
 
       {unscanned.length ? (

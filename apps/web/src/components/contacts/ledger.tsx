@@ -1,11 +1,20 @@
 'use client'
 
 import { Fragment, useState } from 'react'
+import { ContactRound } from 'lucide-react'
+import { EmptyState } from '../empty-state'
 import { pauseReasonClass } from '@agency/core'
 import { When } from '@/components/when'
 import { ContactEdit } from '@/components/contacts/edit'
 import { SmsComposer } from '@/components/contacts/sms-composer'
+import { SharedNumberHolderNote } from '@/components/shared-number-note'
 import { sendCheckSentence, type SendCheckView } from '@/lib/consent-view'
+import type { AddressSourceLine } from '@/lib/address-source'
+import { offersResume, resumeOfferFor } from '@/lib/shared-number-pause'
+import { CONFIRM_WORDS } from '@/lib/delete-view'
+import { toast } from '../toast/toast'
+import { DeleteButton } from '../delete/delete-button'
+import { BulkCheck, BulkSelectAll, BulkSelection } from '../delete/bulk'
 
 /**
  * The consent ledger (§2.1): one row per person, and per row the facts the
@@ -17,9 +26,18 @@ import { sendCheckSentence, type SendCheckView } from '@/lib/consent-view'
  * this component renders and does not decide — with one reading of its own:
  * which pause buttons a row gets, from the pause's CLASS, through
  * `pauseReasonClass`, the one pure reader the route, the inbox and the send
- * path share (review round 3). A pause an unrecorded opt-out or an
- * unfinished erasure left gets no Resume and says what to do instead — the
- * route refuses it anyway (409) — and a reply's pause gets Pause beside
+ * path share (review round 3), and through `resumeOfferFor`
+ * (`lib/shared-number-pause.ts`). A pause the contact's own unrecorded
+ * opt-out or an unfinished erasure left gets no Resume and says what to do
+ * instead — the route refuses it anyway (409). A shared number's holder,
+ * whose pause has the same class, is neither (review round 9): a text from
+ * a number they share asked to stop, they may not have sent it, and the
+ * route lifts their pause once the number is on the suppression list — so
+ * the row says exactly that and offers Resume, which answers the route's
+ * sentence until the number is recorded. So does a holder whose own pause
+ * stood instead of the hold (review round 10, [2]): the shape is a
+ * teammate's or an unsubscribe's, so the row reads the database's answer,
+ * `sharedNumberHold`, beside it. A reply's pause gets Pause beside
  * Resume, so a teammate can hold somebody whose reply someone may answer.
  * The route also refuses a resume while an opt-out the audit log says was
  * never recorded matches no suppression row; that needs the database, so
@@ -35,11 +53,21 @@ import { sendCheckSentence, type SendCheckView } from '@/lib/consent-view'
  * (`sms-composer.tsx`): a registered DLT template, its variables filled, the
  * sender's dry run over those exact words, and a draft parked on /approvals.
  *
+ * Under each email and phone, where it came from (0029) — a page, a
+ * teammate, an import — in words chosen on the server, and a warning for an
+ * address the assistant added before sources were kept.
+ *
  * Two more per row. "Download record" is everything held about the person,
  * as JSON (`/api/contacts/[id]/record`, any member, audited). "Erase…" is
  * owners only, and asks for the contact's id typed back before it will send
  * anything: an erasure cannot be undone, and it keeps the suppression — the
  * panel says exactly what goes, what stays, and what is not scrubbed.
+ *
+ * And "Delete" (2026-10-15), for a person nothing ever went to or came from
+ * — what the chat agent invented before 0029, mostly — beside a checkbox per
+ * row for deleting several at once. The writer decides who may go
+ * (`contactDelete`); anybody else is refused with its sentence, and an owner
+ * is pointed at Erase….
  */
 
 export interface LedgerChannelView {
@@ -65,13 +93,27 @@ export interface LedgerView {
   readonly title: string | null
   readonly email: string | null
   readonly phone: string | null
+  /**
+   * Where the email and the phone came from (0029), worded on the server by
+   * `lib/address-source.ts`; null for an address they do not have.
+   */
+  readonly emailFrom: AddressSourceLine | null
+  readonly phoneFrom: AddressSourceLine | null
   readonly linkedinUrl: string | null
   readonly companyDomain: string
   readonly companyName: string | null
+  /** Filed by the chat agent (`contacts.source`), tagged so it can be checked and cleared. */
+  readonly addedByAssistant?: boolean
   readonly zone: string
   readonly zoneMissing: boolean
   readonly pausedAt: string | null
   readonly pausedReason: string | null
+  /**
+   * Resume refuses their pause until a shared number is recorded
+   * (`consentLedgerFor`'s `sharedNumberHold`, review round 10, [2]) — a
+   * holder whose own pause stood instead of the hold. False when not paused.
+   */
+  readonly sharedNumberHold: boolean
   readonly emailBouncedAt: string | null
   readonly emailBounceCode: string | null
   readonly channels: readonly LedgerChannelView[]
@@ -89,7 +131,36 @@ export interface LedgerCampaign {
 
 const KEY_WORDS: Record<LedgerSuppressionView['key'], string> = { email: 'email', phone: 'phone', linkedin: 'LinkedIn' }
 
+/** What a toast says once a row's Pause or Resume has landed, by the request's action. */
+const PATCHED_WORDS: ReadonlyMap<unknown, string> = new Map<unknown, string>([
+  ['pause', 'Paused. Nothing goes to them until somebody resumes them.'],
+  ['resume', 'Resumed.'],
+])
+
 type Panel = 'check' | 'edit' | 'erase' | 'sms'
+
+/**
+ * Where an address came from, under it (0029). A page it was seen on is a
+ * link, opened in a new tab with no referrer and no follow, as the Research
+ * card's sources are; a source nobody can vouch for reads as a warning.
+ */
+function AddressFrom({ from }: { from: AddressSourceLine | null }) {
+  if (!from) return null
+  return (
+    <span className={from.tone === 'warn' ? 'address-source err-line' : 'address-source'}>
+      {from.href ? (
+        <>
+          {from.before}
+          <a href={from.href} target="_blank" rel="noopener noreferrer nofollow" title={from.href}>
+            {from.linkText}
+          </a>
+        </>
+      ) : (
+        from.words
+      )}
+    </span>
+  )
+}
 
 /** Only a URL that is plainly a LinkedIn page becomes a link; anything else is shown as text. */
 function linkedinHref(url: string): string | null {
@@ -112,6 +183,9 @@ export function ContactsLedger({
   const [open, setOpen] = useState<{ id: string; panel: Panel } | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
+  /** Rows a Delete was refused on because they must be erased instead — an owner is pointed at Erase…. */
+  const [mustErase, setMustErase] = useState<ReadonlySet<string>>(new Set())
+  const columns = canWrite ? 7 : 6
 
   const toggle = (id: string, panel: Panel) =>
     setOpen((o) => (o && o.id === id && o.panel === panel ? null : { id, panel }))
@@ -130,6 +204,7 @@ export function ContactsLedger({
         setErrors((e) => ({ ...e, [id]: b.error ?? 'That did not work.' }))
         return
       }
+      toast.success(PATCHED_WORDS.get(body.action) ?? 'Saved.')
       window.location.reload()
     } catch {
       setErrors((e) => ({ ...e, [id]: 'The request did not complete. Try again.' }))
@@ -139,13 +214,27 @@ export function ContactsLedger({
   }
 
   if (rows.length === 0) {
-    return <p className="muted">Nobody matches. People are added from a company’s page.</p>
+    return (
+      <EmptyState
+        icon={ContactRound}
+        title="Nobody matches"
+        actions={[
+          { href: '/contacts/import', label: 'Import people' },
+          { href: '/companies', label: 'Companies', secondary: true },
+        ]}
+      >
+        People are added from a company’s page or imported from a file, and somebody who books through the booking page
+        arrives here on their own.
+      </EmptyState>
+    )
   }
 
   return (
+    <BulkSelection kind="contacts" enabled={canWrite} items={rows.map((r) => ({ id: r.id, label: r.name }))}>
     <table style={{ marginTop: 14 }}>
       <thead>
         <tr>
+          {canWrite ? <th style={{ width: 28 }}><BulkSelectAll /></th> : null}
           <th>Person</th>
           <th>Addresses</th>
           <th>Timezone</th>
@@ -160,11 +249,18 @@ export function ContactsLedger({
           const panel = open?.id === r.id ? open.panel : null
           // Null when they are not paused. Which buttons the row gets — see the header.
           const pausedFor = r.pausedAt ? pauseReasonClass(r.pausedReason) : null
+          const offer = resumeOfferFor(pausedFor, r.pausedReason, r.sharedNumberHold)
           return (
             <Fragment key={r.id}>
               <tr>
+                {canWrite ? <td><BulkCheck id={r.id} label={r.name} /></td> : null}
                 <td>
                   <strong>{r.name}</strong>
+                  {r.addedByAssistant ? (
+                    <span className="tag" title="Filed by the chat agent. Check where each address came from before relying on it.">
+                      assistant
+                    </span>
+                  ) : null}
                   {r.pausedAt ? <span className="tag warn">paused</span> : null}
                   {r.emailBouncedAt ? <span className="tag warn">bounced</span> : null}
                   {r.title ? <div className="muted" style={{ fontSize: 12.5 }}>{r.title}</div> : null}
@@ -183,8 +279,18 @@ export function ContactsLedger({
                   ) : null}
                 </td>
                 <td style={{ fontSize: 12.5 }}>
-                  {r.email ? <div><code>{r.email}</code></div> : null}
-                  {r.phone ? <div style={{ marginTop: 3 }}><code>{r.phone}</code></div> : null}
+                  {r.email ? (
+                    <div>
+                      <code>{r.email}</code>
+                      <AddressFrom from={r.emailFrom} />
+                    </div>
+                  ) : null}
+                  {r.phone ? (
+                    <div style={{ marginTop: 3 }}>
+                      <code>{r.phone}</code>
+                      <AddressFrom from={r.phoneFrom} />
+                    </div>
+                  ) : null}
                   {r.linkedinUrl ? (
                     <div style={{ marginTop: 3 }}>
                       {li ? (
@@ -244,16 +350,21 @@ export function ContactsLedger({
                             Draft SMS
                           </button>
                         ) : null}
-                        {pausedFor === 'opt_out_not_recorded' ? (
+                        {offer === 'opt_out_not_recorded' ? (
                           <span className="muted" style={{ fontSize: 12 }}>
                             No Resume: they asked to stop and it could not be recorded. Record the opt-out on{' '}
                             <a href="/suppressions">/suppressions</a>; the pause stays.
                           </span>
-                        ) : pausedFor === 'erasure' ? (
+                        ) : offer === 'erasure' ? (
                           <span className="muted" style={{ fontSize: 12 }}>
                             No Resume: they asked to be erased and it did not complete. An owner finishes it with Erase….
                           </span>
-                        ) : pausedFor ? (
+                        ) : offer === 'record_number' ? (
+                          <span className="muted" style={{ fontSize: 12 }}>
+                            <SharedNumberHolderNote />
+                          </span>
+                        ) : null}
+                        {offersResume(offer) ? (
                           <button type="button" className="linkish" disabled={busy === r.id} onClick={() => void patch(r.id, { action: 'resume', pausedReason: r.pausedReason })}>
                             Resume
                           </button>
@@ -282,6 +393,18 @@ export function ContactsLedger({
                         ) : null}
                       </>
                     ) : null}
+                    {canWrite ? (
+                      <DeleteButton
+                        url={`/api/contacts/${r.id}`}
+                        kind="contact"
+                        confirm={CONFIRM_WORDS.contact(r.name)}
+                        title="For somebody nothing ever went to or came from. Anybody else is kept — an owner erases them."
+                        onRefused={(f) => {
+                          setErrors((e) => ({ ...e, [r.id]: f.message }))
+                          setMustErase((m) => (f.code === 'must_erase' ? new Set([...m, r.id]) : m))
+                        }}
+                      />
+                    ) : null}
                     {isOwner ? (
                       <button type="button" className="linkish" style={{ color: 'var(--warn)' }} onClick={() => toggle(r.id, 'erase')}>
                         Erase…
@@ -289,11 +412,16 @@ export function ContactsLedger({
                     ) : null}
                   </div>
                   {errors[r.id] ? <div className="err-line">{errors[r.id]}</div> : null}
+                  {isOwner && mustErase.has(r.id) && panel !== 'erase' ? (
+                    <button type="button" className="linkish" style={{ color: 'var(--warn)' }} onClick={() => toggle(r.id, 'erase')}>
+                      Open Erase… for them
+                    </button>
+                  ) : null}
                 </td>
               </tr>
               {panel ? (
                 <tr>
-                  <td colSpan={6} style={{ background: 'var(--bg)' }}>
+                  <td colSpan={columns} style={{ background: 'var(--bg)' }}>
                     {panel === 'check' ? (
                       <SendCheck contactId={r.id} campaigns={campaigns} />
                     ) : panel === 'erase' ? (
@@ -329,6 +457,7 @@ export function ContactsLedger({
         })}
       </tbody>
     </table>
+    </BulkSelection>
   )
 }
 
@@ -475,6 +604,7 @@ function EraseContact({ contactId, name, onCancel }: { contactId: string; name: 
         return
       }
       setDone(b as EraseResponse)
+      toast.success('Erased.')
     } catch {
       setError('The request did not complete. Reload the page to see whether they are still listed before trying again.')
     } finally {

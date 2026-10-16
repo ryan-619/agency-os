@@ -200,4 +200,68 @@ describe('message templates (0019)', () => {
       expect(await templatesImportDltCsv(db, orgId, '﻿\n\n')).toMatchObject({ ok: false })
     })
   })
+
+  /**
+   * Review round 9 [14]: Postgres refuses U+0000 in text, and `checkTemplate`
+   * let one through in every field — so a pasted body or a corrupted export
+   * threw drizzle's error, which the route let escape whole (a 500, and the
+   * bound parameters in the platform log), and an import lost its per-line
+   * report for every line before the bad one. A template is the registered
+   * text exactly, so a NUL is refused, never replaced with U+FFFD.
+   */
+  describe('a U+0000 in anything a template stores', () => {
+    const SMS = { channel: 'sms' as const, externalId: '1107160000000012345', senderId: 'ACMEIN', category: 'promotional', body: 'Hi {#var#}.' }
+    const WHATSAPP = { channel: 'whatsapp' as const, externalId: 'meeting_reminder', senderId: '+919800000000', category: 'utility', body: 'Hi {#var#}' }
+
+    it.each([
+      ['the text', SMS, { body: 'Hello {#var#}\u0000 from Acme' }, 'bad_body', 'template text'],
+      ['a text that is nothing else', SMS, { body: '\u0000' }, 'bad_body', 'template text'],
+      ['the DLT template id', SMS, { externalId: '1107160000000012345\u0000' }, 'bad_external_id', 'DLT template id'],
+      ['the DLT header', SMS, { senderId: 'ACMEIN\u0000' }, 'bad_sender', 'DLT header'],
+      ['the category', SMS, { category: 'promotional\u0000' }, 'bad_category', 'category'],
+      ['the name', SMS, { name: 'Greeting\u0000' }, 'bad_name', 'name'],
+      ['the language', SMS, { language: 'en\u0000' }, 'bad_language', 'language'],
+      ['a WhatsApp template name', WHATSAPP, { externalId: 'meeting_reminder\u0000' }, 'bad_external_id', 'WhatsApp template name'],
+      ['a WhatsApp sender', WHATSAPP, { senderId: '+919800000000\u0000' }, 'bad_sender', 'sender'],
+    ] as const)('refuses one in %s with a sentence, and stores nothing', async (_what, base, over, reason, label) => {
+      const r = await templatesCreate(db, orgId, { ...base, ...over, createdBy: userId })
+      expect(r).toEqual({
+        ok: false,
+        reason,
+        message:
+          `The ${label} has a NUL character (U+0000) in it. No registered template carries one, the database cannot ` +
+          'store one, and replacing it would record words that were never registered — copy it again from the portal ' +
+          'it was registered on. Nothing was recorded.',
+      })
+      expect(await templatesList(db, orgId)).toHaveLength(0)
+      expect(await audits('template.created')).toHaveLength(0)
+    })
+
+    it('refuses the line on import, and imports and reports every other line', async () => {
+      const csv = [
+        'Template ID,Header,Template Type,Template Content,Template Name,Status',
+        '1107160000000012345,ACMEIN,Service Explicit,"Hi {#var#}, your call is at {#var#}.",meeting_reminder,Approved',
+        '1107160000000012346,ACMEIN,Service Implicit,"Hi {#var#}\u0000 there",nul_body,Approved',
+        '1107160000000012347\u0000,ACMEIN,Service Implicit,Hello,nul_id,Approved',
+        '1107160000000012348,ACMEIN,Service Implicit,Hello {#var#},nul_name\u0000,Approved',
+        '1107160000000012349,ACMEIN,Service Implicit,Goodbye {#var#},after,Approved',
+      ].join('\r\n')
+      const r = await templatesImportDltCsv(db, orgId, csv, { createdBy: userId })
+      expect(r.ok).toBe(true)
+      if (!r.ok) return
+      const byLine = Object.fromEntries(r.lines.map((l) => [l.line, l]))
+      expect(byLine[2]).toMatchObject({ outcome: 'imported' })
+      expect(byLine[3]).toMatchObject({ outcome: 'refused', why: expect.stringContaining('The template text has a NUL character (U+0000)') })
+      expect(byLine[4]).toMatchObject({ outcome: 'refused', why: expect.stringContaining('The DLT template id has a NUL character') })
+      expect(byLine[5]).toMatchObject({ outcome: 'refused', why: expect.stringContaining('The name has a NUL character') })
+      expect(byLine[6]).toMatchObject({ outcome: 'imported' })
+      expect(r).toMatchObject({ imported: 2, alreadyPresent: 0, skipped: 0, refused: 3 })
+      const stored = await templatesList(db, orgId)
+      expect(stored.map((t) => t.externalId).sort()).toEqual(['1107160000000012345', '1107160000000012349'])
+      // Never stored with the NUL replaced: a template is the registered text exactly.
+      expect(stored.some((t) => /[\u0000\ufffd]/.test(`${t.body}${t.externalId}${t.name ?? ''}`))).toBe(false)
+      const [a] = await audits('template.imported')
+      expect(a?.detail).toEqual({ channel: 'sms', imported: 2, alreadyPresent: 0, skipped: 0, refused: 3 })
+    })
+  })
 })

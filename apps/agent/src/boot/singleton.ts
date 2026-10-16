@@ -75,8 +75,14 @@ export interface LockOptions {
  * someone restarts the worker.
  */
 function watchForDisconnect(client: Client, log: Logger, onLost: () => void): void {
+  // Said once: pg emits 'error' for the socket and again for the query the
+  // drop interrupted, and on 2026-10-09 the operator's log carried the line
+  // twice for one drop. The lock is lost once.
+  let said = false
   client.on('error', (err: Error) => {
     onLost()
+    if (said) return
+    said = true
     log.error('the worker lock connection dropped, so the lock is NO LONGER HELD', {
       error: err.name,
       consequence:

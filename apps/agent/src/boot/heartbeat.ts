@@ -22,6 +22,7 @@
 import { writeHeartbeat, type AgencyDb } from '@agency/db'
 import type { HealthInputs } from '../health.js'
 import type { Logger } from '../logger.js'
+import { faultFields } from '../log-fields.js'
 
 /** What one heartbeat row says about the worker, read fresh at every write. */
 export interface HeartbeatInputs {
@@ -51,6 +52,11 @@ export interface HeartbeatDeps {
  * may not be the one running.
  */
 const VERSION = process.env['npm_package_version'] ?? null
+
+/** The version every heartbeat row carries, for the worker's own view (`worker_status`). */
+export function workerVersion(): string | null {
+  return VERSION
+}
 
 /** The instant stamped on the last row that actually reached the database. */
 let lastWritten: Date | null = null
@@ -110,7 +116,7 @@ export function startHeartbeat(deps: HeartbeatDeps): () => Promise<void> {
       if (failing !== name) {
         deps.log.warn('heartbeat not written; the worker carries on', {
           workerId: deps.workerId,
-          error: name,
+          ...faultFields(err),
         })
         failing = name
       }

@@ -161,6 +161,17 @@ describe('what the page says', () => {
     expect(CATEGORY_HINT.promotional).toContain(PROMOTIONAL_WINDOW.words)
   })
 
+  /**
+   * Review round 5: the hint said "Held outside 10:00–21:00 India time" for every number, which is
+   * the rule for neither an American number (its own hours only) nor an Indian one read elsewhere
+   * (both bands). It names the recipient's own hours first, and India's for a +91 number.
+   */
+  it('names the recipient’s own hours for every number, and India’s for an Indian one', () => {
+    expect(CATEGORY_HINT.promotional).toContain(`${PROMOTIONAL_WINDOW.hours} where the recipient is`)
+    expect(CATEGORY_HINT.promotional).toMatch(/India time as well for an Indian \(\+91\) number/)
+    expect(CATEGORY_HINT.promotional).not.toMatch(/^Held outside 10:00–21:00 India time/)
+  })
+
   it('says the registration happens on the portal, and this page only records it', () => {
     expect(TEMPLATES_LEDE).toContain('DLT portal (SmartPing)')
     expect(TEMPLATES_LEDE).toContain('this page only records what is registered there')

@@ -130,6 +130,8 @@ export const getReplies: AgencyToolSpec<typeof getRepliesShape> = {
         suppressed: r.suppressed,
         /** Where the latest answer drafted to it got to, if one was. */
         answerStatus: r.answered?.status ?? null,
+        /** A suggested answer waits on /inbox for a person to read, change and draft (0026). Its words are not here. */
+        suggested: r.suggestion !== null,
         /** Our own message it answered, when matched by Message-ID; null when matched by address alone. */
         inReplyTo: r.parent
           ? { touchId: r.parent.id, subject: clip(r.parent.subject, 120) || null, sentAt: r.parent.sentAt?.toISOString() ?? null }
@@ -158,6 +160,7 @@ export const getReplies: AgencyToolSpec<typeof getRepliesShape> = {
         r.handled ? `handled${r.handledBy ? ` by ${clip(r.handledBy, 40)}` : ''}` : 'NOT handled',
         ...(r.suppressed ? ['on the suppression list — do not answer'] : []),
         ...(r.answerStatus ? [`an answer is ${r.answerStatus}`] : []),
+        ...(r.suggested ? ['a suggested answer waits on /inbox'] : []),
       ].join(' · ')
       const re = r.inReplyTo
         ? `re “${r.inReplyTo.subject ?? '(no subject)'}”`

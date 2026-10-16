@@ -17,11 +17,23 @@
  * retries under a new tool_use_id, and a second approval card appears for one
  * human intent. This hook therefore decides from what it already knows and
  * never waits for anything.
+ *
+ * The two hooks AFTER a call (2026-10-13) are where the worker sees what a
+ * tool answered before the model does, for the main thread and helpers
+ * alike. PostToolUse hands the answer to the conversation's ledger — what
+ * this conversation has shown the agent (chat/ledger.ts) — and both it and
+ * PostToolUseFailure read a connector's answer for a refusal
+ * (gate/connector-watch.ts). Neither waits on the database: what they write
+ * runs behind their answer.
  */
-import type { PreToolUseHookInput, SyncHookJSONOutput } from '@anthropic-ai/claude-agent-sdk'
-import { classifyRisk } from '@agency/core'
+import type {
+  PostToolUseFailureHookInput, PostToolUseHookInput, PreToolUseHookInput, SyncHookJSONOutput,
+} from '@anthropic-ai/claude-agent-sdk'
+import { classifyRisk, connectorResultFailure } from '@agency/core'
 import { connectorToolsIsDisabled } from '@agency/db'
+import { toolResponseText, type SessionLedger } from '../chat/ledger.js'
 import { disabledToolMessage } from './can-use-tool.js'
+import { connectorRefusalSentence, connectorServerOf, type ConnectorWatch } from './connector-watch.js'
 
 export interface HookDeps {
   readonly audit: (action: string, detail: Record<string, unknown>) => Promise<void>
@@ -33,6 +45,29 @@ export interface HookDeps {
    * before `canUseTool` was consulted.
    */
   readonly disabledTools: ReadonlySet<string>
+  /**
+   * What this conversation has shown the agent. Every tool result is handed
+   * to it, with the call's own input, before the model reads the result; the
+   * ledger decides what counts. Absent, nothing is recorded.
+   */
+  readonly ledger?: SessionLedger | undefined
+  /** This turn's watch on connectors that refuse; the same one `canUseTool` asks. */
+  readonly connectors?: ConnectorWatch | undefined
+}
+
+/** A connector's answer is read this far for a refusal: an error says what it is at its start. */
+const CONNECTOR_ANSWER_READ = 8_000
+
+/** The class of an error, for a log line: never its message, which can quote a tool's answer. */
+const errorClass = (err: unknown): string => (err instanceof Error ? err.name : 'UnknownError')
+
+/** A log line that cannot throw out of a hook: a hook that throws must never reach the CLI. */
+function quietly(write: () => void): void {
+  try {
+    write()
+  } catch {
+    // Nothing left to tell.
+  }
 }
 
 /** Seconds. The hook does no I/O beyond one audit insert. */
@@ -129,20 +164,93 @@ export function makePreToolUse(deps: HookDeps) {
 export function makePostToolUse(deps: HookDeps) {
   return async (input: unknown): Promise<SyncHookJSONOutput> => {
     try {
-      const h = input as { hook_event_name?: string; tool_name?: string; tool_use_id?: string }
+      const h = input as Partial<PostToolUseHookInput> | null
       if (h?.hook_event_name !== 'PostToolUse') return {}
+      const toolName = typeof h.tool_name === 'string' ? h.tool_name : null
+
+      // A connector refusing IN BAND — jina's "Error: Search failed …
+      // Unauthorized", tavily's {"error":…,"status":429} — which the CLI
+      // reports as a success. The model is told in our words, never the
+      // server's.
+      const server = connectorServerOf(toolName)
+      const refusal =
+        server === null ? null : connectorResultFailure(toolResponseText(h.tool_response, CONNECTOR_ANSWER_READ), false, server)
+
+      // What this conversation has shown the agent: the answer, with the
+      // call's own input stripped out of it, before the model reads it — and
+      // never a refusal, which shows nothing true (a signup link, the
+      // server's own words), as PostToolUseFailure never adds an error. A
+      // ledger that throws costs the ledger this answer, never the call.
+      if (toolName !== null && refusal === null && deps.ledger) {
+        try {
+          deps.ledger.addToolResult(toolName, h.tool_response, h.tool_input)
+        } catch (err) {
+          quietly(() => deps.log.error('could not note a tool result in the conversation’s ledger', { error: errorClass(err) }))
+        }
+      }
+
+      let context: string | null = null
+      if (server !== null && deps.connectors) {
+        if (refusal !== null) {
+          deps.connectors.fail(server, refusal)
+          context = connectorRefusalSentence(server, refusal)
+        } else {
+          deps.connectors.ok(server)
+        }
+      }
+
       // Deliberately no result body. §10: never log full message bodies — a
       // tool result can carry a company's evidence, and this row is kept
-      // forever.
-      await deps.audit('agent.tool_post', {
-        toolName: h.tool_name ?? null,
-        toolUseId: h.tool_use_id ?? null,
-      })
-      return {}
+      // forever. Not waited for, and unable to cost the model the sentence
+      // above: nothing here depends on it.
+      try {
+        void deps
+          .audit('agent.tool_post', {
+            toolName: toolName ?? null,
+            toolUseId: h.tool_use_id ?? null,
+          })
+          .catch((err: unknown) => quietly(() => deps.log.error('PostToolUse audit failed', { error: errorClass(err) })))
+      } catch (err) {
+        quietly(() => deps.log.error('PostToolUse audit failed', { error: errorClass(err) }))
+      }
+
+      return context === null ? {} : { hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: context } }
     } catch (err) {
-      deps.log.error('PostToolUse hook failed', {
-        error: err instanceof Error ? err.name : 'UnknownError',
-      })
+      quietly(() => deps.log.error('PostToolUse hook failed', { error: errorClass(err) }))
+      return {}
+    }
+  }
+}
+
+/**
+ * A tool call that FAILED (2026-10-13) — an MCP result flagged as an error,
+ * which the CLI turns into this event rather than PostToolUse: jina's "HTTP
+ * 401: Unauthorized", firecrawl's "Anonymous keyless access is unavailable
+ * for this request". Only a connector's failure is read, and only for a
+ * refusal of its own; anything else — a page the connector could not fetch,
+ * an interrupted call, the agency's own tools — is left as the CLI reported
+ * it. A failure is never added to the ledger: an error shows nothing true.
+ */
+export function makePostToolUseFailure(deps: HookDeps) {
+  return async (input: unknown): Promise<SyncHookJSONOutput> => {
+    try {
+      const h = input as Partial<PostToolUseFailureHookInput> | null
+      if (h?.hook_event_name !== 'PostToolUseFailure') return {}
+      if (h.is_interrupt === true || !deps.connectors) return {}
+      const server = connectorServerOf(h.tool_name)
+      if (server === null) return {}
+      const text = typeof h.error === 'string' ? h.error : toolResponseText(h.error, CONNECTOR_ANSWER_READ)
+      const kind = connectorResultFailure(text.slice(0, CONNECTOR_ANSWER_READ), true, server)
+      if (kind === null) return {}
+      deps.connectors.fail(server, kind)
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PostToolUseFailure',
+          additionalContext: connectorRefusalSentence(server, kind),
+        },
+      }
+    } catch (err) {
+      quietly(() => deps.log.error('PostToolUseFailure hook failed', { error: errorClass(err) }))
       return {}
     }
   }

@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { toast } from '../toast/toast'
 
 /**
  * Settings → Agents (PROMPT.md §7).
@@ -44,7 +45,7 @@ export function AgentsPanel({
   const [busy, setBusy] = useState<string | null>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
 
-  const act = async (id: string, run: () => Promise<Response>): Promise<void> => {
+  const act = async (id: string, run: () => Promise<Response>, done: string): Promise<void> => {
     setBusy(id)
     setErrors((e) => ({ ...e, [id]: '' }))
     try {
@@ -54,6 +55,7 @@ export function AgentsPanel({
         setErrors((e) => ({ ...e, [id]: body.error ?? 'That did not work.' }))
         return
       }
+      toast.afterReload(done)
       window.location.reload()
     } catch {
       setErrors((e) => ({ ...e, [id]: 'The request did not complete. Try again.' }))
@@ -99,12 +101,15 @@ export function AgentsPanel({
                       type="button"
                       disabled={busy === a.id}
                       onClick={() =>
-                        void act(a.id, () =>
-                          fetch(`/api/agents/${a.id}`, {
-                            method: 'PATCH',
-                            headers: { 'content-type': 'application/json' },
-                            body: JSON.stringify({ enabled: !a.enabled }),
-                          }),
+                        void act(
+                          a.id,
+                          () =>
+                            fetch(`/api/agents/${a.id}`, {
+                              method: 'PATCH',
+                              headers: { 'content-type': 'application/json' },
+                              body: JSON.stringify({ enabled: !a.enabled }),
+                            }),
+                          a.enabled ? `The ${a.slug} agent is disabled.` : `The ${a.slug} agent is enabled.`,
                         )
                       }
                     >
@@ -115,7 +120,7 @@ export function AgentsPanel({
                       disabled={busy === a.id}
                       onClick={() => {
                         if (!window.confirm(`Remove the "${a.slug}" agent?`)) return
-                        void act(a.id, () => fetch(`/api/agents/${a.id}`, { method: 'DELETE' }))
+                        void act(a.id, () => fetch(`/api/agents/${a.id}`, { method: 'DELETE' }), `The ${a.slug} agent is removed.`)
                       }}
                     >
                       Remove
@@ -195,6 +200,7 @@ function AgentForm({
         setError(body.error ?? 'That did not work.')
         return
       }
+      toast.afterReload(agent ? 'Agent saved.' : 'Agent added.')
       window.location.reload()
     } catch {
       setError('The request did not complete. Try again.')

@@ -180,25 +180,11 @@ export async function claimRescan(
 ): Promise<{ readonly claimed: true } | { readonly claimed: false; readonly heldUntil: Date }> {
   const now = input.now.getTime()
   const until = new Date(now + Math.max(0, input.budgetMs) + RESCAN_MARGIN_MS)
-  // Any claim still live was written minutes ago; the floor bounds the read.
-  const lookback = new Date(now - RESCAN_MIN_AGE_HOURS * 3_600_000)
   return db.transaction(async (tx) => {
     const t = tx as unknown as AgencyDb
     await t.execute(sql`SELECT pg_advisory_xact_lock(hashtext('cron.rescan'), hashtext(${input.orgId}))`)
-    const claims = await t
-      .select({ detail: schema.auditLog.detail })
-      .from(schema.auditLog)
-      .where(
-        and(
-          eq(schema.auditLog.orgId, input.orgId),
-          eq(schema.auditLog.action, 'scan.cron_started'),
-          gte(schema.auditLog.createdAt, lookback),
-        ),
-      )
-    for (const c of claims) {
-      const held = claimUntil(c.detail)
-      if (held !== null && held.getTime() > now) return { claimed: false as const, heldUntil: held }
-    }
+    const held = await liveClaimUntil(t, input.orgId, input.now)
+    if (held !== null) return { claimed: false as const, heldUntil: held }
     await appendAudit(t, {
       orgId: input.orgId,
       actor: input.actor ?? 'system',
@@ -211,6 +197,77 @@ export async function claimRescan(
     })
     return { claimed: true as const }
   })
+}
+
+/**
+ * Whether a rescan run holds this org now, and until when — WITHOUT claiming
+ * it. For a caller that must not start scans beside a run but is not one
+ * itself: the agent's `rescan_stale`, which scans a few companies on a
+ * person's request and leaves the nightly run its claim. Taking one would
+ * make the night's delivery skip the org until the next day.
+ *
+ * Under the same two-key lock `claimRescan` takes, so a claim being written
+ * at this moment is waited for and then seen, rather than read as absent.
+ * The same reading of a claim, too: a live `scan.cron_started` row whose
+ * `until` is still ahead, and a `until` that cannot be read holds nothing.
+ *
+ * And one reading of its own: a claim with a `scan.cron_run` row for the org
+ * at or after it — the row a run writes as it ends — is a run that has
+ * ended, compared in SQL against the claim's STORED `created_at`. A claim's
+ * `until` is its whole budget, about five minutes, and a run with nothing
+ * due ends in a second; read alone, it told a person the rescan "is running
+ * now" for minutes after it had finished (review round 16). `claimRescan`
+ * keeps the plain reading: a second delivery waits out the whole claim.
+ */
+export async function rescanClaimHeldUntil(db: AgencyDb, orgId: string, now: Date): Promise<Date | null> {
+  return db.transaction(async (tx) => {
+    const t = tx as unknown as AgencyDb
+    await t.execute(sql`SELECT pg_advisory_xact_lock(hashtext('cron.rescan'), hashtext(${orgId}))`)
+    const held = await liveClaim(t, orgId, now)
+    if (!held) return null
+    const ended = await t
+      .select({ id: schema.auditLog.id })
+      .from(schema.auditLog)
+      .where(
+        and(
+          eq(schema.auditLog.orgId, orgId),
+          eq(schema.auditLog.action, 'scan.cron_run'),
+          sql`${schema.auditLog.createdAt} >= (SELECT a.created_at FROM audit_log a WHERE a.id = ${held.id})`,
+        ),
+      )
+      .limit(1)
+    return ended.length > 0 ? null : held.until
+  })
+}
+
+/**
+ * The `until` of a live claim on this org's rescan, or null when none holds.
+ * Called under the advisory lock, by `claimRescan` and `rescanClaimHeldUntil`
+ * alike. Any claim still live was written minutes ago; the floor bounds the
+ * read.
+ */
+async function liveClaimUntil(db: AgencyDb, orgId: string, now: Date): Promise<Date | null> {
+  return (await liveClaim(db, orgId, now))?.until ?? null
+}
+
+/** The live claim itself: its row's id beside its `until`. */
+async function liveClaim(db: AgencyDb, orgId: string, now: Date): Promise<{ id: string; until: Date } | null> {
+  const lookback = new Date(now.getTime() - RESCAN_MIN_AGE_HOURS * 3_600_000)
+  const claims = await db
+    .select({ id: schema.auditLog.id, detail: schema.auditLog.detail })
+    .from(schema.auditLog)
+    .where(
+      and(
+        eq(schema.auditLog.orgId, orgId),
+        eq(schema.auditLog.action, 'scan.cron_started'),
+        gte(schema.auditLog.createdAt, lookback),
+      ),
+    )
+  for (const c of claims) {
+    const held = claimUntil(c.detail)
+    if (held !== null && held.getTime() > now.getTime()) return { id: c.id, until: held }
+  }
+  return null
 }
 
 /** A claim row's `until`, or null when it holds none that can be read. */

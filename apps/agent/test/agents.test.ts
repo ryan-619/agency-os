@@ -17,6 +17,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { ALLOWED_AGENT_KEYS, buildAgents } from '../src/runtime/agents.js'
+import { PLAYBOOK_HEADER, TRUE_DATA_SECTION } from '../src/runtime/options.js'
 import type { AgentDefRow } from '@agency/db'
 
 const silent = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} }
@@ -105,7 +106,7 @@ describe('what it builds', () => {
     const { agents } = buildAgents([row()], silent)
     expect(agents['qualifier']).toEqual({
       description: 'Scans and scores a company against the ICP. Use it to qualify one domain.',
-      prompt: 'You qualify companies from what their public pages actually show.',
+      prompt: `You qualify companies from what their public pages actually show.\n\n${TRUE_DATA_SECTION}`,
       tools: ['mcp__agency__scan_company', 'mcp__agency__score_company'],
       model: 'sonnet',
     })
@@ -135,6 +136,42 @@ describe('what it builds', () => {
 
   it('leaves a disabled definition out', () => {
     expect(buildAgents([row({ enabled: false })], silent).agents).toEqual({})
+  })
+
+  it('gives every helper the playbook under the main agent’s header, after its own prompt and the data rule', () => {
+    const { agents } = buildAgents([row()], silent, 'We secure B2B SaaS apps.')
+    expect(agents['qualifier']!.prompt).toBe(
+      `You qualify companies from what their public pages actually show.\n\n${TRUE_DATA_SECTION}\n\n${PLAYBOOK_HEADER}\nWe secure B2B SaaS apps.`,
+    )
+    // None written: the row's prompt as stored, and the data rule after it.
+    expect(buildAgents([row()], silent, '').agents['qualifier']!.prompt).toBe(
+      `You qualify companies from what their public pages actually show.\n\n${TRUE_DATA_SECTION}`,
+    )
+  })
+
+  /**
+   * True data only (2026-10-13). A helper does not inherit the main prompt,
+   * and a live database never re-seeds a helper's own prompt — an owner wrote
+   * it in Settings → Agents — so the rule rides inside every built prompt:
+   * after the row's words, before the playbook, which stays last.
+   */
+  it('gives every helper the true-data section, before the playbook', () => {
+    const playbook = 'We build websites for clinics.'
+    const { agents } = buildAgents(
+      [row(), row({ slug: 'researcher', id: '22222222-2222-4222-8222-222222222222', systemPrompt: 'You research.' })],
+      silent,
+      playbook,
+    )
+    for (const [slug, own] of [
+      ['qualifier', 'You qualify companies from what their public pages actually show.'],
+      ['researcher', 'You research.'],
+    ] as const) {
+      const prompt = agents[slug]!.prompt
+      expect(prompt.startsWith(`${own}\n\n`), slug).toBe(true)
+      expect(prompt.indexOf(TRUE_DATA_SECTION), slug).toBeGreaterThan(0)
+      expect(prompt.indexOf(PLAYBOOK_HEADER), slug).toBeGreaterThan(prompt.indexOf(TRUE_DATA_SECTION))
+      expect(prompt.endsWith(`${PLAYBOOK_HEADER}\n${playbook}`), slug).toBe(true)
+    }
   })
 
   it('builds several, keyed by slug', () => {

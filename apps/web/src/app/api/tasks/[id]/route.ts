@@ -2,10 +2,13 @@ import { NextResponse } from 'next/server'
 import { and, eq } from 'drizzle-orm'
 import { assertCan } from '@agency/core'
 import {
-  schema, tasksAssign, tasksComplete, tasksReopen, tasksSetDue, type AgencyDb,
+  TASK_OUTCOMES, schema, taskDelete, tasksAssign, tasksComplete, tasksRecordOutcome, tasksReopen, tasksSetDue, type AgencyDb,
+  type TaskOutcome,
 } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
+import { deleteAnswer } from '@/lib/delete-answer'
+import { log } from '@/lib/logger'
 
 /**
  * Change one task: mark it done, reopen it, hand it to somebody, or move its
@@ -21,7 +24,7 @@ export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-const ACTIONS = ['done', 'reopen', 'assign', 'due'] as const
+const ACTIONS = ['done', 'reopen', 'assign', 'due', 'outcome'] as const
 type Action = (typeof ACTIONS)[number]
 
 export async function PATCH(
@@ -46,7 +49,7 @@ export async function PATCH(
   } catch {
     return NextResponse.json({ error: 'invalid_json' }, { status: 400 })
   }
-  const b = (body ?? {}) as { action?: unknown; assigneeUserId?: unknown; dueAt?: unknown }
+  const b = (body ?? {}) as { action?: unknown; assigneeUserId?: unknown; dueAt?: unknown; outcome?: unknown; callBackOn?: unknown }
   if (typeof b.action !== 'string' || !(ACTIONS as readonly string[]).includes(b.action)) {
     return NextResponse.json({ error: `action must be one of ${ACTIONS.join(', ')}` }, { status: 400 })
   }
@@ -57,6 +60,12 @@ export async function PATCH(
   }
   if (action === 'due' && b.dueAt !== null && (typeof b.dueAt !== 'string' || Number.isNaN(Date.parse(b.dueAt)))) {
     return NextResponse.json({ error: 'dueAt must be an ISO-8601 time, or null to clear it' }, { status: 400 })
+  }
+  if (action === 'outcome' && (typeof b.outcome !== 'string' || !(TASK_OUTCOMES as readonly string[]).includes(b.outcome))) {
+    return NextResponse.json({ error: `outcome must be one of ${TASK_OUTCOMES.join(', ')}` }, { status: 400 })
+  }
+  if (action === 'outcome' && b.callBackOn !== undefined && b.callBackOn !== null && (typeof b.callBackOn !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(b.callBackOn))) {
+    return NextResponse.json({ error: 'callBackOn must be a day, YYYY-MM-DD' }, { status: 400 })
   }
 
   const db = getDb() as unknown as AgencyDb
@@ -75,6 +84,17 @@ export async function PATCH(
 
   const common = { orgId: user.orgId, id, actor: user.id }
   switch (action) {
+    case 'outcome': {
+      // A call's or a visit's outcome (0027): the completion and what happened, in one transaction.
+      const r = await tasksRecordOutcome(db, {
+        ...common, byUserId: user.id, outcome: b.outcome as TaskOutcome, callBackOn: typeof b.callBackOn === 'string' ? b.callBackOn : null,
+      })
+      if (!r.ok) {
+        const status = r.reason === 'not_found' ? 404 : r.reason === 'already_done' || r.reason === 'suppression_failed' ? 409 : 400
+        return NextResponse.json({ error: r.message, reason: r.reason }, { status })
+      }
+      return NextResponse.json({ task: r.task, callBackTaskId: r.callBackTaskId, suppressed: r.suppressed })
+    }
     case 'done': {
       const r = await tasksComplete(db, { ...common, byUserId: user.id })
       if (!r.ok) return NextResponse.json({ error: r.message }, { status: 404 })
@@ -96,4 +116,32 @@ export async function PATCH(
       return NextResponse.json({ id, dueAt: r.task.dueAt ? r.task.dueAt.toISOString() : null })
     }
   }
+}
+
+/**
+ * Delete a task (2026-10-15) — `deals:write`, as changing one is. Not a
+ * LinkedIn step, which is closed with "I sent it" or "I did not send it",
+ * and not a done call whose outcome was "asked not to be called": that is
+ * where the number's suppression came from (409 for each).
+ */
+export async function DELETE(
+  _request: Request,
+  context: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const session = await auth()
+  const user = session?.user
+  if (!user) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
+  try {
+    assertCan({ id: user.id, orgId: user.orgId, role: user.role }, 'deals:write')
+  } catch {
+    return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+  }
+  const { id } = await context.params
+  if (!UUID.test(id)) return NextResponse.json({ error: 'not_found', message: 'No such task.' }, { status: 404 })
+  const a = await deleteAnswer(
+    'task',
+    () => taskDelete(getDb() as unknown as AgencyDb, { orgId: user.orgId, taskId: id.toLowerCase(), actor: user.id }),
+    log,
+  )
+  return NextResponse.json(a.body, { status: a.status })
 }

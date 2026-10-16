@@ -42,6 +42,7 @@ export type LlmTask =
   | 'summarise_call'
   | 'classify_reply'
   | 'draft_outreach'
+  | 'draft_reply'
   | 'summarise_findings'
   | 'polish_copy'
 
@@ -58,6 +59,8 @@ export const TASK_CARRIES_LEAD_DATA: Readonly<Record<LlmTask, boolean>> = {
   summarise_call: true,
   classify_reply: true,
   draft_outreach: true,
+  /** A reply's own words and the person's name: lead data in every line (0026). */
+  draft_reply: true,
   summarise_findings: true,
   polish_copy: false,
 }

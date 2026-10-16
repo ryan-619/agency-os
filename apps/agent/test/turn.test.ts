@@ -187,6 +187,33 @@ describe('mapping SDK messages to wire events', () => {
     expect(events[0]).toMatchObject({ turnCostUsd: '0.000000' })
   })
 
+  /**
+   * The CLI the SDK bundles (2.1.269) predates Sonnet 5.5 and Opus 5.5, and
+   * prices a model it does not know at its $5 / $25 fallback, saying so as
+   * `costBasis: "unknown"` (measured 2026-10-15 against a fake API). The
+   * worker re-prices such an entry from its tokens, so Settings → Spend and
+   * the thread's budget see what the turn cost.
+   */
+  it('re-prices a model the CLI could not, from its own tokens', () => {
+    const modelUsage = {
+      'claude-sonnet-5-5': {
+        inputTokens: 1_000, outputTokens: 500, cacheReadInputTokens: 30_000, cacheCreationInputTokens: 2_000,
+        costUSD: 0.045, costBasis: 'unknown',
+      },
+    }
+    const events = mapSdkMessage(result({ total_cost_usd: 0.045, modelUsage }), ctx)
+    // 1,000 × $2 + 500 × $10 + 30,000 × $0.20 + 2,000 × $2.50, per million.
+    expect(events[0]).toMatchObject({ turnCostUsd: '0.018000' })
+  })
+
+  it('keeps the figure the CLI priced from its own list', () => {
+    const modelUsage = {
+      'claude-sonnet-5-5': { inputTokens: 1_000, outputTokens: 500, costUSD: 0.045, costBasis: 'list' },
+    }
+    const events = mapSdkMessage(result({ total_cost_usd: 0.045, modelUsage }), ctx)
+    expect(events[0]).toMatchObject({ turnCostUsd: '0.045000' })
+  })
+
   it.each([
     ['error_max_turns', 'max_turns'],
     ['error_max_budget_usd', 'max_budget'],
@@ -224,6 +251,38 @@ describe('mapping SDK messages to wire events', () => {
     expect(events).toHaveLength(1)
     expect(events[0]).toMatchObject({ kind: 'error', code, retryable })
     expect((events[0] as { message: string }).message).toMatch(matches)
+  })
+
+  /**
+   * Seen on the live site on 2026-10-07: a connector with 98 tools took every
+   * request past the model's context, and the person was told "This is a
+   * bug" — of a request that was too big, which a new thread or fewer
+   * connector tools fixes.
+   */
+  it('says what to do when the API answers that the prompt is too long', () => {
+    const refused = {
+      type: 'assistant', parent_tool_use_id: null, uuid: 'u', session_id: 's',
+      error: 'invalid_request',
+      message: { id: 'm', content: [{ type: 'text', text: 'Prompt is too long' }] },
+    } as unknown as SDKMessage
+    const events = mapSdkMessage(refused, ctx)
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ kind: 'error', code: 'sdk_error', retryable: false })
+    const message = (events[0] as { message: string }).message
+    expect(message).toMatch(/new thread/i)
+    expect(message).toMatch(/Settings → Connectors/)
+    expect(message).not.toMatch(/bug/i)
+    expect(JSON.stringify(events)).not.toContain('Prompt is too long')
+  })
+
+  it('still calls any other rejected request a bug', () => {
+    const refused = {
+      type: 'assistant', parent_tool_use_id: null, uuid: 'u', session_id: 's',
+      error: 'invalid_request',
+      message: { id: 'm', content: [{ type: 'text', text: 'tools.3.custom.name: String should match pattern' }] },
+    } as unknown as SDKMessage
+    const [event] = mapSdkMessage(refused, ctx)
+    expect((event as { message: string }).message).toMatch(/bug/i)
   })
 
   it('does not render the API’s diagnostic as if the agent had said it', () => {

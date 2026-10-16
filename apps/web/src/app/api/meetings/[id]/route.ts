@@ -1,11 +1,13 @@
 import { NextResponse } from 'next/server'
 import { assertCan } from '@agency/core'
 import {
-  cancelMeeting, readMeeting, rescheduleMeeting, setMeetingOutcome, type AgencyDb,
+  cancelMeeting, meetingDelete, readMeeting, rescheduleMeeting, setMeetingOutcome, type AgencyDb,
 } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
 import { wallClockToInstant } from '@/lib/wall-clock'
+import { deleteAnswer } from '@/lib/delete-answer'
+import { log } from '@/lib/logger'
 
 /**
  * What happened to a meeting (PROMPT.md §8.6): it was held, they did not turn
@@ -139,4 +141,33 @@ export async function PATCH(
   }
 
   return NextResponse.json({ error: 'action must be outcome, cancel or reschedule' }, { status: 400 })
+}
+
+/**
+ * Delete a meeting whose outcome is not recorded (2026-10-15) — a booking
+ * made by mistake, or one the assistant booked with somebody who does not
+ * exist. `deals:write`, as cancelling is. A held, no-show or rescheduled
+ * meeting is refused (409). The deal does not move back, and nobody is
+ * told: no invitation was sent from here.
+ */
+export async function DELETE(
+  _request: Request,
+  context: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const session = await auth()
+  const user = session?.user
+  if (!user) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
+  try {
+    assertCan({ id: user.id, orgId: user.orgId, role: user.role }, 'deals:write')
+  } catch {
+    return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+  }
+  const { id } = await context.params
+  if (!UUID.test(id)) return NextResponse.json({ error: 'not_found', message: 'No such meeting.' }, { status: 404 })
+  const a = await deleteAnswer(
+    'meeting',
+    () => meetingDelete(getDb() as unknown as AgencyDb, { orgId: user.orgId, meetingId: id.toLowerCase(), actor: user.id }),
+    log,
+  )
+  return NextResponse.json(a.body, { status: a.status })
 }

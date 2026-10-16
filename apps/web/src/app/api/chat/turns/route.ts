@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { can } from '@agency/core'
 import { auth } from '@/auth'
 import { agentConfigured, startTurn } from '@/lib/agent'
+import { refusalFromUpstream } from '@/lib/agent-refusal'
 
 /**
  * Start an agent turn and stream it to the browser (PROMPT.md §5.2, §8.1).
@@ -45,7 +46,7 @@ export async function POST(request: Request): Promise<Response> {
   } catch {
     return NextResponse.json({ error: 'invalid_json' }, { status: 400 })
   }
-  const { chatSessionId, text } = (body ?? {}) as { chatSessionId?: unknown; text?: unknown }
+  const { chatSessionId, text, deep } = (body ?? {}) as { chatSessionId?: unknown; text?: unknown; deep?: unknown }
   if (typeof chatSessionId !== 'string' || !chatSessionId) {
     return NextResponse.json({ error: 'chatSessionId is required' }, { status: 400 })
   }
@@ -56,20 +57,27 @@ export async function POST(request: Request): Promise<Response> {
     return NextResponse.json({ error: 'text is too long' }, { status: 413 })
   }
 
-  const upstream = await startTurn({ chatSessionId, userId: user.id, text })
+  // "Think harder" is only an exact `true`: the stronger model costs several times as much.
+  const upstream = await startTurn({ chatSessionId, userId: user.id, text, deep: deep === true })
   if (!(upstream instanceof Response)) {
     return NextResponse.json({ error: `agent_${upstream.reason}` }, { status: 503 })
   }
 
   const res = upstream
   if (!res.ok || !res.body) {
-    // The worker refused — chat disabled, no such conversation, already
-    // running. Pass its own words through; they are written for a person.
-    const detail = await res.text().catch(() => '')
-    return new Response(detail || JSON.stringify({ error: 'agent_error' }), {
+    // The worker refused — chat disabled, no such conversation — and its code
+    // goes through. But behind a tunnel what answered may not be the worker
+    // at all: ngrok's page for a Mac that is off, a proxy's HTML. Those, and
+    // the worker refusing this site's token, are told apart here, because
+    // the panel can only word what it is told (review round 15).
+    const body = await res.text().catch(() => '')
+    const reply = refusalFromUpstream({
       status: res.status,
-      headers: { 'content-type': 'application/json' },
+      contentType: res.headers.get('content-type'),
+      ngrokErrorCode: res.headers.get('ngrok-error-code'),
+      body,
     })
+    return NextResponse.json(reply.body, { status: reply.status })
   }
 
   return new Response(res.body, {

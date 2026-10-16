@@ -1,12 +1,15 @@
 import { NextResponse, after } from 'next/server'
 import { and, eq } from 'drizzle-orm'
 import { assertCan } from '@agency/core'
-import { DEAL_STAGES, appendAudit, schema, setDealStage, setDealOwner, type AgencyDb, type DealStage } from '@agency/db/queries'
+import {
+  DEAL_STAGES, appendAudit, dealDelete, schema, setDealStage, setDealOwner, type AgencyDb, type DealStage,
+} from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
 import { log } from '@/lib/logger'
 import { notify } from '@/lib/slack'
 import { closedStage, dealClosedNotification } from './notification'
+import { deleteAnswer } from '@/lib/delete-answer'
 
 /**
  * Move a deal on the board (PROMPT.md §8.6).
@@ -25,6 +28,8 @@ import { closedStage, dealClosedNotification } from './notification'
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export async function PATCH(
   request: Request,
@@ -187,4 +192,33 @@ export async function PATCH(
     valueCents: details.valueCents !== undefined ? details.valueCents : moved.valueCents,
     ownerUserId: ownerUserId !== undefined ? owned.ownerUserId : moved.ownerUserId,
   })
+}
+
+/**
+ * Delete a deal that is not won (2026-10-15) — `deals:write`, as moving one
+ * is. Its meetings, proposals and tasks stay with the deal taken off them,
+ * and the company stays; a won deal is refused (409) — moving it off Won is
+ * the act for a mistaken win. The deal's earlier moves stop counting in the
+ * board's analytics, which read only deals that exist.
+ */
+export async function DELETE(
+  _request: Request,
+  context: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const session = await auth()
+  const user = session?.user
+  if (!user) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
+  try {
+    assertCan({ id: user.id, orgId: user.orgId, role: user.role }, 'deals:write')
+  } catch {
+    return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+  }
+  const { id } = await context.params
+  if (!UUID.test(id)) return NextResponse.json({ error: 'not_found', message: 'No such deal.' }, { status: 404 })
+  const a = await deleteAnswer(
+    'deal',
+    () => dealDelete(getDb() as unknown as AgencyDb, { orgId: user.orgId, dealId: id.toLowerCase(), actor: user.id }),
+    log,
+  )
+  return NextResponse.json(a.body, { status: a.status })
 }

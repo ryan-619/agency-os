@@ -1,12 +1,13 @@
 import { NextResponse, after } from 'next/server'
 import { and, eq } from 'drizzle-orm'
 import { assertCan } from '@agency/core'
-import { readProposal, schema, setProposalStatus, type AgencyDb, type ProposalStatus } from '@agency/db/queries'
+import { proposalDelete, readProposal, schema, setProposalStatus, type AgencyDb, type ProposalStatus } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
 import { log } from '@/lib/logger'
 import { notify } from '@/lib/slack'
 import { proposalAcceptedNotification } from './notification'
+import { deleteAnswer } from '@/lib/delete-answer'
 
 /**
  * Record what happened to a proposal (PROMPT.md §8.6).
@@ -24,6 +25,8 @@ import { proposalAcceptedNotification } from './notification'
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 const STATUSES: readonly ProposalStatus[] = ['draft', 'sent', 'accepted', 'declined', 'withdrawn']
 const NEXT: Readonly<Record<ProposalStatus, readonly ProposalStatus[]>> = {
@@ -120,4 +123,30 @@ async function notWritten(db: AgencyDb, orgId: string, id: string, to: ProposalS
     },
     { status: 409 },
   )
+}
+
+/**
+ * Delete a draft proposal (2026-10-15) — `deals:write`. Anything past draft
+ * is refused (409): it is withdrawn instead, and stays.
+ */
+export async function DELETE(
+  _request: Request,
+  context: { params: Promise<{ id: string }> },
+): Promise<NextResponse> {
+  const session = await auth()
+  const user = session?.user
+  if (!user) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
+  try {
+    assertCan({ id: user.id, orgId: user.orgId, role: user.role }, 'deals:write')
+  } catch {
+    return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+  }
+  const { id } = await context.params
+  if (!UUID.test(id)) return NextResponse.json({ error: 'not_found', message: 'No such proposal.' }, { status: 404 })
+  const a = await deleteAnswer(
+    'proposal',
+    () => proposalDelete(getDb() as unknown as AgencyDb, { orgId: user.orgId, proposalId: id.toLowerCase(), actor: user.id }),
+    log,
+  )
+  return NextResponse.json(a.body, { status: a.status })
 }

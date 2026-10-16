@@ -99,6 +99,19 @@ describe('optOutNotRecordedEvent — the web route’s rule', () => {
     expect(optOutNotRecordedEvent(MATCHED)).toEqual(EVENT)
   })
 
+  /**
+   * Review round 7: a colleague's stop filed under the contact our mail went
+   * to. The opt-out is the sender's; the alarm names their reply and never
+   * the contact — the web route's rule, byte for byte.
+   */
+  it('names the reply and not the contact for a stop sent by somebody else', () => {
+    expect(optOutNotRecordedEvent({ ...MATCHED, fromIsContact: false })).toEqual({
+      ...EVENT, contactId: null, fromIsContact: false,
+    })
+    expect(optOutNotRecordedEvent({ ...MATCHED, fromIsContact: true })).toEqual(EVENT)
+    expect(optOutNotRecordedEvent({ ...MATCHED, fromIsContact: null })).toEqual(EVENT)
+  })
+
   it.each([
     ['an ordinary reply', { ...MATCHED, optOutNotRecorded: false, replyKind: 'interested' as const }],
     ['a recorded opt-out', { ...MATCHED, optOutNotRecorded: false, suppressed: true }],

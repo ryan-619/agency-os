@@ -442,6 +442,26 @@ describe('the voice service, end to end', () => {
       expect(counted.bySource.find((b) => b.source === 'unrecorded')?.n).toBe(0)
     })
 
+    /**
+     * Review round 5: this handler read texts with the SPOKEN reader alone,
+     * while every other text goes through the SMS readers (0019) — so
+     * STOPALL, UNSUB, CANCEL, END and QUIT texted to the voice number were
+     * left for a human and suppressed nothing. A text is a text. And
+     * nothing the spoken reader caught here is dropped: a DLT footer's
+     * "STOP ALL 56161", "Please stop" and "please stop texting me" are
+     * still opt-outs.
+     */
+    it.each(['STOP ALL 56161', 'STOPALL', 'UNSUB', 'CANCEL', 'END', 'QUIT', 'Please stop', 'please stop texting me'])(
+      'records %j texted to the voice number as an opt-out',
+      async (text) => {
+        await start()
+        const res = await post(service.port, '/sms', { From: THEIR, To: OURS, Body: text })
+        expect(res.status).toBe(200)
+        const rows = await db.select().from(schema.suppressions)
+        expect(rows).toEqual([expect.objectContaining({ kind: 'phone', value: THEIR, source: 'voice' })])
+      },
+    )
+
     it('leaves any other text for a human and answers nothing', async () => {
       await start()
       const res = await post(service.port, '/sms', { From: THEIR, To: OURS, Body: 'what do you charge?' })

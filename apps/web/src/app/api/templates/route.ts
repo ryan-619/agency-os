@@ -1,10 +1,11 @@
 import { NextResponse } from 'next/server'
-import { templatesCreate, templatesList, type AgencyDb } from '@agency/db/queries'
+import { templatesList, type AgencyDb } from '@agency/db/queries'
 import { auth } from '@/auth'
 import { getDb } from '@/lib/db'
+import { log } from '@/lib/logger'
+import { templateCreateAnswer } from './outcome'
 import {
-  TEMPLATE_MAX_REQUEST_BYTES, TEMPLATE_REFUSAL_STATUS, firstIssue, mayReadTemplates, mayWriteTemplates,
-  templateCreateSchema, templateView,
+  TEMPLATE_MAX_REQUEST_BYTES, firstIssue, mayReadTemplates, mayWriteTemplates, templateCreateSchema, templateView,
 } from './rules'
 
 /**
@@ -14,9 +15,11 @@ import {
  * a message can be drafted from, which is what the SMS composer asks for.
  * POST records one, as the DLT portal registered it; `templatesCreate`
  * refuses, with a sentence, anything that would not store or that this org
- * already holds under that id. Nothing here registers a template with an
- * operator, and nothing here sends: an SMS drafted from a template is
- * approved by a person and checked again at sending.
+ * already holds under that id; a database fault under it is a 500 with a
+ * sentence and a log line naming its class, never drizzle's message
+ * (`templateCreateAnswer`, `./outcome.ts`). Nothing here registers a
+ * template with an operator, and nothing here sends: an SMS drafted from a
+ * template is approved by a person and checked again at sending.
  */
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -59,7 +62,10 @@ export async function POST(request: Request): Promise<NextResponse> {
   const parsed = templateCreateSchema.safeParse(body)
   if (!parsed.success) return NextResponse.json({ error: firstIssue(parsed.error) }, { status: 400 })
 
-  const r = await templatesCreate(getDb() as unknown as AgencyDb, user.orgId, { ...parsed.data, createdBy: user.id })
-  if (!r.ok) return NextResponse.json({ error: r.message, reason: r.reason }, { status: TEMPLATE_REFUSAL_STATUS[r.reason] })
-  return NextResponse.json({ template: templateView(r.template) }, { status: 201 })
+  const answer = await templateCreateAnswer(
+    getDb() as unknown as AgencyDb,
+    { orgId: user.orgId, input: parsed.data, createdBy: user.id },
+    log,
+  )
+  return NextResponse.json(answer.body, { status: answer.status })
 }

@@ -271,7 +271,10 @@ describe('seeding a fresh database', () => {
       const rows = await db.driver.select<{ slug: string; tools: string[] }>(
         'SELECT slug, tools FROM agent_defs',
       )
-      const drafters = rows.filter((r) => r.tools.includes('mcp__agency__queue_touch'))
+      // Both tools that draft for somebody outside the company count.
+      const drafters = rows.filter(
+        (r) => r.tools.includes('mcp__agency__queue_touch') || r.tools.includes('mcp__agency__enrol_contacts'),
+      )
       expect(drafters.map((r) => r.slug)).toEqual(['closer'])
       for (const r of drafters) {
         expect(r.tools, r.slug).toContain('mcp__agency__check_send')

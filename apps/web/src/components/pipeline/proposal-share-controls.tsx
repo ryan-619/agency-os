@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { When } from '../when'
+import { toast } from '../toast/toast'
 import { SHARE_SHOWN_ONCE, shareStateLabel, type ShareState } from './proposal-share-copy'
 
 /** One link, as the slot hands it over: ISO strings, and a state decided on the server. */
@@ -77,18 +78,24 @@ export function ProposalShareControls({
     if (!b || typeof b.url !== 'string' || !share || typeof share.expiresAt !== 'string') return
     setCopied(false)
     setCreated({ url: b.url, expiresAt: share.expiresAt, cappedByEvidence: share.cappedByEvidence === true })
+    // The link itself stays on the page, where it can be copied; nothing was sent.
+    toast.success('Buyer link made.')
     router.refresh()
   }
 
   const revoke = async (id: string): Promise<void> => {
     if (!window.confirm('Revoke this link? Anyone holding it will see a page that does not exist. This cannot be undone.')) return
-    if (await post({ action: 'revoke', shareId: id })) router.refresh()
+    if (await post({ action: 'revoke', shareId: id })) {
+      toast.success('Link revoked. It no longer opens.')
+      router.refresh()
+    }
   }
 
   const copy = async (url: string): Promise<void> => {
     try {
       await navigator.clipboard.writeText(url)
       setCopied(true)
+      toast.success('Link copied.')
     } catch {
       setError('The browser would not copy it. Select the address and copy it by hand.')
     }

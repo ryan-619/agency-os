@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { DEFERRED_CODES } from '../../lib/approval-view'
 import { sendCheckSentence, type SendCheckView } from '../../lib/consent-view'
 import { SMS_VAR_MAX_CHARS, lengthLine, renderPreview, smsLength, type ComposerPart } from './sms-text'
+import { toast } from '../toast/toast'
 
 /**
  * "Draft SMS" (0019): one SMS to one person, from a registered DLT template,
@@ -60,6 +61,9 @@ export function atSending(code: string): 'held' | 'refused' {
 }
 
 const withoutStop = (s: string): string => s.trim().replace(/\.+$/, '')
+
+/** A draft's first line when the route sends none, and the toast every draft raises. */
+const DRAFTED_WORDS = 'Drafted. A person approves it on /approvals.'
 
 /** The line under Check: the send path's answer, and what that means for a draft. */
 export function checkLine(answer: CheckAnswer): string {
@@ -183,11 +187,12 @@ export function SmsComposer({
     const b = await post(false)
     setBusy(null)
     if (!b) return
-    const lines = [typeof b.note === 'string' ? b.note : 'Drafted. A person approves it on /approvals.']
+    const lines = [typeof b.note === 'string' ? b.note : DRAFTED_WORDS]
     const hold = b.wouldHold as { code?: unknown; reason?: unknown } | null | undefined
     if (hold && typeof hold.code === 'string' && typeof hold.reason === 'string') lines.push(holdLine({ code: hold.code, reason: hold.reason }))
     if (typeof b.deployment === 'string') lines.push(b.deployment)
     setDrafted(lines)
+    toast.success(DRAFTED_WORDS)
   }
 
   if (drafted) {

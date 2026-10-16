@@ -13,6 +13,13 @@
  *
  * This is posture review from the outside, not a security test.
  *
+ * The page reader (`read-page.ts`, 2026-10-13) requests through the same
+ * `get()` — `fetchFollowingRedirects` below — and is a different thing from a
+ * scan: one page a person would open from a search result, at an address the
+ * caller names, refused by `readablePathProblem` when it looks like a probe.
+ * It never widens what a scan requests; `capture` still asks for the
+ * homepage, the frozen list and the certificate, and nothing else.
+ *
  * Built on `node:https` rather than `fetch()`. That is not a preference: the
  * WHATWG Response hides the two things this module has to get right. It
  * decompresses before anything can measure the encoded stream — and the
@@ -26,8 +33,10 @@ import { Agent as HttpAgent, request as httpRequest, type IncomingMessage } from
 import { Agent as HttpsAgent, request as httpsRequest } from 'node:https'
 import { connect as tlsConnect, type PeerCertificate } from 'node:tls'
 import { gunzipSync, inflateRawSync } from 'node:zlib'
+import { readablePathProblem } from '@agency/core'
 import { ALL_PUBLIC_PATHS, type RawCapture, type RawResponse, type RawTls } from './types.js'
 import { isScannableHost, normaliseDomain } from './extract.js'
+import { publicOnlyLookup } from './address.js'
 
 const USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
@@ -249,18 +258,36 @@ export function redirectTarget(location: string, from: URL): URL {
   if (!isScannableHost(next.hostname)) {
     throw new RedirectRefused(`redirected to "${next.hostname}", which is not a public hostname`)
   }
+  // A company's site is served on the default port. A hop to any other port is
+  // refused, so a site cannot turn the scanner into a probe of somebody's
+  // ports (review, 2026-10-08) — what the page said is recorded as a failure.
+  if (next.port !== '') {
+    throw new RedirectRefused(`redirected to port ${next.port}, and the scanner requests only the default ports`)
+  }
   return next
 }
 
-function once(url: URL, timeoutMs: number): Promise<IncomingMessage> {
+/**
+ * Responses whose socket fell silent past the per-hop timeout while the body
+ * was arriving. Node reports that as the SERVER resetting the connection
+ * (`ECONNRESET`, "aborted") — it was this side closing a silent socket — so
+ * the response is marked here, and the page reader words it as the timeout it
+ * was. A scan records what Node reported, as it always has.
+ */
+const silencedBodies = new WeakSet<IncomingMessage>()
+
+function once(url: URL, timeoutMs: number, signal?: AbortSignal): Promise<IncomingMessage> {
   return new Promise((resolve, reject) => {
     const https = url.protocol === 'https:'
     const send = https ? httpsRequest : httpRequest
+    let response: IncomingMessage | null = null
     const req = send(
       url,
       {
         method: 'GET',
         agent: https ? httpsAgent : httpAgent,
+        // Resolve, and refuse an address that is not public, at the moment of connecting (`address.ts`).
+        lookup: publicOnlyLookup,
         headers: {
           'user-agent': USER_AGENT,
           accept: 'text/html,application/xhtml+xml,text/plain,*/*',
@@ -269,12 +296,18 @@ function once(url: URL, timeoutMs: number): Promise<IncomingMessage> {
           // the two engines are handed different bytes by the same server.
           'accept-encoding': 'gzip, deflate',
         },
+        // Only the page reader passes one; a scan's request is as it always was.
+        ...(signal ? { signal } : {}),
       },
-      resolve,
+      (res) => {
+        response = res
+        resolve(res)
+      },
     )
     // A socket-inactivity timeout, which is what Python's `timeout=` is. The
     // caller bounds the whole chain separately.
     req.setTimeout(timeoutMs, () => {
+      if (response) silencedBodies.add(response)
       req.destroy(Object.assign(new Error('request timed out'), { name: 'TimeoutError' }))
     })
     req.on('error', reject)
@@ -283,11 +316,41 @@ function once(url: URL, timeoutMs: number): Promise<IncomingMessage> {
 }
 
 /**
+ * What the page reader (`read-page.ts`, 2026-10-13) asks of `get()` beyond
+ * what a scan does. A scan passes none of it, so its requests and what it
+ * records are exactly as they were. None of these can widen what is
+ * requested: the host check on every hop, `publicOnlyLookup` on every
+ * connection and `fetchFollowingRedirects`' probe check run whatever is
+ * passed here.
+ */
+export interface FollowHooks {
+  /** Asked of every address before it is requested, the first included. Throws to refuse it. */
+  readonly beforeRequest?: (url: URL) => void
+  /**
+   * Asked of the final response before its body is read. False leaves the
+   * body unread — the connection is closed — and the result's body empty,
+   * so a file the reader would refuse is never downloaded.
+   */
+  readonly readBody?: (status: number, headers: Readonly<Record<string, string>>) => boolean
+  /** Turns the bytes read into text. A scan's own is `decodeBody`, with Python's semantics. */
+  readonly decode?: (raw: Buffer, headers: Readonly<Record<string, string>>) => string
+  /** Closes the connection, wherever the read has got to, when the caller stops waiting. */
+  readonly signal?: AbortSignal
+}
+
+/**
  * One GET, following redirects the way urllib does, with `redirectTarget`
  * deciding which hops are allowed. The caller has already checked the starting
- * host; every hop after it is checked here.
+ * host; every hop after it is checked here. `silenceIsTimeout` is the page
+ * reader's: a body that fell silent is thrown as a TimeoutError rather than
+ * as the connection reset Node reports it as (`silencedBodies`).
  */
-async function get(startUrl: string, timeoutMs: number): Promise<HttpResult> {
+async function get(
+  startUrl: string,
+  timeoutMs: number,
+  hooks: FollowHooks = {},
+  silenceIsTimeout = false,
+): Promise<HttpResult> {
   const deadline = Date.now() + timeoutMs * (MAX_REDIRECTS + 1)
   let url = new URL(startUrl)
 
@@ -295,7 +358,8 @@ async function get(startUrl: string, timeoutMs: number): Promise<HttpResult> {
     const remaining = Math.min(timeoutMs, deadline - Date.now())
     if (remaining <= 0) throw Object.assign(new Error('request timed out'), { name: 'TimeoutError' })
 
-    const res = await once(url, remaining)
+    hooks.beforeRequest?.(url)
+    const res = await once(url, remaining, hooks.signal)
     const status = res.statusCode ?? 0
     const headers = firstHeaders(res.rawHeaders)
     const location = headers.location ?? headers.uri
@@ -306,7 +370,23 @@ async function get(startUrl: string, timeoutMs: number): Promise<HttpResult> {
       continue
     }
 
-    const { raw, truncated } = await readCapped(res)
+    if (hooks.readBody && !hooks.readBody(status, headers)) {
+      res.destroy() // nothing of it is wanted, so nothing more of it is read
+      return {
+        status, finalUrl: url.toString(), headers, setCookies: [], cspHeaders: [], body: '', truncated: false,
+      }
+    }
+
+    let read: { raw: Buffer; truncated: boolean }
+    try {
+      read = await readCapped(res)
+    } catch (err) {
+      if (silenceIsTimeout && silencedBodies.has(res)) {
+        throw Object.assign(new Error('request timed out'), { name: 'TimeoutError' })
+      }
+      throw err
+    }
+    const { raw, truncated } = read
     return {
       status,
       finalUrl: url.toString(),
@@ -315,9 +395,104 @@ async function get(startUrl: string, timeoutMs: number): Promise<HttpResult> {
       // that hop's host, which is not the page being described.
       setCookies: setCookieHeaders(res.rawHeaders),
       cspHeaders: headerValues(res.rawHeaders, 'content-security-policy'),
-      body: decodeBody(raw, headers['content-encoding'] ?? ''),
+      body: hooks.decode ? hooks.decode(raw, headers) : decodeBody(raw, headers['content-encoding'] ?? ''),
       truncated,
     }
+  }
+}
+
+/** A start address `fetchFollowingRedirects` will not request. Its message names why, never a credential. */
+export class AddressRefused extends Error {
+  constructor(reason: string) {
+    super(reason)
+    this.name = 'AddressRefused'
+  }
+}
+
+/** The final response of `fetchFollowingRedirects`. */
+export interface FollowedResponse {
+  readonly status: number
+  /** The address the final response came from, after every redirect. */
+  readonly finalUrl: string
+  /** Lower-cased names, the FIRST value of a repeated header. */
+  readonly headers: Readonly<Record<string, string>>
+  /** Empty when `readBody` said no. */
+  readonly body: string
+  /** The body hit MAX_ENCODED_BYTES, so it is a prefix of the page. */
+  readonly truncated: boolean
+  /** False when `readBody` said no and the body was never read. */
+  readonly bodyRead: boolean
+}
+
+/**
+ * One GET of an arbitrary public page through the scanner's own machinery —
+ * the same redirect check on every hop, the same `publicOnlyLookup` on every
+ * connection, the same read cap — for the page reader. No cookie and no
+ * credential is ever sent: none is set on the request, and an address with a
+ * username or password in it is refused here rather than turned into an
+ * Authorization header, as `http.request` would.
+ *
+ * The start address is checked here as `capture` checks its host, because
+ * this too turns a string into an outbound request: http or https, a public
+ * host name, the default port, no userinfo. A refused start throws
+ * `AddressRefused` before anything is resolved. A network failure throws as
+ * `get()` throws; the caller words it.
+ *
+ * And it refuses a probe itself — `readablePathProblem`, on the start and on
+ * every hop, after the caller's own `beforeRequest`. Unlike `capture`, whose
+ * paths are a frozen list, this takes any path, and it is exported from the
+ * package root: §2.2's "no probing for .git, .env, admin panels or backups"
+ * has to hold for every caller, not only for the page reader that passes a
+ * check of its own.
+ */
+export async function fetchFollowingRedirects(
+  startUrl: string,
+  timeoutMs: number,
+  hooks: FollowHooks = {},
+): Promise<FollowedResponse> {
+  let start: URL
+  try {
+    start = new URL(startUrl)
+  } catch {
+    throw new AddressRefused('not a web address')
+  }
+  if (start.protocol !== 'https:' && start.protocol !== 'http:') {
+    throw new AddressRefused(`"${start.protocol}" is not a protocol the scanner speaks`)
+  }
+  if (start.username !== '' || start.password !== '') {
+    throw new AddressRefused('an address carrying a username or password is never requested')
+  }
+  if (start.port !== '') throw new AddressRefused(`port ${start.port} is not requested; only the default ports are`)
+  if (!isScannableHost(start.hostname)) throw new AddressRefused(`"${start.hostname.slice(0, 120)}" is not a public hostname`)
+  const startProblem = readablePathProblem(start)
+  if (startProblem) throw new AddressRefused(startProblem)
+
+  let bodyRead = true
+  const readBody = hooks.readBody
+  const beforeRequest = hooks.beforeRequest
+  const res = await get(
+    start.toString(),
+    timeoutMs,
+    {
+      ...hooks,
+      beforeRequest: (hop: URL) => {
+        beforeRequest?.(hop)
+        const problem = readablePathProblem(hop)
+        if (problem) throw new AddressRefused(problem)
+      },
+      ...(readBody
+        ? {
+            readBody: (status: number, headers: Readonly<Record<string, string>>) => {
+              bodyRead = readBody(status, headers)
+              return bodyRead
+            },
+          }
+        : {}),
+    },
+    true,
+  )
+  return {
+    status: res.status, finalUrl: res.finalUrl, headers: res.headers, body: res.body, truncated: res.truncated, bodyRead,
   }
 }
 
@@ -332,7 +507,7 @@ function describe(err: unknown): string {
 /** Read the certificate the server presents. Never sends a request. */
 export function fetchTls(host: string, now: () => Date = () => new Date()): Promise<RawTls> {
   return new Promise((resolve) => {
-    const socket = tlsConnect({ host, port: 443, servername: host, timeout: 8000 }, () => {
+    const socket = tlsConnect({ host, port: 443, servername: host, timeout: 8000, lookup: publicOnlyLookup }, () => {
       try {
         const cert = socket.getPeerCertificate() as PeerCertificate & { issuer?: { O?: string } }
         const protocol = socket.getProtocol() ?? ''

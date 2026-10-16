@@ -12,11 +12,42 @@
  */
 import { and, asc, eq, sql } from 'drizzle-orm'
 import { z } from 'zod'
-import { normaliseEmail } from '@agency/core'
+import { ADDRESS_SOURCE_MAX, isAddressSource, normaliseEmail, normaliseLinkedIn, normalisePhone } from '@agency/core'
 import * as schema from './schema.js'
+import { isCheckViolation } from './pg-errors.js'
 import type { AgencyDb } from './repository.js'
 
 export type ContactRow = typeof schema.contacts.$inferSelect
+
+/**
+ * The two sentences an address that cannot be stored is refused with, on
+ * every writer of a contact: `createContact`, `contactsUpdate` and the
+ * routes in front of them. One wording, because a person who meets the same
+ * refusal on the form and in chat should read the same thing.
+ */
+export function phoneNotInternational(raw: string): string {
+  return (
+    `"${raw}" is not a number in international form. Include the country code, like ` +
+    '+1 415 555 0100 — without one it cannot be matched against an opt-out.'
+  )
+}
+
+export function linkedinUnreadable(raw: string): string {
+  return (
+    `"${raw}" could not be read as a LinkedIn profile. Paste the full URL, like ` +
+    'linkedin.com/in/jane-doe — a bare handle does not say whether it is a person or a company.'
+  )
+}
+
+/**
+ * Whether a LinkedIn URL can be stored on a contact: one `normaliseLinkedIn`
+ * reads, as an edit requires. The form's route asks it before
+ * `createContact`; the CSV import keeps its own rule (it stores the URL as
+ * the file had it), so this is not in `createContact` itself.
+ */
+export function linkedinIsReadable(raw: string): boolean {
+  return normaliseLinkedIn(raw) !== null
+}
 
 /** Postgres's unique_violation, wherever drizzle wrapped it. */
 function isUniqueViolation(err: unknown): boolean {
@@ -47,9 +78,89 @@ export const contactInput = z.object({
    */
   timeZone: z.string().trim().max(64).optional().nullable(),
   source: z.string().trim().max(40).default('manual'),
+  /**
+   * Where the email and the phone came from (0029), in core's
+   * ADDRESS_SOURCE_PATTERN: `person`, `import`, `inbound`, `chat`,
+   * `connector:<name>` or the page it was seen on. Omitted is NULL — "not
+   * recorded" — never a guess at one. Each caller stamps its own (the form's
+   * route `person`, the import `import`, the public forms `inbound`, the
+   * assistant what it was shown); `createContact` refuses one that is not in
+   * the pattern, or that names an address the contact does not have. Bounded
+   * loosely here so the refusal is `createContact`'s sentence, not a parse
+   * error.
+   */
+  emailSource: z.string().trim().max(ADDRESS_SOURCE_MAX * 2).optional().nullable(),
+  phoneSource: z.string().trim().max(ADDRESS_SOURCE_MAX * 2).optional().nullable(),
 })
 
 export type ContactInput = z.infer<typeof contactInput>
+
+/** The values `contacts_source_check` (0003) admits for the ROW's source. */
+export const CONTACT_ROW_SOURCES = ['apollo', 'manual', 'import', 'agent', 'inbound'] as const
+
+const SOURCE_NOT_KNOWN = {
+  email:
+    'That is not a source the email can be recorded with. Name the page it was seen on (https://…), ' +
+    'or person, import, inbound, chat or connector:<name>.',
+  phone:
+    'That is not a source the phone number can be recorded with. Name the page it was seen on (https://…), ' +
+    'or person, import, inbound, chat or connector:<name>.',
+} as const
+
+const SOURCE_WITHOUT_ADDRESS = {
+  email: 'A source was given for an email address, but the contact has none. Give the address with it, or leave the source out.',
+  phone: 'A source was given for a phone number, but the contact has none. Give the number with it, or leave the source out.',
+} as const
+
+/**
+ * A control character, C0 or C1, which no page's address and none of our own
+ * words carry. `isAddressSource` lets them through (JavaScript's `\S` matches
+ * them), and the database does not agree: Postgres refuses U+0000 in any text,
+ * which reached the INSERT as a 500, and reads U+0085 as a space, so the
+ * CHECK refused a value the writer had passed (measured on the engine the
+ * tests run, every code point of the Basic Multilingual Plane —
+ * `contact-sources.test.ts`).
+ */
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/
+
+/**
+ * Why an address's source cannot be stored, as a sentence, or null when it
+ * can. `which` names the address in the sentence; `address` is the address
+ * as it will be stored, or null for none. A source with no address is refused
+ * rather than dropped: the caller said where something came from that is not
+ * there, which is a mistake worth hearing about (0029's
+ * `contacts_*_source_needs_*` CHECKs say the same to anything that gets past
+ * this).
+ */
+export function addressSourceProblem(
+  which: 'email' | 'phone',
+  source: string | null | undefined,
+  address: string | null,
+): string | null {
+  if (!source) return null
+  if (!isAddressSource(source) || CONTROL_CHARACTER.test(source)) return SOURCE_NOT_KNOWN[which]
+  if (!address) return SOURCE_WITHOUT_ADDRESS[which]
+  return null
+}
+
+function rowSourceRefused(source: string): string {
+  return `"${source}" is not a source a contact can have — one of ${CONTACT_ROW_SOURCES.join(', ')}.`
+}
+
+/**
+ * The sentence for a CHECK on `contacts` that refused a new row, by its name.
+ * The checks in `createContact` run first, so reaching one is a race or a
+ * caller that went around them — a person still reads a sentence, never a 500.
+ */
+function contactCheckSentence(err: unknown, input: ContactInput): string | null {
+  if (isCheckViolation(err, 'contacts_source_check')) return rowSourceRefused(input.source)
+  if (isCheckViolation(err, 'contacts_email_source_is_known')) return SOURCE_NOT_KNOWN.email
+  if (isCheckViolation(err, 'contacts_phone_source_is_known')) return SOURCE_NOT_KNOWN.phone
+  if (isCheckViolation(err, 'contacts_email_source_needs_an_email')) return SOURCE_WITHOUT_ADDRESS.email
+  if (isCheckViolation(err, 'contacts_phone_source_needs_a_phone')) return SOURCE_WITHOUT_ADDRESS.phone
+  if (isCheckViolation(err)) return 'That contact could not be stored as given: one of its values is not one the CRM accepts.'
+  return null
+}
 
 /** True if the runtime's own timezone database knows this zone. */
 export function isKnownTimeZone(zone: string): boolean {
@@ -122,6 +233,23 @@ export async function createContact(
   if (!email && !input.phone && !input.linkedinUrl) {
     return { ok: false, message: 'A contact needs at least one way to reach them.' }
   }
+  // Stored as E.164, as an edit stores it (§1): a number in any other form
+  // matches no suppression key and no text sent back, so a STOP from it would
+  // find nobody. The CSV import has already normalised it, or dropped it.
+  let phone: string | null = null
+  if (input.phone) {
+    phone = normalisePhone(input.phone)
+    if (!phone) return { ok: false, message: phoneNotInternational(input.phone) }
+  }
+  if (!(CONTACT_ROW_SOURCES as readonly string[]).includes(input.source)) {
+    return { ok: false, message: rowSourceRefused(input.source) }
+  }
+  // Where each address came from (0029), checked against the addresses as
+  // they will be STORED — a phone the caller sent blank has no source either.
+  const emailSourceProblem = addressSourceProblem('email', input.emailSource, email)
+  if (emailSourceProblem) return { ok: false, message: emailSourceProblem }
+  const phoneSourceProblem = addressSourceProblem('phone', input.phoneSource, phone)
+  if (phoneSourceProblem) return { ok: false, message: phoneSourceProblem }
 
   const company = await db
     .select({ id: schema.companies.id })
@@ -153,14 +281,18 @@ export async function createContact(
       lastName: input.lastName || null,
       title: input.title || null,
       email,
-      phone: input.phone || null,
+      phone,
       linkedinUrl: input.linkedinUrl || null,
       timeZone: input.timeZone || null,
       source: input.source,
+      emailSource: input.emailSource || null,
+      phoneSource: input.phoneSource || null,
     })
     .returning()
   } catch (err) {
     if (isUniqueViolation(err)) return { ok: false, message: `${email} is already a contact in this CRM.` }
+    const sentence = contactCheckSentence(err, input)
+    if (sentence) return { ok: false, message: sentence }
     throw err
   }
   const contact = rows[0]

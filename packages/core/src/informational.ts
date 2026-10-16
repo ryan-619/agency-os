@@ -30,6 +30,13 @@ export interface InformationalSignal {
   readonly why: string
   /** Which part of the homepage response it is read from. */
   readonly source: 'header' | 'html' | 'cookie'
+  /**
+   * `presence` (2026-10-08): what a visitor, a phone and a search engine find
+   * on the homepage. Unlike the security context, these may be quoted when
+   * the team pitches a website service — observed, dated by the scan, and
+   * only while it is fresh. Absent: security context, never quoted.
+   */
+  readonly group?: 'presence'
 }
 
 export const INFORMATIONAL_SIGNALS: Readonly<Record<string, InformationalSignal>> = Object.freeze({
@@ -98,10 +105,89 @@ export const INFORMATIONAL_SIGNALS: Readonly<Record<string, InformationalSignal>
     why: 'Report-To, Reporting-Endpoints and NEL show whether the site collects browser reports. Recorded as context; never a gap.',
     source: 'header',
   },
+  // Website presence (2026-10-08, scanner presence.ts): what a visitor, a phone and a
+  // search engine find on the homepage — context for building, fixing and promoting sites.
+  mobile_viewport: {
+    label: 'Mobile layout',
+    why: 'Without a viewport tag set to the device width, phones show the desktop page shrunk to fit — most visits are on a phone.',
+    source: 'html',
+    group: 'presence',
+  },
+  page_title: {
+    label: 'Page title',
+    why: 'The title is the headline of every search result and browser tab; an empty, generic or "coming soon" one says nothing about the business.',
+    source: 'html',
+    group: 'presence',
+  },
+  meta_description: {
+    label: 'Search description',
+    why: 'The meta description is the text a search result usually shows under the title; without one the search engine picks any text from the page.',
+    source: 'html',
+    group: 'presence',
+  },
+  social_preview: {
+    label: 'Link previews',
+    why: 'Open Graph tags give a shared link its title and picture on WhatsApp, Facebook and LinkedIn; without an image the link shows bare.',
+    source: 'html',
+    group: 'presence',
+  },
+  structured_data: {
+    label: 'Structured data',
+    why: 'schema.org data (JSON-LD or microdata) tells search engines the business name, type, address and hours, which feeds rich results.',
+    source: 'html',
+    group: 'presence',
+  },
+  contact_options: {
+    label: 'Ways to get in touch',
+    why: 'Whether the homepage offers a tap-to-call link, an email link, a WhatsApp link or a form. Counted, never the number or the address.',
+    source: 'html',
+    group: 'presence',
+  },
+  whatsapp_chat: {
+    label: 'WhatsApp chat link',
+    why: 'A wa.me or WhatsApp link lets a visitor start a chat in one tap, which many customers in India and elsewhere prefer to a call.',
+    source: 'html',
+    group: 'presence',
+  },
+  analytics_tags: {
+    label: 'Analytics and ad tags',
+    why: 'Google Analytics, Tag Manager, the Meta pixel and similar tags show whether visits and campaigns are being measured at all.',
+    source: 'html',
+    group: 'presence',
+  },
+  social_profiles: {
+    label: 'Social media links',
+    why: 'Links from the homepage to Instagram, Facebook, LinkedIn, YouTube or X tie the site to the profiles customers check.',
+    source: 'html',
+    group: 'presence',
+  },
+  site_platform: {
+    label: 'Site builder or CMS',
+    why: 'What the site is built with (WordPress, Wix, Shopify …), and whether it lives on a free builder address rather than a domain of its own.',
+    source: 'html',
+    group: 'presence',
+  },
+  copyright_year: {
+    label: 'Footer year',
+    why: 'A footer that still says © a year long past is a sign nobody has touched the site since. Read against the date of the scan.',
+    source: 'html',
+    group: 'presence',
+  },
+  booking_or_store: {
+    label: 'Booking, ordering or store',
+    why: 'Whether visitors can book, order or buy from the homepage — Calendly, Practo, Zomato, Shopify, Razorpay and the like. Context; never a gap.',
+    source: 'html',
+    group: 'presence',
+  },
 })
 
 export function isInformationalSignal(key: string): boolean {
   return Object.prototype.hasOwnProperty.call(INFORMATIONAL_SIGNALS, key)
+}
+
+/** A website-presence signal: quotable when pitching a website service (see `group`). */
+export function isPresenceSignal(key: string): boolean {
+  return isInformationalSignal(key) && INFORMATIONAL_SIGNALS[key]!.group === 'presence'
 }
 
 /**

@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { When } from '@/components/when'
+import { toast } from '../toast/toast'
 
 /**
  * The thread list beside the chat panel (PROMPT.md §8.1).
@@ -33,6 +34,13 @@ const TITLE_MAX = 120
 /** The global `button` is full-width for the sign-in form; a link-styled one in a row sizes to its label. */
 const LINK = { width: 'auto' } as const
 
+/** What each change confirms once the route has stored it. */
+const CHANGED = {
+  rename: 'Thread renamed.',
+  archive: 'Thread archived: hidden from your list, not deleted.',
+  restore: 'Thread put back in your list.',
+} as const
+
 export function ChatThreads({
   threads,
   current,
@@ -58,6 +66,7 @@ export function ChatThreads({
         setError(body.error === 'forbidden' ? 'Your role cannot start a thread.' : 'Could not start a thread. Try again.')
         return
       }
+      toast.success('New thread started.')
       router.push(`/chat/${body.id}`)
     } catch {
       setError('The request did not complete. Try again.')
@@ -83,6 +92,7 @@ export function ChatThreads({
         setError(body.error ?? 'That did not work.')
         return false
       }
+      toast.success(CHANGED[kind])
       router.refresh()
       return true
     } catch {

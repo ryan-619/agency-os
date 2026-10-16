@@ -1,10 +1,11 @@
 import { redirect } from 'next/navigation'
-import { parseIcpDefinition } from '@agency/core'
+import { can, parseIcpDefinition } from '@agency/core'
 import { secretsKeyFromEnv, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { When } from '@/components/when'
 import { agentConfigured } from '@/lib/agent'
+import { agentMisconfiguredSentence } from '@/lib/agent-config'
 import { getDb } from '@/lib/db'
 import { deployment } from '@/lib/deployment'
 import { env } from '@/lib/env'
@@ -12,14 +13,16 @@ import { orgIdentity } from '@/lib/org-identity'
 import { icpForOrg } from '@/lib/queries'
 import { workerStatus, type WorkerStatus } from '@/lib/worker-status'
 import { deploymentFacts, workerLine } from './facts'
+import { OrgName } from './org-name'
 
 /**
  * Settings: the landing page for everything that configures the product.
  *
  * Three things, in the order somebody arriving here needs them: who this
  * organisation is (its name and public booking page), what THIS deployment
- * can and cannot do, and where each setting lives. Read only — every
- * control is on the page a card links to, behind that page's own
+ * can and cannot do, and where each setting lives. Read only but for the
+ * organisation's name, which an owner renames in place (`OrgName`); every
+ * other control is on the page a card links to, behind that page's own
  * capability.
  *
  * "What this deployment can do" states configuration by variable NAME and
@@ -32,6 +35,10 @@ export const runtime = 'nodejs'
 
 const AREAS: readonly { readonly href: string; readonly title: string; readonly what: string }[] = [
   { href: '/settings/connectors', title: 'Connectors', what: 'MCP servers the agent can use, and which of their tools.' },
+  { href: '/settings/assistant', title: 'Assistant', what: 'The playbook the AI reads with every message, and its morning brief.' },
+  { href: '/settings/services', title: 'Services', what: 'What the agency sells, at what price, and which needs each answers.' },
+  { href: '/settings/profile', title: 'Business profile', what: 'What quotes print about you: legal name, GSTIN and GST, the UPI ID for advances, terms.' },
+  { href: '/settings/night', title: 'Night shift', what: 'Saved Google Maps searches run overnight: new businesses filed, scanned and measured, the best listed for the morning.' },
   { href: '/settings/agents', title: 'Agents', what: 'Subagent definitions: prompt, tools, model.' },
   { href: '/settings/team', title: 'Team', what: 'Who can sign in, and as what.' },
   { href: '/settings/credentials', title: 'Credentials', what: 'Encrypted connector credentials. Never shown.' },
@@ -77,6 +84,7 @@ export default async function SettingsPage() {
   const facts = deploymentFacts({
     flags,
     agent: agentConfigured(),
+    agentProblem: flags.agentMisconfigured ? agentMisconfiguredSentence(flags.agentMisconfigured) : undefined,
     secretsKey,
     vercelEnv: e.VERCEL_ENV,
     inboundJson: Boolean(e.INBOUND_WEBHOOK_SECRET),
@@ -96,7 +104,7 @@ export default async function SettingsPage() {
       <h1>Settings</h1>
       <p className="lede">
         Who this organisation is, what this deployment can and cannot do, and where each setting lives.
-        Nothing on this page changes anything.
+        Only the organisation's name changes here; every other control is on the page a card links to.
       </p>
 
       <h2>Organisation</h2>
@@ -104,7 +112,9 @@ export default async function SettingsPage() {
         <tbody>
           <tr>
             <th style={{ width: 200 }}>Name</th>
-            <td>{org.name}</td>
+            <td>
+              <OrgName name={org.name} canWrite={can({ id: user.id, orgId: user.orgId, role: user.role }, 'users:write')} />
+            </td>
           </tr>
           <tr>
             <th>Public booking page</th>

@@ -158,6 +158,26 @@ const schema = z.object({
 
   /** Overrides the SDK's default model per §5.5's "pick a model per task". */
   AGENT_MODEL: z.preprocess(blankIsUnset, z.string().optional()),
+  /**
+   * The model a turn runs on when the person ticks "Think harder" in chat —
+   * one turn at a time, never the default. A full model id or an alias the
+   * CLI resolves. Claude Opus 5.5 by default (2026-10-15): twice Sonnet
+   * 5.5's price, for the turns a person says need more. The bare aliases
+   * `sonnet` and `opus` resolve, in the CLI the SDK bundles, to OLDER and
+   * dearer models, so the default names the id.
+   */
+  AGENT_DEEP_MODEL: z.preprocess(blankIsUnset, z.string().default('claude-opus-5-5')),
+
+  /**
+   * Google, for the opportunity tools (2026-10-08): one key with the Places
+   * API (New) and the PageSpeed Insights API enabled. Places searches cost
+   * money past Google's free tier, so they are capped per org per UTC day;
+   * without a key `find_businesses` says how to add one, and PageSpeed runs
+   * keyless at Google's small shared quota. The key goes in one request
+   * header (Places) or one query parameter (PageSpeed) and is never logged.
+   */
+  GOOGLE_API_KEY: z.preprocess(blankIsUnset, z.string().regex(/^AIza[0-9A-Za-z_-]{35}$/, 'GOOGLE_API_KEY must be a Google API key (AIza…)').optional()),
+  PLACES_DAILY_SEARCHES: z.preprocess(blankIsUnset, z.coerce.number().int().min(1).max(1000).default(30)),
 
   /**
    * §5.5's single-shot seam, used here for reply triage (`classify_reply`).

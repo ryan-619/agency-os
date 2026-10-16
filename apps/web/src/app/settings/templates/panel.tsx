@@ -2,6 +2,10 @@
 
 import { Fragment, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { toast } from '../../../components/toast/toast'
+import { ToastOn } from '../../../components/toast/toast-on'
+import { DeleteButton } from '../../../components/delete/delete-button'
+import { CONFIRM_WORDS } from '../../../lib/delete-view'
 import {
   CATEGORY_HINT, IMPORT_OUTCOME_WORDS, NOT_SENDABLE_NOTE, TEMPLATE_CATEGORY_OPTIONS, TEMPLATE_CHANNEL_LABEL,
   bodySegments, categoryWords, type TemplateChannelName,
@@ -17,7 +21,10 @@ import {
  * person can see what a message drafted from it will ask them to fill.
  *
  * A template is never edited here — the portal issues a new id when a body
- * changes — so the only control on a row is On / Off.
+ * changes — so a row's controls are On / Off and, since 2026-10-15, Delete:
+ * for one recorded by mistake that no message names. One that any message
+ * was checked against, a draft's included, is kept by the database
+ * (`ON DELETE RESTRICT`) and the route says to switch it off instead.
  */
 
 export interface TemplateRowView {
@@ -72,6 +79,13 @@ export function TemplatesPanel({ templates, canWrite }: { templates: readonly Te
         setErrors((e) => ({ ...e, [t.id]: b.error ?? 'That did not work.' }))
         return
       }
+      // `changed` is false when the template was already in the state asked for.
+      const answer = (await res.json().catch(() => ({}))) as { changed?: boolean }
+      toast.success(
+        answer.changed === false
+          ? `Template ${t.externalId} was already ${t.active ? 'off' : 'on'}.`
+          : `Template ${t.externalId} switched ${t.active ? 'off' : 'on'}.`,
+      )
       router.refresh()
     } catch {
       setErrors((e) => ({ ...e, [t.id]: 'The request did not complete. Try again.' }))
@@ -134,6 +148,14 @@ export function TemplatesPanel({ templates, canWrite }: { templates: readonly Te
                       >
                         {t.active ? 'Switch off' : 'Switch on'}
                       </button>
+                      <div style={{ marginTop: 4 }}>
+                        <DeleteButton
+                          url={`/api/templates/${t.id}`}
+                          kind="template"
+                          confirm={CONFIRM_WORDS.template(t.externalId)}
+                          title="Only one no message was checked against; switch any other off."
+                        />
+                      </div>
                     </div>
                   ) : null}
                   {errors[t.id] ? <div className="err-line">{errors[t.id]}</div> : null}
@@ -277,7 +299,7 @@ function AddForm({ onDone }: { onDone: () => void }) {
         </div>
       ) : null}
       {error ? <div className="err-line">{error}</div> : null}
-      {done ? <div className="ok-line">{done}</div> : null}
+      <ToastOn message={done} />
       <div className="row-actions" style={{ marginTop: 10 }}>
         <button type="button" disabled={busy || !externalId.trim() || !senderId.trim() || !body.trim()} onClick={() => void submit()}>
           {busy ? 'Recording…' : 'Record template'}

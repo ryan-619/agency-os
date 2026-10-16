@@ -1,4 +1,5 @@
 import { deployment } from '@/lib/deployment'
+import { PasteSignInLink } from '@/components/paste-signin-link'
 
 /**
  * Rendered per request, because it reads configuration.
@@ -32,6 +33,7 @@ export default function CheckEmail() {
               nowhere to go but the back button. */}
           <a href="/signin">Use a different address</a>
         </p>
+        <PasteSignInLink />
         <p className="fine">
           You will see this page whether or not the address is on the team, and no account is
           ever created — so this screen reveals nothing about who has access.

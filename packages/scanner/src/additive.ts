@@ -1,6 +1,8 @@
 /**
- * Thirteen INFORMATIONAL signals, read from bytes the scanner already
- * captures — the homepage's response headers, its markup and its cookies.
+ * Thirteen INFORMATIONAL security signals, read from bytes the scanner
+ * already captures — the homepage's response headers, its markup and its
+ * cookies — and, since 2026-10-08, the twelve website-presence signals of
+ * presence.ts beside them, in the one list below (25 in all).
  *
  * Not a port. The reference engine has none of these, and nothing here feeds
  * the score: `scoreCompany` walks the ICP, none of these keys is in it, and
@@ -26,6 +28,7 @@
  */
 import type { Observation } from '@agency/core'
 import type { HtmlFacts } from './html.js'
+import { PRESENCE_SIGNAL_KEYS, presenceObservations } from './presence.js'
 import { pyHead } from './pystr.js'
 import type { RawCapture } from './types.js'
 
@@ -33,6 +36,7 @@ export const ADDITIVE_SIGNAL_KEYS = Object.freeze([
   'csp_report_only', 'csp_quality', 'cookie_flags', 'referrer_policy_quality', 'permissions_policy_quality',
   'content_type_options_quality', 'cross_origin_policies', 'sri_third_party', 'mixed_content',
   'stack_disclosure', 'deprecated_headers', 'hsts_quality', 'reporting_endpoints',
+  ...PRESENCE_SIGNAL_KEYS,
 ] as const)
 
 export type AdditiveKey = (typeof ADDITIVE_SIGNAL_KEYS)[number]
@@ -563,13 +567,14 @@ function reportingEndpoints(raw: RawCapture, url: string): Observation {
 // ---------------------------------------------------------------------------
 
 /**
- * All thirteen, for a homepage that answered. The caller (extractProfile)
+ * All twenty-five, for a homepage that answered. The caller (extractProfile)
  * only calls this when `raw.home.ok`; a homepage that never answered has no
  * headers and no markup, and nothing is observed about it at all.
  */
 export function additiveObservations(raw: RawCapture, facts: HtmlFacts): Record<AdditiveKey, Observation> {
   const url = raw.home.finalUrl || `https://${raw.domain}/`
   return {
+    ...presenceObservations(raw, facts),
     ...cspObservations(raw, url),
     cookie_flags: cookieFlags(raw, url),
     referrer_policy_quality: referrerQuality(raw, url),

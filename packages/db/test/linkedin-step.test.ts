@@ -216,15 +216,20 @@ describe('the LinkedIn step', () => {
       expect(step).toMatchObject({ state: 'stopped', refusalCode: 'suppressed', words: null, preview: null })
     })
 
+    /**
+     * Review round 5: the step waits for the end of the quiet window — 08:00 in London, 07:00 UTC —
+     * where it used to come back an hour later, and an hour after that, through the night.
+     */
     it('quiet hours defer: back to approved with scheduled_for, and the words are never shown', async () => {
       const t = await approved()
       const r = await start(t.id, NIGHT)
-      expect(r).toMatchObject({ ok: true, status: 'deferred', code: 'quiet_hours', until: new Date(NIGHT.getTime() + 3_600_000) })
+      const windowEnds = new Date('2026-09-16T07:00:00.000Z')
+      expect(r).toMatchObject({ ok: true, status: 'deferred', code: 'quiet_hours', until: windowEnds })
       expect(r).not.toHaveProperty('words')
       const row = await reread(t.id)
       expect(row.status).toBe('approved')
       expect(row.refusalCode).toBeNull()
-      expect(row.scheduledFor).toEqual(new Date(NIGHT.getTime() + 3_600_000))
+      expect(row.scheduledFor).toEqual(windowEnds)
       expect(row.approvedBy).toBe(userId)
       expect(row.providerId).toBeNull()
     })
@@ -466,7 +471,10 @@ describe('the LinkedIn step', () => {
     expect(await start(t.id, NIGHT)).toMatchObject({ status: 'deferred' })
     const [ahead] = await linkedinStepsDue(db, orgId, NIGHT)
     expect(ahead).toMatchObject({ touchId: t.id, state: 'ready', deferred: true })
-    const [past] = await linkedinStepsDue(db, orgId, new Date(NIGHT.getTime() + 2 * 3_600_000))
+    // Still ahead two hours on: the deferral waits for the end of the window, 07:00 UTC.
+    const [stillAhead] = await linkedinStepsDue(db, orgId, new Date(NIGHT.getTime() + 2 * 3_600_000))
+    expect(stillAhead).toMatchObject({ touchId: t.id, deferred: true })
+    const [past] = await linkedinStepsDue(db, orgId, new Date('2026-09-16T07:00:00.000Z'))
     expect(past).toMatchObject({ touchId: t.id, deferred: false })
     const fresh = await approved()
     const steps = await linkedinStepsDue(db, orgId, NOON)

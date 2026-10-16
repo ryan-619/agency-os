@@ -1,4 +1,6 @@
-import { agentReachable, workerReceives, workerSends, workerWord, type WorkerStatusLike } from '../../lib/dashboard-view'
+import {
+  agentReachable, workerReceives, workerSends, workerSendsSms, workerWord, type WorkerStatusLike,
+} from '../../lib/dashboard-view'
 import type { Deployment } from '../../lib/deployment-facts'
 
 /**
@@ -54,12 +56,17 @@ function notSending(w: WorkerStatusLike): string | null {
   }
 }
 
-/** Why no worker is reading a mailbox, likewise. */
+/**
+ * Why no worker is reading a mailbox, likewise. A worker that texts through
+ * DoveSoft with its mailbox off is SENDING (`workerSends`), so its outreach
+ * is not "switched off" — its EMAIL outreach is, the dashboard's own words
+ * for the same heartbeat (`notReadingBecause`; review round 5, [15]).
+ */
 function notReading(w: WorkerStatusLike): string | null {
   if (workerReceives(w)) return null
   if (w.status === 'live' && !w.retired) {
     return w.outreach === 'disabled'
-      ? 'The worker is running with outreach switched off'
+      ? `The worker is running with ${workerSendsSms(w) ? 'email ' : ''}outreach switched off`
       : 'The worker reports that it does not read a mailbox'
   }
   return notSending(w)

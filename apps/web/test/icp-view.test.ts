@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { FIRMOGRAPHIC_DISQUALIFIERS } from '@agency/core'
 import { SCORER_DISQUALIFIERS, activeProfilesNote, describeValue, icpView, tierPill } from '../src/lib/icp-view'
 
 const SEED = JSON.parse(
@@ -140,19 +141,22 @@ describe('disqualifiers the scorer applies', () => {
 
   it('agree with the keys scoreCompany reads', () => {
     const read = new Set([...scoring.matchAll(/icp\.disqualifiers\.(\w+)/g)].map((m) => m[1]!))
+    // The firmographic ones (0021) are read from the same object under a local name.
+    const firmographic = new Set([...scoring.matchAll(/reasons\.(\w+)/g)].map((m) => m[1]!))
+    expect(firmographic).toEqual(new Set(FIRMOGRAPHIC_DISQUALIFIERS))
     // `unreachable` is applied from the fetch itself, before any key is read.
     expect(scoring).toMatch(/if \(!profile\.fetchOk\)/)
-    expect(new Set([...read, 'unreachable'])).toEqual(new Set(SCORER_DISQUALIFIERS))
+    expect(new Set([...read, ...firmographic, 'unreachable'])).toEqual(new Set(SCORER_DISQUALIFIERS))
   })
 
-  it('marks the seed’s enterprise_scale as not applied, and the rest as applied', () => {
-    const byKey = Object.fromEntries(view(SEED).disqualifiers.map((d) => [d.key, d.applied]))
+  it('marks every disqualifier the seed names as applied — enterprise_scale once a headcount is recorded', () => {
+    const byKey = Object.fromEntries(view(SEED).disqualifiers.map((d) => [d.key, [d.applied, d.when]]))
     expect(byKey).toEqual({
-      enterprise_scale: false,
-      has_security_team: true,
-      is_security_vendor: true,
-      no_public_product: true,
-      unreachable: true,
+      enterprise_scale: [true, 'when its headcount is recorded'],
+      has_security_team: [true, null],
+      is_security_vendor: [true, null],
+      no_public_product: [true, null],
+      unreachable: [true, null],
     })
   })
 })

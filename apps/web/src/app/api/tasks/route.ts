@@ -38,6 +38,13 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
   const b = (body ?? {}) as {
     title?: unknown; detail?: unknown; companyId?: unknown; dealId?: unknown; assigneeUserId?: unknown; dueAt?: unknown
+    kind?: unknown
+  }
+  // A person may make a to-do, a call or a visit (0022). The other kinds are
+  // made by the system — a LinkedIn step, a kickoff or renewal set — never by hand.
+  const kind = b.kind === undefined || b.kind === null ? 'todo' : b.kind
+  if (kind !== 'todo' && kind !== 'call' && kind !== 'visit') {
+    return NextResponse.json({ error: 'A task made by hand is a to-do, a call or a visit.' }, { status: 400 })
   }
   if (typeof b.title !== 'string') return NextResponse.json({ error: 'A task needs a title.' }, { status: 400 })
   if (b.detail !== undefined && b.detail !== null && typeof b.detail !== 'string') {
@@ -52,7 +59,7 @@ export async function POST(request: Request): Promise<NextResponse> {
 
   const r = await tasksCreate(getDb() as unknown as AgencyDb, {
     orgId: user.orgId,
-    kind: 'todo',
+    kind,
     title: b.title.slice(0, 1000),
     detail: typeof b.detail === 'string' ? b.detail.slice(0, TASK_DETAIL_MAX) : null,
     companyId: (b.companyId as string | null | undefined) ?? null,
@@ -63,7 +70,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     actor: user.id,
   })
   if (!r.ok) {
-    const status = r.reason === 'not_found' ? 404 : r.reason === 'duplicate_open_for_touch' ? 409 : 400
+    const status = r.reason === 'not_found' ? 404 : r.reason === 'duplicate_open_for_touch' || r.reason === 'suppressed' ? 409 : 400
     return NextResponse.json({ error: r.message }, { status })
   }
   return NextResponse.json(

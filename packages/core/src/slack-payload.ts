@@ -61,27 +61,58 @@ export interface SlackOptOutNotRecordedEvent {
   readonly contactId: string | null
   /** Which way the person asked: the unsubscribe link, an erasure, or a reply that said stop. */
   readonly path: 'unsubscribe' | 'erasure' | 'reply'
+  /**
+   * False when the reply came from another address than the contact the
+   * message went to — a colleague in the thread replying all (review round
+   * 7). Their address is the one to record, and the contact's is not, so
+   * the message says so; absent, nothing is said about the sender. A
+   * boolean, never the address (the rule above).
+   */
+  readonly fromIsContact?: false
 }
 
 /**
  * §2.1's Phase 4 obligation, said to a person: an opt-out that failed to
  * store. The link is the suppressions page, where it is recorded by hand.
  *
- * With no touch there is no row in the app that holds the number, and the
- * number is lead data, so it is not in the message either: the person is
- * told where it is (the provider's inbound log), and the link is the
- * Compliance page, which counts the failure by the audit row the recorder
- * wrote — never a link built from the number.
+ * With no touch and no contact, whose number it was is not known to the
+ * writer, and the number is lead data, so it is not in the message either:
+ * the person is told where it is (the provider's inbound log), and the link
+ * is the Compliance page, which counts the failure by the audit row the
+ * recorder wrote — never a link built from the number. It says only what
+ * is known (review round 7): a recording that threw may have recorded part
+ * of it, or an earlier delivery all of it, so the person is told to CHECK
+ * the suppression list first, not that the number is missing from it.
  */
 export function slackOptOutNotRecordedPayload(event: SlackOptOutNotRecordedEvent, origin: string | null): SlackPayload {
   const way = event.path === 'unsubscribe' ? 'the unsubscribe link' : event.path === 'reply' ? 'a reply' : 'an erasure request'
   const lines = [
     `OPT-OUT NOT RECORDED. Somebody asked to be left alone through ${way} and no suppression row could be written. A person has to record it now.`,
   ]
+  if (event.fromIsContact === false) {
+    // A colleague's stop, filed under the contact our message went to. The
+    // contact's address is the wrong one to record, and the reply may not
+    // be stored yet (its recording threw), so the address to record is in
+    // the mail itself; a retry that records it may have suppressed it since.
+    lines.push(`${event.touchId === null ? 'no message on file' : `touch ${event.touchId}`} · sent by somebody other than the contact`)
+    lines.push(
+      'The reply came from another address than the contact that message went to, so record THAT address, never the contact’s: read it from the mail itself, check the Suppressions page for it, and record it there if it is missing.',
+    )
+    lines.push(slackLink(origin, '/suppressions') ?? 'Record it on the Suppressions page in the app.')
+    return slackPayloadOf(lines)
+  }
+  if (event.touchId === null && event.contactId !== null) {
+    // A reply matched to a contact by its sender's address alone (no
+    // message of ours named): the contact's record holds the address, so the
+    // person records it from there — "nothing in the app holds it" is false.
+    lines.push(`no message on file · contact ${event.contactId}`)
+    lines.push(slackLink(origin, '/suppressions') ?? 'Record it on the Suppressions page in the app.')
+    return slackPayloadOf(lines)
+  }
   if (event.touchId === null) {
     lines.push(
-      `no message on file · contact ${event.contactId ?? 'unknown'}`,
-      'Nothing in the app holds the number it came from: read it from the provider’s inbound log and record it on the Suppressions page. The Compliance page counts it.',
+      'no message or contact named',
+      'Whose number it was is not known here, and it may not be on the suppression list: check the Suppressions page for the number in the provider’s inbound log, and record it there if it is missing. Anybody holding the number may already be paused. The Compliance page counts it.',
       slackLink(origin, '/compliance') ?? 'It is counted on the Compliance page in the app.',
     )
     return slackPayloadOf(lines)

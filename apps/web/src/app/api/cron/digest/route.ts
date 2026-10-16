@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { staleAfterDaysOf } from '@agency/core'
 import {
-  DIGEST_MAX_PAUSE_NOTICES, DIGEST_WINDOW_HOURS, activeIcpProfile, appendAudit, digestCampaignPauses, digestCounts,
+  DIGEST_MAX_PAUSE_NOTICES, DIGEST_WINDOW_HOURS, activeIcpProfile, advanceSequences, appendAudit, certificateAlerts, digestCampaignPauses, pruneListingCoordinates, digestCounts,
   digestFacts, digestOnce, digestRecord, heartbeatReport, heartbeatReportedStatus, heartbeatSilentAfter, listOrgIds,
   readLatestHeartbeat, type AgencyDb, type DigestNotPosted, type DigestRecord,
 } from '@agency/db/queries'
@@ -198,6 +198,40 @@ export async function GET(request: Request): Promise<NextResponse> {
     }
   }
 
+  // Follow-up sequences (0024), once a day here as well as every five minutes on the worker: a call, a
+  // visit or a LinkedIn step advances with no worker running, and every step is claimed over what was
+  // read, so the two take each one once. Best-effort, after the digest, and never a reason to fail it.
+  let sequences: Awaited<ReturnType<typeof advanceSequences>> | { failed: string } | 'not_run' = 'not_run'
+  if (Date.now() - started < maxDuration * 1000 - ORG_BUDGET_MS) {
+    try {
+      sequences = await advanceSequences(db, { now: new Date() })
+    } catch (err) {
+      sequences = { failed: errorName(err) }
+      log.warn('cron digest could not advance follow-up sequences', { route: 'cron.digest', error: errorName(err) })
+    }
+  }
+  // A website certificate about to expire (2026-10-08): a task to tell the business, once per company per date.
+  let certificates: { alerted: number } | { failed: string } | 'not_run' = 'not_run'
+  if (Date.now() - started < maxDuration * 1000 - ORG_BUDGET_MS) {
+    try {
+      certificates = await certificateAlerts(db, { now: new Date() })
+    } catch (err) {
+      certificates = { failed: errorName(err) }
+      log.warn('cron digest could not check certificates', { route: 'cron.digest', error: errorName(err) })
+    }
+  }
+
+  // Google's coordinates are kept thirty days (2026-10-09): a pair older than that is cleared, the listing kept.
+  let coordinates: { pruned: number; orgs: number } | { failed: string } | 'not_run' = 'not_run'
+  if (Date.now() - started < maxDuration * 1000 - ORG_BUDGET_MS) {
+    try {
+      coordinates = await pruneListingCoordinates(db, { now: new Date() })
+    } catch (err) {
+      coordinates = { failed: errorName(err) }
+      log.warn('cron digest could not prune listing coordinates', { route: 'cron.digest', error: errorName(err) })
+    }
+  }
+
   const failed = orgs.some((o) => 'failed' in o || 'notRun' in o)
   const outcome = failed ? 'failed' : !slack ? 'no_slack' : orgs.some((o) => 'why' in o) ? 'slack_failed' : 'ok'
   if (outcome === 'ok' || outcome === 'no_slack') log.info('cron digest finished', { route: 'cron.digest', outcome })
@@ -206,8 +240,8 @@ export async function GET(request: Request): Promise<NextResponse> {
 
   return NextResponse.json(
     slack
-      ? { posted: orgs.some((o) => 'posted' in o && o.posted), orgs }
-      : { posted: false, why: 'no_slack', orgs },
+      ? { posted: orgs.some((o) => 'posted' in o && o.posted), orgs, sequences, certificates, coordinates }
+      : { posted: false, why: 'no_slack', orgs, sequences, certificates, coordinates },
     { status: failed ? 500 : 200 },
   )
 }

@@ -3,6 +3,7 @@ import { getDb } from '@/lib/db'
 import { env } from '@/lib/env'
 import { log } from '@/lib/logger'
 import { notify } from '@/lib/slack'
+import { TOKEN_SHAPE, logMismatchOnce } from './mismatch'
 
 /**
  * One-click unsubscribe (RFC 8058, §2.1). The link every outbound email
@@ -33,7 +34,10 @@ import { notify } from '@/lib/slack'
  * Without `UNSUBSCRIBE_SECRET` everything is refused (503), like
  * `/api/inbound/email` without its secret: a token that cannot be verified
  * names nothing. A body over 1 KB is refused before it is read further. A
- * token that does not verify is a 404 with no hint of why. Exempt from the
+ * token that does not verify is a 404 with no hint of why — and one in the
+ * shape a worker mints, whose MAC did not match, is logged at error once
+ * per process (`mismatch.ts`): the worker holds a different secret, and
+ * every click on its links is an opt-out lost. Exempt from the
  * cookie gate in `proxy.ts` — a mail client carries no session. Rate
  * limiting belongs at the reverse proxy, like the booking route's.
  *
@@ -45,9 +49,6 @@ export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
 
 const MAX_BODY = 1024
-
-/** A token's shape, without the secret: enough to tell a real click from a probe in a log. */
-const TOKEN_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.[0-9a-f]{64}$/
 
 const COPY = {
   done: 'Done. You will not be emailed again.',
@@ -76,7 +77,25 @@ export async function POST(
 ): Promise<Response> {
   const { token } = await context.params
 
-  const secret = env().UNSUBSCRIBE_SECRET
+  // env() throws when ANY variable fails its schema — a value for another
+  // feature entirely — and outside a try that was Next's bare 500 with no
+  // line saying an opt-out was lost (review round 15). The logger reads no
+  // environment, so the loud line is still written; the class only.
+  let secret: string | undefined
+  try {
+    secret = env().UNSUBSCRIBE_SECRET
+  } catch (err) {
+    const error = err instanceof Error ? err.name : 'UnknownError'
+    if (TOKEN_SHAPE.test(token)) {
+      log.error('OPT-OUT NOT RECORDED — the web app’s environment does not parse, so no unsubscribe can be verified', {
+        path: 'unsubscribe',
+        error,
+      })
+    } else {
+      log.warn('unsubscribe refused: environment does not parse', { path: 'unsubscribe', error })
+    }
+    return page(503, 'Unsubscribe', COPY.unavailable)
+  }
   if (!secret) {
     // A well-shaped token here was minted by a worker that HAS the secret,
     // so a person asked to be left alone and this deployment cannot tell
@@ -96,7 +115,10 @@ export async function POST(
   if (raw.length > MAX_BODY) return page(413, 'Unsubscribe', COPY.tooLarge)
 
   const check = verifyUnsubscribeToken(secret, token)
-  if (!check.ok) return page(404, 'Unsubscribe', COPY.invalid)
+  if (!check.ok) {
+    logMismatchOnce('/api/unsubscribe', token, log)
+    return page(404, 'Unsubscribe', COPY.invalid)
+  }
 
   let outcome: UnsubscribeOutcome
   try {

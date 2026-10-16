@@ -19,6 +19,13 @@
  * teammate paused them — and is not their no: nobody approves past it, and
  * it ends when a person answers the reply or resumes them. It was logged as
  * `consent_revoked` ("declined, or replied") before it had its own code.
+ * `band_never_opens` is a promotional SMS with no minute it may go — an
+ * Indian number read in a zone whose hours never meet TRAI's band, or a band
+ * the campaign's quiet hours cover — which was stored as `unknown_timezone`
+ * until review round 5, and so read "no timezone on the contact" for a
+ * contact whose zone is Denver. That label is true again of what is left
+ * under it: no zone on the contact or their company, or one this system
+ * does not recognise.
  */
 export const REFUSAL_WORDS: Readonly<Record<string, string>> = {
   unparseable_recipient: 'no usable address',
@@ -29,6 +36,7 @@ export const REFUSAL_WORDS: Readonly<Record<string, string>> = {
   paused: 'contact paused',
   quiet_hours: 'quiet hours',
   unknown_timezone: 'no timezone on the contact',
+  band_never_opens: 'promotional band never opens for them',
   daily_cap: 'daily cap',
   campaign_inactive: 'campaign paused or not active',
   needs_approval: 'denied by a person',

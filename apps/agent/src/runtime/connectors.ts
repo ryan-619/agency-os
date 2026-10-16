@@ -77,7 +77,8 @@
  */
 import type { AgencyDb, ConnectorRow } from '@agency/db'
 import {
-  connectorToolsDenied, enabledConnectors, isReachableConnectorUrl, parseConnectorConfig, revealSecret,
+  connectorReadsAllowed, connectorToolsDenied, enabledConnectors, isReachableConnectorUrl, parseConnectorConfig,
+  revealSecret,
   secretEnvName, secretPlacement, type HttpConfig, type StdioConfig,
 } from '@agency/db'
 import type { Logger } from '../logger.js'
@@ -104,6 +105,13 @@ export interface BuildResult {
    * second form is missed. Names only (§2.3).
    */
   readonly disabledTools: ReadonlySet<string>
+  /**
+   * The calls Ring 1 lets run without a card: `mcp__<name>__*` for a
+   * read-only research server an owner switched on (`connectorReadsAllowed`,
+   * 2026-10-07). Never consulted before `disabledTools`, and never in a turn
+   * nobody is watching. Ask `connectorToolsMatch`, not `.has()`.
+   */
+  readonly readsWithoutCard: ReadonlySet<string>
 }
 
 /**
@@ -150,6 +158,7 @@ export async function buildMcpServers(
   const servers: Record<string, BuiltMcpServer> = {}
   const skipped: { name: string; why: string }[] = []
   const disabledTools = new Set<string>()
+  const readsWithoutCard = new Set<string>()
 
   for (const row of rows) {
     const built = await buildConnector(db, row, masterKey, log)
@@ -165,10 +174,11 @@ export async function buildMcpServers(
     // runs must not quietly switch off the agency's own tools.
     if (row.name !== 'agency') {
       for (const name of connectorToolsDenied(row)) disabledTools.add(name)
+      for (const name of connectorReadsAllowed(row)) readsWithoutCard.add(name)
     }
   }
 
-  return { servers, skipped, disabledTools }
+  return { servers, skipped, disabledTools, readsWithoutCard }
 }
 
 /**

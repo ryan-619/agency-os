@@ -2,6 +2,12 @@
 
 import { useState } from 'react'
 import { When } from '@/components/when'
+import { SharedNumberHolderNote } from '@/components/shared-number-note'
+import { isSharedNumberOptOutPause } from '@/lib/shared-number-pause'
+import type { AddressSourceLine } from '@/lib/address-source'
+import { CONFIRM_WORDS } from '@/lib/delete-view'
+import { toast } from '../toast/toast'
+import { DeleteButton } from '../delete/delete-button'
 
 /**
  * The people at a company (PROMPT.md §2.1, §8.4).
@@ -11,6 +17,23 @@ import { When } from '@/components/when'
  * consent is recorded per channel (absence means NO for SMS and voice). The
  * form asks for the timezone and says why; it does not create consent, which
  * is recorded deliberately, one channel at a time, with a source.
+ *
+ * Resume is offered for every pause, and the route refuses, with its
+ * sentence, the ones a person may not lift. A shared number's holder also
+ * reads what lifts theirs (review round 9): a text from a number they share
+ * asked to stop and could not be recorded, so the number goes on the
+ * suppression list first — the words /contacts uses.
+ *
+ * Under each email and phone, where it came from (0029), in the words
+ * /contacts and /approvals use: the page it was seen on, linked; a teammate;
+ * an import — and a warning for an address the assistant added before
+ * sources were kept, the likeliest to be a guess. A teammate's own Add is
+ * recorded as typed by them; the route says so, not this form.
+ *
+ * Delete (2026-10-15) takes a person nothing ever went to or came from —
+ * somebody added by mistake, or invented by the assistant before 0029. The
+ * route refuses anybody else with its sentence: an owner erases them on
+ * /contacts instead.
  */
 
 export interface ContactView {
@@ -19,12 +42,41 @@ export interface ContactView {
   readonly title: string | null
   readonly email: string | null
   readonly phone: string | null
+  /** Where the email and the phone came from (0029), worded on the server; null for an address they lack. */
+  readonly emailFrom: AddressSourceLine | null
+  readonly phoneFrom: AddressSourceLine | null
   readonly linkedinUrl: string | null
   readonly timeZone: string | null
   readonly pausedAt: string | null
   readonly pausedReason: string | null
   readonly consents: readonly { readonly channel: string; readonly granted: boolean; readonly source: string }[]
 }
+
+/**
+ * Where an address came from, under it (0029): a page it was seen on is a
+ * link, opened as the Research card opens a source; a source nobody can
+ * vouch for reads as a warning.
+ */
+function AddressFrom({ from }: { from: AddressSourceLine | null }) {
+  if (!from) return null
+  return (
+    <span className={from.tone === 'warn' ? 'address-source err-line' : 'address-source'}>
+      {from.href ? (
+        <>
+          {from.before}
+          <a href={from.href} target="_blank" rel="noopener noreferrer nofollow" title={from.href}>
+            {from.linkText}
+          </a>
+        </>
+      ) : (
+        from.words
+      )}
+    </span>
+  )
+}
+
+/** A consent channel as the pop-up names it. */
+const CHANNEL_WORDS: Readonly<Record<string, string>> = { email: 'email', sms: 'SMS', voice: 'voice', whatsapp: 'WhatsApp' }
 
 export function ContactsPanel({
   companyId,
@@ -39,7 +91,8 @@ export function ContactsPanel({
   const [busy, setBusy] = useState<string | null>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
 
-  const patch = async (id: string, body: Record<string, unknown>): Promise<void> => {
+  /** `done` is the pop-up once the route has taken it. */
+  const patch = async (id: string, body: Record<string, unknown>, done: string): Promise<void> => {
     setBusy(id)
     setErrors((e) => ({ ...e, [id]: '' }))
     try {
@@ -53,6 +106,7 @@ export function ContactsPanel({
         setErrors((e) => ({ ...e, [id]: b.error ?? 'That did not work.' }))
         return
       }
+      toast.afterReload(done)
       window.location.reload()
     } catch {
       setErrors((e) => ({ ...e, [id]: 'The request did not complete. Try again.' }))
@@ -82,6 +136,7 @@ export function ContactsPanel({
         setErrors((e) => ({ ...e, [id]: b.error ?? 'That did not work.' }))
         return
       }
+      toast.afterReload(`${granted ? 'Opt-in' : 'Refusal'} recorded for ${CHANNEL_WORDS[channel] ?? channel}.`)
       window.location.reload()
     } catch {
       setErrors((e) => ({ ...e, [id]: 'The request did not complete. Try again.' }))
@@ -111,7 +166,11 @@ export function ContactsPanel({
                 {canWrite ? (
                   <div className="row-actions">
                     {c.pausedAt ? (
-                      <button type="button" disabled={busy === c.id} onClick={() => void patch(c.id, { action: 'resume', pausedReason: c.pausedReason })}>
+                      <button
+                        type="button"
+                        disabled={busy === c.id}
+                        onClick={() => void patch(c.id, { action: 'resume', pausedReason: c.pausedReason }, 'Pause lifted.')}
+                      >
                         Resume
                       </button>
                     ) : (
@@ -120,23 +179,44 @@ export function ContactsPanel({
                         disabled={busy === c.id}
                         onClick={() => {
                           const reason = window.prompt('Why pause them? (kept with the pause)')
-                          if (reason?.trim()) void patch(c.id, { action: 'pause', reason })
+                          if (reason?.trim()) {
+                            void patch(c.id, { action: 'pause', reason }, 'Paused. Nothing further goes to them until the pause is lifted.')
+                          }
                         }}
                       >
                         Pause
                       </button>
                     )}
+                    <DeleteButton
+                      url={`/api/contacts/${c.id}`}
+                      kind="contact"
+                      confirm={CONFIRM_WORDS.contact(c.name)}
+                      title="For somebody nothing ever went to or came from. Anybody else is kept — an owner erases them on /contacts."
+                      onRefused={(f) => setErrors((e) => ({ ...e, [c.id]: f.message }))}
+                    />
                   </div>
                 ) : null}
               </div>
 
               <div className="muted" style={{ fontSize: 12.5 }}>
-                {c.email ? <code>{c.email}</code> : null}
-                {c.phone ? <code style={{ marginLeft: 8 }}>{c.phone}</code> : null}
+                {c.email ? (
+                  <div>
+                    <code>{c.email}</code>
+                    <AddressFrom from={c.emailFrom} />
+                  </div>
+                ) : null}
+                {c.phone ? (
+                  <div style={{ marginTop: c.email ? 3 : 0 }}>
+                    <code>{c.phone}</code>
+                    <AddressFrom from={c.phoneFrom} />
+                  </div>
+                ) : null}
                 {c.linkedinUrl ? (
-                  <a href={c.linkedinUrl} style={{ marginLeft: 8 }} target="_blank" rel="noreferrer">
-                    LinkedIn
-                  </a>
+                  <div style={{ marginTop: c.email || c.phone ? 3 : 0 }}>
+                    <a href={c.linkedinUrl} target="_blank" rel="noreferrer">
+                      LinkedIn
+                    </a>
+                  </div>
                 ) : null}
               </div>
 
@@ -157,7 +237,10 @@ export function ContactsPanel({
                     disabled={busy === c.id}
                     onClick={() => {
                       const zone = window.prompt('IANA timezone, e.g. Europe/London or America/New_York', c.timeZone ?? '')
-                      if (zone !== null) void patch(c.id, { action: 'timeZone', timeZone: zone })
+                      if (zone !== null) {
+                        // The route stores a blank as no zone.
+                        void patch(c.id, { action: 'timeZone', timeZone: zone }, zone.trim() ? 'Timezone saved.' : 'Timezone cleared.')
+                      }
                     }}
                   >
                     {c.timeZone ? 'Change' : 'Set timezone'}
@@ -168,6 +251,11 @@ export function ContactsPanel({
               {c.pausedAt ? (
                 <div className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
                   Paused: {c.pausedReason} · <When iso={c.pausedAt} />
+                  {isSharedNumberOptOutPause(c.pausedReason) ? (
+                    <div style={{ marginTop: 2 }}>
+                      <SharedNumberHolderNote />
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
 
@@ -243,6 +331,7 @@ function AddContact({ companyId, onCancel }: { companyId: string; onCancel: () =
         setError(b.error ?? 'That did not work.')
         return
       }
+      toast.afterReload('Contact added.')
       window.location.reload()
     } finally {
       setBusy(false)

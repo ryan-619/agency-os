@@ -1,4 +1,4 @@
-import { orderedSignals, parseIcpDefinition, staleAfterDaysOf, totalWeight } from '@agency/core'
+import { FIRMOGRAPHIC_DISQUALIFIERS, orderedSignals, parseIcpDefinition, staleAfterDaysOf, totalWeight } from '@agency/core'
 
 /**
  * An ICP profile row, reduced to what /settings/icp shows (§2.2).
@@ -43,21 +43,32 @@ export interface IcpTierView {
 
 /**
  * The disqualifiers the scorer actually evaluates (`scoreCompany` in
- * packages/core/src/scoring.ts): `unreachable` from the fetch itself, the
- * other three from what the scan observed. A profile can name more — the seed
- * names `enterprise_scale` — and the page must not present those as applied,
- * because nothing checks them. `apps/web/test/icp-view.test.ts` reads
- * scoring.ts and fails if this list and the scorer disagree.
+ * packages/core/src/scoring.ts): `unreachable` from the fetch itself, three
+ * from what the scan observed, and since 0021 the firmographic three —
+ * `enterprise_scale`, `too_small` and `outside_geos` — from what the CRM
+ * records about the company, applied only when that headcount or country is
+ * recorded. A profile can name more, and the page must not present those as
+ * applied, because nothing checks them. `apps/web/test/icp-view.test.ts`
+ * reads scoring.ts and fails if this list and the scorer disagree.
  */
 export const SCORER_DISQUALIFIERS: ReadonlySet<string> = new Set([
-  'unreachable', 'is_security_vendor', 'has_security_team', 'no_public_product',
+  'unreachable', 'is_security_vendor', 'has_security_team', 'no_public_product', ...FIRMOGRAPHIC_DISQUALIFIERS,
 ])
+
+/** When a firmographic disqualifier applies: only once the fact it reads is recorded. */
+export const FIRMOGRAPHIC_WHEN: Readonly<Record<string, string>> = {
+  enterprise_scale: 'when its headcount is recorded',
+  too_small: 'when its headcount is recorded',
+  outside_geos: 'when its country is recorded',
+}
 
 export interface IcpDisqualifierView {
   readonly key: string
   readonly why: string
   /** The scorer evaluates this key. False: it is written in the profile and checked by nothing. */
   readonly applied: boolean
+  /** For a firmographic disqualifier, when it applies: "when its headcount is recorded". */
+  readonly when: string | null
 }
 
 export interface IcpOutreachView {
@@ -184,7 +195,12 @@ export function icpView(definition: unknown): IcpViewResult {
   // Sorted by key so the table does not depend on jsonb's key order either.
   const disqualifiers = Object.keys(def.disqualifiers)
     .sort()
-    .map((k) => ({ key: k, why: def.disqualifiers[k] ?? '', applied: SCORER_DISQUALIFIERS.has(k) }))
+    .map((k) => ({
+      key: k,
+      why: def.disqualifiers[k] ?? '',
+      applied: SCORER_DISQUALIFIERS.has(k),
+      when: FIRMOGRAPHIC_WHEN[k] ?? null,
+    }))
   const firmographics = def.firmographics
     ? Object.keys(def.firmographics).sort().map((k) => [k, describeValue(def.firmographics![k])] as const)
     : []

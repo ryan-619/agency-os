@@ -29,7 +29,9 @@ import type { Deployment } from '../src/lib/deployment-facts'
 import { slackMessage, type NotificationEvent } from '../src/lib/slack-message'
 import {
   ICP_OUTREACH_NOTE,
+  IMAP_LOGIN_REFUSED_WORDS,
   RESCAN_OVERDUE_HOURS,
+  SMTP_LOGIN_REFUSED_WORDS,
   RETIRED_WORKER_WORDS,
   complianceChecksFailing,
   dealsNeedingALook,
@@ -460,6 +462,17 @@ describe('workerLine', () => {
     expect(workerLine({ ...LIVE, outreach: 'send-only', chat: 'disabled' }, NOW).tail).toBe(
       'sending, not reading replies · chat off',
     )
+  })
+
+  it('live with a refused login: warns first, because approved email fails on it', () => {
+    const l = workerLine({ ...LIVE, smtpLogin: 'refused', imapLogin: 'ok' }, NOW)
+    expect(l.tone).toBe('warn')
+    expect(l.tail).toBe(`${SMTP_LOGIN_REFUSED_WORDS} · sending and receiving · chat on`)
+    expect(workerLine({ ...LIVE, imapLogin: 'refused' }, NOW).tail).toBe(`${IMAP_LOGIN_REFUSED_WORDS} · sending and receiving · chat on`)
+    // Unchecked, ok or unreachable is not a refusal, and the line is as it was.
+    for (const smtpLogin of ['unchecked', 'ok', 'unreachable', null] as const) {
+      expect(workerLine({ ...LIVE, smtpLogin }, NOW)).toEqual(workerLine(LIVE, NOW))
+    }
   })
 
   it('live but unreachable from here: says chat is not reachable, not "chat on"', () => {
@@ -1066,8 +1079,12 @@ describe('the dashboard page', () => {
 describe('the worker writes what the dashboard reads about SMS', () => {
   const worker = code(read('../../agent/src/worker.ts'))
 
-  it('puts sms beside halted and lockHeld in the heartbeat’s detail', () => {
-    expect(worker).toContain('detail: { halted: now.halted, lockHeld: now.lockHeld, sms: senders.sms }')
+  it('puts sms beside halted and lockHeld in the heartbeat’s detail — and, since 0020, whether it writes the brief', () => {
+    const detail = /detail: \{\s*halted: now\.halted,\s*lockHeld: now\.lockHeld,\s*sms: senders\.sms,\s*brief: credential \? 'on' : 'off',/
+    expect(worker).toMatch(detail)
+    // Since 2026-10-08, whether each mailbox accepted the worker's login.
+    expect(worker).toContain('...(smtpProvider ? { smtpLogin } : {}),')
+    expect(worker).toContain('{ imapLogin } : {}),')
     expect(worker).toContain("sms: dovesoft.on ? 'on' : 'off',")
   })
 })

@@ -17,8 +17,13 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { HEARTBEAT_RETIRED_AFTER_DAYS, heartbeatReport, heartbeatReportedStatus } from '@agency/db/queries'
-import { deploymentFacts, sendingAnswer, workerLine, workerModes, type DeploymentFactInput } from '../src/app/settings/facts'
-import { RETIRED_WORKER_WORDS } from '../src/lib/dashboard-view'
+import {
+  IMAP_LOGIN_REFUSED_WORDS, SMTP_LOGIN_REFUSED_WORDS, deploymentFacts, sendingAnswer, workerLine, workerModes, type DeploymentFactInput,
+} from '../src/app/settings/facts'
+import {
+  IMAP_LOGIN_REFUSED_WORDS as DASHBOARD_IMAP_REFUSED, RETIRED_WORKER_WORDS, SMTP_LOGIN_REFUSED_WORDS as DASHBOARD_SMTP_REFUSED,
+} from '../src/lib/dashboard-view'
+import { agentMisconfiguredSentence } from '../src/lib/agent-config'
 
 const NOW = new Date('2026-09-30T12:00:00Z')
 const DAY = 86_400
@@ -202,6 +207,33 @@ describe('the clause is the digest’s', () => {
  * a mailbox" sat beside "Worker last seen 2 minutes ago · sending and
  * reading a mailbox". Review round 3, finding [20].
  */
+describe('the Chat fact', () => {
+  const input = (over: Partial<DeploymentFactInput['flags']> = {}, agent = false, agentProblem?: string): DeploymentFactInput => ({
+    flags: { worker: false, mailIsLocalSink: false, inbound: 'none', cron: false, slack: false, unsubscribe: false, ...over },
+    agent,
+    ...(agentProblem === undefined ? {} : { agentProblem }),
+    secretsKey: 'unset',
+    vercelEnv: undefined,
+    inboundJson: false,
+    inboundResend: false,
+    rescanBatchSize: 25,
+  })
+  const chat = (i: DeploymentFactInput) => deploymentFacts(i).find((f) => f.area === 'Chat')!
+
+  /** Off because of a value, not an absence: it says which variable (review round 15). */
+  it('names a variable set to a value chat cannot use', () => {
+    const c = chat(input({ agentMisconfigured: ['AGENT_URL'] }, false, agentMisconfiguredSentence(['AGENT_URL'])))
+    expect(c.on).toBe(false)
+    expect(c.sentence).toContain('AGENT_URL is set here but is not a full http(s) address')
+    expect(c.sentence).toContain('So chat is off.')
+  })
+
+  it('keeps its sentences for configured and absent', () => {
+    expect(chat(input({ worker: true }, true)).sentence).toBe('The agent runs in the configured worker; chat turns are forwarded to it.')
+    expect(chat(input()).sentence).toBe('Unavailable here: the agent runs only in the worker, which cannot run on a serverless host.')
+  })
+})
+
 describe('the Replies fact', () => {
   const input = (over: Partial<DeploymentFactInput['flags']> = {}, i: Partial<DeploymentFactInput> = {}): DeploymentFactInput => ({
     flags: { worker: false, mailIsLocalSink: false, inbound: 'none', cron: false, slack: false, unsubscribe: false, ...over },
@@ -278,5 +310,28 @@ describe('the Replies fact', () => {
       }
       expect(replies(input({ smsInbound: false })).on).toBe(false)
     })
+  })
+})
+
+describe('a refused mailbox login', () => {
+  const row = (detail: unknown) =>
+    ({ lastTickAt: new Date(NOW.getTime() - 60_000), outreach: 'send-and-receive', chat: 'enabled', detail }) as never
+
+  it('is said on the worker line, in the dashboard’s words', () => {
+    expect(SMTP_LOGIN_REFUSED_WORDS).toBe(DASHBOARD_SMTP_REFUSED)
+    expect(IMAP_LOGIN_REFUSED_WORDS).toBe(DASHBOARD_IMAP_REFUSED)
+    const line = workerLine(heartbeatReport(row({ smtpLogin: 'refused' }), true, NOW))
+    expect(line.tone).toBe('warn')
+    expect(line.text).toContain('The mail server REFUSED the sending login')
+    const both = workerLine(heartbeatReport(row({ smtpLogin: 'refused', imapLogin: 'refused' }), true, NOW))
+    expect(both.text).toContain('The mailbox REFUSED the reply-reading login')
+  })
+
+  it('leaves the line as it was for any other answer', () => {
+    const plain = workerLine(heartbeatReport(row({}), true, NOW))
+    expect(plain.tone).toBe('ok')
+    for (const smtpLogin of ['unchecked', 'ok', 'unreachable']) {
+      expect(workerLine(heartbeatReport(row({ smtpLogin }), true, NOW))).toEqual(plain)
+    }
   })
 })

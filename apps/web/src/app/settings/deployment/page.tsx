@@ -8,6 +8,7 @@ import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { When } from '@/components/when'
 import { agentConfigured } from '@/lib/agent'
+import { agentMisconfiguredSentence } from '@/lib/agent-config'
 import { getDb } from '@/lib/db'
 import { deployment, dovesoft } from '@/lib/deployment'
 import { env } from '@/lib/env'
@@ -98,6 +99,7 @@ export default async function DeploymentPage() {
   const facts = deploymentFacts({
     flags,
     agent: agentConfigured(),
+    agentProblem: flags.agentMisconfigured ? agentMisconfiguredSentence(flags.agentMisconfigured) : undefined,
     secretsKey,
     vercelEnv: e.VERCEL_ENV,
     inboundJson: Boolean(e.INBOUND_WEBHOOK_SECRET),

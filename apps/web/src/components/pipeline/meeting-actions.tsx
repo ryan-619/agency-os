@@ -1,6 +1,10 @@
 'use client'
 
 import { useState } from 'react'
+import { toast } from '../toast/toast'
+import { ToastOn } from '../toast/toast-on'
+import { DeleteButton } from '../delete/delete-button'
+import { CONFIRM_WORDS, mayDeleteMeeting } from '../../lib/delete-view'
 
 /**
  * What a person can record about a meeting from its brief: that it was held,
@@ -15,6 +19,13 @@ import { useState } from 'react'
  *
  * Nothing here tells anybody anything; no invitation was sent from here, so
  * there is none to move or withdraw, and the copy says so where it matters.
+ *
+ * Delete (2026-10-15) sits beside Cancel while no outcome is recorded — and
+ * stays offered on a cancelled meeting — for one booked by mistake or with
+ * somebody who does not exist. It goes for good, the deal does not move
+ * back, and the page goes to the company's. Not on a meeting that replaced
+ * a rescheduled one (`replacesRescheduled`): the original points at it, so
+ * it is cancelled instead, and the route refuses it too.
  */
 const OUTCOMES = [
   { outcome: 'held', label: 'Held', note: 'It happened. The deal stays where it is; move it on the board.' },
@@ -28,6 +39,8 @@ export function MeetingActions({
   cancelled,
   outcome,
   canWrite,
+  companyHref,
+  replacesRescheduled,
 }: {
   id: string
   /** The meeting's own zone: a new time is entered in it, not the viewer's. */
@@ -37,13 +50,32 @@ export function MeetingActions({
   cancelled: boolean
   outcome: string | null
   canWrite: boolean
+  /** Where to go once it is deleted: the company's page. */
+  companyHref: string
+  /** It replaced a rescheduled meeting (the page's `links.from`): no Delete. */
+  replacesRescheduled: boolean
 }) {
   const [mode, setMode] = useState<'idle' | 'reschedule'>('idle')
   const [local, setLocal] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState<string | null>(null)
-  if (!canWrite || cancelled) return null
+  if (!canWrite) return null
+  const deletable = mayDeleteMeeting(outcome, replacesRescheduled)
+  const remove = deletable ? (
+    <DeleteButton
+      url={`/api/meetings/${id}`}
+      kind="meeting"
+      confirm={CONFIRM_WORDS.meeting}
+      label="Delete meeting"
+      then={companyHref}
+      className="deny"
+      title="Booked by mistake, or with somebody who does not exist. The deal does not move back."
+    />
+  ) : null
+  if (cancelled) {
+    return deletable ? <div className="row-actions" style={{ marginBottom: 22, marginTop: 6 }}>{remove}</div> : null
+  }
 
   const patch = async (body: Record<string, unknown>): Promise<Record<string, unknown> | null> => {
     setBusy(true)
@@ -70,14 +102,20 @@ export function MeetingActions({
   }
 
   const record = async (to: string): Promise<void> => {
-    if (await patch({ action: 'outcome', outcome: to })) window.location.reload()
+    if (await patch({ action: 'outcome', outcome: to })) {
+      toast.afterReload(to === 'no_show' ? 'Recorded as a no-show.' : 'Recorded as held.')
+      window.location.reload()
+    }
   }
 
   const cancel = async (): Promise<void> => {
     if (!window.confirm('Cancel this meeting? Nobody is told — if you sent an invitation from your calendar, cancel it there too.')) return
     const out = await patch({ action: 'cancel' })
     if (out) {
-      setDone(typeof out.note === 'string' ? out.note : 'Cancelled.')
+      const note = typeof out.note === 'string' ? out.note : 'Cancelled.'
+      setDone(note)
+      // Said again once the page has reloaded: 900 ms is too short to read it.
+      toast.afterReload(note)
       setTimeout(() => window.location.reload(), 900)
     }
   }
@@ -90,7 +128,10 @@ export function MeetingActions({
     // A datetime-local input can carry seconds; the route takes minutes.
     const out = await patch({ action: 'reschedule', startsAtLocal: local.slice(0, 16), timeZone })
     if (out && typeof out.replacement === 'string') {
-      setDone(typeof out.note === 'string' ? out.note : 'Recorded at the new time.')
+      const note = typeof out.note === 'string' ? out.note : 'Recorded at the new time.'
+      setDone(note)
+      // Said again on the new meeting's page, which this tab opens next: 900 ms is too short to read it.
+      toast.afterReload(note)
       setTimeout(() => window.location.assign(`/meetings/${out.replacement as string}`), 900)
     }
   }
@@ -98,7 +139,7 @@ export function MeetingActions({
   return (
     <div style={{ marginBottom: 22 }}>
       {error ? <div className="err-line" role="alert">{error}</div> : null}
-      {done ? <div className="ok-line">{done}</div> : null}
+      <ToastOn message={done} />
 
       {mode === 'idle' ? (
         <div className="row-actions" style={{ marginTop: 6 }}>
@@ -131,6 +172,7 @@ export function MeetingActions({
               Cancel meeting
             </button>
           ) : null}
+          {remove}
           {!started ? (
             <span className="hint" style={{ alignSelf: 'center', marginTop: 0 }}>
               Held, no-show and rescheduled can be recorded once it has started. To move it before then, cancel it

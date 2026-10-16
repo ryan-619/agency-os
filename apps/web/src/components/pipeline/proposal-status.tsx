@@ -1,10 +1,15 @@
 'use client'
 
 import { useState } from 'react'
+import { toast } from '../toast/toast'
+import { DeleteButton } from '../delete/delete-button'
+import { CONFIRM_WORDS, mayDeleteProposal } from '../../lib/delete-view'
 
 /**
  * What can happen to a proposal next. The transitions are the route's;
  * this only offers the ones it will accept, and says what each means.
+ * A draft may also be deleted (2026-10-15), beside Withdraw; anything past
+ * draft is withdrawn instead, and stays.
  */
 const NEXT: Readonly<Record<string, readonly { to: string; label: string; note: string; danger?: boolean }[]>> = {
   draft: [
@@ -18,7 +23,18 @@ const NEXT: Readonly<Record<string, readonly { to: string; label: string; note: 
   ],
 }
 
-export function ProposalStatus({ id, status, canWrite }: { id: string; status: string; canWrite: boolean }) {
+export function ProposalStatus({
+  id,
+  status,
+  canWrite,
+  companyHref,
+}: {
+  id: string
+  status: string
+  canWrite: boolean
+  /** Where to go once a draft is deleted: the company's page. */
+  companyHref: string
+}) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const options = NEXT[status] ?? []
@@ -39,6 +55,8 @@ export function ProposalStatus({ id, status, canWrite }: { id: string; status: s
         setError(b.error ?? 'That did not work.')
         return
       }
+      // What was recorded, and no more: marking it sent sends nothing.
+      toast.afterReload(to === 'sent' ? 'Marked as sent.' : to === 'withdrawn' ? 'Withdrawn.' : `Recorded as ${to}.`)
       window.location.reload()
     } catch {
       setError('The request did not complete.')
@@ -56,6 +74,16 @@ export function ProposalStatus({ id, status, canWrite }: { id: string; status: s
             {o.label}
           </button>
         ))}
+        {mayDeleteProposal(status) ? (
+          <DeleteButton
+            url={`/api/proposals/${id}`}
+            kind="proposal"
+            confirm={CONFIRM_WORDS.proposal}
+            label="Delete draft"
+            then={companyHref}
+            className="deny"
+          />
+        ) : null}
       </div>
     </div>
   )

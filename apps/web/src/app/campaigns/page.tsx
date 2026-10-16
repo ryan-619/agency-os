@@ -1,6 +1,6 @@
 import { redirect } from 'next/navigation'
 import { can } from '@agency/core'
-import { campaignActivity, campaignAutoPauses, listCampaigns, type AgencyDb } from '@agency/db/queries'
+import { campaignActivity, campaignAutoPauses, campaignStepsRead, listCampaigns, sequenceRunsSummary, type AgencyDb } from '@agency/db/queries'
 import { auth, signOut } from '@/auth'
 import { Shell } from '@/components/shell'
 import { CampaignsPanel, type CampaignView } from '@/components/outreach/campaigns'
@@ -46,6 +46,8 @@ export default async function CampaignsPage() {
       autoSend: c.autoSend,
       status: c.status as CampaignView['status'],
       activity: await campaignActivity(db, user.orgId, c.id),
+      steps: await campaignStepsRead(db, user.orgId, c.id),
+      runs: await sequenceRunsSummary(db, user.orgId, c.id),
       autoPaused: (() => {
         const p = c.status === 'paused' ? autoPauses.get(c.id) : undefined
         return p

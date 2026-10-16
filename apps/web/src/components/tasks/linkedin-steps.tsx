@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { When } from '@/components/when'
+import { toast } from '../toast/toast'
 
 /**
  * The LinkedIn steps: the one place in the product where the provider is a
@@ -65,6 +66,13 @@ export interface LinkedinStepItem {
 
 type Handed = { readonly subject: string; readonly body: string; readonly profileUrl: string | null }
 
+/** What a toast says once a person's answer about a step is recorded — "sent" is their word, not ours. */
+const FINISHED_WORDS: Readonly<Record<'sent' | 'not_sent' | 'dismiss', string>> = {
+  sent: 'Recorded as sent.',
+  not_sent: 'Recorded as not sent.',
+  dismiss: 'Step closed.',
+}
+
 async function post(
   touchId: string,
   action: 'start' | 'sent' | 'not_sent' | 'dismiss',
@@ -112,6 +120,7 @@ function Step({ step, canAct }: { step: LinkedinStepItem; canAct: boolean }) {
         profileUrl: typeof w.profileUrl === 'string' ? w.profileUrl : step.profileUrl,
       })
       setBusy(false)
+      toast.success('Handed to you. Send it from your own LinkedIn account, then say whether it went.')
       return
     }
     if (action === 'start') {
@@ -126,6 +135,9 @@ function Step({ step, canAct }: { step: LinkedinStepItem; canAct: boolean }) {
       setTimeout(() => window.location.reload(), 1200)
       return
     }
+    // `alreadyDone`: another answer closed the step first, and this one changed nothing.
+    if (r.out.alreadyDone === true) toast.info('This step was already closed, so nothing was changed.')
+    else toast.success(FINISHED_WORDS[action])
     window.location.reload()
   }
 

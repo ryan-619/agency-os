@@ -33,7 +33,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { WebSocketServer, type WebSocket } from 'ws'
 import { aiDisclosure, normalisePhone, spokenOptOut, suppressedGreeting } from '@agency/core'
 import {
-  addSuppression, callByProviderSid, endCall, markAnswered, phoneIsSuppressed, schema, startCall,
+  addSuppression, callByProviderSid, endCall, markAnswered, phoneIsSuppressed, schema, smsTextAsksToStop, startCall,
   type AgencyDb,
 } from '@agency/db'
 import { providerFrom } from '@agency/llm'
@@ -328,11 +328,20 @@ export async function startVoiceService(deps: VoiceDeps): Promise<VoiceService> 
         if (!org) return xml(res, emptyTwiml())
         // Carriers already honour STOP, but the carrier does not tell the
         // CRM. Recording it here is what stops the next campaign.
-        // ONE opt-out detector for the whole product. This used to be its
-        // own narrower regex, which caught exactly the keywords the carrier
-        // already handles and dropped "take me off your list" — recorded
-        // nowhere, so the next campaign mailed them. Found by review.
-        if (spokenOptOut(text)) {
+        // A text is a text: it is read by the SMS readers every other text
+        // goes through (`smsTextAsksToStop` — the keyword reader 0019's
+        // footer taught, STOPALL, UNSUB, CANCEL, END, QUIT and "STOP ALL
+        // 56161" among them, and the prose reader an email reply gets), the
+        // reading DoveSoft's texts are recorded by. And by the spoken reader
+        // too, which this handler always used: it catches "please stop
+        // texting me" anywhere in a sentence, and narrowing what is
+        // recorded as an opt-out is the one direction this must not move.
+        // This used to be the spoken reader ALONE, read as "one opt-out
+        // detector for the whole product" — and since 0019 it was not: the
+        // keywords above were opt-outs to DoveSoft's webhook and ordinary
+        // texts here (review round 5). Before that it was its own narrower
+        // regex, which dropped "take me off your list".
+        if (smsTextAsksToStop(text) || spokenOptOut(text)) {
           const e164 = normalisePhone(from)
           log.info('inbound opt-out by SMS', { readable: e164 !== null })
           let added: { ok: boolean; message?: string }

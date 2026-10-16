@@ -106,9 +106,13 @@ if (url.password) {
   mask(decodeURIComponent(url.password))
 }
 
+// Whatever the source, a Neon `-pooler` endpoint becomes its direct host:
+// the migrator wants one connection's transaction, and the worker's
+// single-instance lock is session-scoped and does not survive a
+// transaction-mode pooler (two workers would both believe they hold it).
 let derived = ''
 const [first, ...rest] = url.hostname.split('.')
-if (source === 'Vercel DATABASE_URL' && first.endsWith('-pooler')) {
+if (first.endsWith('-pooler')) {
   url.hostname = [first.slice(0, -'-pooler'.length), ...rest].join('.')
   derived = ' (direct host: -pooler removed)'
 }
